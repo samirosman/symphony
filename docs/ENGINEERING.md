@@ -243,7 +243,7 @@ A CI benchmark tracks these once the renderer exists.
 - **E11.4 CI** builds, tests and lints (`clippy -D warnings`) on macOS,
   Linux and Windows for every push and pull request.
 - **E11.5 UI changes** come with a before/after screenshot in the pull
-  request, checked against DESIGN §14.
+  request, checked against DESIGN §15.
 
 ---
 
@@ -315,7 +315,7 @@ from the **latest** Harmony release's public docs (currently 27.1).
 
 ## E17. AI
 
-Policy: [AI-POLICY.md](AI-POLICY.md). Design rules: DESIGN §15.
+Policy: [AI-POLICY.md](AI-POLICY.md). Design rules: DESIGN §16.
 
 - **E17.1 Forbidden:** generative models and LLMs, in any crate, build,
   feature flag or bundled plugin. Pull requests that add one are closed.
@@ -334,7 +334,7 @@ Policy: [AI-POLICY.md](AI-POLICY.md). Design rules: DESIGN §15.
   data source in AI-POLICY.md before they can be merged (alongside E12.3).
 - **E17.6 What counts:** anything whose behaviour comes from a trained
   statistical model (neural nets and other ML). Fixed-rule algorithms
-  don't count and must not be labelled as AI (DESIGN D15.5).
+  don't count and must not be labelled as AI (DESIGN D16.5).
 
 ---
 

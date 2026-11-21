@@ -322,7 +322,7 @@ Every effect is a node in the graph.
 - ⬜ Scan/paper workflow (import scanned drawings, registration)
 
 ### 4.14 Symphony extras (after the main chunk)
-- ⬜ **Use no AI** switch and per-scene "No AI used" provenance (DESIGN §15, ENGINEERING E17)
+- ⬜ **Use no AI** switch and per-scene "No AI used" provenance (DESIGN §16, ENGINEERING E17)
 These are improvements and new features. They come after the Harmony list
 above is in place.
 - Ideas go here as they come up.

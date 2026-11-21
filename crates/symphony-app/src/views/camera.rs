@@ -4,7 +4,7 @@
 //!
 //! Drawing on an empty cell creates the next numbered drawing, like Harmony.
 
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke as EStroke, StrokeKind, Vec2};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke as EStroke, Vec2};
 use symphony_core::math::Affine;
 use symphony_pen::{PenSample, Phase, Tool};
 
@@ -35,8 +35,8 @@ impl CanvasState {
 
 /// Where the stage sits inside `rect`, and scene-units -> points scale.
 fn fit_stage(rect: Rect) -> (Rect, f32) {
-    let s = ((rect.width() - 24.0) / STAGE_W)
-        .min((rect.height() - 24.0) / STAGE_H)
+    let s = ((rect.width() - 64.0) / STAGE_W)
+        .min((rect.height() - 64.0) / STAGE_H)
         .max(0.01);
     (
         Rect::from_center_size(rect.center(), Vec2::new(STAGE_W * s, STAGE_H * s)),
@@ -131,13 +131,15 @@ pub fn ui(
 
     // D4.2: neutral surround, white stage.
     painter.rect_filled(rect, 0.0, theme::CANVAS_SURROUND);
+    // D3.10: paper on a light table, with a soft neutral shadow.
+    let shadow = egui::Shadow {
+        offset: [0, 10],
+        blur: 36,
+        spread: 0,
+        color: theme::SHADOW,
+    };
+    painter.add(shadow.as_shape(stage, 0));
     painter.rect_filled(stage, 0.0, theme::CANVAS_STAGE);
-    painter.rect_stroke(
-        stage,
-        0.0,
-        EStroke::new(1.0, theme::BG_BASE),
-        StrokeKind::Outside,
-    );
 
     // What to draw: (key, transform) back to front.
     let items: Vec<((String, String), Affine)> = if drawing_only {

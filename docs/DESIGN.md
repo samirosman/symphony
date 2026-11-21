@@ -1,7 +1,7 @@
 # Symphony design rules
 
 These rules govern how Symphony looks, reads and behaves, for its whole
-life. Every UI change is checked against them (see §14). Each rule has an
+life. Every UI change is checked against them (see §15). Each rule has an
 ID, such as **D3.2**, so reviews and commits can cite it.
 
 The rules can change, but only on purpose: through a pull request to this
@@ -44,22 +44,28 @@ When two rules conflict, the higher principle wins.
 - **P7. The art is the artist's.** This one is absolute: it never trades off
   against the others. No generative AI and no LLMs, ever.
   Assisted tools are rare, local, labelled and opt-in, and one switch turns
-  them all off (§15, [AI-POLICY.md](AI-POLICY.md)).
+  them all off (§16, [AI-POLICY.md](AI-POLICY.md)).
 ---
 
 ## 3. Window and view anatomy
 
-**D3.1** The main window keeps Harmony's structure, from top to bottom:
-- Menu bar.
-- Top toolbars: workspace, file and edit, playback.
-- The Tools toolbar, docked to the left edge.
-- The dock area, which holds the views.
-- A status bar along the bottom: current frame, zoom, selected layer,
-  tool hint.
+**D3.1** The main window keeps Harmony's *structure* with less chrome:
+- **One top bar** (40 px). Menus on the left, the scene name in the
+  centre, and the workspace switcher on the right. On macOS it *is* the
+  title bar: content extends under it, the window buttons sit at its left,
+  and dragging its empty space moves the window. Harmony stacks several
+  toolbars here; Symphony folds them into this one bar and into view
+  headers (D3.2).
+- **The Tools toolbar**, docked to the left as its own card.
+- **The dock area**, which holds the views.
+- **A status bar** (24 px) along the bottom: frame, layer, tool and modes
+  on the left; pen and profile on the right.
 
 **D3.2** Every view has the same anatomy:
-1. **Tab.** It shows the view's name. The active tab has a cel-blue
-   underline.
+1. **Tab.** It shows the view's name. The active tab in each card sits on
+   `bg.raised` with primary text, and inactive tabs show secondary text on
+   the card. The tab of the *focused* view gets a 1 px cel-blue outline, so
+   you always know where keystrokes go.
 2. **View toolbar** (optional). One row of view-specific controls, always
    at the top of the view.
 3. **Content.**
@@ -72,6 +78,8 @@ Timeline, Xsheet, Node, Tool Properties, Colour, Layer Properties,
 Function, Library…), so tutorials and docs transfer over.
 
 **D3.4** Views can be docked, tabbed, split, floated and maximised.
+Tabs have **no close or collapse buttons**. Those actions live in the
+tab's right-click menu and the Windows menu, so the chrome stays quiet.
 Maximising the view under the focus is one keystroke and its own undo:
 press it again to restore.
 
@@ -85,6 +93,31 @@ selected drawing untransformed).
 
 ---
 
+### 3.1 Surfaces (elevation by tone)
+Symphony separates areas by **tone, not lines**:
+
+| Level | Token | What sits there |
+|---|---|---|
+| 0 | `bg.base` | The window, the top bar, the status bar, and the gutters between cards |
+| 1 | `bg.panel` | Cards: every docked view, and the Tools toolbar |
+| 2 | `bg.raised` | Controls inside cards, rows, view headers |
+| 3 | `bg.hover` | Hover, and popups or menus (plus a shadow) |
+
+- **D3.7** Each docked view is a **card**: `bg.panel`, 8 px corner radius,
+  separated from its neighbours by a 6 px `bg.base` gutter.
+- **D3.8** A line is used only where tone can't separate, such as grid
+  lines in the Xsheet or the divider under a tab row. Never a box around a
+  box.
+
+### 3.2 Signature details
+Spend boldness in one place (P5). Symphony's signature is **time**:
+- **D3.9** The playhead is an amber line with an amber **frame tag** on the
+  ruler, showing the current frame number. It's the same in every time
+  view (Timeline, Xsheet, Function).
+- **D3.10** The stage is **paper on a light table**: white, with a soft
+  neutral shadow, on the grey surround. This is the one docked thing that
+  casts a shadow (an exception to D6.4).
+
 ## 4. Colour
 
 ### 4.1 Tokens
@@ -93,7 +126,7 @@ Tokens live in `crates/symphony-app/src/theme.rs`.
 
 | Token | Hex | Use |
 |---|---|---|
-| `bg.base` | `#1E2025` | Window background, gaps between docks |
+| `bg.base` | `#16181C` | Window background, gaps between docks |
 | `bg.panel` | `#272A30` | View content background |
 | `bg.raised` | `#31353C` | Toolbars, tab bars, headers, buttons at rest |
 | `bg.hover` | `#3A3F47` | Hovered buttons and rows |
@@ -165,19 +198,23 @@ Tokens live in `crates/symphony-app/src/theme.rs`.
 - **D6.1 4 px grid.** Every size and gap is a multiple of 4 (with 2 px
   allowed for hairline insets).
 - **D6.2 Standard sizes.**
-  - Toolbar row: 28 px.
-  - Toolbar button: 24 px.
-  - Tools strip: 36 px wide.
-  - List and Timeline row: 24 px.
-  - Xsheet row: 20 px.
-  - Minimum pen target: 20 px.
+  - Top bar: 40 px. View header (tab row): 32 px. Status bar: 24 px.
+  - Toolbar button: 24 px with a 16 px icon.
+  - **Tool button (Tools toolbar): 32 px with a 20 px icon**, since it's
+    picked with the pen all day. Tool groups are separated by 12 px.
+  - Tools toolbar: 44 px wide.
+  - List and Timeline row: 28 px. Xsheet row: 20 px.
+  - Timeline frame cell: 16 px wide at default zoom.
+  - Minimum pen target: 24 px.
+  - Card inner padding: 12 px. Gutter between cards: 6 px.
 - **D6.3 Corner radius.**
-  - Controls: 3 px.
-  - Docked panels: 0.
-  - Popups, menus and floating windows: 6 px.
-  - Nothing else is rounded.
+  - Controls, rows and exposure blocks: 4 px.
+  - Cards (docked views and the Tools toolbar): 8 px.
+  - Popups, menus and floating windows: 8 px.
+  - The stage: 0, because paper has square corners.
 - **D6.4 Shadows** only on things that float above the dock (menus,
-  popups, floating windows). Docked UI is flat.
+  popups, floating windows), and on the stage (D3.10). Cards are flat:
+  their gutter separates them.
 - **D6.5 Density over air.** We prefer showing more over padding. But
   related controls group together, and groups are separated by 8 px or
   a `line.subtle` divider, never both.
@@ -302,18 +339,39 @@ Tokens live in `crates/symphony-app/src/theme.rs`.
 
 ---
 
-## 12. Accessibility
+## 12. One look on every OS
 
-- **D12.1** Contrast as in D4.4. Colour is never the only signal (D4.5).
-- **D12.2** Everything can be done from the keyboard outside the canvas,
+- **D12.1 Same pixels everywhere.** Symphony draws its whole UI itself
+  with bundled fonts and its own icons. It never uses OS widgets, OS
+  fonts or OS themes inside the window, so macOS, Windows and Linux look
+  identical.
+- **D12.2 Differences are deliberate and listed here:**
+  - Modifier names and keys: Cmd and Option on macOS, Ctrl and Alt
+    elsewhere. Each profile maps Cmd to Ctrl automatically.
+  - Window buttons: left on macOS, inside our top bar. Right on Windows and
+    Linux, in the OS frame.
+  - File open and save dialogs are the OS's own, because people know
+    them.
+  - Scrolling, pointer acceleration and display scaling follow OS settings.
+- **D12.3 The window frame is always dark.** We ask the OS for its dark
+  frame, so there's never a white title bar on Windows or Linux next to the
+  dark UI.
+- **D12.4** Screenshots for design review come from the app's own
+  screenshot mode (`scripts/screenshot.sh`), and the same scene renders
+  the same on every OS.
+
+## 13. Accessibility
+
+- **D13.1** Contrast as in D4.4. Colour is never the only signal (D4.5).
+- **D13.2** Everything can be done from the keyboard outside the canvas,
   with a visible focus ring (`accent.select`, 2 px).
-- **D12.3** UI scale from 75% to 200% (D6.6).
-- **D12.4** Left-handed setups work: the Tools toolbar can dock right,
+- **D13.3** UI scale from 75% to 200% (D6.6).
+- **D13.4** Left-handed setups work: the Tools toolbar can dock right,
   and nothing assumes a side.
 
 ---
 
-## 13. Performance as design
+## 14. Performance as design
 
 Speed is part of the design (P1). Budgets are in
 [ENGINEERING.md](ENGINEERING.md) E6. A feature that breaks a budget isn't
@@ -321,11 +379,13 @@ finished.
 
 ---
 
-## 14. Review checklist (every UI change)
+## 15. Review checklist (every UI change)
 
 - [ ] Only theme tokens are used, with no colour literals (D4.1).
 - [ ] Any new colour pairing is contrast-checked (D4.4).
 - [ ] Sizes are on the 4 px grid and use the standard sizes (D6).
+- [ ] Areas separated by tone, not boxes (D3.7, D3.8). No new chrome buttons.
+- [ ] Looks the same on all three OSes, or the difference is listed in D12.2.
 - [ ] Icons are from our set, on the grid and tooltipped. No emoji (D7).
 - [ ] Works with the pen alone. Nothing is hover-only (D8.1).
 - [ ] Undoable, and named the same everywhere (D8.4, D10.2).
@@ -334,28 +394,28 @@ finished.
       logged in §11.1.
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
-- [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§15).
+- [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§16).
 - [ ] Checked against the latest Harmony behaviour
       ([CLEAN-ROOM.md](CLEAN-ROOM.md)).
 
 ---
 
-## 15. AI
+## 16. AI
 
 The full policy for artists is in [AI-POLICY.md](AI-POLICY.md).
 
-- **D15.1 No generative AI and no LLMs.** Nothing in Symphony generates
+- **D16.1 No generative AI and no LLMs.** Nothing in Symphony generates
   images, drawings, colours, poses, in-betweens or text. This rule can't be
   overridden by a profile, a setting or a plugin shipped with Symphony.
-- **D15.2 Assisted tools are opt-in.** A tool that uses a trained model is
+- **D16.2 Assisted tools are opt-in.** A tool that uses a trained model is
   off until the artist turns it on, and **Preferences → AI → Use no AI** (on
   by default) disables all of them at once.
-- **D15.3 Always labelled.** An assisted tool carries an "Assisted" tag in
+- **D16.3 Always labelled.** An assisted tool carries an "Assisted" tag in
   its tooltip, its Tool Properties header and its menu item, and is listed
   in AI-POLICY.md with what the model does.
-- **D15.4 Provenance is visible.** Scene info shows **No AI used**, or lists
+- **D16.4 Provenance is visible.** Scene info shows **No AI used**, or lists
   the assisted tools used on that scene. Artists never have to dig for it.
-- **D15.5 Plain algorithms aren't labelled as AI.** Flood fill, gap
+- **D16.5 Plain algorithms aren't labelled as AI.** Flood fill, gap
   closing, smoothing, tracing and interpolation work with the switch on,
   and are never marketed as "smart" or "AI".
 

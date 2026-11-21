@@ -223,13 +223,51 @@ pub fn button(
     enabled: bool,
     tooltip: &str,
 ) -> Response {
-    let size = Vec2::splat(theme::TOOLBAR_BUTTON);
+    sized_button(
+        ui,
+        icon,
+        theme::TOOLBAR_BUTTON,
+        16.0,
+        active,
+        enabled,
+        tooltip,
+    )
+}
+
+/// A Tools-toolbar button (D6.2: 32 px pen target, 20 px icon).
+pub fn tool_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    active: bool,
+    enabled: bool,
+    tooltip: &str,
+) -> Response {
+    sized_button(
+        ui,
+        icon,
+        theme::TOOL_BUTTON,
+        theme::TOOL_ICON,
+        active,
+        enabled,
+        tooltip,
+    )
+}
+
+fn sized_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    icon_size: f32,
+    active: bool,
+    enabled: bool,
+    tooltip: &str,
+) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
     let painter = ui.painter();
     let (bg, fg) = if !enabled {
         (None, theme::TEXT_DISABLED)
@@ -243,6 +281,11 @@ pub fn button(
     if let Some(bg) = bg {
         painter.rect_filled(rect, theme::RADIUS_CONTROL as f32, bg);
     }
-    paint(painter, rect.shrink(4.0), icon, fg);
+    paint(
+        painter,
+        Rect::from_center_size(rect.center(), Vec2::splat(icon_size)),
+        icon,
+        fg,
+    );
     response.on_hover_text(tooltip)
 }

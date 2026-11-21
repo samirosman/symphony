@@ -13,7 +13,7 @@ const fn hex(rgb: u32) -> Color32 {
 }
 
 // §4.1 colour tokens.
-pub const BG_BASE: Color32 = hex(0x1E2025);
+pub const BG_BASE: Color32 = hex(0x16181C);
 pub const BG_PANEL: Color32 = hex(0x272A30);
 pub const BG_RAISED: Color32 = hex(0x31353C);
 pub const BG_HOVER: Color32 = hex(0x3A3F47);
@@ -31,6 +31,8 @@ pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
 pub const CANVAS_SURROUND: Color32 = hex(0x505359);
 pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
+/// Neutral shadow under the stage (D3.10) and floating windows (D6.4).
+pub const SHADOW: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
 
 // §5.2 type scale.
 pub const SIZE_DENSE: f32 = 11.0;
@@ -38,14 +40,24 @@ pub const SIZE_BODY: f32 = 13.0;
 pub const SIZE_HEADING: f32 = 15.0;
 
 // §6.2 standard sizes.
+pub const TOP_BAR: f32 = 40.0;
+pub const TAB_ROW: f32 = 32.0;
+pub const STATUS_BAR: f32 = 24.0;
 pub const TOOLBAR_BUTTON: f32 = 24.0;
-pub const TOOLS_STRIP: f32 = 36.0;
-pub const ROW: f32 = 24.0;
+pub const TOOL_BUTTON: f32 = 32.0;
+pub const TOOL_ICON: f32 = 20.0;
+pub const TOOL_GROUP_GAP: f32 = 12.0;
+pub const TOOLS_STRIP: f32 = 44.0;
+pub const ROW: f32 = 28.0;
 pub const XSHEET_ROW: f32 = 20.0;
+pub const FRAME_CELL: f32 = 16.0;
+pub const CARD_PAD: i8 = 12;
+pub const GUTTER: f32 = 6.0;
 
 // §6.3 radii.
-pub const RADIUS_CONTROL: u8 = 3;
-pub const RADIUS_FLOATING: u8 = 6;
+pub const RADIUS_CONTROL: u8 = 4;
+pub const RADIUS_CARD: u8 = 8;
+pub const RADIUS_FLOATING: u8 = 8;
 
 pub fn dense() -> FontId {
     FontId::proportional(SIZE_DENSE)
@@ -144,31 +156,63 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 #[cfg(feature = "dock")]
-/// Dock styling: flat docked panels (D6.3, D6.4), active tab marked in cel blue (D3.2).
+/// Dock styling (DESIGN §3.1): every view is a card on `bg.base` with
+/// 6 px gutters. Tabs are flat, with the active one on a raised tone and the
+/// focused view's tab outlined in cel blue (D3.2). No close or collapse
+/// buttons (D3.4).
 pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
+    use egui_dock::TabInteractionStyle;
+    let top = CornerRadius {
+        nw: RADIUS_CARD,
+        ne: RADIUS_CARD,
+        sw: 0,
+        se: 0,
+    };
+    let bottom = CornerRadius {
+        nw: 0,
+        ne: 0,
+        sw: RADIUS_CARD,
+        se: RADIUS_CARD,
+    };
+    let tab_radius = CornerRadius::same(RADIUS_CONTROL);
+    let tab = |bg: Color32, text: Color32, outline: Color32| TabInteractionStyle {
+        outline_color: outline,
+        corner_radius: tab_radius,
+        bg_fill: bg,
+        text_color: text,
+    };
+
     let mut d = egui_dock::Style::from_egui(style);
+    d.dock_area_padding = Some(Margin::same(GUTTER as i8));
     d.main_surface_border_stroke = Stroke::NONE;
     d.main_surface_border_rounding = CornerRadius::ZERO;
-    d.tab_bar.bg_fill = BG_BASE;
-    d.tab_bar.hline_color = LINE_SUBTLE;
-    d.tab_bar.corner_radius = CornerRadius::ZERO;
+    d.separator.width = GUTTER;
+    d.separator.extra = 0.0;
     d.separator.color_idle = BG_BASE;
     d.separator.color_hovered = LINE_STRONG;
     d.separator.color_dragged = ACCENT_SELECT;
-    d.separator.width = 4.0;
-    d.tab.active.bg_fill = BG_PANEL;
-    d.tab.active.text_color = TEXT_PRIMARY;
-    d.tab.active.corner_radius = CornerRadius::ZERO;
-    d.tab.focused = d.tab.active.clone();
-    d.tab.focused.outline_color = ACCENT_SELECT;
-    d.tab.inactive.bg_fill = BG_RAISED;
-    d.tab.inactive.text_color = TEXT_SECONDARY;
-    d.tab.inactive.corner_radius = CornerRadius::ZERO;
-    d.tab.hovered.bg_fill = BG_HOVER;
-    d.tab.hovered.text_color = TEXT_PRIMARY;
+    d.tab_bar.bg_fill = BG_PANEL;
+    d.tab_bar.height = TAB_ROW;
+    d.tab_bar.corner_radius = top;
+    d.tab_bar.hline_color = LINE_SUBTLE;
+    d.tab_bar.inner_margin = Margin {
+        left: 6,
+        right: 6,
+        top: 4,
+        bottom: 4,
+    };
+    d.tab.active = tab(BG_RAISED, TEXT_PRIMARY, Color32::TRANSPARENT);
+    d.tab.inactive = tab(BG_PANEL, TEXT_SECONDARY, Color32::TRANSPARENT);
+    d.tab.hovered = tab(BG_RAISED, TEXT_PRIMARY, Color32::TRANSPARENT);
+    d.tab.focused = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
+    d.tab.active_with_kb_focus = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
+    d.tab.inactive_with_kb_focus = tab(BG_PANEL, TEXT_PRIMARY, ACCENT_SELECT);
+    d.tab.focused_with_kb_focus = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
+    d.tab.hline_below_active_tab_name = false;
     d.tab.tab_body.bg_fill = BG_PANEL;
     d.tab.tab_body.stroke = Stroke::NONE;
-    d.tab.tab_body.corner_radius = CornerRadius::ZERO;
-    d.tab.hline_below_active_tab_name = true;
+    d.tab.tab_body.corner_radius = bottom;
+    d.tab.tab_body.inner_margin = Margin::same(0);
+    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.25);
     d
 }

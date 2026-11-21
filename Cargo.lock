@@ -3556,6 +3556,7 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "egui_dock",
+ "image",
  "serde",
  "symphony-core",
  "symphony-pen",

@@ -1,9 +1,11 @@
-//! Symphony desktop app. Window anatomy follows docs/DESIGN.md §3: menu bar,
-//! workspace bar, Tools toolbar on the left, dock area, status bar.
+//! Symphony desktop app. Window anatomy follows docs/DESIGN.md §3: one top
+//! bar (the title bar on macOS), the Tools toolbar card, the dock of view
+//! cards, and the status bar.
 //! Shortcuts come only from the keymap (ENGINEERING E4.3).
 
 mod keymap;
 mod scene;
+mod shot;
 mod views;
 mod workspace;
 
@@ -25,7 +27,7 @@ struct Saved {
     layouts: Vec<(Workspace, DockState<View>)>,
     #[serde(default)]
     profile: Profile,
-    /// DESIGN D15.2: on by default.
+    /// DESIGN D16.2: on by default.
     #[serde(default = "yes")]
     use_no_ai: bool,
 }
@@ -50,6 +52,7 @@ struct SymphonyApp {
     show_icon_sheet: bool,
     last_time: Option<f64>,
     frame_clock: f64,
+    shot: Option<shot::Shot>,
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -102,8 +105,29 @@ impl SymphonyApp {
                 layouts.push((ws, ws.preset()));
             }
         }
+        let shot = shot::Shot::from_env();
+        // Screenshots always use fresh presets, so reviews are repeatable.
+        let mut workspace = workspace;
+        if shot.is_some() {
+            layouts = Workspace::ALL.iter().map(|w| (*w, w.preset())).collect();
+            if let Ok(name) = std::env::var("SYMPHONY_WORKSPACE") {
+                if let Some(w) = Workspace::ALL
+                    .into_iter()
+                    .find(|w| format!("{w:?}") == name)
+                {
+                    workspace = w;
+                }
+            }
+        }
+        let mut scene = Scene::demo();
+        if std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
+            scene.add_demo_art();
+        }
+        // Dark window frame on every OS (DESIGN D12.3).
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         SymphonyApp {
-            scene: Scene::demo(),
+            scene,
             workspace,
             layouts,
             profile,
@@ -118,6 +142,7 @@ impl SymphonyApp {
             show_icon_sheet: false,
             last_time: None,
             frame_clock: 0.0,
+            shot,
         }
     }
 
@@ -205,122 +230,172 @@ impl SymphonyApp {
         }
     }
 
-    fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("Quit Symphony").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.menu_button("Edit", |ui| {
-                self.menu_action(ui, Action::Undo);
-                ui.separator();
-                if ui.button("Preferences").clicked() {
-                    self.show_preferences = true;
-                    ui.close();
-                }
-            });
-            ui.menu_button("Play", |ui| {
-                self.menu_action(ui, Action::PlayPause);
-                self.menu_action(ui, Action::PrevFrame);
-                self.menu_action(ui, Action::NextFrame);
-            });
-            ui.menu_button("Windows", |ui| {
-                for v in View::ALL {
-                    if ui.button(v.title()).clicked() {
-                        self.show_view(v);
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                self.menu_action(ui, Action::MaximiseView);
-            });
-            ui.menu_button("Help", |ui| {
-                if ui.button("Icon sheet").clicked() {
-                    self.show_icon_sheet = true;
-                    ui.close();
-                }
-            });
-        });
-    }
-
-    fn workspace_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.colored_label(theme::TEXT_SECONDARY, "Workspace");
-            let mut ws = self.workspace;
-            egui::ComboBox::from_id_salt("workspace")
-                .selected_text(ws.title())
-                .show_ui(ui, |ui| {
-                    for w in Workspace::ALL {
-                        ui.selectable_value(&mut ws, w, w.title());
-                    }
-                });
-            if ws != self.workspace {
-                self.workspace = ws;
-                self.maximised = None;
+    fn menus(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
+            if ui.button("Quit Symphony").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            if ui
-                .button("Reset workspace")
-                .on_hover_text("Put this workspace back to its preset layout")
-                .clicked()
-            {
-                *self.layout_mut() = self.workspace.preset();
-                self.maximised = None;
+        });
+        ui.menu_button("Edit", |ui| {
+            self.menu_action(ui, Action::Undo);
+            ui.separator();
+            if ui.button("Preferences").clicked() {
+                self.show_preferences = true;
+                ui.close();
+            }
+        });
+        ui.menu_button("Play", |ui| {
+            self.menu_action(ui, Action::PlayPause);
+            self.menu_action(ui, Action::PrevFrame);
+            self.menu_action(ui, Action::NextFrame);
+        });
+        ui.menu_button("Windows", |ui| {
+            for v in View::ALL {
+                if ui.button(v.title()).clicked() {
+                    self.show_view(v);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            self.menu_action(ui, Action::MaximiseView);
+        });
+        ui.menu_button("Help", |ui| {
+            if ui.button("Icon sheet").clicked() {
+                self.show_icon_sheet = true;
+                ui.close();
             }
         });
     }
 
+    /// D3.1: menus left, scene name centred, workspace right. On macOS this
+    /// bar is the title bar, so its empty space drags the window.
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        let drag = ui.interact(
+            rect,
+            egui::Id::unique("symphony-top-bar-drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+        }
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Untitled scene",
+            theme::body(),
+            theme::TEXT_SECONDARY,
+        );
+        ui.horizontal_centered(|ui| {
+            // Room for the macOS window buttons (D12.2).
+            if cfg!(target_os = "macos") {
+                ui.add_space(72.0);
+            }
+            egui::MenuBar::new().ui(ui, |ui| self.menus(ui));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut ws = self.workspace;
+                egui::ComboBox::from_id_salt("workspace")
+                    .width(170.0)
+                    .selected_text(ws.title())
+                    .show_ui(ui, |ui| {
+                        for w in Workspace::ALL {
+                            ui.selectable_value(&mut ws, w, w.title());
+                        }
+                        ui.separator();
+                        if ui.button("Reset this workspace").clicked() {
+                            *self.layout_mut() = self.workspace.preset();
+                            self.maximised = None;
+                        }
+                    });
+                if ws != self.workspace {
+                    self.workspace = ws;
+                    self.maximised = None;
+                }
+                ui.colored_label(theme::TEXT_SECONDARY, "Workspace");
+            });
+        });
+    }
+
+    /// The Tools toolbar card, in groups (D6.2).
     fn tools_strip(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            for t in Tool::ALL {
-                let action = tool_action(t);
-                let mut tip = keymap::tooltip(self.profile, action);
-                if let Some(m) = t.planned_for() {
-                    tip.push_str(&format!("\nComing in {m}"));
+        const GROUPS: [&[Tool]; 4] = [
+            &[Tool::Select, Tool::Transform],
+            &[Tool::Brush, Tool::Pencil, Tool::Eraser],
+            &[Tool::Paint, Tool::Dropper],
+            &[Tool::Hand, Tool::Zoom],
+        ];
+        egui::Frame::new()
+            .fill(theme::BG_PANEL)
+            .corner_radius(theme::RADIUS_CARD)
+            .inner_margin(egui::Margin::same(6))
+            .show(ui, |ui| {
+                ui.set_min_height(ui.available_height());
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (g, group) in GROUPS.iter().enumerate() {
+                    if g > 0 {
+                        ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
+                    }
+                    for &t in group.iter() {
+                        let mut tip = keymap::tooltip(self.profile, tool_action(t));
+                        if let Some(m) = t.planned_for() {
+                            tip.push_str(&format!("\nComing in {m}"));
+                        }
+                        let enabled = t.planned_for().is_none();
+                        if icons::tool_button(ui, tool_icon(t), self.scene.tool == t, enabled, &tip)
+                            .clicked()
+                        {
+                            self.scene.tool = t;
+                        }
+                    }
                 }
-                let enabled = t.planned_for().is_none();
-                if icons::button(ui, tool_icon(t), self.scene.tool == t, enabled, &tip).clicked() {
-                    self.scene.tool = t;
-                }
-            }
-        });
+            });
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui, device: Option<&DeviceInfo>) {
-        ui.horizontal(|ui| {
+        let dense = |ui: &mut egui::Ui, text: String, colour: egui::Color32| {
+            ui.label(egui::RichText::new(text).font(theme::dense()).color(colour));
+        };
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
             let s = &self.scene;
-            ui.colored_label(
-                theme::TEXT_SECONDARY,
+            dense(
+                ui,
                 format!("Frame {} of {}", s.frame, s.length),
-            );
-            ui.separator();
-            ui.colored_label(
                 theme::TEXT_SECONDARY,
+            );
+            dense(
+                ui,
                 format!("Layer {}", s.column_name(s.selected)),
-            );
-            ui.separator();
-            ui.colored_label(
                 theme::TEXT_SECONDARY,
+            );
+            dense(
+                ui,
                 format!("Tool {}", tool_action(s.tool).name()),
+                theme::TEXT_SECONDARY,
             );
             if self.animate {
-                ui.separator();
                 // D8.5: a visible mode, in its token colour (amber = time).
-                ui.colored_label(theme::ACCENT_TIME, "Animate mode on");
+                dense(ui, "Animate mode on".into(), theme::ACCENT_TIME);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.colored_label(
-                    theme::TEXT_SECONDARY,
+                dense(
+                    ui,
                     format!("{} profile", self.profile.title()),
+                    theme::TEXT_SECONDARY,
                 );
-                ui.separator();
-                let pen = match device {
-                    Some(d) if d.in_proximity => "Pen in range",
-                    Some(_) => "Pen ready",
-                    None => "Mouse only",
+                let (pen, dot) = match device {
+                    Some(d) if d.in_proximity => ("Pen in range", theme::STATE_OK),
+                    Some(_) => ("Pen ready", theme::TEXT_SECONDARY),
+                    None => ("Mouse only", theme::TEXT_DISABLED),
                 };
-                ui.colored_label(theme::TEXT_SECONDARY, pen);
+                dense(ui, pen.into(), theme::TEXT_SECONDARY);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 3.5, dot);
             });
         });
     }
@@ -383,6 +458,9 @@ impl egui_dock::TabViewer for Viewer<'_> {
 impl eframe::App for SymphonyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(s) = self.shot.as_mut() {
+            s.tick(&ctx);
+        }
         let samples = match &self.pen {
             Some(p) => p.drain(),
             None => camera::pointer_samples(&ctx),
@@ -391,24 +469,24 @@ impl eframe::App for SymphonyApp {
         self.tick_playback(&ctx);
         self.shortcuts(&ctx);
 
-        let bar = egui::Frame::new()
-            .fill(theme::BG_RAISED)
-            .inner_margin(egui::Margin::symmetric(8, 4));
-        egui::Panel::top("menu")
-            .frame(bar)
-            .show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("workspace")
-            .frame(bar)
-            .show(ui, |ui| self.workspace_bar(ui));
+        let base = egui::Frame::new().fill(theme::BG_BASE);
+        egui::Panel::top("top-bar")
+            .frame(base.inner_margin(egui::Margin::symmetric(10, 0)))
+            .exact_size(theme::TOP_BAR)
+            .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status")
-            .frame(bar)
+            .frame(base.inner_margin(egui::Margin::symmetric(12, 0)))
+            .exact_size(theme::STATUS_BAR)
             .show(ui, |ui| self.status_bar(ui, device.as_ref()));
-        let strip = egui::Frame::new()
-            .fill(theme::BG_RAISED)
-            .inner_margin(egui::Margin::symmetric(0, 8));
+        let g = theme::GUTTER as i8;
         egui::Panel::left("tools")
-            .frame(strip)
-            .exact_size(theme::TOOLS_STRIP)
+            .frame(base.inner_margin(egui::Margin {
+                left: g,
+                right: 0,
+                top: g,
+                bottom: g,
+            }))
+            .exact_size(theme::TOOLS_STRIP + theme::GUTTER)
             .resizable(false)
             .show(ui, |ui| self.tools_strip(ui));
 
@@ -453,6 +531,9 @@ impl eframe::App for SymphonyApp {
                     DockArea::new(layout)
                         .style(theme::dock_style(ui.style()))
                         .show_add_buttons(false)
+                        .show_close_buttons(false)
+                        .show_leaf_close_all_buttons(false)
+                        .show_leaf_collapse_buttons(false)
                         .show_inside(ui, &mut viewer);
                 }
             });
@@ -474,11 +555,25 @@ impl eframe::App for SymphonyApp {
     }
 }
 
+/// On macOS the top bar becomes the title bar: content runs under it and
+/// the window buttons float at its left (D3.1, D12.2).
+fn viewport() -> egui::ViewportBuilder {
+    let v = egui::ViewportBuilder::default()
+        .with_title("Symphony")
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([960.0, 600.0]);
+    if cfg!(target_os = "macos") {
+        v.with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+    } else {
+        v
+    }
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Symphony")
-            .with_inner_size([1400.0, 860.0]),
+        viewport: viewport(),
         ..Default::default()
     };
     eframe::run_native(

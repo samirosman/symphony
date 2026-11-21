@@ -14,8 +14,10 @@ pub struct NodeViewState {
     pan: Vec2,
 }
 
-const W: f32 = 112.0;
-const H: f32 = 32.0;
+const W: f32 = 132.0;
+const H: f32 = 44.0;
+/// Dot grid spacing; dots use line.subtle so they stay in the background.
+const GRID: f32 = 24.0;
 
 /// Node type is shown as text, not colour (D4.1: colour only for meaning).
 fn kind_label(kind: &NodeKind) -> &'static str {
@@ -34,6 +36,17 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
     if resp.dragged() {
         state.pan += resp.drag_delta();
     }
+    let r = resp.rect;
+    let start = r.min + Vec2::new(state.pan.x.rem_euclid(GRID), state.pan.y.rem_euclid(GRID));
+    let mut y = start.y;
+    while y < r.max.y {
+        let mut x = start.x;
+        while x < r.max.x {
+            painter.circle_filled(Pos2::new(x, y), 1.0, theme::LINE_SUBTLE);
+            x += GRID;
+        }
+        y += GRID;
+    }
     let n = scene.layers.len().max(1) as f32;
     let top = resp.rect.center_top() + Vec2::new(0.0, 32.0) + state.pan;
     let col_x = |i: usize| top.x + (i as f32 - (n - 1.0) / 2.0) * (W + 24.0);
@@ -43,10 +56,10 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
     let mut pos: Vec<(NodeId, Pos2)> = Vec::new();
     for (i, l) in scene.layers.iter().enumerate() {
         pos.push((l.peg, Pos2::new(col_x(i), top.y)));
-        pos.push((l.node, Pos2::new(col_x(i), top.y + 72.0)));
+        pos.push((l.node, Pos2::new(col_x(i), top.y + 88.0)));
     }
-    pos.push((scene.composite, Pos2::new(top.x, top.y + 152.0)));
-    pos.push((scene.display, Pos2::new(top.x, top.y + 224.0)));
+    pos.push((scene.composite, Pos2::new(top.x, top.y + 184.0)));
+    pos.push((scene.display, Pos2::new(top.x, top.y + 272.0)));
     let at = |id: NodeId| pos.iter().find(|(n, _)| *n == id).map(|(_, p)| *p);
 
     for link in scene.graph.links() {
@@ -99,20 +112,32 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
         } else {
             theme::TEXT_DISABLED
         };
-        painter.text(
-            r.center() - Vec2::new(0.0, 6.0),
-            Align2::CENTER_CENTER,
-            &node.name,
-            theme::body(),
-            name_col,
-        );
-        painter.text(
-            r.center() + Vec2::new(0.0, 8.0),
-            Align2::CENTER_CENTER,
-            kind_label(&node.kind),
-            theme::dense(),
-            theme::TEXT_SECONDARY,
-        );
+        // Show the type under the name only when it adds information.
+        let kind = kind_label(&node.kind);
+        if node.name == kind {
+            painter.text(
+                r.center(),
+                Align2::CENTER_CENTER,
+                &node.name,
+                theme::body(),
+                name_col,
+            );
+        } else {
+            painter.text(
+                r.center() - Vec2::new(0.0, 7.0),
+                Align2::CENTER_CENTER,
+                &node.name,
+                theme::body(),
+                name_col,
+            );
+            painter.text(
+                r.center() + Vec2::new(0.0, 9.0),
+                Align2::CENTER_CENTER,
+                kind,
+                theme::dense(),
+                theme::TEXT_SECONDARY,
+            );
+        }
         if resp.clicked() && resp.interact_pointer_pos().is_some_and(|q| r.contains(q)) {
             clicked_layer = scene
                 .layers

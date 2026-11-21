@@ -173,6 +173,80 @@ impl Scene {
         scene
     }
 
+    /// Sample strokes so screenshots and first launch show something to look at.
+    pub fn add_demo_art(&mut self) {
+        let circle = |cx: f32, cy: f32, r: f32| -> Vec<StrokePoint> {
+            (0..=48)
+                .map(|i| {
+                    let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                    StrokePoint {
+                        x: cx + r * t.cos(),
+                        y: cy + r * t.sin(),
+                        pressure: 0.55 + 0.45 * (t * 1.5).sin().abs(),
+                    }
+                })
+                .collect()
+        };
+        let line = |pts: &[(f32, f32)]| -> Vec<StrokePoint> {
+            pts.iter()
+                .enumerate()
+                .map(|(i, &(x, y))| StrokePoint {
+                    x,
+                    y,
+                    pressure: 0.3 + 0.7 * ((i as f32) * 0.9).sin().abs(),
+                })
+                .collect()
+        };
+        let stroke = |points, colour| Stroke {
+            points,
+            colour,
+            max_width: 9.0,
+            min_width: 1.0,
+        };
+        for (col, strokes) in [
+            (
+                "Head",
+                vec![
+                    stroke(circle(0.0, -180.0, 110.0), 0),
+                    stroke(circle(-38.0, -195.0, 12.0), 0),
+                    stroke(circle(38.0, -195.0, 12.0), 0),
+                ],
+            ),
+            (
+                "Body",
+                vec![stroke(
+                    line(&[
+                        (-90.0, -60.0),
+                        (-120.0, 120.0),
+                        (-60.0, 300.0),
+                        (60.0, 300.0),
+                        (120.0, 120.0),
+                        (90.0, -60.0),
+                    ]),
+                    0,
+                )],
+            ),
+            (
+                "BG",
+                vec![stroke(
+                    line(&[
+                        (-900.0, 380.0),
+                        (-300.0, 340.0),
+                        (300.0, 360.0),
+                        (900.0, 330.0),
+                    ]),
+                    4,
+                )],
+            ),
+        ] {
+            if let Some(c) = self.xsheet.column_mut(col) {
+                c.expose("1", 1, self.length);
+            }
+            self.drawings
+                .insert((col.to_owned(), "1".to_owned()), strokes);
+        }
+    }
+
     /// Add a layer at the back.
     pub fn add_layer(&mut self, name: &str) {
         self.xsheet.add_column(name);
