@@ -8,7 +8,7 @@ Each milestone ends in something an animator can try.
 | M1 | Pen spike | A test window shows pressure and tilt on Mac, Windows and Linux. The UI-stack decision gets made here (see LANGUAGE.md). **(macOS done: Veikk gave 244 pressure levels, tilt, ~340 Hz. Windows and Linux to do)** |
 | L | Launcher and releases | Testers install one launcher, which installs, updates and rolls back Symphony from GitHub Releases. **(built; first preview release not published yet)** |
 | M2 | Shell | Window with dockable Camera, Timeline, Xsheet, Node and Tool Properties views. Workspace switching. **(done)** |
-| M3 | Draw | Pencil (centreline + thickness) and Brush (contour). Line Art and Colour Art layers. Onion skin. Undo. |
+| M3 | Draw | Pencil (centreline + thickness) and Brush (contour). Line Art and Colour Art layers. Onion skin. Undo. **(mostly done: brush, pencil, eraser, smoothing, pressure curve, onion skin, undo/redo, canvas navigation. Still to do: art layers in the UI, Select and Transform tools, cutting strokes with the eraser.)** |
 | M4 | Time | Timeline and Xsheet editing the same data. Exposures and holds. Playback at scene fps. |
 | M5 | Paint | Palettes with colour IDs, Paint tool, auto-fill, close gap, swatch edits recolour everything. |
 | M6 | Rig | Node view editing. Pegs, the Transform tool, Function view (Bézier/ease), drawing substitution. |

@@ -344,13 +344,10 @@ These are known gaps from early prototyping, and each one is a task.
 
 | Rule | Gap today | Fix in |
 |---|---|---|
-| E2.2 | Xsheet columns and drawings are keyed by name, not stable IDs. | Before M3 ends |
-| E3.1 | Views mutate `Scene` directly. Undo is a simple stroke stack. | M3, with the command system |
-| E1.1 | Strokes live in `symphony-app` (`scene.rs`), not in `symphony-vector`. | M3 |
-| E4.3 | Shortcuts go through the new keymap, but menus don't read the registry yet. | M2 polish |
-| E7 | No save or load yet. | M12, though autosave comes early, alongside save |
-| E10.2 | The canvas draws with egui shapes, not the shared renderer. | M3 / renderer |
-| E13.5 | The launcher doesn't update itself yet. Testers download a new launcher by hand when one is announced. | Before the first stable release |
+| E7.1 | Drawings are stored inside `scene.json`, not as separate binary `drawings/<id>.svd` files. | A format migration once scenes get large |
+| E5.3 | Background saves clone the whole document instead of sharing copy-on-write data. | When scenes get large |
+| E10.2 | The canvas draws tessellated meshes through egui, not a shared GPU renderer. Strokes are re-tessellated every frame, with no cache. | Renderer milestone |
+| E4.3 | Panels still edit a few UI settings directly (brush, onion skin). They're not document data, so that's allowed (E3.5). | n/a |
 | E17.2, E17.4 | The "Use no AI" setting and provenance record aren't built yet. There are no assisted tools, so nothing is affected. | With the actions registry (M2 polish) and scene files (M12) |
 | E13.6 | Builds aren't code-signed. Testers follow the "Open anyway" steps in TESTERS.md. | Before the first stable release |
 | E13.4 | The macOS app is launched as a plain binary, not a `.app` bundle (it gets no Dock icon of its own). | With app icons |

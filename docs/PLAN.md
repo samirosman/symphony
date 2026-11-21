@@ -145,18 +145,18 @@ continues.
 - ⬜ Keyboard shortcut sets: a Harmony-style set built from the published
   default list, plus custom sets
 - ⬜ Preferences dialog (all tabs)
-- ⬜ Rotate, flip and zoom the canvas. Reset view.
+- 🟡 Rotate, flip and zoom the canvas. Reset view. (flip still to do)
 - ⬜ Field guide, grid, rulers, safe areas, guides (including perspective guides)
 - ⬜ Light table and Shift & Trace
 
 ### 4.2 Drawing
 - 🟡 Pressure and tilt input (macOS ✅)
-- ⬜ **Pencil**: centreline with thickness, pressure-driven thickness, editable afterwards
+- 🟡 **Pencil**: centreline with thickness, pressure-driven thickness, editable afterwards (draws; editing comes with the Contour/Pencil editors)
 - ⬜ Pencil line textures and pencil presets
-- ⬜ **Brush**: filled contour, pressure size and opacity, smoothing
+- 🟡 **Brush**: filled contour, pressure size and opacity, smoothing (size and smoothing done; opacity later)
 - ⬜ Textured vector brushes (greyscale bitmap mask)
 - ⬜ Bitmap layers and bitmap brushes (tip and paper textures, blending)
-- ⬜ Eraser (vector and bitmap)
+- 🟡 Eraser (vector and bitmap): removes whole vector strokes; cutting comes next
 - ⬜ Line, Rectangle, Ellipse and Polyline tools
 - ⬜ Text tool
 - ⬜ Stroke tool (invisible lines used for painting zones)
@@ -169,18 +169,18 @@ continues.
 - ⬜ Perspective tool
 - ⬜ Envelope tool (warp a selection)
 - ⬜ Morphing tool and morph sequences (Premium)
-- ⬜ Stabiliser, smoothing and pressure curve settings
+- ✅ Stabiliser, smoothing and pressure curve settings
 - ⬜ Auto-flatten, auto-merge, draw behind, and "Draw on Colour Art" options
 - ⬜ Auto close gap
 - ⬜ Snap to contour, snap to grid, snap to alignment guides
 - ⬜ Art layers: Overlay, Line Art, Colour Art, Underlay
 - ⬜ Art Layer Manager (25.2) *(verify)*
 - ⬜ Create Colour Art from Line Art
-- ⬜ Onion skin (previous and next drawings, colours, opacity, range)
+- ✅ Onion skin (previous and next drawings, colours, opacity, range)
 - ⬜ Reposition All Drawings
 - ⬜ Rotary table
-- ⬜ Hand and Zoom tools
-- ⬜ Undo/redo history view
+- ✅ Hand and Zoom tools
+- 🟡 Undo/redo history view (undo and redo work everywhere; the history view itself is later)
 
 ### 4.3 Ink and paint, colour
 - ⬜ **Palettes with colour IDs**: edit a swatch and everything using it recolours
@@ -204,7 +204,7 @@ continues.
   extend and reduce exposure, drag timing
 - ⬜ **Xsheet**: columns, cells with drawing names, Increase/Decrease
   Exposure, Fill Empty Cells, Sequence Fill, holds, keyframe markers
-- ⬜ Timeline and Xsheet editing the same data, live
+- ✅ Timeline and Xsheet editing the same data, live
 - ⬜ Drawing substitution (swap the exposed drawing, substitution browser)
 - ⬜ Annotation column (notes and drawings in the Xsheet)
 - ⬜ Function columns in the Xsheet (Bézier, Ease, Expression, 3D Path, Quaternion)
@@ -315,7 +315,7 @@ Every effect is a node in the graph.
 - ⬜ Command-line utilities (render, scene inspection, conversion)
 
 ### 4.13 Production
-- ⬜ Native scene format: save, autosave, crash recovery, versions
+- ✅ Native scene format: save, autosave, crash recovery, versions
 - ⬜ Project and scene browser
 - ⬜ Scene setup (resolution, frame rate, alignment)
 - ⬜ Multi-user database mode (like Harmony Server) — last, and optional
@@ -329,4 +329,4 @@ above is in place.
 
 ---
 
-*Last updated: 2026-11-21*
+*Last updated: 2026-11-21 (M3 drawing, undo, onion skin, saving)*
