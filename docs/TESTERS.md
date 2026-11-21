@@ -51,3 +51,10 @@ The launcher keeps the version you had before. Pick it under
 - Bugs and ideas: [open an issue](https://github.com/tdemers218/symphony/issues).
 - Tablets: run the pen test and file a *Tablet report* (see
   [CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+## Update from the editor
+
+Click **Update** beside Help. Save any edits when prompted. A release build
+checks your selected release channel and installs an available update.
+Click **Launch** when it finishes. Symphony Dev instead rebuilds the
+current source checkout and opens the resulting app, including local edits.

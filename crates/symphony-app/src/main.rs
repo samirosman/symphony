@@ -7,6 +7,7 @@ mod codec;
 mod keymap;
 mod session;
 mod shot;
+mod update;
 mod views;
 mod workspace;
 
@@ -58,6 +59,7 @@ fn yes() -> bool {
 /// Something waiting on "Save changes?".
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending {
+    Update,
     Quit,
     New,
     Open,
@@ -293,6 +295,10 @@ impl SymphonyApp {
 
     fn proceed(&mut self, ctx: &egui::Context, p: Pending) {
         match p {
+            Pending::Update => match update::start() {
+                Ok(_) => self.proceed(ctx, Pending::Quit),
+                Err(e) => self.error = Some(format!("Couldn’t start the updater ({e}).")),
+            },
             Pending::Quit => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -825,6 +831,14 @@ impl SymphonyApp {
                 ui.close();
             }
         });
+        ui.separator();
+        if ui
+            .button("Update")
+            .on_hover_text("Update Symphony")
+            .clicked()
+        {
+            self.guard(ui.ctx(), Pending::Update);
+        }
     }
 
     /// D3.1: menus left, scene name centred, workspace right. On macOS this
@@ -848,39 +862,51 @@ impl SymphonyApp {
         if self.s.dirty() {
             title.push_str("  (edited)");
         }
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            &title,
-            theme::body(),
-            theme::TEXT_SECONDARY,
-        );
         ui.horizontal_centered(|ui| {
             // Room for the macOS window buttons (D12.2).
             if cfg!(target_os = "macos") {
                 ui.add_space(72.0);
             }
-            egui::MenuBar::new().ui(ui, |ui| self.menus(ui));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut ws = self.workspace;
-                egui::ComboBox::from_id_salt("workspace")
-                    .width(170.0)
-                    .selected_text(ws.title())
-                    .show_ui(ui, |ui| {
-                        for w in Workspace::ALL {
-                            ui.selectable_value(&mut ws, w, w.title());
-                        }
-                        ui.separator();
-                        if ui.button("Reset this workspace").clicked() {
-                            *self.layout_mut() = self.workspace.preset();
-                            self.maximised = None;
-                        }
-                    });
-                if ws != self.workspace {
-                    self.workspace = ws;
-                    self.maximised = None;
-                }
-                ui.colored_label(theme::TEXT_SECONDARY, "Workspace");
+            egui::MenuBar::new().ui(ui, |ui| {
+                self.menus(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut ws = self.workspace;
+                    egui::ComboBox::from_id_salt("workspace")
+                        .width(170.0)
+                        .selected_text(ws.title())
+                        .show_ui(ui, |ui| {
+                            for w in Workspace::ALL {
+                                ui.selectable_value(&mut ws, w, w.title());
+                            }
+                            ui.separator();
+                            if ui.button("Reset this workspace").clicked() {
+                                *self.layout_mut() = self.workspace.preset();
+                                self.maximised = None;
+                            }
+                        });
+                    if ws != self.workspace {
+                        self.workspace = ws;
+                        self.maximised = None;
+                    }
+                    ui.colored_label(theme::TEXT_SECONDARY, "Workspace");
+                    let space = ui
+                        .available_rect_before_wrap()
+                        .shrink2(egui::vec2(6.0, 0.0));
+                    if space.is_positive() {
+                        let galley =
+                            ui.painter()
+                                .layout_no_wrap(title, theme::body(), theme::TEXT_PRIMARY);
+                        let width = galley.size().x;
+                        let x = (rect.center().x - width * 0.5)
+                            .clamp(space.left(), (space.right() - width).max(space.left()));
+                        let y = rect.center().y - galley.size().y * 0.5;
+                        ui.painter().with_clip_rect(space).galley(
+                            egui::pos2(x, y),
+                            galley,
+                            theme::TEXT_PRIMARY,
+                        );
+                    }
+                });
             });
         });
     }
@@ -1395,6 +1421,9 @@ fn viewport() -> egui::ViewportBuilder {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--update")) {
+        return symphony_launcher::run_release_manager(true);
+    }
     let options = eframe::NativeOptions {
         viewport: viewport(),
         // A forced review size must win over the remembered window size.
