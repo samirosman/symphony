@@ -174,6 +174,11 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
                     PaintMode::Unpaint => "Removes the colour from an area.",
                 });
                 ui.add_space(6.0);
+                widgets::checkbox(ui, &mut s.respect_protected, "Respect protected colours");
+                hint(
+                    ui,
+                    "Leaves colours marked as protected in the Colour view alone (Shift+S).",
+                );
                 widgets::checkbox(ui, &mut s.show_strokes, "Show strokes");
                 hint(ui, "Shows the invisible lines that close areas (K).");
             }
@@ -235,6 +240,17 @@ pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
             for (index, sw) in swatches.iter().enumerate() {
                 ui.push_id(sw.id.0, |ui| {
                     ui.horizontal(|ui| {
+                        // Harmony marks a protected colour with a red bar
+                        // beside it. The space is kept so rows line up.
+                        let (bar, _) = ui.allocate_exact_size(
+                            egui::vec2(3.0, ui.spacing().interact_size.y),
+                            egui::Sense::hover(),
+                        );
+                        if sw.protected {
+                            ui.painter().rect_filled(bar, 1.0, theme::STATE_DANGER);
+                            ui.interact(bar, ui.scope_id().with("protected"), egui::Sense::hover())
+                                .on_hover_text("Protected colour");
+                        }
                         let mut rgb = sw.rgb;
                         let chip = ui
                             .color_edit_button_srgb(&mut rgb)
@@ -272,6 +288,15 @@ pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
                                     ui.data_mut(|d| {
                                         d.insert_temp(rename, (sw.id, sw.name.clone()))
                                     });
+                                    ui.close();
+                                }
+                                let protect = if sw.protected {
+                                    "Unprotect Colour"
+                                } else {
+                                    "Protect Colour"
+                                };
+                                if ui.button(protect).clicked() {
+                                    s.toggle_protect_swatch(sw.id);
                                     ui.close();
                                 }
                                 for (label, delta, enabled) in [

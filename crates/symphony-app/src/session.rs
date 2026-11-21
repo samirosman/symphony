@@ -139,6 +139,8 @@ pub struct Session {
     pub paint_mode: PaintMode,
     /// Harmony's Show Strokes (K): reveal invisible strokes.
     pub show_strokes: bool,
+    /// Harmony's Respect Protected Colours (Shift+S), on by default.
+    pub respect_protected: bool,
     /// Select tool options, as in Harmony: Marquee instead of Lasso, and
     /// Easy Drag (drag from anywhere inside the box).
     pub marquee_mode: bool,
@@ -200,6 +202,7 @@ impl Session {
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,
             show_strokes: false,
+            respect_protected: true,
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),
@@ -479,6 +482,17 @@ impl Session {
             .rev()
             .find(|(_, f)| f.contains(x, y))
             .map(|(i, f)| (i, f.clone()));
+        if let Some((_, fill)) = &existing {
+            let changes = match mode {
+                PaintMode::Unpaint => true,
+                PaintMode::PaintUnpainted => false,
+                _ => fill.swatch != swatch,
+            };
+            if changes && self.is_locked(fill.swatch) {
+                self.note_protected(fill.swatch);
+                return;
+            }
+        }
         match (mode, existing) {
             (PaintMode::Unpaint, Some((index, fill))) => {
                 self.history.apply(
@@ -546,6 +560,11 @@ impl Session {
             return;
         };
         if st.swatch == swatch {
+            return;
+        }
+        if self.is_locked(st.swatch) {
+            let locked = st.swatch;
+            self.note_protected(locked);
             return;
         }
         let before = st.clone();
@@ -1124,6 +1143,7 @@ impl Session {
             id,
             name: "New colour".into(),
             rgb,
+            protected: false,
         });
         self.apply_palette("Add colour", palette, Vec::new());
         self.swatch = id;
@@ -1186,6 +1206,47 @@ impl Session {
         if self.swatch == id {
             self.swatch = replacement;
         }
+    }
+
+    /// Does painting have to leave this swatch's zones and lines alone?
+    pub fn is_locked(&self, swatch: Id) -> bool {
+        self.respect_protected && self.doc.palette.get(swatch).is_some_and(|sw| sw.protected)
+    }
+
+    fn note_protected(&mut self, swatch: Id) {
+        let name = self
+            .doc
+            .palette
+            .get(swatch)
+            .map_or_else(String::new, |sw| sw.name.clone());
+        self.note(format!(
+            "{name} is protected. Unprotect it in the Colour view, or turn off Respect Protected Colours (Shift+S)."
+        ));
+    }
+
+    /// Harmony's Protect Colour, from the Colour view. Undoable, like any
+    /// palette change.
+    pub fn toggle_protect_swatch(&mut self, id: Id) {
+        let mut palette = self.doc.palette.clone();
+        let Some(sw) = palette.get_mut(id) else {
+            return;
+        };
+        sw.protected = !sw.protected;
+        let name = if sw.protected {
+            "Protect colour"
+        } else {
+            "Unprotect colour"
+        };
+        self.apply_palette(name, palette, Vec::new());
+    }
+
+    pub fn toggle_respect_protected(&mut self) {
+        self.respect_protected = !self.respect_protected;
+        self.note(if self.respect_protected {
+            "Respecting protected colours"
+        } else {
+            "Protected colours can be painted over"
+        });
     }
 
     /// Recolour a swatch. Every stroke using it changes (E2.3).
@@ -1375,6 +1436,39 @@ mod tests {
         s.paint_mode = PaintMode::Unpaint;
         s.paint_at(0, 1, 50.0, 50.0, 1.0);
         assert!(fills(&s).is_empty());
+    }
+
+    #[test]
+    fn protected_colours_are_left_alone_while_respected() {
+        let mut s = Session::new_scene();
+        let ink = s.swatch;
+        square_drawing(&mut s);
+        let (a, b) = (s.doc.palette.swatches[1].id, s.doc.palette.swatches[2].id);
+        s.paint_mode = PaintMode::Paint;
+        s.swatch = a;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        s.toggle_protect_swatch(a);
+        s.toggle_protect_swatch(ink);
+        assert!(s.doc.palette.get(a).unwrap().protected);
+
+        s.swatch = b;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s)[0].swatch, a, "Paint skips a protected zone");
+        s.paint_mode = PaintMode::Unpaint;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s).len(), 1, "Unpaint skips a protected zone");
+        s.paint_mode = PaintMode::Paint;
+        s.paint_at(0, 1, 10.0, 50.0, 1.0);
+        let d = s.doc.exposed(0, 1).unwrap();
+        assert_eq!(s.doc.drawings[&d].strokes[0].swatch, ink, "protected line");
+
+        s.toggle_respect_protected();
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s)[0].swatch, b, "not respected: repaints");
+
+        s.undo();
+        s.undo();
+        assert!(!s.doc.palette.get(ink).unwrap().protected, "protect undoes");
     }
 
     #[test]

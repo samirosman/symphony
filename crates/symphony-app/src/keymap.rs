@@ -90,13 +90,14 @@ pub enum Action {
     ToolUnpaint,
     ToolCloseGap,
     ShowStrokes,
+    RespectProtectedColours,
     ToolDropper,
     ToolHand,
     ToolZoom,
 }
 
 impl Action {
-    pub const ALL: [Action; 59] = [
+    pub const ALL: [Action; 60] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -153,6 +154,7 @@ impl Action {
         Action::ToolUnpaint,
         Action::ToolCloseGap,
         Action::ShowStrokes,
+        Action::RespectProtectedColours,
         Action::ToolDropper,
         Action::ToolHand,
         Action::ToolZoom,
@@ -217,6 +219,7 @@ impl Action {
             Action::ToolUnpaint => "tool.unpaint",
             Action::ToolCloseGap => "tool.close_gap",
             Action::ShowStrokes => "view.show_strokes",
+            Action::RespectProtectedColours => "drawing.respect_protected_colours",
             Action::ToolDropper => "tool.dropper",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
@@ -281,6 +284,7 @@ impl Action {
             Action::ToolUnpaint => "Unpaint",
             Action::ToolCloseGap => "Close Gap",
             Action::ShowStrokes => "Show Strokes",
+            Action::RespectProtectedColours => "Respect Protected Colours",
             Action::ToolDropper => "Dropper",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
@@ -385,6 +389,7 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolUnpaint => b(Key::U, ALT),
         Action::ToolCloseGap => b(Key::C, ALT),
         Action::ShowStrokes => b(Key::K, NONE),
+        Action::RespectProtectedColours => b(Key::S, SHIFT),
         Action::ToolDropper => b(Key::D, ALT),
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),

@@ -222,6 +222,14 @@ impl SymphonyApp {
                     workspace = w;
                 }
             }
+            // SYMPHONY_SHOT_PAINT: the Paint tool with a protected colour,
+            // to review the paint options and the protection marker.
+            if std::env::var_os("SYMPHONY_SHOT_PAINT").is_some() {
+                s.tool = Tool::Paint;
+                if let Some(id) = s.doc.palette.swatches.get(1).map(|sw| sw.id) {
+                    s.toggle_protect_swatch(id);
+                }
+            }
         }
         let recovery = recovery_dir().map(Recovery::new);
         let recovered = match (&recovery, &shot) {
@@ -689,6 +697,7 @@ impl SymphonyApp {
                     Action::AddLayer => s.add_layer(),
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
                     Action::ShowStrokes => s.show_strokes = !s.show_strokes,
+                    Action::RespectProtectedColours => s.toggle_respect_protected(),
                     Action::ToolPaint
                     | Action::ToolPaintUnpainted
                     | Action::ToolRepaint
@@ -746,6 +755,18 @@ impl SymphonyApp {
 
     fn menu_item(&mut self, ui: &mut egui::Ui, action: Action, label: String) {
         let btn = egui::Button::new(label).shortcut_text(keymap::label(self.profile, action));
+        if ui.add(btn).clicked() {
+            let ctx = ui.ctx().clone();
+            ui.close();
+            self.run(&ctx, action);
+        }
+    }
+
+    /// A menu item for an on/off setting, ticked while it's on.
+    fn menu_toggle(&mut self, ui: &mut egui::Ui, action: Action, on: bool) {
+        let btn = egui::Button::new(action.name())
+            .selected(on)
+            .shortcut_text(keymap::label(self.profile, action));
         if ui.add(btn).clicked() {
             let ctx = ui.ctx().clone();
             ui.close();
@@ -822,6 +843,12 @@ impl SymphonyApp {
                 ui.close();
             }
         });
+        ui.menu_button("Drawing", |ui| {
+            ui.menu_button("Colour Protection", |ui| {
+                let on = self.s.respect_protected;
+                self.menu_toggle(ui, Action::RespectProtectedColours, on);
+            });
+        });
         ui.menu_button("Timing", |ui| {
             self.menu_action(ui, Action::IncreaseExposure);
             self.menu_action(ui, Action::DecreaseExposure);
@@ -838,7 +865,8 @@ impl SymphonyApp {
         });
         ui.menu_button("View", |ui| {
             self.menu_action(ui, Action::ToggleOnionSkin);
-            self.menu_action(ui, Action::ShowStrokes);
+            let on = self.s.show_strokes;
+            self.menu_toggle(ui, Action::ShowStrokes, on);
             ui.separator();
             self.menu_action(ui, Action::ZoomIn);
             self.menu_action(ui, Action::ZoomOut);

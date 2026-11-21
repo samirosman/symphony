@@ -96,6 +96,7 @@ impl Scene {
             id: ids.fresh(),
             name: name.into(),
             rgb,
+            protected: false,
         };
         let palette = Palette {
             name: "Scene palette".into(),

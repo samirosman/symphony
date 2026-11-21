@@ -11,6 +11,10 @@ pub struct Swatch {
     pub name: String,
     /// sRGB (E10.4).
     pub rgb: [u8; 3],
+    /// Harmony's Protect Colour: while Respect Protected Colours is on,
+    /// painting never repaints or unpaints what uses this swatch.
+    #[serde(default)]
+    pub protected: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -26,5 +30,17 @@ impl Palette {
 
     pub fn get_mut(&mut self, id: Id) -> Option<&mut Swatch> {
         self.swatches.iter_mut().find(|s| s.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swatches_saved_before_protection_load_unprotected() {
+        let old = r#"{"id":7,"name":"Ink","rgb":[0,0,0]}"#;
+        let sw: Swatch = serde_json::from_str(old).unwrap();
+        assert!(!sw.protected);
     }
 }

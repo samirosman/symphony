@@ -193,7 +193,7 @@ continues.
 - ✅ Dropper
 - ✅ Close Gap tool
 - ⬜ Edit Gradient/Texture tool
-- ⬜ Protect colour
+- ✅ Protect colour (swatch lock, Respect Protected Colours, Shift+S)
 - 🟡 Show Strokes, Show Unpainted Zones (Show Strokes done)
 - ⬜ Colour override
 - ✖ Generative fill (Harmony 25.2's AI fill): **won't be added.** Symphony has no
