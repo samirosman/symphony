@@ -2,9 +2,8 @@
 //! docs/DESIGN.md §11). Every shortcut in the app is defined here and
 //! nowhere else.
 //!
-//! Harmony-profile bindings come from Harmony's published default
-//! shortcuts. They're marked `verified: false` until each one is checked
-//! against the Harmony 27 list (E4.4). The Symphony profile starts as a
+//! Harmony-profile bindings are checked against Harmony 27's published
+//! default shortcuts, kept as facts in docs/reference/harmony-27-shortcuts.tsv (E4.4). The Symphony profile starts as a
 //! copy of Harmony; any difference must be logged in DESIGN.md §11.1.
 
 use eframe::egui::{self, Key, Modifiers};
@@ -52,6 +51,17 @@ pub enum Action {
     AddLayer,
     ToggleOnionSkin,
     ResetView,
+    ZoomIn,
+    ZoomOut,
+    RotateCw,
+    RotateCcw,
+    ResetZoom,
+    ResetRotation,
+    ResetPan,
+    OnionMorePrevious,
+    OnionLessPrevious,
+    OnionMoreNext,
+    OnionLessNext,
     MaximiseView,
     ToolSelect,
     ToolTransform,
@@ -65,7 +75,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 38] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -83,6 +93,17 @@ impl Action {
         Action::AddLayer,
         Action::ToggleOnionSkin,
         Action::ResetView,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::RotateCw,
+        Action::RotateCcw,
+        Action::ResetZoom,
+        Action::ResetRotation,
+        Action::ResetPan,
+        Action::OnionMorePrevious,
+        Action::OnionLessPrevious,
+        Action::OnionMoreNext,
+        Action::OnionLessNext,
         Action::MaximiseView,
         Action::ToolSelect,
         Action::ToolTransform,
@@ -115,6 +136,17 @@ impl Action {
             Action::AddLayer => "layer.add",
             Action::ToggleOnionSkin => "view.onion_skin",
             Action::ResetView => "view.reset",
+            Action::ZoomIn => "view.zoom_in",
+            Action::ZoomOut => "view.zoom_out",
+            Action::RotateCw => "view.rotate_cw",
+            Action::RotateCcw => "view.rotate_ccw",
+            Action::ResetZoom => "view.reset_zoom",
+            Action::ResetRotation => "view.reset_rotation",
+            Action::ResetPan => "view.reset_pan",
+            Action::OnionMorePrevious => "onion.previous_more",
+            Action::OnionLessPrevious => "onion.previous_less",
+            Action::OnionMoreNext => "onion.next_more",
+            Action::OnionLessNext => "onion.next_less",
             Action::MaximiseView => "view.maximise",
             Action::ToolSelect => "tool.select",
             Action::ToolTransform => "tool.transform",
@@ -147,6 +179,17 @@ impl Action {
             Action::AddLayer => "Add drawing layer",
             Action::ToggleOnionSkin => "Onion skin",
             Action::ResetView => "Reset view",
+            Action::ZoomIn => "Zoom in",
+            Action::ZoomOut => "Zoom out",
+            Action::RotateCw => "Rotate view CW",
+            Action::RotateCcw => "Rotate view CCW",
+            Action::ResetZoom => "Reset zoom",
+            Action::ResetRotation => "Reset rotation",
+            Action::ResetPan => "Reset pan",
+            Action::OnionMorePrevious => "Onion skin: add previous drawing",
+            Action::OnionLessPrevious => "Onion skin: remove previous drawing",
+            Action::OnionMoreNext => "Onion skin: add next drawing",
+            Action::OnionLessNext => "Onion skin: remove next drawing",
             Action::MaximiseView => "Maximise view",
             Action::ToolSelect => "Select",
             Action::ToolTransform => "Transform",
@@ -173,7 +216,7 @@ const fn b(key: Key, mods: Modifiers) -> Option<Binding> {
     Some(Binding {
         key,
         mods,
-        verified: false,
+        verified: true,
     })
 }
 
@@ -182,6 +225,7 @@ const SHIFT: Modifiers = Modifiers::SHIFT;
 const NONE: Modifiers = Modifiers::NONE;
 const CMD: Modifiers = Modifiers::COMMAND;
 const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+const CTRL_SHIFT: Modifiers = Modifiers::CTRL.plus(Modifiers::SHIFT);
 const ALT_SHIFT: Modifiers = Modifiers::ALT.plus(Modifiers::SHIFT);
 
 fn harmony(action: Action) -> Option<Binding> {
@@ -189,20 +233,39 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::NewScene => b(Key::N, CMD),
         Action::Open => b(Key::O, CMD),
         Action::Save => b(Key::S, CMD),
-        Action::SaveAs => b(Key::S, CMD_SHIFT),
+        Action::SaveAs => None, // Harmony's Ctrl+Shift+S is Advanced Save
         Action::Undo => b(Key::Z, CMD),
-        Action::Redo => b(Key::Z, CMD_SHIFT),
+        // Harmony 27 documents Redo as Ctrl+Shift+Z on macOS too.
+        Action::Redo => b(
+            Key::Z,
+            if cfg!(target_os = "macos") {
+                CTRL_SHIFT
+            } else {
+                CMD_SHIFT
+            },
+        ),
         Action::PrevFrame => b(Key::Comma, NONE),
         Action::NextFrame => b(Key::Period, NONE),
-        Action::FirstFrame | Action::LastFrame => None,
-        Action::PlayPause => b(Key::Enter, NONE),
+        Action::FirstFrame => b(Key::Comma, SHIFT), // "<"
+        Action::LastFrame => b(Key::Period, SHIFT), // ">"
+        Action::PlayPause => b(Key::Enter, SHIFT),  // Toggle Playback
         Action::IncreaseExposure => b(Key::Plus, NONE),
         Action::DecreaseExposure => b(Key::Minus, NONE),
         Action::CreateEmptyDrawing => b(Key::R, ALT_SHIFT),
         Action::AddLayer => b(Key::R, CMD),
         Action::ToggleOnionSkin => b(Key::O, ALT),
         Action::ResetView => b(Key::M, SHIFT),
-        Action::MaximiseView => b(Key::Backtick, NONE),
+        Action::ZoomIn => b(Key::Num2, NONE),
+        Action::ZoomOut => b(Key::Num1, NONE),
+        Action::ResetZoom => None,
+        Action::ResetRotation => b(Key::X, SHIFT),
+        Action::ResetPan => b(Key::N, SHIFT),
+        Action::RotateCw | Action::RotateCcw => None,
+        Action::OnionMorePrevious
+        | Action::OnionLessPrevious
+        | Action::OnionMoreNext
+        | Action::OnionLessNext => None,
+        Action::MaximiseView => b(Key::F, CMD), // Toggle Full Screen
         Action::ToolSelect => b(Key::S, ALT),
         Action::ToolTransform => b(Key::T, SHIFT),
         Action::ToolBrush => b(Key::B, ALT),
@@ -218,7 +281,11 @@ fn harmony(action: Action) -> Option<Binding> {
 /// Symphony profile: Harmony's bindings unless an improvement is logged
 /// in DESIGN.md §11.1. There are none yet.
 fn symphony(action: Action) -> Option<Binding> {
-    harmony(action)
+    match action {
+        // Mac-standard Redo (DESIGN §11.1).
+        Action::Redo => b(Key::Z, CMD_SHIFT),
+        _ => harmony(action),
+    }
 }
 
 pub fn binding(profile: Profile, action: Action) -> Option<Binding> {

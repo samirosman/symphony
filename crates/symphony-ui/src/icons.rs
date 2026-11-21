@@ -33,10 +33,12 @@ pub enum Icon {
     RotateRight,
     Plus,
     Trash,
+    ZoomOut,
+    Forbidden,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 23] = [
+    pub const ALL: [Icon; 25] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -60,6 +62,8 @@ impl Icon {
         Icon::RotateRight,
         Icon::Plus,
         Icon::Trash,
+        Icon::ZoomOut,
+        Icon::Forbidden,
     ];
 }
 
@@ -202,6 +206,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         Icon::Zoom => {
             g.circle(p, 7.0, 7.0, 4.2);
             g.line(p, &[(10.2, 10.2), (13.6, 13.6)]);
+            g.line(p, &[(5.0, 7.0), (9.0, 7.0)]);
+            g.line(p, &[(7.0, 5.0), (7.0, 9.0)]);
+        }
+        Icon::ZoomOut => {
+            g.circle(p, 7.0, 7.0, 4.2);
+            g.line(p, &[(10.2, 10.2), (13.6, 13.6)]);
+            g.line(p, &[(5.0, 7.0), (9.0, 7.0)]);
+        }
+        Icon::Forbidden => {
+            g.circle(p, 8.0, 8.0, 5.5);
+            g.line(p, &[(4.1, 11.9), (11.9, 4.1)]);
         }
         Icon::FirstFrame => {
             g.line(p, &[(3.5, 3.5), (3.5, 12.5)]);

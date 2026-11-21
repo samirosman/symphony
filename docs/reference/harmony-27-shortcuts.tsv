@@ -1,0 +1,270 @@
+section	command	windows_linux	macos
+3d-graph	Collapse All Elements	0	0
+3d-graph	Expand All Elements	9	9
+camera	Add All to Onion Skin	Alt + Shift + O	Alt + Shift + O
+camera	Add to Onion Skin	Shift + S	Shift + S
+camera	Bitmap Image Quality	Ctrl + Q	⌘ + Q
+camera	Centre on Selection	Shift + O	Shift + O
+camera	Create Drawing from Drawing Selection	F9	⌘ + F9
+camera	Create Symbol	F8	F8
+camera	Enter Selected Symbol	Ctrl + E	⌘ + E
+camera	Expand Symbol	Shift + F8	Shift + F8
+camera	Flip Horizontal	4	4
+camera	Flip Vertical	5	5
+camera	Hide All Control Parameters	Shift + C	Shift + C
+camera	Hide Selected	Alt + H	Alt + H
+camera	Insert Control Point	P	P
+camera	Insert Keyframe	F6	F6
+camera	Inverse Kinematics Tool	Shift + I	Shift + I
+camera	Lock All	Ctrl + Shift + L	⌘ + Shift + L
+camera	Lock All Others	Ctrl + Alt + Shift + O	⌘ + Alt + Shift + O
+camera	Lock Selection	Ctrl + Alt + L	⌘ + Alt + L
+camera	Maintain Size Tool	Alt + 6	Alt + 6
+camera	Remove All Onion Skin	Ctrl + Shift + O	⌘ + Shift + O
+camera	Reset All Transformations	Shift + R	Shift + R
+camera	Reset Transformation	R	R
+camera	Return To Parent Symbol	Ctrl + Shift + E	⌘ + Shift + E
+camera	Rotate Tool	Alt + 3	Alt + 3
+camera	Scale Tool	Alt + 4	Alt + 4
+camera	Select Control Point	T	T
+camera	Select Next Control Point	'	'
+camera	Select Previous Control Point	semicolon (;)	semicolon (;)
+camera	Show Hidden	Alt + Shift + H	Alt + Shift + H
+camera	Show/Hide Control Parameters	Shift + F11	⌘ + F11
+camera	Skew Tool	Alt + 5	Alt + 5
+camera	Spline Offset Tool	Alt + 8	Alt + 8
+camera	Substitute Drawing Next	]	]
+camera	Substitute Drawing Previous	[	[
+camera	Toggle Lock In Time	Alt + L	Alt + L
+camera	Toggle Snap Keyframe	X	X
+camera	Transform Tool	Shift + T	Shift + T
+camera	Translate Tool	Alt + 2	Alt + 2
+camera	Unlock All	Ctrl + Alt + Shift + L	⌘ + Alt + Shift + L
+camera	Unlock Selection	Ctrl + Shift + K	⌘ + Shift + K
+colour-manage	Get Rights to Modify All Palettes	Alt + L	Alt + L
+drawing-mode	Apply Tool to All Frames	Alt + A	Alt + A
+drawing-mode	Apply Tool to Line and Colour Art	Shift+Q	Shift+Q
+drawing-mode	Auto-Create Colour Art from Brush	Shift+F2	Shift+F2
+drawing-mode	Automatically Fill Inside Regions	Ctrl + Shift + R	⌘ + Shift + R
+drawing-mode	Bring Forward	Ctrl + PgUp	⌘ + PgUp
+drawing-mode	Bring To Front	Ctrl + Shift + PgUp	⌘ + Shift + PgUp
+drawing-mode	Brush Tool	Alt + B	Alt + B
+drawing-mode	Centerline Editor Tool	Alt + W	Alt + W
+drawing-mode	Close Desk	Alt + J	Alt + J
+drawing-mode	Close Gap Interactive Tool	Shift+F10	
+drawing-mode	Close Gap Tool	Alt + C	Alt + C
+drawing-mode	Colour Eyedropper Tool	Alt + D	Alt + D
+drawing-mode	Contour Editor Tool	Alt + Q	Alt + Q
+drawing-mode	Convert Brush Strokes to Pencil Lines	^	^
+drawing-mode	Convert Pencil Lines to Brush Strokes	&	&
+drawing-mode	Convert Strokes to Pencil Lines	Shift + F12	Shift + F12
+drawing-mode	Create Colour Art from Line Art	*	*
+drawing-mode	Cutter Tool	Alt + T	Alt + T
+drawing-mode	Delete All Morphing Hints	Shift + Del	Shift + Backspace
+drawing-mode	Drawing Pivot Tool	Shift + P	Shift + P
+drawing-mode	Edit Texture/Gradient Tool	Shift + F3	Shift + F3
+drawing-mode	Ellipse Tool	Alt + =	Alt + =
+drawing-mode	Eraser Tool	Alt + E	Alt + E
+drawing-mode	Flatten	Alt + Shift + F	Alt + Shift + F
+drawing-mode	Flatten and Remove Extra Strokes	Ctrl + Shift + F	⌘ + Shift + F
+drawing-mode	Group	Ctrl + G	⌘ + G
+drawing-mode	Join Pencil Lines	Alt + Shift + J	Alt + Shift + J
+drawing-mode	Light Table	Shift + L	Shift + L
+drawing-mode	Line Tool	Alt + \	Alt + \
+drawing-mode	Morphing Tool	F3	F3
+drawing-mode	Onion Skin: 1 Next	Ctrl + 1	⌘ + 1
+drawing-mode	Onion Skin: 1 Previous	!	!
+drawing-mode	Onion Skin: 2 Next	Ctrl + 2	⌘ + 2
+drawing-mode	Onion Skin: 2 Previous	@	@
+drawing-mode	Onion Skin: 3 Next	Ctrl + 3	⌘ + 3
+drawing-mode	Onion Skin: 3 Previous	#	#
+drawing-mode	Onion Skin: No Next	Ctrl + `	⌘ + `
+drawing-mode	Onion Skin: No Previous	~	~
+drawing-mode	Optimize	Ctrl + Alt + Shift + C	⌘ + Alt + Shift + C
+drawing-mode	Paint and Remove Texture	Shift + F6	Shift + F6
+drawing-mode	Paint Tool	Alt + I	Alt + I
+drawing-mode	Paint Unpainted Tool	Alt+Y	Alt+Y
+drawing-mode	Pencil Editor Tool	8	8
+drawing-mode	Pencil Tool	Alt + /	Alt + /
+drawing-mode	Permanent Selection	Ctrl + Shift + P	⌘ + Shift + P
+drawing-mode	Perspective Tool	Alt + 0	Alt + 0
+drawing-mode	Polyline Tool	Alt + _	Alt + _
+drawing-mode	Preview Line and Colour Arts	P	P
+drawing-mode	Rectangle Tool	Alt + 7	Alt + 7
+drawing-mode	Remove Dirt	Shift + D	Shift + D
+drawing-mode	Repaint Brush Tool	Alt + X	Alt + X
+drawing-mode	Repaint Tool	Alt + R	Alt + R
+drawing-mode	Resize Pencil Style Tool	O	O
+drawing-mode	Rotate 90 CCW	Ctrl + 7	⌘ + 7
+drawing-mode	Rotate 90 CW	Ctrl + 9	⌘ + 9
+drawing-mode	Select Delete Morphing Hint Mode	Delete Del	Backspace
+drawing-mode	Select Morphing Contour Hint Mode	F7	F7
+drawing-mode	Select Morphing Vanishing Point Mode	F10	F10
+drawing-mode	Select Strokes with Current Colour	Ctrl + Shift + A	⌘ + Shift + A
+drawing-mode	Select Tool	Alt + S	Alt + S
+drawing-mode	Send Backward	Ctrl + PgDown	⌘ + PgDown
+drawing-mode	Send to Back	Ctrl + Shift + PgDown	⌘ + Shift + PgDown
+drawing-mode	Show Grid	Ctrl + '	⌘ + '
+drawing-mode	Show Other Morphing Key Drawing	Ctrl + Shift + M	⌘ + Shift + M
+drawing-mode	Show Strokes	K	K
+drawing-mode	Show/Hide Contour Editor Controls	Alt+F5	Alt+F5
+drawing-mode	Show/Hide Onion Skin	Alt + O	Alt + O
+drawing-mode	Smooth	Alt + Shift + S	Alt + Shift + S
+drawing-mode	Snap and Align	Ctrl + Alt + ,	⌘+Alt + ,
+drawing-mode	Snap to Contour	Ctrl + Alt + ;	⌘+Alt + ;
+drawing-mode	Snap to Grid	Ctrl + Alt + '	⌘ + Alt + '
+drawing-mode	Split Pencil Line	Alt+Shift+K	Alt+Shift+K
+drawing-mode	Stroke Tool	Alt + V	Alt + V
+drawing-mode	Switch to Line Art/Colour Art	L	L
+drawing-mode	Switch to Overlay/Underlay Layer	colon (:)	colon (:)
+drawing-mode	Text Tool	Alt + 9	Alt + 9
+drawing-mode	Toggle Backlight	Alt + Shift + B	Alt + Shift + B
+drawing-mode	Toggle Morphing Key Drawings	F4	F4
+drawing-mode	Toggle Protect Colours	Shift + S	Shift + S
+drawing-mode	Ungroup	Ctrl + Shift + G	⌘ + Shift + G
+drawing-mode	Unpaint Tool	Alt + U	Alt + U
+drawing-mode	Zoom Tool	Alt + Z	Alt + Z
+exposure-sheet	Add Columns	Shift + C	Shift + C
+exposure-sheet	Add Drawing Column	Ctrl + R	⌘ + R
+exposure-sheet	Collapse All	0	0
+exposure-sheet	Expand All	9	9
+exposure-sheet	Fill Selection	Ctrl + T	⌘ + T
+exposure-sheet	Hide Selected Column	Alt + H	Alt + H
+exposure-sheet	Insert Blank Cell	Shift + J	Shift + J
+exposure-sheet	Insert Keyframe	F6	F6
+exposure-sheet	Insert/Overwrite Mode	I	I
+exposure-sheet	Preview	Alt + P	Alt + P
+exposure-sheet	Sequence Fill	Ctrl + M	⌘ + M
+exposure-sheet	Set Hold 1 Cell	Ctrl + 1	⌘ + 1
+exposure-sheet	Set Hold 2 Cells	Ctrl + 2	⌘ + 2
+exposure-sheet	Set Hold 3 Cells	Ctrl + 3	⌘ + 3
+exposure-sheet	Set Hold 4 Cells	Ctrl + 4	⌘ + 4
+exposure-sheet	Show Hidden Columns	Alt + Shift + H	Alt + Shift + H
+function-editor	Insert Point	I	I
+function-editor	Select Left Handle	[	[
+function-editor	Select Next Keyframe	'	'
+function-editor	Select Prev Keyframe	semicolon (;)	semicolon (;)
+function-editor	Select Right Handle	]	]
+function-editor	Toggle Grid	G	G
+function-editor	Toggle Stop-Motion Segment	S	S
+function-editor	Zoom In X	4	4
+function-editor	Zoom In Y	6	6
+function-editor	Zoom Out X	3	3
+function-editor	Zoom Out Y	5	5
+general	Add Frame After Selection	Ctrl + H	Ctrl + H
+general	Add Frame Before Selection	Ctrl + G	⌘ + G
+general	Advanced Save	Ctrl + Shift + S	Shift + ⌘ + S
+general	Auto Render	Ctrl + Alt + R	⌘ + Alt + R
+general	Auto Render Write	Ctrl + W	⌘ + W
+general	Cancel Preview	Shift + Esc	Shift + Esc
+general	Copy	Ctrl + C	⌘ + C
+general	Create Empty Drawing	Alt + Shift + R	Alt + Shift + R
+general	Cut	Ctrl + X	⌘ + X
+general	Decrease Exposure	-	-
+general	Delete	Del	Backspace
+general	Deselect All	Esc	Esc
+general	Duplicate Drawings	Alt + Shift + D	Alt + Shift + D
+general	First Frame	<	<
+general	Free Pan and Zoom	Space	Space
+general	Get Rights to Modify Drawings	Alt + L	Alt + L
+general	Go to Next Column	J	J
+general	Go to Next Drawing	G	G
+general	Go to Previous Column	H	H
+general	Go to Previous Drawing	F	F
+general	Increase Exposure	+	+
+general	Invert Selection	Ctrl + Shift + I	Shift + ⌘ + I
+general	Last Frame	>	>
+general	New	Ctrl + N	⌘ + N
+general	Next Frame	period (.)	period (.)
+general	Open	Ctrl + O	⌘ + O
+general	Paste	Ctrl + V	⌘ + V
+general	Paste Cycle	Ctrl + /	⌘ + /
+general	Paste Reverse	Ctrl + .	Ctrl + .
+general	Paste Special	Ctrl + B	⌘ + B
+general	Paste Special Again	Ctrl + Shift + B	⌘ + Shift + B
+general	Preferences	Ctrl + U	⌘ + U
+general	Previous Frame	comma (,)	comma (,)
+general	Quick Close-up	Shift + Z	Shift + Z
+general	Read Changed Drawings	Ctrl + ;	⌘ + ;
+general	Recentre	N	N
+general	Redo	Ctrl + Shift + Z	Ctrl + Shift + Z
+general	Release Rights to Modify Drawings	Alt + Shift + L	Alt + Shift + L
+general	Remove All Drawings	Esc	Esc
+general	Remove Art Outside Selection	Shift + Del or Shift + Backspace	Shift + Del or Shift + Backspace
+general	Rename Drawings	Ctrl + D	⌘ + D
+general	Render	Ctrl + Shift + Y	⌘ + Shift + Y
+general	Reset Pan	Shift + N	Shift + N
+general	Reset Rotation	Shift + X	Shift + X
+general	Reset View	Shift + M	Shift + M
+general	Save	Ctrl + S	⌘ + S
+general	Select All	Ctrl + A	⌘ + A
+general	Select Child Skipping Effects	Shift + B	Shift + B
+general	Select Next Sibling	?	?
+general	Select Parent Skipping Effects	B	B
+general	Select Previous Sibling	/	/
+general	Show Colour Model	Shift+K	Shift+K
+general	Show Whats This	F1	⌘ + /
+general	Toggle Editor	Shift+E	Shift+E
+general	Toggle Full Screen	Ctrl + F	⌘ + F
+general	Toggle Playback	Shift + Return	Shift + Return
+general	Toggle Velocity Editor	Shift + V	Shift + V
+general	Undo	Ctrl + Z	⌘ + Z
+general	Unload Model	Del	Del
+general	Zoom In	2	2
+general	Zoom Out	1	1
+guide	Enable Guide	Shift + G	Shift + G
+library	Refresh	F5	F5
+node	Centre on Selection	O	O
+node	Centre to Child Node	Ctrl + Down	⌘ + Down
+node	Centre to Parent Node	Ctrl + Up	⌘ + Up
+node	Copy Qualified Name	Ctrl + Q	⌘ + Q
+node	Create Composite	Ctrl + H	Ctrl + H
+node	Create Display	Ctrl + Y	⌘ + Y
+node	Create Group	Alt + G	Alt + G
+node	Create Parent Peg	Ctrl + Shift + P	⌘ + Shift + P
+node	Create Peg	Ctrl + P	⌘ + P
+node	Create Read	Ctrl + R	⌘ + R
+node	Disable Node	D	D
+node	Enable Node	A	A
+node	Enter Group	Ctrl + Return	⌘ + Return
+node	Exit Group	Ctrl + Shift + Return	⌘ + Shift + Return
+node	Group	Ctrl + G	⌘ + G
+node	Group with Composite	Ctrl +Shift + G	⌘ + Shift + G
+node	Hide All Thumbnails	Alt + T	Alt + T
+node	Magnifier	Z	Z
+node	Move To Parent	Ctrl + Shift + U	⌘ + Shift + U
+node	Show All Nodes	Shift + comma (,)	Shift + comma (,)
+node	Show/Hide Navigator	Ctrl + Shift + W	⌘ + Shift + W
+node	Show/Hide Selected Thumbnails	T	T
+timeline	Centre On Selection	O	O
+timeline	Collapse All Elements	0	0
+timeline	Collapse or Expand an Element	Ctrl + I	⌘ + I
+timeline	Create Morphing	Alt + M	Alt + M
+timeline	Delete Keyframe	F7	F7
+timeline	Disable Layers	D	D
+timeline	Enable Layers	A	A
+timeline	Expand All Elements	9	9
+timeline	Extend Exposure	F5	F5
+timeline	Go to Next Global Frame	Ctrl + Shift + C	⌘ + Shift + C
+timeline	Go to Next Keyframe	'	'
+timeline	Go to Previous Global Frame	Ctrl + Shift + X	⌘ + Shift + X
+timeline	Go to Previous Keyframe	semicolon (;)	semicolon (;)
+timeline	Group Selection	Ctrl + G	⌘ + G
+timeline	Group Selection With Composite	Ctrl +Shift + G	⌘ + Shift + G
+timeline	Insert Blank Frame	Shift + J	Shift + J
+timeline	Insert Drawing	Ctrl + R	⌘ + R
+timeline	Insert Group	Alt + G	Alt + G
+timeline	Insert Keyframe	F6	F6
+timeline	Insert Parent Peg	Shift + P	Shift + P
+timeline	Insert Peg	Ctrl + P	⌘ + P
+timeline	Lock All	Ctrl + Shift + L	⌘ + Shift + L
+timeline	Lock All Others	Ctrl + Alt + Shift + O	⌘ + Alt + Shift + O
+timeline	Lock Selection	Ctrl + Alt + L	⌘ + Alt + L
+timeline	Set Motion Keyframe	Ctrl + K	⌘ + K
+timeline	Set Stop-Motion Keyframe	Ctrl + L	⌘ + L
+timeline	Show or Hide Thumbnails	T	T
+timeline	Show/Hide Functions	Alt + F	Alt + F
+timeline	Substitute Drawing Next	]	]
+timeline	Substitute Drawing Previous	[	[
+timeline	Unlock All	Ctrl + Alt + Shift + L	⌘ + Alt + Shift + L
+timeline	Unlock Selection	Ctrl + Shift + K	⌘ + Shift + K

@@ -87,6 +87,11 @@ press it again to restore.
 active workspace, and *Reset* returns it to its preset. The shipped
 workspaces follow Harmony's.
 
+**D3.5a** Camera view toolbars follow Harmony: a top toolbar for display
+options (onion skin: show it, and add or remove earlier and later drawings),
+and a bottom toolbar for navigation (zoom level, Reset Zoom, Reset Rotation,
+Reset Pan, Reset View). Rotate View turns 30° like an animation table.
+
 **D3.6** One canvas truth: the Camera and Drawing views use the same
 renderer. They differ only in what they show (the composited scene, or the
 selected drawing untransformed).
@@ -283,6 +288,22 @@ Tokens live in `crates/symphony-app/src/theme.rs`.
 - **D8.10 Clicking an empty cell or empty canvas does the obvious thing.**
   For example, drawing on an empty cell creates the next drawing.
 
+- **D8.11 Cursors show what will happen.** Over the canvas, Symphony
+  draws its own cursor:
+  - A crosshair at the exact hotspot, with a small icon of the active tool
+    beside it. Both are drawn white over a dark outline, so they read on
+    paper and on the grey surround.
+  - When a shortcut or modifier changes what the pen does, the cursor
+    changes at once, like Harmony's:
+    - Space shows the Hand.
+    - Shift+Space shows Rotate.
+    - Option/Alt with the Zoom tool shows zoom out.
+    - The pen's eraser end shows the Eraser.
+    - A locked layer shows a "no" sign.
+  - **Brush size cursor** (Preferences, as in Harmony): drawing tools add
+    a circle the size of the brush. The Eraser always shows its circle.
+  - Outside the canvas, the OS cursor is used as normal.
+
 ---
 
 ## 9. Motion
@@ -335,7 +356,7 @@ Tokens live in `crates/symphony-app/src/theme.rs`.
 ### 11.1 Symphony profile differences
 | Area | Harmony profile | Symphony profile | Why |
 |---|---|---|---|
-| *(none yet)* | | | |
+| Redo on macOS | Control+Shift+Z (as Harmony 27 documents) | Cmd+Shift+Z | Matches every other Mac app |
 
 ---
 

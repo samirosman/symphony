@@ -291,7 +291,7 @@ pub fn preferences(ui: &mut egui::Ui, profile: &mut Profile, use_no_ai: &mut boo
         });
     hint(
         ui,
-        "Harmony shortcuts are being checked against Harmony 27.",
+        "Harmony shortcuts follow Harmony 27's published defaults.",
     );
 }
 
