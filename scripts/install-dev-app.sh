@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # macOS: install "Symphony Dev.app" into /Applications. Opening it rebuilds
 # the latest code from this repo and launches it, so it always runs what's
-# on disk. It works from Spotlight, Raycast, Launchpad and the Dock.
+# on disk. A loading window shows build progress the whole time. It works from Spotlight, Raycast, Launchpad and the Dock.
 # Re-run this script if the repo or the Rust toolchain moves.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -40,6 +40,11 @@ if [ ! -d "\$REPO" ]; then
   exit 1
 fi
 cd "\$REPO"
+# Preferred: the launcher's developer mode shows a loading screen while it
+# builds (DESIGN §17), then starts Symphony.
+if [ -x "\$REPO/target/release/symphony-launcher" ]; then
+  exec nice -n 5 "\$REPO/target/release/symphony-launcher" --dev "\$REPO"
+fi
 if ! nice -n 10 cargo build --release -p symphony-app >"\$LOG" 2>&1; then
   alert "Symphony didn't build" "The latest code has an error. Details are in ~/Library/Logs/Symphony Dev.log."
   exit 1
@@ -47,4 +52,6 @@ fi
 exec "\$REPO/target/release/symphony"
 SCRIPT
 chmod +x "$APP/Contents/MacOS/symphony-dev"
+echo "Building the launcher once, so Symphony Dev can show build progress..."
+( cd "$REPO" && RUSTUP_HOME="$RUSTUP_HOME" CARGO_HOME="$CARGO_HOME" PATH="/opt/homebrew/opt/rustup/bin:$CARGO_HOME/bin:$PATH" cargo build --release -p symphony-launcher )
 echo "Installed $APP"

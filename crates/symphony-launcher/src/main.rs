@@ -4,6 +4,7 @@
 //! rollback, and launches the version you choose. It works offline with
 //! whatever is already installed.
 
+mod dev;
 mod install;
 mod release;
 
@@ -328,6 +329,15 @@ impl eframe::App for Launcher {
 }
 
 fn main() -> eframe::Result {
+    // Developer mode, used by Symphony Dev.app: build from source, then launch.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--dev") {
+        let repo = args
+            .get(2)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        return dev::run(repo);
+    }
     let Some(paths) = Paths::default_location() else {
         eprintln!("Couldn't find a folder to install Symphony into.");
         std::process::exit(1);
