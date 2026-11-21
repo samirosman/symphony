@@ -7,7 +7,9 @@
 //!   every sample the tablet sends arrives.
 //! - Windows (Windows Ink + Wintab), Linux (Wayland tablet-v2, XInput2): planned.
 
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::HasWindowHandle;
+#[cfg(target_os = "macos")]
+use raw_window_handle::RawWindowHandle;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -99,13 +101,14 @@ impl PenInput {
     /// Must be called on the main thread.
     pub fn attach(window: &impl HasWindowHandle) -> Result<Self, PenError> {
         let handle = window.window_handle().map_err(|_| PenError::NoNativeView)?;
-        match handle.as_raw() {
-            #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(h) => Ok(PenInput {
+        #[cfg(target_os = "macos")]
+        if let RawWindowHandle::AppKit(h) = handle.as_raw() {
+            return Ok(PenInput {
                 backend: macos::Backend::attach(h.ns_view)?,
-            }),
-            _ => Err(PenError::Unsupported),
+            });
         }
+        let _ = handle;
+        Err(PenError::Unsupported)
     }
 
     /// Take every sample received since the last call, oldest first.
