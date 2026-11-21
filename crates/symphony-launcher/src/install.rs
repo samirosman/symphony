@@ -251,7 +251,12 @@ pub fn install_archive(
 
 // The marker is created by a running editor, so its presence identifies a
 // version that participates in locking. Older builds cannot report liveness.
-const IN_USE: &str = ".running-lock";
+fn lock_path(dir: &Path) -> PathBuf {
+    // Windows cannot rename a directory containing an open lock handle.
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".running-lock");
+    dir.with_file_name(name)
+}
 
 pub fn editor_lock(exe: &Path) -> std::io::Result<Option<File>> {
     let Some(dir) = exe.parent() else {
@@ -265,7 +270,7 @@ pub fn editor_lock(exe: &Path) -> std::io::Result<Option<File>> {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join(IN_USE))?;
+        .open(lock_path(dir))?;
     file.lock_shared()?;
     fs::metadata(exe)?;
     Ok(Some(file))
@@ -276,11 +281,7 @@ pub fn prune(paths: &Paths, keep: &[Version], running: &[Version]) {
     for v in paths.installed() {
         if !keep.contains(&v) && !running.contains(&v) {
             let dir = paths.version_dir(&v);
-            let Ok(file) = File::options()
-                .read(true)
-                .write(true)
-                .open(dir.join(IN_USE))
-            else {
+            let Ok(file) = File::options().read(true).write(true).open(lock_path(&dir)) else {
                 continue;
             };
             if file.try_lock().is_ok() {
