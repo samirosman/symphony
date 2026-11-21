@@ -1500,6 +1500,9 @@ fn viewport() -> egui::ViewportBuilder {
 }
 
 fn main() -> eframe::Result {
+    let _version_lock = std::env::current_exe()
+        .and_then(|exe| symphony_launcher::editor_lock(&exe))
+        .map_err(|e| eframe::Error::AppCreation(Box::new(e)))?;
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--update")) {
         return symphony_launcher::run_release_manager(true);
     }

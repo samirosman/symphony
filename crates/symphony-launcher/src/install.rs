@@ -161,7 +161,8 @@ pub fn install(
         .to_ascii_lowercase();
 
     fs::create_dir_all(paths.downloads()).map_err(|e| e.to_string())?;
-    let part = paths.downloads().join(format!("{}.part", archive.name));
+    let download = tempfile::tempdir_in(paths.downloads()).map_err(|e| e.to_string())?;
+    let part = download.path().join("archive.part");
     let total = archive.size;
     {
         let mut out =
@@ -214,36 +215,81 @@ pub fn install_archive(
     version: &Version,
     is_zip: bool,
 ) -> Result<(), String> {
-    let tmp = paths.versions().join(format!(".tmp-{version}"));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let dest = paths.version_dir(version);
+    let complete = || dest.join(MARKER).is_file() && dest.join(EXE).is_file();
+    if complete() {
+        return Ok(());
+    }
+    fs::create_dir_all(paths.versions()).map_err(|e| e.to_string())?;
+    let staging = tempfile::tempdir_in(paths.versions()).map_err(|e| e.to_string())?;
+    let tmp = staging.path();
     let file = File::open(archive).map_err(|e| e.to_string())?;
     // Both extractors refuse paths that escape the folder (E7.6).
     if is_zip {
         zip::ZipArchive::new(file)
-            .and_then(|mut z| z.extract(&tmp))
+            .and_then(|mut z| z.extract(tmp))
             .map_err(|e| format!("Couldn't unpack the download ({e})."))?;
     } else {
         let mut t = tar::Archive::new(flate2::read::GzDecoder::new(file));
         t.set_preserve_permissions(true);
-        t.unpack(&tmp)
+        t.unpack(tmp)
             .map_err(|e| format!("Couldn't unpack the download ({e})."))?;
     }
     if !tmp.join(EXE).is_file() {
-        let _ = fs::remove_dir_all(&tmp);
         return Err("The download doesn't contain the Symphony app.".into());
     }
     File::create(tmp.join(MARKER)).map_err(|e| e.to_string())?;
-    let dest = paths.version_dir(version);
-    let _ = fs::remove_dir_all(&dest);
-    fs::rename(&tmp, &dest).map_err(|e| e.to_string())
+    match fs::rename(tmp, &dest) {
+        Ok(()) => Ok(()),
+        Err(_) if complete() => Ok(()), // Another updater finished first.
+        Err(e) => Err(format!(
+            "Couldn’t install Symphony {version} in {} ({e}).",
+            dest.display()
+        )),
+    }
+}
+
+// The marker is created by a running editor, so its presence identifies a
+// version that participates in locking. Older builds cannot report liveness.
+const IN_USE: &str = ".running-lock";
+
+pub fn editor_lock(exe: &Path) -> std::io::Result<Option<File>> {
+    let Some(dir) = exe.parent() else {
+        return Ok(None);
+    };
+    if !dir.join(MARKER).is_file() {
+        return Ok(None);
+    }
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(IN_USE))?;
+    file.lock_shared()?;
+    fs::metadata(exe)?;
+    Ok(Some(file))
 }
 
 /// Delete installed versions except `keep`. Never touches a running one (E13.4).
 pub fn prune(paths: &Paths, keep: &[Version], running: &[Version]) {
     for v in paths.installed() {
         if !keep.contains(&v) && !running.contains(&v) {
-            let _ = fs::remove_dir_all(paths.version_dir(&v));
+            let dir = paths.version_dir(&v);
+            let Ok(file) = File::options()
+                .read(true)
+                .write(true)
+                .open(dir.join(IN_USE))
+            else {
+                continue;
+            };
+            if file.try_lock().is_ok() {
+                // Rename before deletion: no new editor can start at the old path.
+                if let Ok(retired) = tempfile::tempdir_in(paths.versions()) {
+                    let _ = fs::rename(&dir, retired.path().join("retired"));
+                    drop(file);
+                }
+            }
         }
     }
 }
@@ -304,6 +350,15 @@ mod tests {
         assert_eq!(paths.installed(), vec![v2.clone(), v1.clone()]);
         assert!(paths.exe(&v1).is_file());
 
+        make_tar_gz(&archive, &[(EXE, b"different")]);
+        install_archive(&paths, &archive, &v1, false).unwrap();
+        assert_eq!(fs::read(paths.exe(&v1)).unwrap(), b"app");
+        prune(&paths, std::slice::from_ref(&v2), &[]);
+        assert!(paths.exe(&v1).exists(), "legacy installations are kept");
+        let guard = editor_lock(&paths.exe(&v1)).unwrap().unwrap();
+        prune(&paths, std::slice::from_ref(&v2), &[]);
+        assert!(paths.exe(&v1).exists(), "open editor is kept");
+        drop(guard);
         prune(&paths, std::slice::from_ref(&v2), &[]);
         assert_eq!(paths.installed(), vec![v2]);
         let _ = fs::remove_dir_all(&paths.root);

@@ -8,6 +8,8 @@ mod dev;
 mod install;
 mod release;
 
+pub use install::editor_lock;
+
 use std::process::Child;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;

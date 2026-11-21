@@ -3836,6 +3836,7 @@ dependencies = [
  "sha2 0.11.1",
  "symphony-ui",
  "tar",
+ "tempfile",
  "ureq",
  "zip",
 ]
