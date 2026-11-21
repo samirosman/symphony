@@ -20,6 +20,27 @@ pub enum PresetTool {
 pub struct Preset {
     pub name: String,
     pub settings: BrushSettings,
+    /// The app it was imported from, if any ("Krita", "Procreate"...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Tip and grain textures, as file names in the brush library folder
+    /// (kept for textured brushes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<String>,
+}
+
+impl Preset {
+    pub fn new(name: impl Into<String>, settings: BrushSettings) -> Self {
+        Preset {
+            name: name.into(),
+            settings,
+            source: None,
+            tip: None,
+            grain: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,10 +93,7 @@ fn tapered() -> Stencil {
 impl Default for Presets {
     /// Symphony's own starter set.
     fn default() -> Self {
-        let p = |name: &str, settings| Preset {
-            name: name.into(),
-            settings,
-        };
+        let p = |name: &str, settings| Preset::new(name, settings);
         let mut taper = settings(0.5, 4.0, 0.3);
         taper.stencil = Some(tapered());
         let mut flat = settings(2.0, 3.0, 0.3);
@@ -148,10 +166,8 @@ impl Presets {
     /// Add a preset at the end of the list and make it current.
     pub fn add(&mut self, tool: PresetTool, name: &str, settings: BrushSettings) -> String {
         let name = self.unique_name(tool, name);
-        self.list_mut(tool).push(Preset {
-            name: name.clone(),
-            settings,
-        });
+        self.list_mut(tool)
+            .push(Preset::new(name.clone(), settings));
         self.set_current(tool, Some(name.clone()));
         name
     }
@@ -228,7 +244,20 @@ impl Presets {
             for p in list {
                 let s = sanitised(p.settings);
                 let name = self.unique_name(tool, &p.name);
-                self.list_mut(tool).push(Preset { name, settings: s });
+                // Texture names must be plain library file names.
+                let plain = |f: &String| {
+                    f.len() <= 64
+                        && f.ends_with(".png")
+                        && f.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                };
+                self.list_mut(tool).push(Preset {
+                    name,
+                    settings: s,
+                    source: p.source.filter(|s| s.len() <= 40),
+                    tip: p.tip.filter(plain),
+                    grain: p.grain.filter(plain),
+                });
                 n += 1;
             }
         }

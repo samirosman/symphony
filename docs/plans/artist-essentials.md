@@ -44,6 +44,15 @@ Symphony plan:
    users created and exported themselves, so we need sample exports
    from someone with a Harmony licence. **Blocked on sample files.**
 6. ⬜ Import Photoshop `.abr` tips (Brush and Eraser).
+7. 🟡 **Drag any brush file onto Symphony** (Tristan, 2026-11-21: "just
+   drag most brush presets into Symphony and it imports"). Crate
+   `symphony-brushes` reads Krita `.kpp`/`.bundle`, MyPaint `.myb`,
+   Procreate `.brush`/`.brushset`, Clip Studio `.sut` and GIMP `.gbr` into
+   one neutral description, on a background thread. Size, pressure,
+   opacity, spacing and smoothing map to Symphony presets. Tip and grain
+   images are kept in the brush library for textured brushes (next).
+   Still to do: `.abr`, Harmony `.xml`/`.tbr`, Clip Studio tip images and
+   pressure curves, and eraser presets.
 
 ## 2. Textures
 

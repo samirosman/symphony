@@ -3,6 +3,7 @@
 //! cards, and the status bar. Shortcuts come only from the keymap
 //! (ENGINEERING E4.3). Saving and autosave run off the main thread (E5.2).
 
+mod brush_import;
 mod codec;
 mod keymap;
 mod presets;
@@ -132,6 +133,8 @@ struct SymphonyApp {
     saving_jobs: u32,
     use_openh264: bool,
     codec_download: Option<CodecDownload>,
+    /// Brush files dropped on the window, being read in the background.
+    brush_import: Option<brush_import::BrushImport>,
     show_licences: bool,
     opening: Option<Opening>,
     notice_seen: Option<(String, f64)>,
@@ -287,6 +290,7 @@ impl SymphonyApp {
             use_openh264,
             presets,
             codec_download: None,
+            brush_import: None,
             show_licences: false,
             opening: None,
             notice_seen: None,
@@ -1065,9 +1069,7 @@ impl SymphonyApp {
             if s.onion.on {
                 dense(ui, "Onion skin on".into(), theme::TEXT_PRIMARY);
             }
-            if let Some(n) = &s.notice {
-                dense(ui, n.clone(), theme::TEXT_PRIMARY);
-            }
+            let notice = s.notice.clone();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Which build this is, so testers know what they're running.
                 dense(
@@ -1107,6 +1109,16 @@ impl SymphonyApp {
                         d.total.map(|t| d.done as f32 / t.max(1) as f32),
                     ));
                 }
+                if let Some(b) = &self.brush_import {
+                    jobs.push((
+                        if b.files == 1 {
+                            "Importing brushes".into()
+                        } else {
+                            format!("Importing brushes from {} files", b.files)
+                        },
+                        None,
+                    ));
+                }
                 if self.saving_jobs > 0 {
                     jobs.push(("Saving".into(), None));
                 }
@@ -1121,8 +1133,126 @@ impl SymphonyApp {
                     dense(ui, label, theme::TEXT_PRIMARY);
                     feedback::spinner(ui, 12.0);
                 }
+                // The last notice gets whatever room is left, cut short
+                // with an ellipsis (full text on hover), never overlapping.
+                if let Some(n) = notice {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&n)
+                                    .font(theme::dense())
+                                    .color(theme::TEXT_PRIMARY),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(n);
+                    });
+                }
             });
         });
+    }
+
+    /// Brush and preset files dropped anywhere on the window import as
+    /// Brush presets; while files hover, say what dropping will do.
+    fn file_drops(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.brush_import {
+            if let Some(done) = job.poll() {
+                self.brush_import = None;
+                let n = done.presets.len();
+                for p in done.presets {
+                    let name = self
+                        .presets
+                        .unique_name(presets::PresetTool::Brush, &p.name);
+                    self.presets.brush.push(presets::Preset { name, ..p });
+                }
+                // One line: what arrived, then anything that didn't.
+                let mut text = match done.messages.as_slice() {
+                    [] if n == 0 => "No brushes were imported.".to_owned(),
+                    [] => format!("Imported {n} brushes."),
+                    [only] => format!("Imported {only}."),
+                    [first, rest @ ..] => format!("Imported {first}. {}", rest.join(". ")),
+                };
+                if n == 0 {
+                    text = text.replacen("Imported ", "", 1);
+                }
+                for m in &done.messages {
+                    eprintln!("Brush import: {m}");
+                }
+                if n > 0 {
+                    self.s.tool = Tool::Brush;
+                }
+                self.s.notice = Some(text);
+            }
+        }
+        let (hovered, dropped) =
+            ctx.input(|i| (i.raw.hovered_files.len(), i.raw.dropped_files.clone()));
+        if hovered > 0 {
+            egui::Area::new(egui::Id::unique("symphony-drop-hint"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(theme::BG_RAISED)
+                        .stroke(egui::Stroke::new(1.0, theme::ACCENT_SELECT))
+                        .corner_radius(theme::RADIUS_FLOATING)
+                        .inner_margin(egui::Margin::same(16))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("Drop to import brushes")
+                                    .font(egui::FontId::proportional(theme::SIZE_HEADING))
+                                    .color(theme::TEXT_PRIMARY),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Krita, MyPaint, Procreate, Clip Studio and GIMP brushes, or Symphony presets",
+                                )
+                                .font(theme::dense())
+                                .color(theme::TEXT_SECONDARY),
+                            );
+                        });
+                });
+        }
+        let paths: Vec<std::path::PathBuf> = dropped
+            .into_iter()
+            .map(|f| f.path().to_path_buf())
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let (brushes, rest): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .partition(|p| symphony_brushes::is_brush_file(p));
+        let mut notes = Vec::new();
+        for p in rest {
+            let is_preset = p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(presets::EXTENSION));
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            notes.push(if is_preset {
+                match self.presets.import(&p) {
+                    Ok(n) => format!("Imported {n} presets from {name}."),
+                    Err(e) => format!("{name}: {e}"),
+                }
+            } else {
+                format!("{name} isn't a brush file Symphony can import.")
+            });
+        }
+        if !notes.is_empty() {
+            self.s.notice = Some(notes.join(" "));
+        }
+        if !brushes.is_empty() {
+            if self.brush_import.is_some() {
+                self.s.notice =
+                    Some("Still importing the last brushes. Drop these again in a moment.".into());
+            } else {
+                self.brush_import = Some(brush_import::BrushImport::start(brushes, ctx));
+            }
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1331,6 +1461,13 @@ impl eframe::App for SymphonyApp {
             s.tick(&ctx);
         }
         // Design review only: show the shared loading screen (DESIGN D17.7).
+        // Screenshot mode can import brushes as if dropped (SYMPHONY_SHOT_DROP).
+        if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_DROP")) {
+            if self.brush_import.is_none() && !self.presets.brush.iter().any(|p| p.source.is_some())
+            {
+                self.brush_import = Some(brush_import::BrushImport::finished(vec![p.into()]));
+            }
+        }
         if self.shot.is_some() && std::env::var_os("SYMPHONY_SHOT_LOADING").is_some() {
             feedback::loading_screen(
                 ui,
@@ -1498,6 +1635,7 @@ impl eframe::App for SymphonyApp {
                 });
             });
         self.show_licences = open;
+        self.file_drops(&ctx);
         self.dialogs(&ctx);
 
         let pending = self.pen.as_ref().is_some_and(|p| p.has_pending());
@@ -1512,6 +1650,11 @@ impl eframe::App for SymphonyApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Screenshot runs use fresh layouts and test data; they must never
+        // overwrite the person's real preferences.
+        if self.shot.is_some() {
+            return;
+        }
         let saved = Saved {
             interface_animations: self.interface_animations,
             workspace: self.workspace,
@@ -1571,6 +1714,10 @@ fn main() -> eframe::Result {
         viewport: viewport(),
         // A forced review size must win over the remembered window size.
         persist_window: std::env::var_os("SYMPHONY_SHOT_SIZE").is_none(),
+        // Screenshot runs keep their state in a throwaway folder, so a
+        // design review never reads or changes the real preferences.
+        persistence_path: std::env::var_os("SYMPHONY_SCREENSHOT")
+            .map(|_| std::env::temp_dir().join("symphony-shot-state")),
         ..Default::default()
     };
     eframe::run_native(
