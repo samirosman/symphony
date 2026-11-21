@@ -45,6 +45,21 @@ impl ArtLayer {
     ];
 }
 
+/// How a line ends (Harmony's pencil Start and End tips).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tip {
+    #[default]
+    Round,
+    Flat,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tips {
+    /// The end drawn first.
+    pub start: Tip,
+    pub end: Tip,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     pub id: Id,
@@ -56,6 +71,8 @@ pub struct Stroke {
     pub min_width: f32,
     pub max_width: f32,
     pub points: Vec<Point>,
+    #[serde(default)]
+    pub tips: Tips,
 }
 
 impl Stroke {

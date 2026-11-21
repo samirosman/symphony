@@ -16,7 +16,7 @@ use symphony_ui::theme;
 use symphony_vector::{hits, pressure_curve, scale_of, tessellate, Smoother};
 
 use crate::keymap::{self, Action, Profile};
-use crate::session::{Session, Tool};
+use crate::session::{apply_stencil, Session, Stencil, Tool};
 use crate::views::select::{self, SelectState};
 
 /// Eraser radius, in screen points.
@@ -58,6 +58,8 @@ struct Active {
     smoother: Smoother,
     min_step: f32,
     stroke: Stroke,
+    /// Pencil thickness stencil, if the preset has one.
+    stencil: Option<Stencil>,
 }
 
 impl CanvasState {
@@ -603,7 +605,14 @@ pub fn ui(
                             min_width: settings.min_width * k,
                             max_width: settings.max_width * k,
                             points: vec![first],
+                            // Start and end tips are a pencil property.
+                            tips: if kind == StrokeKind::Pencil {
+                                settings.tips
+                            } else {
+                                Default::default()
+                            },
                         },
+                        stencil: settings.stencil.filter(|_| kind == StrokeKind::Pencil),
                     });
                 }
             }
@@ -617,6 +626,10 @@ pub fn ui(
                     };
                     if let Some(p) = a.smoother.push(raw, a.min_step) {
                         a.stroke.points.push(p);
+                        // A thickness stencil ignores pressure; show it live.
+                        if let Some(st) = &a.stencil {
+                            apply_stencil(&mut a.stroke.points, st);
+                        }
                     }
                 } else if state.erasing.is_some() {
                     let local_px = px / scale_of(layer_world).max(1e-6);
@@ -627,6 +640,9 @@ pub fn ui(
                 if let Some(mut a) = state.active.take() {
                     if let Some(p) = a.smoother.finish() {
                         a.stroke.points.push(p);
+                    }
+                    if let Some(st) = &a.stencil {
+                        apply_stencil(&mut a.stroke.points, st);
                     }
                     if a.stroke.kind == StrokeKind::Invisible {
                         // Close Gap: the rough stroke only says where; it isn't kept.

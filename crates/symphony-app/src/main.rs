@@ -5,6 +5,7 @@
 
 mod codec;
 mod keymap;
+mod presets;
 mod session;
 mod shot;
 mod update;
@@ -52,6 +53,8 @@ struct Saved {
     /// Use Cisco's OpenH264 for movies (Cisco requires the user can turn it off).
     #[serde(default = "yes")]
     use_openh264: bool,
+    #[serde(default)]
+    presets: Option<presets::Presets>,
 }
 
 fn yes() -> bool {
@@ -97,6 +100,8 @@ type SaveResult = (u64, PathBuf, Result<(), String>);
 struct SymphonyApp {
     interface_animations: bool,
     s: Session,
+    /// Brush and Pencil presets, kept in preferences like Harmony's.
+    presets: presets::Presets,
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
     profile: Profile,
@@ -186,6 +191,10 @@ impl SymphonyApp {
         theme::set_motion(&cc.egui_ctx, interface_animations);
         let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
         let use_openh264 = saved.as_ref().is_none_or(|s| s.use_openh264);
+        let presets = saved
+            .as_ref()
+            .and_then(|s| s.presets.clone())
+            .unwrap_or_default();
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -224,6 +233,12 @@ impl SymphonyApp {
             }
             // SYMPHONY_SHOT_PAINT: the Paint tool with a protected colour,
             // to review the paint options and the protection marker.
+            // SYMPHONY_SHOT_TOOL=Brush|Pencil: review that tool's properties.
+            match std::env::var("SYMPHONY_SHOT_TOOL").as_deref() {
+                Ok("Brush") => s.tool = Tool::Brush,
+                Ok("Pencil") => s.tool = Tool::Pencil,
+                _ => {}
+            }
             if std::env::var_os("SYMPHONY_SHOT_PAINT").is_some() {
                 s.tool = Tool::Paint;
                 if let Some(id) = s.doc.palette.swatches.get(1).map(|sw| sw.id) {
@@ -270,6 +285,7 @@ impl SymphonyApp {
             title: String::new(),
             saving_jobs: 0,
             use_openh264,
+            presets,
             codec_download: None,
             show_licences: false,
             opening: None,
@@ -330,9 +346,13 @@ impl SymphonyApp {
             r.clear(&self.s.key);
         }
         let (gamma, cursor) = (self.s.pressure_gamma, self.s.brush_size_cursor);
+        let (brush, pencil) = (self.s.brush, self.s.pencil);
         self.s = next;
         self.s.pressure_gamma = gamma;
         self.s.brush_size_cursor = cursor;
+        // Tool settings belong to the artist, not the scene.
+        self.s.brush = brush;
+        self.s.pencil = pencil;
         self.autosaved_version = self.s.doc.version;
         self.camera.reset_view();
         self.drawing.reset_view();
@@ -1225,6 +1245,7 @@ struct Viewer<'a> {
     samples: &'a [PenSample],
     device: Option<&'a DeviceInfo>,
     profile: Profile,
+    presets: &'a mut presets::Presets,
 }
 
 impl Viewer<'_> {
@@ -1257,7 +1278,7 @@ impl Viewer<'_> {
             View::Timeline => timing::timeline(ui, self.s, self.timing, self.profile),
             View::Xsheet => timing::xsheet(ui, self.s, self.timing, self.profile),
             View::Node => node::ui(ui, self.s, self.node_view),
-            View::ToolProperties => panels::tool_properties(ui, self.s, self.device),
+            View::ToolProperties => panels::tool_properties(ui, self.s, self.presets, self.device),
             View::Colour => panels::colour(ui, self.s),
             View::LayerProperties => panels::layer_properties(ui, self.s),
             View::Function => panels::planned(ui, "Function view (curve editor)", "M6"),
@@ -1424,6 +1445,7 @@ impl eframe::App for SymphonyApp {
             samples: &samples,
             device: device.as_ref(),
             profile: self.profile,
+            presets: &mut self.presets,
         };
         let central = egui::Frame::new().fill(theme::BG_BASE);
         egui::CentralPanel::default()
@@ -1489,6 +1511,7 @@ impl eframe::App for SymphonyApp {
             pressure_gamma: Some(self.s.pressure_gamma),
             brush_size_cursor: self.s.brush_size_cursor,
             use_openh264: self.use_openh264,
+            presets: Some(self.presets.clone()),
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

@@ -11,7 +11,7 @@ use symphony_core::graph::PegParams;
 use symphony_core::history::{Edit, History};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
-use symphony_core::stroke::{Point, Stroke, StrokeKind};
+use symphony_core::stroke::{Point, Stroke, StrokeKind, Tips};
 
 /// Drawing tools, in Tools-toolbar order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,12 +83,83 @@ impl Tool {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// What a Brush or Pencil preset holds (Harmony's tool presets).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BrushSettings {
     pub min_width: f32,
     pub max_width: f32,
     /// 0 = raw pen, 1 = very smooth.
     pub smoothing: f32,
+    /// Pencil start and end tips.
+    #[serde(default)]
+    pub tips: Tips,
+    /// Harmony's thickness stencil: a fixed thickness along the line
+    /// (0..=1 between minimum and maximum size) that ignores pen pressure.
+    #[serde(default)]
+    pub stencil: Option<Stencil>,
+}
+
+/// A thickness profile sampled evenly from start to end of a line.
+pub type Stencil = [f32; STENCIL_SAMPLES];
+pub const STENCIL_SAMPLES: usize = 16;
+
+/// Thickness at `t` (0 at the start of the line, 1 at its end).
+pub fn stencil_at(stencil: &Stencil, t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0) * (STENCIL_SAMPLES - 1) as f32;
+    let i = (x.floor() as usize).min(STENCIL_SAMPLES - 2);
+    let f = x - i as f32;
+    stencil[i] * (1.0 - f) + stencil[i + 1] * f
+}
+
+/// Replace pen pressure with the stencil, by distance along the line.
+pub fn apply_stencil(points: &mut [Point], stencil: &Stencil) {
+    let mut along = Vec::with_capacity(points.len());
+    let mut total = 0.0;
+    for (i, p) in points.iter().enumerate() {
+        if i > 0 {
+            let q = points[i - 1];
+            total += (p.x - q.x).hypot(p.y - q.y);
+        }
+        along.push(total);
+    }
+    for (p, d) in points.iter_mut().zip(along) {
+        p.pressure = stencil_at(stencil, if total > 0.0 { d / total } else { 0.0 });
+    }
+}
+
+/// A line's thickness profile, as a stencil (New Thickness Stencil).
+pub fn stencil_from(stroke: &Stroke) -> Option<Stencil> {
+    let span = stroke.max_width - stroke.min_width;
+    if stroke.points.len() < 2 {
+        return None;
+    }
+    let mut lengths = vec![0.0f32];
+    for w in stroke.points.windows(2) {
+        let d = (w[1].x - w[0].x).hypot(w[1].y - w[0].y);
+        lengths.push(lengths.last().unwrap() + d);
+    }
+    let total = *lengths.last().unwrap();
+    if total <= 0.0 {
+        return None;
+    }
+    let width = |i: usize| stroke.width_at(stroke.points[i].pressure);
+    let mut out = [0.0; STENCIL_SAMPLES];
+    for (k, slot) in out.iter_mut().enumerate() {
+        let target = total * k as f32 / (STENCIL_SAMPLES - 1) as f32;
+        let i = lengths
+            .partition_point(|&l| l < target)
+            .clamp(1, lengths.len() - 1);
+        let seg = (lengths[i] - lengths[i - 1]).max(1e-6);
+        let f = ((target - lengths[i - 1]) / seg).clamp(0.0, 1.0);
+        let w = width(i - 1) * (1.0 - f) + width(i) * f;
+        // Relative to the line's own sizes, so it scales with any preset.
+        *slot = if span > 0.0 {
+            ((w - stroke.min_width) / span).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+    }
+    Some(out)
 }
 
 /// A peg's values at the current frame, for the Transform tool.
@@ -185,11 +256,15 @@ impl Session {
                 min_width: 0.6,
                 max_width: 10.0,
                 smoothing: 0.4,
+                tips: Tips::default(),
+                stencil: None,
             },
             pencil: BrushSettings {
                 min_width: 2.0,
                 max_width: 3.0,
                 smoothing: 0.3,
+                tips: Tips::default(),
+                stencil: None,
             },
             swatch,
             pressure_gamma: 1.0,
@@ -284,6 +359,7 @@ impl Session {
                     min_width: 1.0,
                     max_width: 9.0,
                     points,
+                    tips: Default::default(),
                 };
                 s.commit_stroke(layer, 1, st);
             }
@@ -635,6 +711,7 @@ impl Session {
             min_width: 0.0,
             max_width: 0.0,
             points: vec![Point { pressure: 1.0, ..a }, Point { pressure: 1.0, ..b }],
+            tips: Default::default(),
         };
         self.history.apply(
             &mut self.doc,
@@ -1208,6 +1285,19 @@ impl Session {
         }
     }
 
+    /// The thickness profile of the one selected pencil line, for Harmony's
+    /// New Thickness Stencil.
+    pub fn selected_stencil(&self) -> Option<Stencil> {
+        let [id] = self.selection.strokes.as_slice() else {
+            return None;
+        };
+        let d = self.doc.drawings.get(&self.selection.drawing?)?;
+        let st = d.strokes.iter().find(|st| st.id == *id)?;
+        (st.kind == StrokeKind::Pencil)
+            .then(|| stencil_from(st))
+            .flatten()
+    }
+
     /// Does painting have to leave this swatch's zones and lines alone?
     pub fn is_locked(&self, swatch: Id) -> bool {
         self.respect_protected && self.doc.palette.get(swatch).is_some_and(|sw| sw.protected)
@@ -1292,6 +1382,7 @@ mod tests {
                     pressure: 1.0,
                 },
             ],
+            tips: Default::default(),
         }
     }
 
@@ -1368,6 +1459,7 @@ mod tests {
                     pressure: 1.0,
                 })
                 .collect(),
+            tips: Default::default(),
         };
         s.commit_stroke(0, 1, st);
     }
@@ -1439,6 +1531,43 @@ mod tests {
     }
 
     #[test]
+    fn thickness_stencils_ignore_pressure_and_round_trip() {
+        let line = |pressure: fn(f32) -> f32| Stroke {
+            id: Id(1),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: 1.0,
+            max_width: 5.0,
+            points: (0..=20)
+                .map(|i| {
+                    let t = i as f32 / 20.0;
+                    Point {
+                        x: t * 100.0,
+                        y: 0.0,
+                        pressure: pressure(t),
+                    }
+                })
+                .collect(),
+            tips: Default::default(),
+        };
+        // A line thick in the middle gives a stencil thick in the middle.
+        let swell = stencil_from(&line(|t| (t * std::f32::consts::PI).sin())).unwrap();
+        assert!(swell[0] < 0.05 && swell[STENCIL_SAMPLES - 1] < 0.05);
+        assert!(swell[STENCIL_SAMPLES / 2] > 0.9);
+        // Applying it to a flat-pressure line copies the profile.
+        let mut flat = line(|_| 1.0);
+        apply_stencil(&mut flat.points, &swell);
+        assert!(flat.points[0].pressure < 0.05);
+        assert!(flat.points[10].pressure > 0.9);
+        assert!(stencil_from(&Stroke {
+            points: vec![],
+            ..line(|_| 1.0)
+        })
+        .is_none());
+    }
+
+    #[test]
     fn protected_colours_are_left_alone_while_respected() {
         let mut s = Session::new_scene();
         let ink = s.swatch;
@@ -1490,6 +1619,7 @@ mod tests {
                     pressure: 1.0,
                 })
                 .collect(),
+            tips: Default::default(),
         };
         s.commit_stroke(0, 1, open);
         s.paint_at(0, 1, 50.0, 50.0, 1.0);

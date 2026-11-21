@@ -252,6 +252,7 @@ mod tests {
                     pressure: 1.0,
                 },
             ],
+            tips: Default::default(),
         };
         let cells = Edit::splice(&s, col, 1, 0, vec![Some(did), Some(did), Some(did)]).unwrap();
         h.apply(

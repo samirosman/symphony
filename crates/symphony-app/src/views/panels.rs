@@ -8,7 +8,9 @@ use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
 use crate::keymap::{Action, Profile};
-use crate::session::{BrushSettings, PaintMode, Session, Tool};
+use crate::presets::{self, Preset, PresetTool, Presets};
+use crate::session::{stencil_at, BrushSettings, PaintMode, Session, Tool};
+use symphony_core::stroke::Tip;
 
 /// A peg parameter row: label, which value, drag speed, unit suffix.
 type PegField = (
@@ -50,41 +52,330 @@ fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInc
     ui.add(egui::Slider::new(v, range));
 }
 
-/// A tapered sample stroke that shows what the settings will do.
-fn preview(ui: &mut egui::Ui, s: &Session, b: &BrushSettings) {
+/// A sample stroke that shows what the settings will do: pressure rises
+/// and falls along it, unless a thickness stencil sets the thickness.
+fn paint_sample(
+    p: &egui::Painter,
+    rect: egui::Rect,
+    ink: egui::Color32,
+    b: &BrushSettings,
+    gamma: f32,
+    pencil: bool,
+) {
+    let n = 48;
+    let (minw, maxw) = (b.min_width, b.max_width.min(rect.height() - 8.0).max(0.5));
+    let minw = minw.min(maxw);
+    let wave = (rect.height() * 0.15).min(8.0);
+    let pt = |i: usize| {
+        let t = i as f32 / n as f32;
+        let x = rect.left() + 12.0 + t * (rect.width() - 24.0);
+        let y = rect.center().y + (t * std::f32::consts::TAU).sin() * wave;
+        let pressure = match (&b.stencil, pencil) {
+            (Some(st), true) => stencil_at(st, t),
+            _ => symphony_vector::pressure_curve((t * std::f32::consts::PI).sin(), gamma),
+        };
+        (egui::pos2(x, y), minw + (maxw - minw) * pressure)
+    };
+    let round = |tip: Tip| !pencil || tip == Tip::Round;
+    for i in 0..n {
+        let ((a, wa), (c, wc)) = (pt(i), pt(i + 1));
+        p.line_segment([a, c], egui::Stroke::new((wa + wc) * 0.5, ink));
+        if i + 1 < n || round(b.tips.end) {
+            p.circle_filled(c, wc * 0.5, ink);
+        }
+    }
+    if round(b.tips.start) {
+        let (a, wa) = pt(0);
+        p.circle_filled(a, wa * 0.5, ink);
+    }
+}
+
+fn preview(ui: &mut egui::Ui, s: &Session, b: &BrushSettings, pencil: bool) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, theme::RADIUS_CONTROL as f32, theme::CANVAS_STAGE);
     let [r, g, bl] = s.doc.swatch_rgb(s.swatch);
-    let ink = egui::Color32::from_rgb(r, g, bl);
-    let n = 48;
-    let (minw, maxw) = (b.min_width, b.max_width.min(rect.height() - 12.0));
-    let pt = |i: usize| {
-        let t = i as f32 / n as f32;
-        let x = rect.left() + 16.0 + t * (rect.width() - 32.0);
-        let y = rect.center().y + (t * std::f32::consts::TAU).sin() * 8.0;
-        let pressure =
-            symphony_vector::pressure_curve((t * std::f32::consts::PI).sin(), s.pressure_gamma);
-        (egui::pos2(x, y), minw + (maxw - minw) * pressure)
-    };
-    for i in 0..n {
-        let ((a, wa), (c, wc)) = (pt(i), pt(i + 1));
-        let w = (wa + wc) * 0.5;
-        p.line_segment([a, c], egui::Stroke::new(w, ink));
-        p.circle_filled(c, w * 0.5, ink);
+    paint_sample(
+        p,
+        rect,
+        egui::Color32::from_rgb(r, g, bl),
+        b,
+        s.pressure_gamma,
+        pencil,
+    );
+}
+
+/// Harmony's preset list, in its Stroke View: a sample stroke and a name
+/// per preset, with New, Delete and a menu for the rest.
+fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: PresetTool) {
+    let pencil = tool == PresetTool::Pencil;
+    let state = ui.scope_id().with(("presets", pencil));
+    let rename = state.with("rename");
+    let removed = state.with("removed");
+    let current_settings = if pencil { s.pencil } else { s.brush };
+    let current = presets.current(tool).map(str::to_owned);
+    ui.horizontal(|ui| {
+        hint(ui, "Presets");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("More", |ui| {
+                if ui
+                    .add_enabled(current.is_some(), egui::Button::new("Rename preset"))
+                    .clicked()
+                {
+                    if let Some(name) = &current {
+                        ui.data_mut(|d| d.insert_temp(rename, (name.clone(), name.clone())));
+                    }
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(current.is_some(), egui::Button::new("Update preset"))
+                    .on_hover_text("Save the current settings into the selected preset")
+                    .clicked()
+                {
+                    if let Some(p) = current.as_ref().and_then(|name| {
+                        presets.list_mut(tool).iter_mut().find(|p| &p.name == name)
+                    }) {
+                        p.settings = current_settings;
+                    }
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Import presets…").clicked() {
+                    ui.close();
+                    import_presets(s, presets);
+                }
+                if ui.button("Export presets…").clicked() {
+                    ui.close();
+                    export_presets(s, presets);
+                }
+            });
+            if icons::button(ui, Icon::Minus, false, current.is_some(), "Delete preset").clicked() {
+                if let Some(gone) = current.as_ref().and_then(|n| presets.remove(tool, n)) {
+                    ui.data_mut(|d| d.insert_temp(removed, gone));
+                }
+            }
+            if icons::button(
+                ui,
+                Icon::Plus,
+                false,
+                true,
+                "New preset from these settings",
+            )
+            .clicked()
+            {
+                let name = presets.add(
+                    tool,
+                    if pencil { "Pencil" } else { "Brush" },
+                    current_settings,
+                );
+                ui.data_mut(|d| d.insert_temp(rename, (name.clone(), name)));
+            }
+        });
+    });
+    let list = presets.list(tool).clone();
+    let [r, g, b] = s.doc.swatch_rgb(s.swatch);
+    let ink = egui::Color32::from_rgb(r, g, b);
+    egui::ScrollArea::vertical()
+        .id_salt(("preset-scroll", pencil))
+        .max_height(168.0)
+        .show(ui, |ui| {
+            for preset in &list {
+                let selected = current.as_deref() == Some(preset.name.as_str());
+                let draft = ui.data(|d| d.get_temp::<(String, String)>(rename));
+                if let Some((from, mut text)) = draft.filter(|(from, _)| *from == preset.name) {
+                    let edit = ui.text_edit_singleline(&mut text);
+                    if !edit.has_focus() && !edit.lost_focus() {
+                        edit.request_focus();
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        ui.data_mut(|d| d.remove::<(String, String)>(rename));
+                    } else if edit.lost_focus() {
+                        presets.rename(tool, &from, &text);
+                        ui.data_mut(|d| d.remove::<(String, String)>(rename));
+                    } else {
+                        ui.data_mut(|d| d.insert_temp(rename, (from, text)));
+                    }
+                    continue;
+                }
+                let width = ui.available_width();
+                let (rect, row) =
+                    ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+                let fill = if selected {
+                    theme::ACCENT_SELECT_FILL
+                } else if row.hovered() {
+                    theme::BG_HOVER
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                let p = ui.painter();
+                p.rect_filled(rect, theme::RADIUS_CONTROL as f32, fill);
+                let sample = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(4.0, 3.0),
+                    egui::vec2(72.0, rect.height() - 6.0),
+                );
+                p.rect_filled(sample, 3.0, theme::CANVAS_STAGE);
+                paint_sample(p, sample, ink, &preset.settings, 1.0, pencil);
+                p.text(
+                    egui::pos2(sample.right() + 8.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &preset.name,
+                    theme::body(),
+                    if selected {
+                        theme::ON_ACCENT
+                    } else {
+                        theme::TEXT_PRIMARY
+                    },
+                );
+                if preset.settings.stencil.is_some() && pencil {
+                    p.text(
+                        egui::pos2(rect.right() - 6.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        "Stencil",
+                        theme::dense(),
+                        if selected {
+                            theme::ON_ACCENT
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
+                    );
+                }
+                let row = row.on_hover_text(if pencil && preset.settings.stencil.is_some() {
+                    "Thickness stencil: ignores pen pressure"
+                } else {
+                    "Click to use. Double-click to rename."
+                });
+                if row.clicked() {
+                    if pencil {
+                        s.pencil = preset.settings;
+                    } else {
+                        s.brush = preset.settings;
+                    }
+                    presets.set_current(tool, Some(preset.name.clone()));
+                }
+                if row.double_clicked() {
+                    ui.data_mut(|d| {
+                        d.insert_temp(rename, (preset.name.clone(), preset.name.clone()))
+                    });
+                }
+            }
+        });
+    if let Some((index, gone)) = ui.data(|d| d.get_temp::<(usize, Preset)>(removed)) {
+        ui.horizontal(|ui| {
+            hint(ui, &format!("Deleted {}.", gone.name));
+            if ui.small_button("Restore").clicked() {
+                presets.restore(tool, index, gone.clone());
+                ui.data_mut(|d| d.remove::<(usize, Preset)>(removed));
+            }
+        });
+    }
+    if let Some(name) = &current {
+        let unchanged = presets
+            .list(tool)
+            .iter()
+            .any(|p| &p.name == name && p.settings == current_settings);
+        if !unchanged {
+            hint(
+                ui,
+                &format!("Changed from {name}. Update it in More, or add a new preset."),
+            );
+        }
     }
 }
 
-fn brush_controls(ui: &mut egui::Ui, s: &mut Session, pencil: bool) {
-    let mut b = if pencil { s.pencil } else { s.brush };
-    preview(ui, s, &b);
+fn import_presets(s: &mut Session, presets: &mut Presets) {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Import presets")
+        .add_filter("Symphony presets", &[presets::EXTENSION])
+        .add_filter("Harmony brush presets", &["xml", "tbr"])
+        .pick_file()
+    else {
+        return;
+    };
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(ext.as_deref(), Some("xml" | "tbr")) {
+        s.notice = Some(
+            "Symphony can't read Harmony brush files yet. That import is being worked on.".into(),
+        );
+        return;
+    }
+    s.notice = Some(match presets.import(&path) {
+        Ok(1) => "Imported 1 preset".into(),
+        Ok(n) => format!("Imported {n} presets"),
+        Err(e) => e,
+    });
+}
+
+fn export_presets(s: &mut Session, presets: &Presets) {
+    let Some(mut path) = rfd::FileDialog::new()
+        .set_title("Export presets")
+        .set_file_name(format!("My presets.{}", presets::EXTENSION))
+        .add_filter("Symphony presets", &[presets::EXTENSION])
+        .save_file()
+    else {
+        return;
+    };
+    if path.extension().is_none() {
+        path.set_extension(presets::EXTENSION);
+    }
+    s.notice = Some(match presets.export(&path) {
+        Ok(()) => format!(
+            "Exported {} brush and {} pencil presets",
+            presets.brush.len(),
+            presets.pencil.len()
+        ),
+        Err(e) => format!("Couldn't export the presets: {e}"),
+    });
+}
+
+fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pencil: bool) {
+    let tool = if pencil {
+        PresetTool::Pencil
+    } else {
+        PresetTool::Brush
+    };
+    // As in Harmony: the preview, then the presets, then the settings.
+    let b = if pencil { s.pencil } else { s.brush };
+    preview(ui, s, &b, pencil);
     ui.add_space(8.0);
+    preset_list(ui, s, presets, tool);
+    ui.add_space(8.0);
+    let mut b = if pencil { s.pencil } else { s.brush };
     slider(ui, "Maximum size", &mut b.max_width, 0.5..=60.0);
     slider(ui, "Minimum size", &mut b.min_width, 0.0..=60.0);
     b.min_width = b.min_width.min(b.max_width);
     slider(ui, "Smoothing", &mut b.smoothing, 0.0..=0.95);
-    hint(ui, "Pen pressure sets the size between minimum and maximum. Smoothing steadies the line as you draw.");
+    hint(
+        ui,
+        if pencil && b.stencil.is_some() {
+            "This preset's thickness stencil sets the thickness between minimum and maximum, ignoring pen pressure."
+        } else {
+            "Pen pressure sets the size between minimum and maximum. Smoothing steadies the line as you draw."
+        },
+    );
+    if pencil {
+        ui.add_space(4.0);
+        egui::Grid::new("pencil-tips")
+            .num_columns(3)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for (label, tip) in [
+                    ("Start tip", &mut b.tips.start),
+                    ("End tip", &mut b.tips.end),
+                ] {
+                    hint(ui, label);
+                    ui.selectable_value(tip, Tip::Round, "Round");
+                    ui.selectable_value(tip, Tip::Flat, "Flat");
+                    ui.end_row();
+                }
+            });
+        if b.stencil.is_some() && ui.small_button("Remove thickness stencil").clicked() {
+            b.stencil = None;
+        }
+    }
     if pencil {
         s.pencil = b;
     } else {
@@ -92,16 +383,34 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, pencil: bool) {
     }
 }
 
-pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&DeviceInfo>) {
+pub fn tool_properties(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    presets: &mut Presets,
+    device: Option<&DeviceInfo>,
+) {
+    // Long tool settings scroll instead of being cut off.
+    egui::ScrollArea::vertical()
+        .id_salt("tool-properties")
+        .auto_shrink([false, false])
+        .show(ui, |ui| tool_properties_body(ui, s, presets, device));
+}
+
+fn tool_properties_body(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    presets: &mut Presets,
+    device: Option<&DeviceInfo>,
+) {
     padded(ui, |ui| {
         match s.tool {
             Tool::Brush => {
                 section(ui, "Brush");
-                brush_controls(ui, s, false);
+                brush_controls(ui, s, presets, false);
             }
             Tool::Pencil => {
                 section(ui, "Pencil");
-                brush_controls(ui, s, true);
+                brush_controls(ui, s, presets, true);
             }
             Tool::Eraser => {
                 section(ui, "Eraser");
@@ -152,6 +461,22 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
                     );
                     if ui.add_enabled(n > 0, egui::Button::new("Delete")).clicked() {
                         s.delete_selection();
+                    }
+                    let stencil = s.selected_stencil();
+                    let new_stencil = ui
+                        .add_enabled(
+                            stencil.is_some(),
+                            egui::Button::new("New thickness stencil"),
+                        )
+                        .on_hover_text("Save this pencil line's thickness as a Pencil preset")
+                        .on_disabled_hover_text("Select one pencil line first");
+                    if new_stencil.clicked() {
+                        if let Some(st) = stencil {
+                            let mut settings = s.pencil;
+                            settings.stencil = Some(st);
+                            let name = presets.add(PresetTool::Pencil, "Stencil", settings);
+                            s.notice = Some(format!("Added the pencil preset {name}"));
+                        }
                     }
                 } else {
                     hint(ui, "Click artwork to pick its layer. Drag to move, corner handles to scale, just outside a corner to rotate. Animate mode sets keys.");

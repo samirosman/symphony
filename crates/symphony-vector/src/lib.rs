@@ -10,7 +10,7 @@
 pub mod fill;
 
 use symphony_core::math::Affine;
-use symphony_core::stroke::{Point, Stroke};
+use symphony_core::stroke::{Point, Stroke, Tip};
 
 /// Map raw pen pressure through a gamma curve. `gamma` < 1 makes light
 /// strokes heavier, > 1 makes them lighter. 1.0 is linear.
@@ -104,8 +104,12 @@ pub fn tessellate(stroke: &Stroke, transform: Affine, min_step: f32) -> Mesh {
         _ => {
             strip(&mut mesh, &pts);
             let (first, last) = (pts[0], pts[pts.len() - 1]);
-            cap(&mut mesh, first.0, sub(first.0, pts[1].0), first.1);
-            cap(&mut mesh, last.0, sub(last.0, pts[pts.len() - 2].0), last.1);
+            if stroke.tips.start == Tip::Round {
+                cap(&mut mesh, first.0, sub(first.0, pts[1].0), first.1);
+            }
+            if stroke.tips.end == Tip::Round {
+                cap(&mut mesh, last.0, sub(last.0, pts[pts.len() - 2].0), last.1);
+            }
         }
     }
     mesh
@@ -263,7 +267,23 @@ mod tests {
                     pressure: 1.0,
                 })
                 .collect(),
+            tips: Default::default(),
         }
+    }
+
+    #[test]
+    fn flat_tips_drop_the_round_caps() {
+        let round = stroke(&[(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)]);
+        let mut flat = round.clone();
+        flat.tips = symphony_core::stroke::Tips {
+            start: Tip::Flat,
+            end: Tip::Flat,
+        };
+        let a = tessellate(&round, Affine::IDENTITY, 0.1);
+        let b = tessellate(&flat, Affine::IDENTITY, 0.1);
+        let reach = |m: &Mesh| m.vertices.iter().map(|v| v[0]).fold(f32::MIN, f32::max);
+        assert!(reach(&a) > 20.5, "round end sticks out past the centreline");
+        assert!(reach(&b) <= 20.01, "flat end stops at the centreline");
     }
 
     #[test]

@@ -152,7 +152,7 @@ continues.
 ### 4.2 Drawing
 - 🟡 Pressure and tilt input (macOS ✅)
 - 🟡 **Pencil**: centreline with thickness, pressure-driven thickness, editable afterwards (draws; editing comes with the Contour/Pencil editors)
-- ⬜ Pencil line textures and pencil presets
+- 🟡 Pencil line textures and pencil presets (presets, Round/Flat tips and thickness stencils done; textures next)
 - 🟡 **Brush**: filled contour, pressure size and opacity, smoothing (size and smoothing done; opacity later)
 - ⬜ Textured vector brushes (greyscale bitmap mask)
 - ⬜ Bitmap layers and bitmap brushes (tip and paper textures, blending)

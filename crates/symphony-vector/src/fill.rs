@@ -319,6 +319,7 @@ mod tests {
                     pressure: 1.0,
                 })
                 .collect(),
+            tips: Default::default(),
         }
     }
 

@@ -456,6 +456,7 @@ mod tests {
                 y: 0.0,
                 pressure: 1.0,
             }],
+            tips: Default::default(),
         }
     }
 

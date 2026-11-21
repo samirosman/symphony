@@ -33,12 +33,12 @@ What Harmony 27 does:
   `reference/tool-properties/pencil-tool-properties`.
 
 Symphony plan:
-1. ⬜ Presets for Brush, Pencil and Eraser: list in Tool Properties, New,
+1. ✅ Presets for Brush and Pencil (Eraser presets wait for a sized eraser): list in Tool Properties, New,
    Rename, Delete, and the stroke-view display. Stored in preferences.
-2. ⬜ Pencil tips and joins (Round, Flat; Round, Mitre, Bevel) in the
+2. 🟡 Pencil tips (done) and joins (Round, Flat; Round, Mitre, Bevel) in the
    tessellator.
-3. ⬜ Thickness stencils (a saved thickness profile).
-4. ⬜ Export and import of Symphony presets (our own documented format).
+3. ✅ Thickness stencils (a saved thickness profile).
+4. ✅ Export and import of Symphony presets (our own documented format).
 5. ⬜ **Import Harmony `.xml` and `.tbr` presets.** Their format isn't
    published. Under CLEAN-ROOM.md we may only learn it from files that
    users created and exported themselves, so we need sample exports
