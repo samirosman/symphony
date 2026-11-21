@@ -6,6 +6,15 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${1:-/Applications}/Symphony Dev.app"
+# One Symphony Dev per Mac, built from the main checkout. A copy from another
+# worktree (in any folder, since Spotlight and Raycast index them all) shows
+# up under the same name and runs someone's unfinished branch. Test
+# branches with `cargo run -p symphony-app` instead.
+if [ "$(git -C "$REPO" rev-parse --git-dir)" != "$(git -C "$REPO" rev-parse --git-common-dir)" ]; then
+  echo "This is a secondary worktree. Install Symphony Dev from the main checkout;" >&2
+  echo "to test this branch, use: cargo run -p symphony-app" >&2
+  exit 1
+fi
 RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 

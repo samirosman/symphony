@@ -1069,6 +1069,16 @@ impl SymphonyApp {
                 dense(ui, n.clone(), theme::TEXT_PRIMARY);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Which build this is, so testers know what they're running.
+                dense(
+                    ui,
+                    format!(
+                        "v{} ({})",
+                        env!("CARGO_PKG_VERSION"),
+                        env!("SYMPHONY_BUILD")
+                    ),
+                    theme::TEXT_DISABLED,
+                );
                 dense(
                     ui,
                     format!("{} profile", self.profile.title()),
