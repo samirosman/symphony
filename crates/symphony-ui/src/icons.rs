@@ -4,7 +4,7 @@
 
 use std::f32::consts::PI;
 
-use eframe::egui::{self, Color32, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Vec2};
+use egui::{self, Color32, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Vec2};
 
 use crate::theme;
 

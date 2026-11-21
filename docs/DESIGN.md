@@ -415,11 +415,62 @@ finished.
       logged in §11.1.
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
+- [ ] Waits follow §17: acknowledged at once, spinner past 150 ms, words and progress past 1 s, Cancel past 3 s.
 - [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§16).
 - [ ] Checked against the latest Harmony behaviour
       ([CLEAN-ROOM.md](CLEAN-ROOM.md)).
 
 ---
+
+## 17. Feedback and waiting
+
+Waiting is fine. Waiting *without knowing anything is happening* is not.
+Every action shows that it was received, and every wait shows what's
+happening and roughly how long is left.
+
+### 17.1 Response times
+| Time since the action | What the user must see |
+|---|---|
+| ≤ 100 ms | The direct result, or a visible acknowledgement where they acted (button pressed, row highlighted, cursor changed). |
+| > 150 ms | An activity indicator **where the work was triggered**: a spinner on the button, in the view, or in the status bar. Never earlier, so fast actions don't flicker (E5.4). |
+| > 1 s | **What** is happening, in words ("Opening Walk", "Rendering frame 12 of 48"), and determinate progress whenever the work can be counted. |
+| > 3 s | A **Cancel** button, and elapsed time or time remaining. |
+| Startup | The window shows something within 200 ms. A launch that will take longer shows a loading screen with its current step. Never a blank or frozen window. |
+
+### 17.2 Rules
+- **D17.1 Never freeze.** The UI keeps answering while work runs. Slow
+  work runs in the background (ENGINEERING E5.2). If something has to
+  block, it shows a loading screen first, never a frozen frame.
+- **D17.2 Say what's happening, in words.** A spinner alone isn't enough
+  past one second. Name the step with the verb the user chose ("Opening",
+  "Saving", "Exporting"). Mention counts if there are any.
+- **D17.3 Determinate when possible.** If the work can be counted
+  (frames, files, crates), show a progress bar that fills. Only use an
+  indeterminate spinner when the total really can't be known.
+- **D17.4 One look for waiting.** There is one Symphony spinner and one
+  progress bar (in `symphony-ui`). They're drawn in **cel blue** (active),
+  never amber (amber is time, D4.1). The spinner turns at a steady,
+  calm speed.
+- **D17.5 Background work stays visible.** Saving, autosave, export and
+  imports show in the **status bar's activity area**, with spinner, label
+  and progress, for as long as they run, even while the user keeps
+  drawing.
+- **D17.6 Confirm the finish.** When background work ends, the status bar
+  says so briefly ("Saved Walk", "Exported 48 frames"), then quietly
+  clears. Failures stay until read and use plain words (D10.3).
+- **D17.7 Loading screens are designed screens,** not empty windows: the
+  Symphony name, the current step in words, a progress bar or spinner,
+  and elapsed time once it passes 3 s. Same tokens, fonts and spacing as
+  the rest of the app.
+- **D17.8 Placeholders over blank space.** While a view's content loads
+  (a thumbnail, a big drawing), show its frame with a quiet placeholder
+  and a spinner, so the layout doesn't jump when it arrives.
+- **D17.9 Reduced motion.** With the OS "reduce motion" setting, spinners
+  become a static "Working" label with pulsing removed. Progress bars
+  still fill (D9.3).
+- **D17.10 Motion here is allowed.** Loading indicators are the one
+  continuous motion in the app (an exception to D9.1), because they
+  answer the user's action and show it's still alive.
 
 ## 16. AI
 

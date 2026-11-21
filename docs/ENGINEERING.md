@@ -129,7 +129,14 @@ symphony-core       document model, commands, undo, evaluation. Pure Rust.
   document (copy-on-write, `Arc`-shared), so the user can keep working
   while an export runs.
 - **E5.4** A loading or progress indicator appears when work takes longer
-  than 150 ms, and not before.
+  than 150 ms, and not before. DESIGN §17 sets what it shows at each stage.
+- **E5.5 Every background job is visible.** Jobs (save, autosave, open,
+  export, import) report a label, progress as done/total when countable,
+  and a cancel flag. The app gathers them into the status bar's activity
+  area (DESIGN D17.5), so new kinds of work get feedback for free.
+- **E5.6 Startup work is deferred.** Anything slow at launch (scanning
+  recovery files, loading large settings, warming caches) runs after the
+  first frame, behind a loading screen if it blocks use (D17.7).
 
 ---
 

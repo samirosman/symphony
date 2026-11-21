@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{
+use egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke,
     TextStyle, Vec2,
 };
