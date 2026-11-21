@@ -10,6 +10,7 @@ members = [
     "crates/symphony-pentest",
     "crates/symphony-ui",
     "crates/symphony-launcher",
+    "crates/symphony-brushes",
 ]
 
 [workspace.package]

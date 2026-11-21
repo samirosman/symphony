@@ -1,0 +1,16 @@
+[package]
+name = "symphony-brushes"
+description = "Reads brush presets from other drawing apps into one neutral description."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.23"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+plist = "1.10.4"
+roxmltree = "0.21"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde_json = "1"
+zip = { version = "9", default-features = false, features = ["deflate"] }
