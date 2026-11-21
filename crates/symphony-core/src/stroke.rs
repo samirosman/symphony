@@ -20,6 +20,9 @@ pub enum StrokeKind {
     Brush,
     /// Centreline with a thickness profile, editable later.
     Pencil,
+    /// Invisible line that only bounds paint zones (Harmony's Stroke and
+    /// Close Gap tools). Shown only with Show Strokes.
+    Invisible,
 }
 
 /// Which art layer of a drawing the stroke is on (Harmony's art layers).
@@ -69,4 +72,38 @@ pub struct Drawing {
     pub column: Id,
     pub name: String,
     pub strokes: Vec<Stroke>,
+    /// Painted colour zones, drawn under the strokes of their art layer.
+    #[serde(default)]
+    pub fills: Vec<Fill>,
+}
+
+/// A painted zone (Harmony's Paint tool): the closed area found from the
+/// strokes, filled with a palette swatch by ID (E2.3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fill {
+    pub id: Id,
+    pub swatch: Id,
+    #[serde(default)]
+    pub art: ArtLayer,
+    /// Closed outlines in drawing space. The first is the outside, any
+    /// others are holes (even-odd).
+    pub contours: Vec<Vec<[f32; 2]>>,
+}
+
+impl Fill {
+    /// Is the point inside the painted area (even-odd over all contours)?
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let mut inside = false;
+        for c in &self.contours {
+            let n = c.len();
+            for i in 0..n {
+                let (a, b) = (c[i], c[(i + n - 1) % n]);
+                if (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]
+                {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
 }

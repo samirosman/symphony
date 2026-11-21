@@ -9,7 +9,7 @@
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke as EStroke, Vec2};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
-use symphony_core::stroke::{Point, Stroke, StrokeKind};
+use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
@@ -104,6 +104,18 @@ fn view_transform(state: &CanvasState, rect: Rect, w: f32, h: f32) -> Affine {
 
 fn to_pos((x, y): (f32, f32)) -> Pos2 {
     Pos2::new(x, y)
+}
+
+fn paint_mesh(painter: &egui::Painter, mesh: symphony_vector::Mesh, colour: Color32) {
+    if mesh.indices.is_empty() {
+        return;
+    }
+    let mut out = egui::Mesh::default();
+    for v in &mesh.vertices {
+        out.colored_vertex(Pos2::new(v[0], v[1]), colour);
+    }
+    out.indices = mesh.indices;
+    painter.add(egui::Shape::mesh(out));
 }
 
 fn paint_stroke(painter: &egui::Painter, stroke: &Stroke, colour: Color32, m: Affine) {
@@ -445,14 +457,39 @@ pub fn ui(
     for (_, d, m) in &items {
         if let Some(dr) = s.doc.drawings.get(d) {
             let moving = preview.is_some() && s.selection.drawing == Some(*d);
-            for st in &dr.strokes {
-                let m = match preview {
-                    Some(l) if moving && s.selection.strokes.contains(&st.id) => {
-                        view.compose(*m).compose(l)
+            // Art layers back to front; within each, paint under ink.
+            for art in ArtLayer::STACK {
+                for f in dr.fills.iter().filter(|f| f.art == art) {
+                    paint_mesh(
+                        &painter,
+                        symphony_vector::fill::fill_mesh(&f.contours, view.compose(*m)),
+                        colour(s, f.swatch),
+                    );
+                }
+                for st in dr.strokes.iter().filter(|st| st.art == art) {
+                    let m = match preview {
+                        Some(l) if moving && s.selection.strokes.contains(&st.id) => {
+                            view.compose(*m).compose(l)
+                        }
+                        _ => view.compose(*m),
+                    };
+                    if st.kind == StrokeKind::Invisible {
+                        // Show Strokes (K): invisible strokes as thin cel-blue lines.
+                        if s.show_strokes {
+                            let pts: Vec<Pos2> = st
+                                .points
+                                .iter()
+                                .map(|p| to_pos(m.apply(p.x, p.y)))
+                                .collect();
+                            painter.add(egui::Shape::line(
+                                pts,
+                                EStroke::new(1.0, theme::ACCENT_SELECT),
+                            ));
+                        }
+                        continue;
                     }
-                    _ => view.compose(*m),
-                };
-                paint_stroke(&painter, st, colour(s, st.swatch), m);
+                    paint_stroke(&painter, st, colour(s, st.swatch), m);
+                }
             }
         }
     }
@@ -462,7 +499,29 @@ pub fn ui(
     } else {
         state.select.hover = None;
     }
-    if let Some(a) = &state.active {
+    if let Some(a) = state
+        .active
+        .as_ref()
+        .filter(|a| a.stroke.kind == StrokeKind::Invisible)
+    {
+        if let Some(back) = a.to_local.inverse() {
+            let pts: Vec<Pos2> = a
+                .stroke
+                .points
+                .iter()
+                .map(|p| to_pos(view.compose(back).apply(p.x, p.y)))
+                .collect();
+            painter.add(egui::Shape::line(
+                pts,
+                EStroke::new(1.5, theme::ACCENT_SELECT),
+            ));
+        }
+    }
+    if let Some(a) = state
+        .active
+        .as_ref()
+        .filter(|a| a.stroke.kind != StrokeKind::Invisible)
+    {
         if let Some(back) = a.to_local.inverse() {
             paint_stroke(
                 &painter,
@@ -475,7 +534,10 @@ pub fn ui(
 
     // Pen input.
     let zoom_factor = ui.ctx().zoom_factor();
-    let draws = matches!(s.tool, Tool::Brush | Tool::Pencil | Tool::Eraser) && !space;
+    let draws = matches!(
+        s.tool,
+        Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Paint | Tool::CloseGap | Tool::Dropper
+    ) && !space;
     let locked = s.doc.column(s.selected).is_some_and(|c| c.locked);
     for sm in samples {
         let pos = Pos2::new(sm.x as f32 / zoom_factor, sm.y as f32 / zoom_factor);
@@ -492,6 +554,15 @@ pub fn ui(
                     continue;
                 };
                 let local_px = px / scale_of(layer_world).max(1e-6);
+                let (lx, ly) = to_local.apply(sx, sy);
+                if !erasing && s.tool == Tool::Paint {
+                    s.paint_at(s.selected, s.frame, lx, ly, local_px);
+                    continue;
+                }
+                if !erasing && s.tool == Tool::Dropper {
+                    s.pick_colour(s.selected, s.frame, lx, ly, local_px);
+                    continue;
+                }
                 if erasing {
                     if let Some(d) = s.doc.exposed(s.selected, s.frame) {
                         state.erasing = Some((d, to_local));
@@ -503,10 +574,10 @@ pub fn ui(
                     } else {
                         s.brush
                     };
-                    let kind = if s.tool == Tool::Pencil {
-                        StrokeKind::Pencil
-                    } else {
-                        StrokeKind::Brush
+                    let kind = match s.tool {
+                        Tool::Pencil => StrokeKind::Pencil,
+                        Tool::CloseGap => StrokeKind::Invisible,
+                        _ => StrokeKind::Brush,
                     };
                     let (x, y) = to_local.apply(sx, sy);
                     let p = Point {
@@ -557,7 +628,13 @@ pub fn ui(
                     if let Some(p) = a.smoother.finish() {
                         a.stroke.points.push(p);
                     }
-                    s.commit_stroke(a.layer, a.frame, a.stroke);
+                    if a.stroke.kind == StrokeKind::Invisible {
+                        // Close Gap: the rough stroke only says where; it isn't kept.
+                        let reach = 40.0 * a.min_step / 0.5;
+                        s.close_gap(a.layer, a.frame, &a.stroke.points, reach);
+                    } else {
+                        s.commit_stroke(a.layer, a.frame, a.stroke);
+                    }
                 }
                 if state.erasing.take().is_some() {
                     s.end_gesture();
@@ -757,6 +834,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
             Tool::Transform => Icon::Transform,
             Tool::Pencil => Icon::Pencil,
             Tool::Paint => Icon::Paint,
+            Tool::CloseGap => Icon::CloseGap,
             Tool::Dropper => Icon::Dropper,
             _ => Icon::Brush,
         }

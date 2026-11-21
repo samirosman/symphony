@@ -241,6 +241,7 @@ impl Scene {
             column,
             name: self.next_drawing_name(column),
             strokes: Vec::new(),
+            fills: Vec::new(),
         }
     }
 

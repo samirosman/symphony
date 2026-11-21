@@ -8,7 +8,7 @@ use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
 use crate::keymap::{Action, Profile};
-use crate::session::{BrushSettings, Session, Tool};
+use crate::session::{BrushSettings, PaintMode, Session, Tool};
 
 /// A peg parameter row: label, which value, drag speed, unit suffix.
 type PegField = (
@@ -157,6 +157,35 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
                     hint(ui, "Click artwork to pick its layer. Drag to move, corner handles to scale, just outside a corner to rotate. Animate mode sets keys.");
                 }
             }
+            Tool::Paint => {
+                section(ui, "Paint");
+                for mode in [
+                    PaintMode::Paint,
+                    PaintMode::PaintUnpainted,
+                    PaintMode::Repaint,
+                    PaintMode::Unpaint,
+                ] {
+                    widgets::radio_value(ui, &mut s.paint_mode, mode, mode.title());
+                }
+                hint(ui, match s.paint_mode {
+                    PaintMode::Paint => "Fills a closed area, or recolours it if it's already painted. Click a line to recolour the line.",
+                    PaintMode::PaintUnpainted => "Fills only empty areas and leaves painted ones alone.",
+                    PaintMode::Repaint => "Recolours only areas that are already painted.",
+                    PaintMode::Unpaint => "Removes the colour from an area.",
+                });
+                ui.add_space(6.0);
+                widgets::checkbox(ui, &mut s.show_strokes, "Show strokes");
+                hint(ui, "Shows the invisible lines that close areas (K).");
+            }
+            Tool::CloseGap => {
+                section(ui, "Close Gap");
+                hint(ui, "Draw a rough line near a gap. Symphony joins the two nearest line ends with an invisible stroke, so the area can be painted.");
+                widgets::checkbox(ui, &mut s.show_strokes, "Show strokes");
+            }
+            Tool::Dropper => {
+                section(ui, "Dropper");
+                hint(ui, "Click a line or painted area to pick up its colour.");
+            }
             Tool::Hand => {
                 section(ui, "Hand");
                 hint(
@@ -167,10 +196,6 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
             Tool::Zoom => {
                 section(ui, "Zoom");
                 hint(ui, "Click to zoom in, Option/Alt-click to zoom out. Pinch or Cmd/Ctrl+scroll also zoom.");
-            }
-            other => {
-                section(ui, &format!("{other:?}"));
-                hint(ui, "Not built yet.");
             }
         }
         ui.add_space(12.0);

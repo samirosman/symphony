@@ -133,6 +133,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Pencil => Icon::Pencil,
         Tool::Eraser => Icon::Eraser,
         Tool::Paint => Icon::Paint,
+        Tool::CloseGap => Icon::CloseGap,
         Tool::Dropper => Icon::Dropper,
         Tool::Hand => Icon::Hand,
         Tool::Zoom => Icon::Zoom,
@@ -147,6 +148,7 @@ fn tool_action(t: Tool) -> Action {
         Tool::Pencil => Action::ToolPencil,
         Tool::Eraser => Action::ToolEraser,
         Tool::Paint => Action::ToolPaint,
+        Tool::CloseGap => Action::ToolCloseGap,
         Tool::Dropper => Action::ToolDropper,
         Tool::Hand => Action::ToolHand,
         Tool::Zoom => Action::ToolZoom,
@@ -651,6 +653,20 @@ impl SymphonyApp {
                     Action::CreateEmptyDrawing => s.new_drawing(),
                     Action::AddLayer => s.add_layer(),
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
+                    Action::ShowStrokes => s.show_strokes = !s.show_strokes,
+                    Action::ToolPaint
+                    | Action::ToolPaintUnpainted
+                    | Action::ToolRepaint
+                    | Action::ToolUnpaint => {
+                        use session::PaintMode;
+                        s.tool = Tool::Paint;
+                        s.paint_mode = match other {
+                            Action::ToolPaintUnpainted => PaintMode::PaintUnpainted,
+                            Action::ToolRepaint => PaintMode::Repaint,
+                            Action::ToolUnpaint => PaintMode::Unpaint,
+                            _ => PaintMode::Paint,
+                        };
+                    }
                     Action::OnionMorePrevious => s.onion_step(true, 1),
                     Action::OnionLessPrevious => s.onion_step(true, -1),
                     Action::OnionMoreNext => s.onion_step(false, 1),
@@ -777,6 +793,7 @@ impl SymphonyApp {
         });
         ui.menu_button("View", |ui| {
             self.menu_action(ui, Action::ToggleOnionSkin);
+            self.menu_action(ui, Action::ShowStrokes);
             ui.separator();
             self.menu_action(ui, Action::ZoomIn);
             self.menu_action(ui, Action::ZoomOut);
@@ -873,7 +890,7 @@ impl SymphonyApp {
         const GROUPS: [&[Tool]; 4] = [
             &[Tool::Select, Tool::Transform],
             &[Tool::Brush, Tool::Pencil, Tool::Eraser],
-            &[Tool::Paint, Tool::Dropper],
+            &[Tool::Paint, Tool::CloseGap, Tool::Dropper],
             &[Tool::Hand, Tool::Zoom],
         ];
         egui::Frame::new()

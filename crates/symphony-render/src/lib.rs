@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use image::{Delay, Frame, RgbaImage};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
+use symphony_core::stroke::{ArtLayer, StrokeKind};
 use symphony_vector::tessellate;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 
@@ -33,7 +34,54 @@ pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Optio
             continue;
         };
         let m = view.compose(item.transform);
-        for st in &d.strokes {
+        // Art layers back to front; within each, paint under ink.
+        for art in ArtLayer::STACK {
+            for fill in d.fills.iter().filter(|f| f.art == art) {
+                let mut pb = PathBuilder::new();
+                for c in &fill.contours {
+                    for (k, p) in c.iter().enumerate() {
+                        let (x, y) = m.apply(p[0], p[1]);
+                        if k == 0 {
+                            pb.move_to(x, y);
+                        } else {
+                            pb.line_to(x, y);
+                        }
+                    }
+                    pb.close();
+                }
+                let Some(path) = pb.finish() else { continue };
+                let [r, g, b] = scene.swatch_rgb(fill.swatch);
+                let mut paint = Paint::default();
+                paint.set_color_rgba8(r, g, b, 255);
+                paint.anti_alias = true;
+                pix.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::EvenOdd,
+                    Transform::identity(),
+                    None,
+                );
+            }
+            paint_strokes(&mut pix, scene, d, art, m);
+        }
+    }
+    RgbaImage::from_raw(pix.width(), pix.height(), pix.take())
+}
+
+/// Ink for one art layer. Invisible strokes only bound paint zones.
+fn paint_strokes(
+    pix: &mut Pixmap,
+    scene: &Scene,
+    d: &symphony_core::stroke::Drawing,
+    art: ArtLayer,
+    m: Affine,
+) {
+    {
+        for st in d
+            .strokes
+            .iter()
+            .filter(|s| s.art == art && s.kind != StrokeKind::Invisible)
+        {
             let mesh = tessellate(st, m, 0.35);
             if mesh.indices.is_empty() {
                 continue;
@@ -69,7 +117,6 @@ pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Optio
             );
         }
     }
-    RgbaImage::from_raw(pix.width(), pix.height(), pix.take())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -36,10 +36,11 @@ pub enum Icon {
     ZoomOut,
     Forbidden,
     Minus,
+    CloseGap,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 26] = [
+    pub const ALL: [Icon; 27] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -66,6 +67,7 @@ impl Icon {
         Icon::ZoomOut,
         Icon::Forbidden,
         Icon::Minus,
+        Icon::CloseGap,
     ];
 }
 
@@ -277,6 +279,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             );
         }
         Icon::Minus => g.line(p, &[(3.0, 8.0), (13.0, 8.0)]),
+        // Two line ends with a dotted bridge between them.
+        Icon::CloseGap => {
+            g.line(p, &[(2.5, 12.0), (5.5, 9.0)]);
+            g.line(p, &[(13.5, 12.0), (10.5, 9.0)]);
+            for x in [7.0, 8.0, 9.0] {
+                g.dot(p, x, 8.6, 0.6);
+            }
+        }
         Icon::Plus => {
             g.line(p, &[(8.0, 3.0), (8.0, 13.0)]);
             g.line(p, &[(3.0, 8.0), (13.0, 8.0)]);

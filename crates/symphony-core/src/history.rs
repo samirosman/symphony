@@ -5,10 +5,28 @@
 use crate::doc::{LayerSnapshot, Scene};
 use crate::graph::{NodeId, NodeKind, PegParams};
 use crate::id::Id;
-use crate::stroke::{Drawing, Stroke};
+use crate::stroke::{Drawing, Fill, Stroke};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
+    /// Paint a zone.
+    AddFill {
+        drawing: Id,
+        fill: Fill,
+    },
+    /// Unpaint a zone.
+    RemoveFill {
+        drawing: Id,
+        index: usize,
+        fill: Fill,
+    },
+    /// Repaint a zone with another swatch.
+    SetFillSwatch {
+        drawing: Id,
+        fill: Id,
+        before: Id,
+        after: Id,
+    },
     /// Replace strokes in place, matched by ID (move, scale, rotate, flip).
     SetStrokes {
         drawing: Id,
@@ -109,6 +127,42 @@ impl Edit {
                         d.strokes
                             .insert((*index).min(d.strokes.len()), stroke.clone());
                     }
+                }
+            }
+            Edit::AddFill { drawing, fill } => {
+                if let Some(d) = s.drawings.get_mut(drawing) {
+                    if forward {
+                        d.fills.push(fill.clone());
+                    } else {
+                        d.fills.retain(|f| f.id != fill.id);
+                    }
+                }
+            }
+            Edit::RemoveFill {
+                drawing,
+                index,
+                fill,
+            } => {
+                if let Some(d) = s.drawings.get_mut(drawing) {
+                    if forward {
+                        d.fills.retain(|f| f.id != fill.id);
+                    } else {
+                        d.fills.insert((*index).min(d.fills.len()), fill.clone());
+                    }
+                }
+            }
+            Edit::SetFillSwatch {
+                drawing,
+                fill,
+                before,
+                after,
+            } => {
+                if let Some(f) = s
+                    .drawings
+                    .get_mut(drawing)
+                    .and_then(|d| d.fills.iter_mut().find(|f| f.id == *fill))
+                {
+                    f.swatch = if forward { *after } else { *before };
                 }
             }
             Edit::SetStrokes {

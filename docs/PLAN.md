@@ -159,7 +159,7 @@ continues.
 - 🟡 Eraser (vector and bitmap): removes whole vector strokes; cutting comes next
 - ⬜ Line, Rectangle, Ellipse and Polyline tools
 - ⬜ Text tool
-- ⬜ Stroke tool (invisible lines used for painting zones)
+- 🟡 Stroke tool (invisible lines used for painting zones): invisible strokes exist (Close Gap makes them); the drawing tool is next
 - ⬜ Contour Editor (edit vector points and Béziers)
 - ⬜ Centerline Editor
 - ⬜ Pencil Editor (reshape thickness)
@@ -188,13 +188,13 @@ continues.
 - ⬜ Palette levels: scene, element, job and environment *(verify naming)*
 - ⬜ Palette lists, palette browser and master palettes
 - ⬜ Palette cloning (for example day and night versions of the same palette)
-- ⬜ Paint tool modes: Paint, Paint Unpainted, Repaint, Unpaint
+- ✅ Paint tool modes: Paint, Paint Unpainted, Repaint, Unpaint
 - ⬜ Ink tool (recolour lines)
-- ⬜ Dropper
-- ⬜ Close Gap tool
+- ✅ Dropper
+- ✅ Close Gap tool
 - ⬜ Edit Gradient/Texture tool
 - ⬜ Protect colour
-- ⬜ Show Strokes, Show Unpainted Zones
+- 🟡 Show Strokes, Show Unpainted Zones (Show Strokes done)
 - ⬜ Colour override
 - ✖ Generative fill (Harmony 25.2's AI fill): **won't be added.** Symphony has no
   generative AI (see [AI-POLICY.md](AI-POLICY.md)).

@@ -22,19 +22,45 @@ pub enum Tool {
     Pencil,
     Eraser,
     Paint,
+    CloseGap,
     Dropper,
     Hand,
     Zoom,
 }
 
+/// Harmony's four Paint tool modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaintMode {
+    /// Paints or repaints zones, whether or not they're filled.
+    Paint,
+    /// Only fills empty zones.
+    PaintUnpainted,
+    /// Only recolours zones that already have colour.
+    Repaint,
+    /// Removes colour from a zone.
+    Unpaint,
+}
+
+impl PaintMode {
+    pub fn title(self) -> &'static str {
+        match self {
+            PaintMode::Paint => "Paint",
+            PaintMode::PaintUnpainted => "Paint Unpainted",
+            PaintMode::Repaint => "Repaint",
+            PaintMode::Unpaint => "Unpaint",
+        }
+    }
+}
+
 impl Tool {
-    pub const ALL: [Tool; 9] = [
+    pub const ALL: [Tool; 10] = [
         Tool::Select,
         Tool::Transform,
         Tool::Brush,
         Tool::Pencil,
         Tool::Eraser,
         Tool::Paint,
+        Tool::CloseGap,
         Tool::Dropper,
         Tool::Hand,
         Tool::Zoom,
@@ -49,8 +75,10 @@ impl Tool {
             | Tool::Hand
             | Tool::Zoom
             | Tool::Select
-            | Tool::Transform => None,
-            Tool::Paint | Tool::Dropper => Some("M5"),
+            | Tool::Transform
+            | Tool::Paint
+            | Tool::CloseGap
+            | Tool::Dropper => None,
         }
     }
 }
@@ -108,6 +136,9 @@ pub struct Session {
     pub brush_size_cursor: bool,
     pub animate: bool,
     pub selection: Selection,
+    pub paint_mode: PaintMode,
+    /// Harmony's Show Strokes (K): reveal invisible strokes.
+    pub show_strokes: bool,
     /// Select tool options, as in Harmony: Marquee instead of Lasso, and
     /// Easy Drag (drag from anywhere inside the box).
     pub marquee_mode: bool,
@@ -167,6 +198,8 @@ impl Session {
             },
             brush_size_cursor: false,
             selection: Selection::default(),
+            paint_mode: PaintMode::Paint,
+            show_strokes: false,
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),
@@ -258,6 +291,11 @@ impl Session {
                 }
             }
         }
+        // Paint the head with skin, so the demo shows ink and paint.
+        let line = s.swatch;
+        s.swatch = s.doc.palette.swatches[1].id;
+        s.paint_at(0, 1, 0.0, -130.0, 1.0);
+        s.swatch = line;
         let mut peg = s.doc.peg(0).cloned().unwrap_or_default();
         peg.x.set_key(1, 0.0);
         peg.x.set_key(24, 120.0);
@@ -343,6 +381,7 @@ impl Session {
         let name = match stroke.kind {
             StrokeKind::Brush => "Brush stroke",
             StrokeKind::Pencil => "Pencil stroke",
+            StrokeKind::Invisible => "Close gap",
         };
         let mut edits = Vec::new();
         let drawing = match self.doc.exposed(layer, frame) {
@@ -410,6 +449,210 @@ impl Session {
             ],
         );
         self.note(format!("Created drawing {name}"));
+    }
+
+    // ---- Ink and paint (M5) ---------------------------------------------
+
+    /// The Paint tool at drawing-local (`x`, `y`). `cell` is about one
+    /// screen pixel in drawing units, the precision of zone finding.
+    pub fn paint_at(&mut self, layer: usize, frame: u32, x: f32, y: f32, cell: f32) {
+        use symphony_vector::fill::{find_zone, ZoneError};
+        let Some(drawing) = self.doc.exposed(layer, frame) else {
+            self.note("There's no drawing here to paint");
+            return;
+        };
+        let Some(d) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let mode = self.paint_mode;
+        let swatch = self.swatch;
+        // Topmost existing zone under the point.
+        let existing = d
+            .fills
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, f)| f.contains(x, y))
+            .map(|(i, f)| (i, f.clone()));
+        match (mode, existing) {
+            (PaintMode::Unpaint, Some((index, fill))) => {
+                self.history.apply(
+                    &mut self.doc,
+                    "Unpaint",
+                    vec![Edit::RemoveFill {
+                        drawing,
+                        index,
+                        fill,
+                    }],
+                );
+            }
+            (PaintMode::Paint | PaintMode::Repaint, Some((_, fill))) => {
+                if fill.swatch != swatch {
+                    self.history.apply(
+                        &mut self.doc,
+                        "Repaint",
+                        vec![Edit::SetFillSwatch {
+                            drawing,
+                            fill: fill.id,
+                            before: fill.swatch,
+                            after: swatch,
+                        }],
+                    );
+                }
+            }
+            (PaintMode::PaintUnpainted, Some(_))
+            | (PaintMode::Unpaint | PaintMode::Repaint, None) => {
+                // Harmony leaves these alone.
+            }
+            (PaintMode::Paint | PaintMode::PaintUnpainted, None) => {
+                let strokes: Vec<&Stroke> = d.strokes.iter().collect();
+                match find_zone(&strokes, x, y, cell) {
+                    Ok(contours) => {
+                        let fill = symphony_core::stroke::Fill {
+                            id: self.doc.ids.fresh(),
+                            swatch,
+                            art: Default::default(),
+                            contours,
+                        };
+                        self.history.apply(
+                            &mut self.doc,
+                            "Paint",
+                            vec![Edit::AddFill { drawing, fill }],
+                        );
+                    }
+                    Err(ZoneError::Open) => self.note(
+                        "This area isn't closed. Close the gap (Close Gap tool) and paint again.",
+                    ),
+                    Err(ZoneError::OnLine) => self.paint_line(drawing, x, y, cell),
+                }
+            }
+        }
+    }
+
+    /// Paint on a line recolours the line itself, as in Harmony.
+    fn paint_line(&mut self, drawing: Id, x: f32, y: f32, cell: f32) {
+        let swatch = self.swatch;
+        let Some(d) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let Some(st) = d.strokes.iter().rev().find(|st| {
+            st.kind != StrokeKind::Invisible && symphony_vector::hits(st, x, y, cell * 2.0)
+        }) else {
+            return;
+        };
+        if st.swatch == swatch {
+            return;
+        }
+        let before = st.clone();
+        let mut after = st.clone();
+        after.swatch = swatch;
+        self.history.apply(
+            &mut self.doc,
+            "Paint line",
+            vec![Edit::SetStrokes {
+                drawing,
+                before: vec![before],
+                after: vec![after],
+            }],
+        );
+    }
+
+    /// Harmony's Close Gap: from a rough stroke near a gap, join the two
+    /// nearest line ends with an invisible stroke. `reach` is how far from
+    /// the rough stroke to look for line ends, in drawing units.
+    pub fn close_gap(&mut self, layer: usize, frame: u32, rough: &[Point], reach: f32) {
+        let Some(drawing) = self.doc.exposed(layer, frame) else {
+            self.note("There's no drawing here to close a gap in");
+            return;
+        };
+        let Some(d) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let near = |p: &Point| {
+            rough
+                .iter()
+                .map(|r| (r.x - p.x).hypot(r.y - p.y))
+                .fold(f32::MAX, f32::min)
+        };
+        // Line ends close to the rough stroke.
+        let ends: Vec<(usize, Point)> = d
+            .strokes
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| st.kind != StrokeKind::Invisible)
+            .flat_map(|(i, st)| {
+                st.points
+                    .first()
+                    .into_iter()
+                    .chain(st.points.last())
+                    .map(move |p| (i, *p))
+            })
+            .filter(|(_, p)| near(p) <= reach)
+            .collect();
+        let mut best: Option<(f32, Point, Point)> = None;
+        for a in 0..ends.len() {
+            for b in a + 1..ends.len() {
+                let (pa, pb) = (ends[a].1, ends[b].1);
+                let dist = (pa.x - pb.x).hypot(pa.y - pb.y);
+                if dist > 1e-3 && best.is_none_or(|(bd, _, _)| dist < bd) {
+                    best = Some((dist, pa, pb));
+                }
+            }
+        }
+        let Some((_, a, b)) = best else {
+            self.note("No line ends near that stroke. Draw it closer to the gap.");
+            return;
+        };
+        let stroke = Stroke {
+            id: self.doc.ids.fresh(),
+            kind: StrokeKind::Invisible,
+            art: Default::default(),
+            swatch: self.swatch,
+            min_width: 0.0,
+            max_width: 0.0,
+            points: vec![Point { pressure: 1.0, ..a }, Point { pressure: 1.0, ..b }],
+        };
+        self.history.apply(
+            &mut self.doc,
+            "Close gap",
+            vec![Edit::AddStroke { drawing, stroke }],
+        );
+        self.note("Gap closed");
+    }
+
+    /// The Dropper: pick up the swatch under the point (a zone or a line).
+    pub fn pick_colour(&mut self, layer: usize, frame: u32, x: f32, y: f32, cell: f32) {
+        let Some(d) = self
+            .doc
+            .exposed(layer, frame)
+            .and_then(|d| self.doc.drawings.get(&d))
+        else {
+            return;
+        };
+        let line = d
+            .strokes
+            .iter()
+            .rev()
+            .find(|st| {
+                st.kind != StrokeKind::Invisible && symphony_vector::hits(st, x, y, cell * 2.0)
+            })
+            .map(|st| st.swatch);
+        let zone = d
+            .fills
+            .iter()
+            .rev()
+            .find(|f| f.contains(x, y))
+            .map(|f| f.swatch);
+        if let Some(sw) = line.or(zone) {
+            self.swatch = sw;
+            let name = self
+                .doc
+                .palette
+                .get(sw)
+                .map(|w| w.name.clone())
+                .unwrap_or_default();
+            self.note(format!("Picked {name}"));
+        }
     }
 
     // ---- Selection (Select tool) ------------------------------------------
@@ -945,6 +1188,116 @@ mod tests {
         s.undo();
         let after: Vec<Id> = s.doc.drawings[&d].strokes.iter().map(|st| st.id).collect();
         assert_eq!(after, before);
+    }
+
+    fn square_drawing(s: &mut Session) {
+        let pts = [
+            (10.0, 10.0),
+            (90.0, 10.0),
+            (90.0, 90.0),
+            (10.0, 90.0),
+            (10.0, 10.0),
+        ];
+        let swatch = s.swatch;
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: 2.0,
+            points: pts
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+        };
+        s.commit_stroke(0, 1, st);
+    }
+
+    fn fills(s: &Session) -> Vec<symphony_core::stroke::Fill> {
+        let d = s.doc.exposed(0, 1).unwrap();
+        s.doc.drawings[&d].fills.clone()
+    }
+
+    #[test]
+    fn paint_modes_follow_harmony() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        let (a, b) = (s.doc.palette.swatches[1].id, s.doc.palette.swatches[2].id);
+
+        s.paint_mode = PaintMode::Repaint;
+        s.swatch = a;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert!(fills(&s).is_empty(), "Repaint leaves empty zones alone");
+
+        s.paint_mode = PaintMode::Paint;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s).len(), 1);
+        assert_eq!(fills(&s)[0].swatch, a);
+
+        s.paint_mode = PaintMode::PaintUnpainted;
+        s.swatch = b;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(
+            fills(&s)[0].swatch,
+            a,
+            "Paint Unpainted leaves painted zones alone"
+        );
+
+        s.paint_mode = PaintMode::Repaint;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s)[0].swatch, b);
+        s.undo();
+        assert_eq!(fills(&s)[0].swatch, a, "repaint undoes");
+
+        s.paint_mode = PaintMode::Unpaint;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert!(fills(&s).is_empty());
+    }
+
+    #[test]
+    fn close_gap_makes_an_open_shape_paintable() {
+        let mut s = Session::new_scene();
+        let swatch = s.swatch;
+        let open = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: 2.0,
+            points: [(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (10.0, 90.0)]
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+        };
+        s.commit_stroke(0, 1, open);
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert!(fills(&s).is_empty(), "an open shape can't be painted");
+        // A rough stroke near the gap on the left side.
+        let rough = [
+            Point {
+                x: 14.0,
+                y: 20.0,
+                pressure: 1.0,
+            },
+            Point {
+                x: 14.0,
+                y: 80.0,
+                pressure: 1.0,
+            },
+        ];
+        s.close_gap(0, 1, &rough, 40.0);
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s).len(), 1, "after Close Gap it can");
     }
 
     #[test]

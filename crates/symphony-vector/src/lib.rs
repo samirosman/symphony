@@ -7,6 +7,8 @@
 //!   round caps, for any renderer.
 //! - [`hits`]: does a circle touch a stroke (eraser, selection)?
 
+pub mod fill;
+
 use symphony_core::math::Affine;
 use symphony_core::stroke::{Point, Stroke};
 
