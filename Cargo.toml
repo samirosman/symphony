@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/symphony-core"]
+members = ["crates/symphony-core", "crates/symphony-pen", "crates/symphony-pentest"]
 
 [workspace.package]
 version = "0.0.1"
