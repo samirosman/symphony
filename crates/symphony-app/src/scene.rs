@@ -41,6 +41,43 @@ pub struct Swatch {
     pub rgb: [u8; 3],
 }
 
+/// Drawing tools, in Tools-toolbar order. Only some work yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    Select,
+    Transform,
+    Brush,
+    Pencil,
+    Eraser,
+    Paint,
+    Dropper,
+    Hand,
+    Zoom,
+}
+
+impl Tool {
+    pub const ALL: [Tool; 9] = [
+        Tool::Select,
+        Tool::Transform,
+        Tool::Brush,
+        Tool::Pencil,
+        Tool::Eraser,
+        Tool::Paint,
+        Tool::Dropper,
+        Tool::Hand,
+        Tool::Zoom,
+    ];
+
+    /// Which milestone brings this tool, if it isn't built yet.
+    pub fn planned_for(self) -> Option<&'static str> {
+        match self {
+            Tool::Brush | Tool::Eraser => None,
+            Tool::Select | Tool::Transform | Tool::Pencil | Tool::Hand | Tool::Zoom => Some("M3"),
+            Tool::Paint | Tool::Dropper => Some("M5"),
+        }
+    }
+}
+
 pub struct Brush {
     pub max_width: f32,
     pub min_width: f32,
@@ -57,6 +94,7 @@ pub struct Scene {
     pub drawings: HashMap<(String, String), Vec<Stroke>>,
     pub palette: Vec<Swatch>,
     pub brush: Brush,
+    pub tool: Tool,
     pub frame: u32,
     pub length: u32,
     pub fps: f32,
@@ -111,6 +149,7 @@ impl Scene {
                 min_width: 0.6,
                 colour: 0,
             },
+            tool: Tool::Brush,
             frame: 1,
             length: 48,
             fps: 24.0,

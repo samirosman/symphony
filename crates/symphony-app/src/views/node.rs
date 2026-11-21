@@ -1,49 +1,52 @@
-//! Node view (read-only for now): the scene graph as Harmony shows it.
+//! Node view (read-only for now): the scene graph as Harmony lays it out.
 //! Data flows top to bottom: pegs -> drawings -> composite -> display.
 //! Drag the background to pan. Click a peg or drawing to select its layer.
 //! Editing connections comes in M6.
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
 
 use crate::scene::Scene;
+use crate::theme;
 
 #[derive(Default)]
 pub struct NodeViewState {
     pan: Vec2,
 }
 
-const W: f32 = 110.0;
-const H: f32 = 28.0;
+const W: f32 = 112.0;
+const H: f32 = 32.0;
 
-fn colour(kind: &NodeKind) -> Color32 {
+/// Node type is shown as text, not colour (D4.1: colour only for meaning).
+fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
-        NodeKind::Drawing { .. } => Color32::from_rgb(70, 110, 170),
-        NodeKind::Peg(_) => Color32::from_rgb(150, 120, 60),
-        NodeKind::Composite => Color32::from_rgb(90, 140, 90),
-        NodeKind::Display | NodeKind::Write => Color32::from_rgb(120, 80, 140),
+        NodeKind::Drawing { .. } => "Drawing",
+        NodeKind::Peg(_) => "Peg",
+        NodeKind::Composite => "Composite",
+        NodeKind::Display => "Display",
+        NodeKind::Write => "Write",
     }
 }
 
 pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
-    painter.rect_filled(resp.rect, 0.0, Color32::from_gray(38));
+    painter.rect_filled(resp.rect, 0.0, theme::BG_PANEL);
     if resp.dragged() {
         state.pan += resp.drag_delta();
     }
     let n = scene.layers.len().max(1) as f32;
-    let top = resp.rect.center_top() + Vec2::new(0.0, 30.0) + state.pan;
+    let top = resp.rect.center_top() + Vec2::new(0.0, 32.0) + state.pan;
     let col_x = |i: usize| top.x + (i as f32 - (n - 1.0) / 2.0) * (W + 24.0);
 
-    // Layout: layer i's peg and drawing sit in column i (front layer on the
-    // left, matching composite port order); composite and display centred.
+    // Layer i's peg and drawing sit in column i (front layer on the left,
+    // matching composite port order). Composite and display are centred.
     let mut pos: Vec<(NodeId, Pos2)> = Vec::new();
     for (i, l) in scene.layers.iter().enumerate() {
         pos.push((l.peg, Pos2::new(col_x(i), top.y)));
-        pos.push((l.node, Pos2::new(col_x(i), top.y + 70.0)));
+        pos.push((l.node, Pos2::new(col_x(i), top.y + 72.0)));
     }
-    pos.push((scene.composite, Pos2::new(top.x, top.y + 150.0)));
-    pos.push((scene.display, Pos2::new(top.x, top.y + 220.0)));
+    pos.push((scene.composite, Pos2::new(top.x, top.y + 152.0)));
+    pos.push((scene.display, Pos2::new(top.x, top.y + 224.0)));
     let at = |id: NodeId| pos.iter().find(|(n, _)| *n == id).map(|(_, p)| *p);
 
     for link in scene.graph.links() {
@@ -61,7 +64,7 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
         let from = a + Vec2::new(0.0, H / 2.0);
         let to = Pos2::new(port_x, b.y - H / 2.0);
         let mid = (to.y - from.y) / 2.0;
-        let curve = egui::epaint::CubicBezierShape::from_points_stroke(
+        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
             [
                 from,
                 from + Vec2::new(0.0, mid),
@@ -69,11 +72,10 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
                 to,
             ],
             false,
-            Color32::TRANSPARENT,
-            Stroke::new(1.5, Color32::from_gray(170)),
-        );
-        painter.add(curve);
-        painter.circle_filled(to, 3.0, Color32::from_gray(210));
+            egui::Color32::TRANSPARENT,
+            Stroke::new(1.5, theme::TEXT_SECONDARY),
+        ));
+        painter.circle_filled(to, 3.0, theme::TEXT_PRIMARY);
     }
 
     let selected = &scene.layers[scene.selected];
@@ -84,26 +86,32 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
             continue;
         };
         let r = Rect::from_center_size(*p, Vec2::new(W, H));
-        painter.rect_filled(r, 4.0, colour(&node.kind));
-        if *id == sel_peg || *id == sel_node {
-            painter.rect_stroke(
-                r,
-                4.0,
-                Stroke::new(2.0, Color32::WHITE),
-                StrokeKind::Outside,
-            );
-        }
-        let text_col = if node.enabled {
-            Color32::WHITE
+        let sel = *id == sel_peg || *id == sel_node;
+        painter.rect_filled(r, theme::RADIUS_CONTROL as f32, theme::BG_RAISED);
+        let outline = if sel {
+            Stroke::new(2.0, theme::ACCENT_SELECT)
         } else {
-            Color32::from_gray(140)
+            Stroke::new(1.0, theme::LINE_STRONG)
+        };
+        painter.rect_stroke(r, theme::RADIUS_CONTROL as f32, outline, StrokeKind::Inside);
+        let name_col = if node.enabled {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_DISABLED
         };
         painter.text(
-            r.center(),
+            r.center() - Vec2::new(0.0, 6.0),
             Align2::CENTER_CENTER,
             &node.name,
-            FontId::proportional(12.0),
-            text_col,
+            theme::body(),
+            name_col,
+        );
+        painter.text(
+            r.center() + Vec2::new(0.0, 8.0),
+            Align2::CENTER_CENTER,
+            kind_label(&node.kind),
+            theme::dense(),
+            theme::TEXT_SECONDARY,
         );
         if resp.clicked() && resp.interact_pointer_pos().is_some_and(|q| r.contains(q)) {
             clicked_layer = scene

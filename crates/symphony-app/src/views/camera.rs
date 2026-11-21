@@ -1,16 +1,15 @@
-//! Camera and Drawing views: one canvas, two modes.
+//! Camera and Drawing views: one canvas, two modes (DESIGN D3.6).
 //! - Camera shows the composited scene (every visible layer, with pegs).
 //! - Drawing shows only the selected layer's drawing, untransformed.
 //!
 //! Drawing on an empty cell creates the next numbered drawing, like Harmony.
 
-use eframe::egui::{
-    self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke as EStroke, StrokeKind, Vec2,
-};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke as EStroke, StrokeKind, Vec2};
 use symphony_core::math::Affine;
 use symphony_pen::{PenSample, Phase, Tool};
 
-use crate::scene::{Scene, Stroke, StrokePoint, STAGE_H, STAGE_W};
+use crate::scene::{Scene, Stroke, StrokePoint, Tool as SceneTool, STAGE_H, STAGE_W};
+use crate::theme;
 
 /// Eraser radius, in screen points.
 const ERASER_RADIUS: f32 = 10.0;
@@ -87,7 +86,7 @@ fn draw_stroke(
     }
 }
 
-/// When no native pen backend exists, turn egui's pointer into samples.
+/// When no native pen backend exists, turn egui's pointer into samples (E4.2).
 pub fn pointer_samples(ctx: &egui::Context) -> Vec<PenSample> {
     ctx.input(|i| {
         let Some(pos) = i.pointer.latest_pos() else {
@@ -130,12 +129,13 @@ pub fn ui(
     let (stage, s) = fit_stage(rect);
     let zoom = ui.ctx().zoom_factor();
 
-    painter.rect_filled(rect, 0.0, Color32::from_gray(58));
-    painter.rect_filled(stage, 0.0, Color32::WHITE);
+    // D4.2: neutral surround, white stage.
+    painter.rect_filled(rect, 0.0, theme::CANVAS_SURROUND);
+    painter.rect_filled(stage, 0.0, theme::CANVAS_STAGE);
     painter.rect_stroke(
         stage,
         0.0,
-        EStroke::new(1.0, Color32::from_gray(30)),
+        EStroke::new(1.0, theme::BG_BASE),
         StrokeKind::Outside,
     );
 
@@ -163,8 +163,9 @@ pub fn ui(
             .unwrap_or_default()
     };
 
+    // Artwork colours come from the scene's palette, not the UI theme (D4.3).
     let colour_of = |idx: usize, scene: &Scene| {
-        let [r, g, b] = scene.palette.get(idx).map(|sw| sw.rgb).unwrap_or([0, 0, 0]);
+        let [r, g, b] = scene.palette.get(idx).map(|sw| sw.rgb).unwrap_or_default();
         Color32::from_rgb(r, g, b)
     };
     let clip = painter.with_clip_rect(stage);
@@ -188,13 +189,15 @@ pub fn ui(
         }
     }
 
-    // Input.
+    // Input. Only working tools draw (Tools toolbar disables the rest).
     let hovered = response.hovered() || state.busy();
+    let can_draw = scene.tool.planned_for().is_none();
     for sm in samples {
         let pos = Pos2::new(sm.x as f32 / zoom, sm.y as f32 / zoom);
         let scene_pt = to_scene(stage, s, pos);
+        let erasing_tool = sm.tool == Tool::Eraser || scene.tool == SceneTool::Eraser;
         match sm.phase {
-            Phase::Down if hovered && rect.contains(pos) => {
+            Phase::Down if hovered && can_draw && rect.contains(pos) => {
                 let key = scene.drawing_for_edit();
                 let world = if drawing_only {
                     Affine::IDENTITY
@@ -207,7 +210,7 @@ pub fn ui(
                 let Some(to_local) = world.inverse() else {
                     continue;
                 };
-                if sm.tool == Tool::Eraser {
+                if erasing_tool {
                     state.erasing = Some((key, to_local));
                     erase(scene, state, scene_pt, ERASER_RADIUS / s);
                 } else {
@@ -255,33 +258,34 @@ pub fn ui(
         }
     }
 
-    // Eraser cursor.
+    // Eraser cursor (D7.3: destructive tools tint red while in use).
     if let Some(last) = samples.last() {
-        if last.tool == Tool::Eraser {
+        if last.tool == Tool::Eraser || scene.tool == SceneTool::Eraser {
             let p = Pos2::new(last.x as f32 / zoom, last.y as f32 / zoom);
             if rect.contains(p) {
-                painter.circle_stroke(
-                    p,
-                    ERASER_RADIUS,
-                    EStroke::new(1.0, Color32::from_rgb(220, 50, 50)),
-                );
+                painter.circle_stroke(p, ERASER_RADIUS, EStroke::new(1.0, theme::STATE_DANGER));
             }
         }
     }
 
-    let label = format!(
-        "{}  ·  {}  ·  frame {}",
-        if drawing_only { "Drawing" } else { "Camera" },
-        scene.column_name(scene.selected),
-        scene.frame
-    );
-    painter.text(
-        rect.left_top() + Vec2::new(8.0, 6.0),
-        Align2::LEFT_TOP,
-        label,
-        FontId::proportional(12.0),
-        Color32::from_gray(220),
-    );
+    // D10.4: an empty cell invites drawing.
+    let col = scene.column_name(scene.selected);
+    if scene
+        .xsheet
+        .column(col)
+        .and_then(|c| c.get(scene.frame))
+        .is_none()
+    {
+        let hint = format!("Draw here to create a drawing on {col}");
+        // On the surround, not the paper: text.primary on canvas.surround is 5.9:1 (D4.4).
+        painter.text(
+            rect.left_top() + Vec2::new(8.0, 4.0),
+            Align2::LEFT_TOP,
+            hint,
+            theme::dense(),
+            theme::TEXT_PRIMARY,
+        );
+    }
 }
 
 /// Remove whole strokes near `scene_pt` in the drawing being erased.
