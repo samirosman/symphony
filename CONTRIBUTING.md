@@ -32,6 +32,9 @@ PRs that break these rules will be closed, no matter how good the code is.
 1. Install Rust (stable) from https://rustup.rs
 2. `cargo test --workspace`
 3. `cargo run --release -p symphony-pentest` to try the pen test
+4. `cargo run --release -p symphony-app` to run Symphony. On macOS,
+   `scripts/install-dev-app.sh` adds **Symphony Dev** to Applications: opening it
+   rebuilds your latest code and launches it (works from Spotlight and Raycast too).
 
 Before opening a PR, run `cargo fmt` and `cargo clippy --workspace --all-targets -- -D warnings`.
 
