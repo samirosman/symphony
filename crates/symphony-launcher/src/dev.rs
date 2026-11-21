@@ -124,7 +124,11 @@ impl DevBuild {
             } else {
                 "symphony"
             });
-        match Command::new(&exe).current_dir(&self.repo).spawn() {
+        match Command::new(&exe)
+            .current_dir(&self.repo)
+            .env("SYMPHONY_DEV_REPO", &self.repo)
+            .spawn()
+        {
             Ok(c) => {
                 self.child = Some(c);
                 self.phase = Phase::Starting(Instant::now());

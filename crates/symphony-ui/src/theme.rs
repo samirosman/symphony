@@ -13,25 +13,25 @@ const fn hex(rgb: u32) -> Color32 {
 }
 
 // §4.1 colour tokens.
-pub const BG_BASE: Color32 = hex(0x16181C);
-pub const BG_PANEL: Color32 = hex(0x272A30);
-pub const BG_RAISED: Color32 = hex(0x31353C);
-pub const BG_HOVER: Color32 = hex(0x3A3F47);
-pub const BG_INPUT: Color32 = hex(0x1A1C20);
-pub const LINE_SUBTLE: Color32 = hex(0x3A3E46);
-pub const LINE_STRONG: Color32 = hex(0x565B65);
+pub const BG_BASE: Color32 = hex(0x12161B);
+pub const BG_PANEL: Color32 = hex(0x22282F);
+pub const BG_RAISED: Color32 = hex(0x303944);
+pub const BG_HOVER: Color32 = hex(0x3D4855);
+pub const BG_INPUT: Color32 = hex(0x191E24);
+pub const LINE_SUBTLE: Color32 = hex(0x37414C);
+pub const LINE_STRONG: Color32 = hex(0x556575);
 /// Edges of controls that would otherwise vanish (checkbox, radio): 3:1 or more on every surface (D4.4).
-pub const LINE_CONTROL: Color32 = hex(0x80868F);
-pub const TEXT_PRIMARY: Color32 = hex(0xDDE0E6);
-pub const TEXT_SECONDARY: Color32 = hex(0xA0A5AF);
+pub const LINE_CONTROL: Color32 = hex(0x94A1AE);
+pub const TEXT_PRIMARY: Color32 = hex(0xE7EBEF);
+pub const TEXT_SECONDARY: Color32 = hex(0xB1BEC9);
 pub const TEXT_DISABLED: Color32 = hex(0x686D77);
 pub const ON_ACCENT: Color32 = hex(0xFFFFFF);
-pub const ACCENT_SELECT: Color32 = hex(0x6A95F0);
+pub const ACCENT_SELECT: Color32 = hex(0x81B4F8);
 pub const ACCENT_SELECT_FILL: Color32 = hex(0x3D63B8);
 pub const ACCENT_TIME: Color32 = hex(0xF0A63A);
 pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
-pub const CANVAS_SURROUND: Color32 = hex(0x505359);
+pub const CANVAS_SURROUND: Color32 = hex(0x484B4F);
 pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
 /// Onion skin tints for previous and next drawings (DESIGN §4.3). Defaults
 /// follow the red-before, green-after convention; to verify against Harmony 27.
@@ -203,7 +203,7 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.tab_bar.bg_fill = BG_PANEL;
     d.tab_bar.height = TAB_ROW;
     d.tab_bar.corner_radius = top;
-    d.tab_bar.hline_color = LINE_SUBTLE;
+    d.tab_bar.hline_color = Color32::TRANSPARENT;
     d.tab_bar.show_scroll_bar_on_overflow = false;
     d.tab_bar.inner_margin = Margin {
         left: 6,

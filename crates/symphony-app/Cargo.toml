@@ -20,6 +20,7 @@ rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 symphony-core = { path = "../symphony-core" }
+symphony-launcher = { path = "../symphony-launcher" }
 symphony-io = { path = "../symphony-io" }
 symphony-pen = { path = "../symphony-pen" }
 symphony-render = { path = "../symphony-render" }

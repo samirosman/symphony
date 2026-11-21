@@ -109,7 +109,9 @@ Symphony separates areas by **tone, not lines**:
 | 3 | `bg.hover` | Hover, and popups or menus (plus a shadow) |
 
 - **D3.7** Each docked view is a **card**: `bg.panel`, 8 px corner radius,
-  separated from its neighbours by a 6 px `bg.base` gutter.
+  separated from its neighbours by a 6 px `bg.base` gutter. Tabs and content share one continuous surface.
+  Use the same gap beside the tool strip and between stacked inspectors.
+  Reserve lines for timing grids, control edges, and interaction feedback.
 - **D3.8** A line is used only where tone can't separate, such as grid
   lines in the Xsheet or the divider under a tab row. Never a box around a
   box.
@@ -127,27 +129,27 @@ Spend boldness in one place (P5). Symphony's signature is **time**:
 
 ### 4.1 Tokens
 The UI uses **only** these tokens. A colour literal in UI code is a bug.
-Tokens live in `crates/symphony-app/src/theme.rs`.
+Tokens live in `crates/symphony-ui/src/theme.rs`.
 
 | Token | Hex | Use |
 |---|---|---|
-| `bg.base` | `#16181C` | Window background, gaps between docks |
-| `bg.panel` | `#272A30` | View content background |
-| `bg.raised` | `#31353C` | Toolbars, tab bars, headers, buttons at rest |
-| `bg.hover` | `#3A3F47` | Hovered buttons and rows |
-| `bg.input` | `#1A1C20` | Text fields, slider rails, wells |
-| `line.subtle` | `#3A3E46` | Dividers and grid lines |
-| `line.strong` | `#565B65` | Outlines of containers |
-| `line.control` | `#80868F` | Edges of checkboxes and radios when off (3.9:1 on cards, 3.4:1 on raised) |
-| `text.primary` | `#DDE0E6` | Labels, values, icons |
-| `text.secondary` | `#A0A5AF` | Hints, units, secondary info. Never on `bg.hover`. |
+| `bg.base` | `#12161B` | Window background, gaps between docks |
+| `bg.panel` | `#22282F` | View content background |
+| `bg.raised` | `#303944` | Toolbars, tab bars, headers, buttons at rest |
+| `bg.hover` | `#3D4855` | Hovered buttons and rows |
+| `bg.input` | `#191E24` | Text fields, slider rails, wells |
+| `line.subtle` | `#37414C` | Dividers and grid lines |
+| `line.strong` | `#556575` | Outlines of containers |
+| `line.control` | `#94A1AE` | Edges of checkboxes and radios when off |
+| `text.primary` | `#E7EBEF` | Labels, values, icons |
+| `text.secondary` | `#B1BEC9` | Hints, units, secondary info. Never on `bg.hover`. |
 | `text.disabled` | `#686D77` | Disabled controls only, never information |
-| `accent.select` | `#6A95F0` | "Cel blue": selection outlines, active tool, focused tab, focus ring |
+| `accent.select` | `#81B4F8` | "Cel blue": selection outlines, active tool, focused tab, focus ring |
 | `accent.select.fill` | `#3D63B8` | Fill behind selected items (white text on it is 5.7:1) |
 | `accent.time` | `#F0A63A` | "Light-table amber": playhead, current frame, keyframes, animate mode |
 | `state.danger` | `#E86A62` | Eraser, destructive actions, errors. Icons and markers only, not body text. |
 | `state.ok` | `#62C484` | Confirmed good states (tablet connected). Rare. |
-| `canvas.surround` | `#505359` | Area around the stage. A neutral mid grey. |
+| `canvas.surround` | `#484B4F` | Area around the stage. A neutral mid grey. |
 | `canvas.stage` | `#FFFFFF` | The stage (paper) |
 
 ### 4.2 Rules
