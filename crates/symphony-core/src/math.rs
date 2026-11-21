@@ -65,6 +65,23 @@ impl Affine {
         }
     }
 
+    /// Inverse transform, or `None` if it squashes everything to a line.
+    pub fn inverse(self) -> Option<Affine> {
+        let det = self.a * self.d - self.b * self.c;
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let (a, b, c, d) = (self.d / det, -self.b / det, -self.c / det, self.a / det);
+        Some(Affine {
+            a,
+            b,
+            c,
+            d,
+            tx: -(a * self.tx + c * self.ty),
+            ty: -(b * self.tx + d * self.ty),
+        })
+    }
+
     pub fn apply(self, x: f32, y: f32) -> (f32, f32) {
         (
             self.a * x + self.c * y + self.tx,
@@ -82,5 +99,18 @@ mod tests {
         let m = Affine::translate(10.0, 0.0).compose(Affine::rotate_deg(90.0));
         let (x, y) = m.apply(1.0, 0.0);
         assert!((x - 10.0).abs() < 1e-5 && (y - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn inverse_round_trips() {
+        let m = Affine::translate(5.0, -3.0)
+            .compose(Affine::rotate_deg(30.0))
+            .compose(Affine::scale(2.0, 0.5));
+        let (x, y) = m
+            .inverse()
+            .unwrap()
+            .apply(m.apply(7.0, 4.0).0, m.apply(7.0, 4.0).1);
+        assert!((x - 7.0).abs() < 1e-4 && (y - 4.0).abs() < 1e-4);
+        assert!(Affine::scale(0.0, 1.0).inverse().is_none());
     }
 }

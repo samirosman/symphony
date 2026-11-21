@@ -1,0 +1,17 @@
+[package]
+name = "symphony-app"
+description = "Symphony desktop app: dockable views over the Symphony scene model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "symphony"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", features = ["persistence"] }
+egui_dock = { version = "0.22", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+symphony-core = { version = "0.0.1", path = "../symphony-core" }
+symphony-pen = { version = "0.0.1", path = "../symphony-pen" }

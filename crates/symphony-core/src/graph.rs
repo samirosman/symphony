@@ -105,13 +105,21 @@ impl Graph {
         self.nodes.get_mut(id.0)
     }
 
+    pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &Node)> {
+        self.nodes.iter().enumerate().map(|(i, n)| (NodeId(i), n))
+    }
+
+    pub fn links(&self) -> &[Link] {
+        &self.links
+    }
+
     /// Connect `from` into `to`'s input `port`, replacing whatever was there.
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: usize) {
         self.links.retain(|l| !(l.to == to && l.port == port));
         self.links.push(Link { from, to, port });
     }
 
-    fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
+    pub fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
         self.links
             .iter()
             .find(|l| l.to == to && l.port == port)
@@ -141,6 +149,14 @@ impl Graph {
         let mut items = Vec::new();
         self.eval_image(out, xsheet, frame, 0, &mut items)?;
         Ok(items)
+    }
+
+    /// The full transform a drawing node gets from its pegs on `frame`.
+    pub fn world_transform(&self, drawing: NodeId, frame: u32) -> Result<Affine, EvalError> {
+        match self.input(drawing, 0) {
+            Some(p) => self.eval_transform(p, frame, 0),
+            None => Ok(Affine::IDENTITY),
+        }
     }
 
     fn get(&self, id: NodeId, depth: usize) -> Result<&Node, EvalError> {
