@@ -92,8 +92,19 @@ pub fn layer_properties(ui: &mut egui::Ui, scene: &mut Scene, animate: &mut bool
     });
 }
 
-/// Preferences → Workflow (DESIGN §11).
-pub fn preferences(ui: &mut egui::Ui, profile: &mut Profile) {
+/// Preferences: Workflow (DESIGN §11) and AI (DESIGN §15).
+pub fn preferences(ui: &mut egui::Ui, profile: &mut Profile, use_no_ai: &mut bool) {
+    ui.heading("AI");
+    ui.checkbox(use_no_ai, "Use no AI");
+    ui.colored_label(
+        theme::TEXT_SECONDARY,
+        "Symphony has no generative AI. It has no assisted tools yet either, so nothing in it uses AI.",
+    );
+    ui.hyperlink_to(
+        "How Symphony uses AI",
+        "https://github.com/tdemers218/symphony/blob/main/docs/AI-POLICY.md",
+    );
+    ui.separator();
     ui.heading("Workflow");
     for p in [Profile::Harmony, Profile::Symphony] {
         ui.radio_value(profile, p, p.title());

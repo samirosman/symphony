@@ -20,6 +20,7 @@ New since those versions:
   indicators for Attribute Controllers, and a detail view for the
   Library audio bin.
 - **Harmony 25.2**: Art Layer Manager, and an AI Generative Fill operation.
+  Symphony deliberately leaves the AI fill out (see AI-POLICY.md).
 - **Harmony 25**: a compact scene format that packs drawings and palettes
   into one file.
 

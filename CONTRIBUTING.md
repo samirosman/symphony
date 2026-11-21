@@ -14,6 +14,9 @@ contributing. In short:
 - Build features from the **latest** Harmony version's docs (currently
   27.1), not older ones.
 
+- No generative AI or LLMs, ever. Any assisted ML tool follows
+  [docs/AI-POLICY.md](docs/AI-POLICY.md).
+
 PRs that break these rules will be closed, no matter how good the code is.
 
 ## The rules every change follows

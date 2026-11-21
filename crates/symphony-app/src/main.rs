@@ -25,6 +25,13 @@ struct Saved {
     layouts: Vec<(Workspace, DockState<View>)>,
     #[serde(default)]
     profile: Profile,
+    /// DESIGN D15.2: on by default.
+    #[serde(default = "yes")]
+    use_no_ai: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 struct SymphonyApp {
@@ -32,6 +39,7 @@ struct SymphonyApp {
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
     profile: Profile,
+    use_no_ai: bool,
     pen: Option<PenInput>,
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
@@ -85,9 +93,9 @@ impl SymphonyApp {
         let saved: Option<Saved> = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
-        let (workspace, mut layouts, profile) = match saved {
-            Some(s) => (s.workspace, s.layouts, s.profile),
-            None => (Workspace::Default, Vec::new(), Profile::Harmony),
+        let (workspace, mut layouts, profile, use_no_ai) = match saved {
+            Some(s) => (s.workspace, s.layouts, s.profile, s.use_no_ai),
+            None => (Workspace::Default, Vec::new(), Profile::Harmony, true),
         };
         for ws in Workspace::ALL {
             if !layouts.iter().any(|(w, _)| *w == ws) {
@@ -99,6 +107,7 @@ impl SymphonyApp {
             workspace,
             layouts,
             profile,
+            use_no_ai,
             pen,
             camera: Default::default(),
             drawing: Default::default(),
@@ -407,7 +416,9 @@ impl eframe::App for SymphonyApp {
         egui::Window::new("Preferences")
             .open(&mut open)
             .resizable(false)
-            .show(&ctx, |ui| panels::preferences(ui, &mut self.profile));
+            .show(&ctx, |ui| {
+                panels::preferences(ui, &mut self.profile, &mut self.use_no_ai)
+            });
         self.show_preferences = open;
         let mut open = self.show_icon_sheet;
         egui::Window::new("Icon sheet")
@@ -457,6 +468,7 @@ impl eframe::App for SymphonyApp {
             workspace: self.workspace,
             layouts: self.layouts.clone(),
             profile: self.profile,
+            use_no_ai: self.use_no_ai,
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

@@ -313,6 +313,31 @@ from the **latest** Harmony release's public docs (currently 27.1).
 
 ---
 
+## E17. AI
+
+Policy: [AI-POLICY.md](AI-POLICY.md). Design rules: DESIGN §15.
+
+- **E17.1 Forbidden:** generative models and LLMs, in any crate, build,
+  feature flag or bundled plugin. Pull requests that add one are closed.
+- **E17.2 Assisted tools are declared.** Every action that runs a trained
+  model is marked `assisted` in the actions registry (E4.3). The registry
+  refuses to run an assisted action while **Use no AI** is on. No other
+  code path may call a model.
+- **E17.3 Local only.** Models run on the device. Assisted tools make no
+  network calls, and models never train or fine-tune on user content.
+- **E17.4 Provenance.** Running an assisted action writes an entry to the
+  scene's `provenance` record (tool, model name and version, date). It's
+  saved in the scene file (E7) and survives copy, import and export. A
+  scene with no entries reports **No AI used**. Provenance can't be edited
+  by hand in the UI, and scripting can only add entries, never remove them.
+- **E17.5 Model dependencies** are listed with their licence and training
+  data source in AI-POLICY.md before they can be merged (alongside E12.3).
+- **E17.6 What counts:** anything whose behaviour comes from a trained
+  statistical model (neural nets and other ML). Fixed-rule algorithms
+  don't count and must not be labelled as AI (DESIGN D15.5).
+
+---
+
 ## E16. Where the code doesn't follow the rules yet
 
 These are known gaps from early prototyping, and each one is a task.
@@ -326,5 +351,6 @@ These are known gaps from early prototyping, and each one is a task.
 | E7 | No save or load yet. | M12, though autosave comes early, alongside save |
 | E10.2 | The canvas draws with egui shapes, not the shared renderer. | M3 / renderer |
 | E13.5 | The launcher doesn't update itself yet. Testers download a new launcher by hand when one is announced. | Before the first stable release |
+| E17.2, E17.4 | The "Use no AI" setting and provenance record aren't built yet. There are no assisted tools, so nothing is affected. | With the actions registry (M2 polish) and scene files (M12) |
 | E13.6 | Builds aren't code-signed. Testers follow the "Open anyway" steps in TESTERS.md. | Before the first stable release |
 | E13.4 | The macOS app is launched as a plain binary, not a `.app` bundle (it gets no Dock icon of its own). | With app icons |

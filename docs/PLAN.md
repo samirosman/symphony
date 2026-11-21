@@ -8,7 +8,7 @@ ones.
 **Target: the latest Harmony, currently 27.1.** Build every feature from the
 newest docs, not older versions (see [CLEAN-ROOM.md](CLEAN-ROOM.md)).
 
-Status key: ✅ done · 🟡 started · ⬜ not started
+Status key: ✅ done · 🟡 started · ⬜ not started · ✖ deliberately left out
 
 ---
 
@@ -196,8 +196,8 @@ continues.
 - ⬜ Protect colour
 - ⬜ Show Strokes, Show Unpainted Zones
 - ⬜ Colour override
-- ⬜ Generative fill (25.2 has an AI fill). Approach to decide later:
-  local model or opt-in only, never required.
+- ✖ Generative fill (Harmony 25.2's AI fill): **won't be added.** Symphony has no
+  generative AI (see [AI-POLICY.md](AI-POLICY.md)).
 
 ### 4.4 Timing
 - ⬜ **Timeline**: layers, exposure bars, keyframes, layer parenting,
@@ -322,6 +322,7 @@ Every effect is a node in the graph.
 - ⬜ Scan/paper workflow (import scanned drawings, registration)
 
 ### 4.14 Symphony extras (after the main chunk)
+- ⬜ **Use no AI** switch and per-scene "No AI used" provenance (DESIGN §15, ENGINEERING E17)
 These are improvements and new features. They come after the Harmony list
 above is in place.
 - Ideas go here as they come up.

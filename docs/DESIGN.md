@@ -41,6 +41,10 @@ When two rules conflict, the higher principle wins.
   identity: our own icons, colours and type. We never copy Toon Boom
   artwork (see [CLEAN-ROOM.md](CLEAN-ROOM.md)).
 
+- **P7. The art is the artist's.** This one is absolute: it never trades off
+  against the others. No generative AI and no LLMs, ever.
+  Assisted tools are rare, local, labelled and opt-in, and one switch turns
+  them all off (§15, [AI-POLICY.md](AI-POLICY.md)).
 ---
 
 ## 3. Window and view anatomy
@@ -330,8 +334,30 @@ finished.
       logged in §11.1.
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
+- [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§15).
 - [ ] Checked against the latest Harmony behaviour
       ([CLEAN-ROOM.md](CLEAN-ROOM.md)).
+
+---
+
+## 15. AI
+
+The full policy for artists is in [AI-POLICY.md](AI-POLICY.md).
+
+- **D15.1 No generative AI and no LLMs.** Nothing in Symphony generates
+  images, drawings, colours, poses, in-betweens or text. This rule can't be
+  overridden by a profile, a setting or a plugin shipped with Symphony.
+- **D15.2 Assisted tools are opt-in.** A tool that uses a trained model is
+  off until the artist turns it on, and **Preferences → AI → Use no AI** (on
+  by default) disables all of them at once.
+- **D15.3 Always labelled.** An assisted tool carries an "Assisted" tag in
+  its tooltip, its Tool Properties header and its menu item, and is listed
+  in AI-POLICY.md with what the model does.
+- **D15.4 Provenance is visible.** Scene info shows **No AI used**, or lists
+  the assisted tools used on that scene. Artists never have to dig for it.
+- **D15.5 Plain algorithms aren't labelled as AI.** Flood fill, gap
+  closing, smoothing, tracing and interpolation work with the switch on,
+  and are never marketed as "smart" or "AI".
 
 ---
 
