@@ -1,0 +1,9 @@
+[package]
+name = "symphony-vector"
+description = "Stroke geometry for Symphony: pen smoothing, pressure curves, tessellation and hit-testing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphony-core = { version = "0.0.1", path = "../symphony-core" }

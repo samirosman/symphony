@@ -3566,6 +3566,19 @@ dependencies = [
 [[package]]
 name = "symphony-core"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "symphony-io"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "symphony-core",
+]
 
 [[package]]
 name = "symphony-launcher"
@@ -3611,6 +3624,13 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "egui_dock",
+]
+
+[[package]]
+name = "symphony-vector"
+version = "0.0.1"
+dependencies = [
+ "symphony-core",
 ]
 
 [[package]]

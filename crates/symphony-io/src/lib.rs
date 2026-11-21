@@ -1,0 +1,351 @@
+//! Saving and opening projects (ENGINEERING E7).
+//!
+//! A project is a folder, `Name.symphony/`:
+//!
+//! ```text
+//! Name.symphony/
+//!   project.json          manifest: format version, scenes
+//!   scenes/main/scene.json
+//!   .backups/             the last 5 saves of each scene file
+//! ```
+//!
+//! Drawings are stored inside scene.json for now. Binary drawing files
+//! (`drawings/<id>.svd`) come later, as a format migration (E16).
+//!
+//! Every write is atomic (E7.3): write a temporary file, flush it to disk,
+//! then rename it over the old one, so a crash mid-save never damages the
+//! previous save.
+
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use symphony_core::doc::Scene;
+
+/// Bump when the on-disk format changes, and add a migration (E7.2).
+pub const FORMAT_VERSION: u32 = 1;
+pub const EXTENSION: &str = "symphony";
+const KEEP_BACKUPS: usize = 5;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Manifest {
+    format_version: u32,
+    app_version: String,
+    scenes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SceneFile {
+    format_version: u32,
+    scene: Scene,
+}
+
+/// Errors in plain words, ready for the user (DESIGN D10.3).
+#[derive(Debug)]
+pub struct IoError(pub String);
+
+impl std::fmt::Display for IoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for IoError {}
+
+fn err(what: &str, path: &Path, e: impl std::fmt::Display) -> IoError {
+    IoError(format!("Couldn't {what} {} ({e}).", path.display()))
+}
+
+/// Make sure a chosen path ends in `.symphony`.
+pub fn with_extension(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) == Some(EXTENSION) {
+        path.to_path_buf()
+    } else {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".");
+        p.push(EXTENSION);
+        PathBuf::from(p)
+    }
+}
+
+/// The project's display name: the folder name without `.symphony`.
+pub fn project_name(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled".into())
+}
+
+/// Write `bytes` to `path` atomically (E7.3).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| err("write", path, "no folder"))?;
+    fs::create_dir_all(dir).map_err(|e| err("create", dir, e))?;
+    let tmp = path.with_extension("tmp");
+    let mut f = File::create(&tmp).map_err(|e| err("write", &tmp, e))?;
+    f.write_all(bytes).map_err(|e| err("write", &tmp, e))?;
+    f.sync_all().map_err(|e| err("write", &tmp, e))?;
+    drop(f);
+    fs::rename(&tmp, path).map_err(|e| err("save", path, e))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Copy the current file into `.backups/` and keep only the newest few (E7.4).
+fn backup(project: &Path, file: &Path) {
+    if !file.exists() {
+        return;
+    }
+    let dir = project.join(".backups");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let _ = fs::copy(file, dir.join(format!("{stem}-{stamp:024}.json")));
+    let mut olds: Vec<PathBuf> = fs::read_dir(&dir)
+        .map(|r| {
+            r.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with(&stem))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    olds.sort();
+    while olds.len() > KEEP_BACKUPS {
+        let _ = fs::remove_file(olds.remove(0));
+    }
+}
+
+/// Save `scene` as the project at `path` (a `.symphony` folder).
+pub fn save(scene: &Scene, path: &Path) -> Result<(), IoError> {
+    let path = with_extension(path);
+    let scene_path = path.join("scenes").join("main").join("scene.json");
+    backup(&path, &scene_path);
+    let file = SceneFile {
+        format_version: FORMAT_VERSION,
+        scene: scene.clone(),
+    };
+    let bytes = serde_json::to_vec(&file).map_err(|e| err("save", &scene_path, e))?;
+    write_atomic(&scene_path, &bytes)?;
+    let manifest = Manifest {
+        format_version: FORMAT_VERSION,
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        scenes: vec!["main".into()],
+    };
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| err("save", &path, e))?;
+    write_atomic(&path.join("project.json"), &bytes)
+}
+
+/// Open the project at `path`. Bad files give a readable error, never a
+/// panic (E7.6).
+pub fn open(path: &Path) -> Result<Scene, IoError> {
+    let manifest_path = path.join("project.json");
+    let bytes = fs::read(&manifest_path).map_err(|e| err("open", &manifest_path, e))?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
+        IoError(format!(
+            "{} isn't a Symphony project, or it's damaged ({e}).",
+            path.display()
+        ))
+    })?;
+    if manifest.format_version > FORMAT_VERSION {
+        return Err(IoError(format!(
+            "{} was saved by a newer Symphony ({}). Update Symphony to open it.",
+            path.display(),
+            manifest.app_version
+        )));
+    }
+    let scene_name = manifest
+        .scenes
+        .first()
+        .ok_or_else(|| IoError("The project has no scenes.".into()))?;
+    if scene_name.contains(['/', '\\']) || scene_name.contains("..") {
+        return Err(IoError(
+            "The project file points outside its folder, so it wasn't opened.".into(),
+        ));
+    }
+    let scene_path = path.join("scenes").join(scene_name).join("scene.json");
+    read_scene(&scene_path)
+}
+
+fn read_scene(path: &Path) -> Result<Scene, IoError> {
+    let bytes = fs::read(path).map_err(|e| err("open", path, e))?;
+    let file: SceneFile = serde_json::from_slice(&bytes).map_err(|e| err("read", path, e))?;
+    validate(file.scene)
+}
+
+/// Reject scenes whose references don't line up, instead of crashing later.
+fn validate(scene: Scene) -> Result<Scene, IoError> {
+    let bad = |what: &str| Err(IoError(format!("The scene is damaged: {what}.")));
+    if scene.graph.node(scene.composite).is_none() || scene.graph.node(scene.display).is_none() {
+        return bad("its output nodes are missing");
+    }
+    for l in &scene.layers {
+        if scene.xsheet.column(l.column).is_none()
+            || scene.graph.node(l.node).is_none()
+            || scene.graph.node(l.peg).is_none()
+        {
+            return bad("a layer is missing its column or nodes");
+        }
+    }
+    Ok(scene)
+}
+
+/// Crash recovery (E7.5): autosaves live in the app data folder, one file
+/// per open scene, until the scene is saved normally.
+pub struct Recovery {
+    dir: PathBuf,
+}
+
+impl Recovery {
+    pub fn new(dir: PathBuf) -> Self {
+        Recovery { dir }
+    }
+
+    fn file(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.json"))
+    }
+
+    pub fn write(&self, key: &str, scene: &Scene, origin: Option<&Path>) -> Result<(), IoError> {
+        #[derive(Serialize)]
+        struct Rec<'a> {
+            format_version: u32,
+            origin: Option<&'a Path>,
+            saved_at: u64,
+            scene: &'a Scene,
+        }
+        let rec = Rec {
+            format_version: FORMAT_VERSION,
+            origin,
+            saved_at: now_secs(),
+            scene,
+        };
+        let bytes = serde_json::to_vec(&rec).map_err(|e| err("autosave", &self.dir, e))?;
+        write_atomic(&self.file(key), &bytes)
+    }
+
+    pub fn clear(&self, key: &str) {
+        let _ = fs::remove_file(self.file(key));
+    }
+
+    /// Autosaves left behind by a crash: (key, original path, scene).
+    pub fn pending(&self) -> Vec<(String, Option<PathBuf>, Scene)> {
+        #[derive(Deserialize)]
+        struct Rec {
+            format_version: u32,
+            origin: Option<PathBuf>,
+            scene: Scene,
+        }
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let key = p.file_stem()?.to_string_lossy().into_owned();
+                let rec: Rec = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
+                (rec.format_version <= FORMAT_VERSION).then_some(())?;
+                Some((key, rec.origin, validate(rec.scene).ok()?))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphony_core::doc::Settings;
+    use symphony_core::history::{Edit, History};
+
+    fn temp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("symphony-io-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    fn sample() -> Scene {
+        let mut s = Scene::new(Settings::default());
+        let snap = s.make_layer("Drawing", 0);
+        History::default().apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        s
+    }
+
+    #[test]
+    fn save_and_open_round_trip() {
+        let dir = temp("roundtrip");
+        let path = dir.join("Walk");
+        let s = sample();
+        save(&s, &path).unwrap();
+        let p = with_extension(&path);
+        assert!(p.join("project.json").is_file());
+        let back = open(&p).unwrap();
+        assert_eq!(back.layers, s.layers);
+        assert_eq!(project_name(&p), "Walk");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeps_five_backups() {
+        let dir = temp("backups");
+        let path = dir.join("B.symphony");
+        let s = sample();
+        for _ in 0..8 {
+            save(&s, &path).unwrap();
+        }
+        let n = fs::read_dir(path.join(".backups")).unwrap().count();
+        assert_eq!(n, KEEP_BACKUPS);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_newer_formats_and_garbage() {
+        let dir = temp("newer");
+        let path = dir.join("N.symphony");
+        save(&sample(), &path).unwrap();
+        let manifest = r#"{"format_version": 999, "app_version": "9.0.0", "scenes": ["main"]}"#;
+        fs::write(path.join("project.json"), manifest).unwrap();
+        assert!(open(&path).unwrap_err().0.contains("newer Symphony"));
+        fs::write(path.join("project.json"), b"nonsense").unwrap();
+        assert!(open(&path).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_paths_outside_the_project() {
+        let dir = temp("escape");
+        let path = dir.join("E.symphony");
+        save(&sample(), &path).unwrap();
+        let manifest = r#"{"format_version": 1, "app_version": "0", "scenes": ["../../etc"]}"#;
+        fs::write(path.join("project.json"), manifest).unwrap();
+        assert!(open(&path).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_round_trip() {
+        let dir = temp("recovery");
+        let r = Recovery::new(dir.clone());
+        r.write("abc", &sample(), None).unwrap();
+        assert_eq!(r.pending().len(), 1);
+        r.clear("abc");
+        assert!(r.pending().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

@@ -1,0 +1,262 @@
+//! Stroke geometry (ENGINEERING E1.1): turning pen input into clean
+//! strokes, and strokes into triangles.
+//!
+//! - [`pressure_curve`]: the user's pressure response (E4.1).
+//! - [`Smoother`]: stroke stabilising as points arrive.
+//! - [`tessellate`]: a variable-width stroke becomes a triangle mesh with
+//!   round caps, for any renderer.
+//! - [`hits`]: does a circle touch a stroke (eraser, selection)?
+
+use symphony_core::math::Affine;
+use symphony_core::stroke::{Point, Stroke};
+
+/// Map raw pen pressure through a gamma curve. `gamma` < 1 makes light
+/// strokes heavier, > 1 makes them lighter. 1.0 is linear.
+pub fn pressure_curve(raw: f32, gamma: f32) -> f32 {
+    raw.clamp(0.0, 1.0).powf(gamma.clamp(0.2, 5.0))
+}
+
+/// Smooths points as they arrive. `amount` 0 = raw, 1 = very smooth.
+/// Smoothing trails the pen slightly, so `finish` adds the last raw point
+/// and the stroke still ends where the pen lifted.
+#[derive(Clone, Debug)]
+pub struct Smoother {
+    amount: f32,
+    last: Option<Point>,
+    last_raw: Option<Point>,
+}
+
+impl Smoother {
+    pub fn new(amount: f32) -> Self {
+        Smoother {
+            amount: amount.clamp(0.0, 0.95),
+            last: None,
+            last_raw: None,
+        }
+    }
+
+    /// Feed one raw point. Returns the smoothed point to append, or `None`
+    /// if it's too close to the previous one to matter.
+    pub fn push(&mut self, raw: Point, min_dist: f32) -> Option<Point> {
+        self.last_raw = Some(raw);
+        let Some(prev) = self.last else {
+            self.last = Some(raw);
+            return Some(raw);
+        };
+        let a = 1.0 - self.amount;
+        let p = Point {
+            x: prev.x + (raw.x - prev.x) * a,
+            y: prev.y + (raw.y - prev.y) * a,
+            // Pressure is smoothed more lightly, so taper still reacts quickly.
+            pressure: prev.pressure + (raw.pressure - prev.pressure) * a.max(0.5),
+        };
+        if (p.x - prev.x).hypot(p.y - prev.y) < min_dist {
+            return None;
+        }
+        self.last = Some(p);
+        Some(p)
+    }
+
+    /// The final raw point, if smoothing left it behind.
+    pub fn finish(&mut self) -> Option<Point> {
+        let (last, raw) = (self.last?, self.last_raw?);
+        ((last.x - raw.x).hypot(last.y - raw.y) > 0.01).then_some(raw)
+    }
+}
+
+/// Triangles for one stroke, in the coordinates of `transform`'s output.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Mesh {
+    pub vertices: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+
+/// Uniform scale of a transform, for widths.
+pub fn scale_of(m: Affine) -> f32 {
+    (m.a * m.d - m.b * m.c).abs().sqrt()
+}
+
+const CAP_SEGMENTS: usize = 8;
+
+/// Build the stroke outline as triangles: a strip along the centreline with
+/// width from pressure, and round caps at both ends. Points closer than
+/// `min_step` (output units) are skipped to keep the strip clean.
+pub fn tessellate(stroke: &Stroke, transform: Affine, min_step: f32) -> Mesh {
+    let k = scale_of(transform);
+    let mut pts: Vec<([f32; 2], f32)> = Vec::with_capacity(stroke.points.len());
+    for p in &stroke.points {
+        let (x, y) = transform.apply(p.x, p.y);
+        let w = stroke.width_at(p.pressure) * k * 0.5;
+        if let Some((last, lw)) = pts.last_mut() {
+            if (x - last[0]).hypot(y - last[1]) < min_step {
+                *lw = lw.max(w);
+                continue;
+            }
+        }
+        pts.push(([x, y], w));
+    }
+    let mut mesh = Mesh::default();
+    match pts.as_slice() {
+        [] => {}
+        [(c, r)] => disc(&mut mesh, *c, *r),
+        _ => {
+            strip(&mut mesh, &pts);
+            let (first, last) = (pts[0], pts[pts.len() - 1]);
+            cap(&mut mesh, first.0, sub(first.0, pts[1].0), first.1);
+            cap(&mut mesh, last.0, sub(last.0, pts[pts.len() - 2].0), last.1);
+        }
+    }
+    mesh
+}
+
+fn sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn normalise(v: [f32; 2]) -> [f32; 2] {
+    let l = v[0].hypot(v[1]);
+    if l < 1e-6 {
+        [1.0, 0.0]
+    } else {
+        [v[0] / l, v[1] / l]
+    }
+}
+
+fn strip(mesh: &mut Mesh, pts: &[([f32; 2], f32)]) {
+    let n = pts.len();
+    for i in 0..n {
+        let prev = pts[i.saturating_sub(1)].0;
+        let next = pts[(i + 1).min(n - 1)].0;
+        let t = normalise(sub(next, prev));
+        let nrm = [-t[1], t[0]];
+        let (c, r) = pts[i];
+        mesh.vertices.push([c[0] + nrm[0] * r, c[1] + nrm[1] * r]);
+        mesh.vertices.push([c[0] - nrm[0] * r, c[1] - nrm[1] * r]);
+    }
+    for i in 0..n as u32 - 1 {
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+        mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+    }
+}
+
+/// Half-disc cap facing `dir`.
+fn cap(mesh: &mut Mesh, c: [f32; 2], dir: [f32; 2], r: f32) {
+    let d = normalise(dir);
+    let base = d[1].atan2(d[0]) - std::f32::consts::FRAC_PI_2;
+    let centre = mesh.vertices.len() as u32;
+    mesh.vertices.push(c);
+    for i in 0..=CAP_SEGMENTS {
+        let a = base + std::f32::consts::PI * i as f32 / CAP_SEGMENTS as f32;
+        mesh.vertices.push([c[0] + a.cos() * r, c[1] + a.sin() * r]);
+    }
+    for i in 0..CAP_SEGMENTS as u32 {
+        mesh.indices
+            .extend_from_slice(&[centre, centre + 1 + i, centre + 2 + i]);
+    }
+}
+
+fn disc(mesh: &mut Mesh, c: [f32; 2], r: f32) {
+    cap(mesh, c, [1.0, 0.0], r);
+    cap(mesh, c, [-1.0, 0.0], r);
+}
+
+/// Does a circle at (`x`, `y`) with radius `r` touch the stroke (in the
+/// stroke's own coordinates)?
+pub fn hits(stroke: &Stroke, x: f32, y: f32, r: f32) -> bool {
+    let near = |p: &Point| r + stroke.width_at(p.pressure) * 0.5;
+    match stroke.points.as_slice() {
+        [] => false,
+        [p] => (p.x - x).hypot(p.y - y) <= near(p),
+        pts => pts.windows(2).any(|w| {
+            let (a, b) = (w[0], w[1]);
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 > 0.0 {
+                (((x - a.x) * dx + (y - a.y) * dy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (px, py) = (a.x + dx * t, a.y + dy * t);
+            (px - x).hypot(py - y) <= near(&a).max(near(&b))
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphony_core::id::Id;
+    use symphony_core::stroke::{ArtLayer, StrokeKind};
+
+    fn stroke(points: &[(f32, f32)]) -> Stroke {
+        Stroke {
+            id: Id(1),
+            kind: StrokeKind::Brush,
+            art: ArtLayer::LineArt,
+            swatch: Id(2),
+            min_width: 2.0,
+            max_width: 2.0,
+            points: points
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn pressure_curve_ends_are_fixed() {
+        assert_eq!(pressure_curve(0.0, 2.0), 0.0);
+        assert_eq!(pressure_curve(1.0, 0.5), 1.0);
+        assert!(pressure_curve(0.5, 0.5) > 0.5);
+    }
+
+    #[test]
+    fn smoother_ends_where_the_pen_lifted() {
+        let mut s = Smoother::new(0.8);
+        let mut out = vec![];
+        for x in 0..10 {
+            out.extend(s.push(
+                Point {
+                    x: x as f32 * 10.0,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+                0.1,
+            ));
+        }
+        out.extend(s.finish());
+        assert_eq!(out.last().unwrap().x, 90.0);
+        // Smoothed points lag the raw ones.
+        assert!(out[3].x < 30.0);
+    }
+
+    #[test]
+    fn tessellation_is_well_formed() {
+        let m = tessellate(
+            &stroke(&[(0.0, 0.0), (10.0, 0.0), (20.0, 5.0)]),
+            Affine::IDENTITY,
+            0.1,
+        );
+        assert!(m.indices.len().is_multiple_of(3) && !m.indices.is_empty());
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
+        // Width 2 means the strip spans y = -1..1 at the start.
+        assert!(m.vertices.iter().any(|v| (v[1] - 1.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn single_point_is_a_dot() {
+        let m = tessellate(&stroke(&[(5.0, 5.0)]), Affine::IDENTITY, 0.1);
+        assert!(!m.indices.is_empty());
+    }
+
+    #[test]
+    fn hit_test_respects_width() {
+        let s = stroke(&[(0.0, 0.0), (10.0, 0.0)]);
+        assert!(hits(&s, 5.0, 1.5, 1.0));
+        assert!(!hits(&s, 5.0, 3.0, 1.0));
+    }
+}

@@ -1,44 +1,62 @@
-/// One xsheet column: which drawing is exposed on each frame.
-/// Frames are 1-based to match how animators count.
-#[derive(Clone, Debug, Default, PartialEq)]
+//! The exposure sheet: which drawing each column shows on each frame.
+//! Frames are 1-based, as animators count (E2.4). Cells hold drawing IDs,
+//! so renaming a drawing never breaks timing (E2.2).
+
+use serde::{Deserialize, Serialize};
+
+use crate::id::Id;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Column {
+    pub id: Id,
     pub name: String,
-    cells: Vec<Option<String>>,
+    pub visible: bool,
+    #[serde(default)]
+    pub locked: bool,
+    cells: Vec<Option<Id>>,
 }
 
 impl Column {
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(id: Id, name: impl Into<String>) -> Self {
         Column {
+            id,
             name: name.into(),
+            visible: true,
+            locked: false,
             cells: Vec::new(),
         }
     }
 
-    pub fn get(&self, frame: u32) -> Option<&str> {
+    pub fn get(&self, frame: u32) -> Option<Id> {
         let i = frame.checked_sub(1)? as usize;
-        self.cells.get(i).and_then(|c| c.as_deref())
+        self.cells.get(i).copied().flatten()
     }
 
-    /// Set one cell. `None` clears it (an empty cell renders nothing).
-    pub fn set(&mut self, frame: u32, drawing: Option<&str>) {
+    /// Set one cell. `None` clears it.
+    pub fn set(&mut self, frame: u32, drawing: Option<Id>) {
         let Some(i) = frame.checked_sub(1).map(|f| f as usize) else {
             return;
         };
         if self.cells.len() <= i {
+            if drawing.is_none() {
+                return;
+            }
             self.cells.resize(i + 1, None);
         }
-        self.cells[i] = drawing.map(str::to_owned);
+        self.cells[i] = drawing;
+        while self.cells.last() == Some(&None) {
+            self.cells.pop();
+        }
     }
 
-    /// Expose `drawing` for `len` frames starting at `start`
-    /// (e.g. on twos: `expose("1", 1, 2); expose("2", 3, 2)`).
-    pub fn expose(&mut self, drawing: &str, start: u32, len: u32) {
+    /// Expose `drawing` for `len` frames starting at `start`.
+    pub fn expose(&mut self, drawing: Id, start: u32, len: u32) {
         for f in start..start + len {
             self.set(f, Some(drawing));
         }
     }
 
-    /// Last frame with a cell (exposed or explicitly empty).
+    /// Last frame with a drawing.
     pub fn len(&self) -> u32 {
         self.cells.len() as u32
     }
@@ -46,29 +64,42 @@ impl Column {
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
     }
+
+    /// First frame of the run of identical cells containing `frame`.
+    pub fn run_start(&self, frame: u32) -> u32 {
+        let d = self.get(frame);
+        let mut f = frame;
+        while f > 1 && self.get(f - 1) == d {
+            f -= 1;
+        }
+        f
+    }
+
+    /// Last frame of the run of identical cells containing `frame`.
+    pub fn run_end(&self, frame: u32) -> u32 {
+        let d = self.get(frame);
+        let mut f = frame;
+        while self.get(f + 1) == d && f < self.len() {
+            f += 1;
+        }
+        f
+    }
 }
 
-/// The exposure sheet: named drawing columns.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Xsheet {
     pub columns: Vec<Column>,
 }
 
 impl Xsheet {
-    pub fn column(&self, name: &str) -> Option<&Column> {
-        self.columns.iter().find(|c| c.name == name)
+    pub fn column(&self, id: Id) -> Option<&Column> {
+        self.columns.iter().find(|c| c.id == id)
     }
 
-    pub fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
-        self.columns.iter_mut().find(|c| c.name == name)
+    pub fn column_mut(&mut self, id: Id) -> Option<&mut Column> {
+        self.columns.iter_mut().find(|c| c.id == id)
     }
 
-    pub fn add_column(&mut self, name: impl Into<String>) -> &mut Column {
-        self.columns.push(Column::new(name));
-        self.columns.last_mut().expect("just pushed")
-    }
-
-    /// Scene length = longest column.
     pub fn length(&self) -> u32 {
         self.columns.iter().map(Column::len).max().unwrap_or(0)
     }
@@ -79,14 +110,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn on_twos() {
-        let mut col = Column::new("Arm");
-        col.expose("1", 1, 2);
-        col.expose("2", 3, 2);
+    fn on_twos_and_runs() {
+        let (a, b) = (Id(1), Id(2));
+        let mut col = Column::new(Id(9), "Arm");
+        col.expose(a, 1, 2);
+        col.expose(b, 3, 2);
         assert_eq!(col.get(0), None);
-        assert_eq!(col.get(2), Some("1"));
-        assert_eq!(col.get(3), Some("2"));
+        assert_eq!(col.get(2), Some(a));
+        assert_eq!(col.get(3), Some(b));
         assert_eq!(col.get(5), None);
         assert_eq!(col.len(), 4);
+        assert_eq!((col.run_start(4), col.run_end(3)), (3, 4));
+    }
+
+    #[test]
+    fn clearing_trailing_cells_shrinks_column() {
+        let mut col = Column::new(Id(9), "Arm");
+        col.expose(Id(1), 1, 3);
+        col.set(3, None);
+        assert_eq!(col.len(), 2);
     }
 }

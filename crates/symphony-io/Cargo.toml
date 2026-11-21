@@ -1,0 +1,11 @@
+[package]
+name = "symphony-io"
+description = "Saving and opening Symphony projects: versioned, atomic, with backups and crash recovery (ENGINEERING E7)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphony-core = { version = "0.0.1", path = "../symphony-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

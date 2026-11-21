@@ -1,16 +1,22 @@
 //! Node graph. Data flows top to bottom like Harmony's Node view:
 //! Peg -> Drawing -> Composite -> Display / Write.
+//!
+//! Node IDs are slots that are never reused, so removing a node leaves a
+//! gap instead of renumbering the others (E2.2).
+
+use serde::{Deserialize, Serialize};
 
 use crate::anim::Value;
+use crate::id::Id;
 use crate::math::Affine;
 use crate::xsheet::Xsheet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
-/// Transform parameters on a peg. Order: scale + rotate around the pivot,
-/// then translate by position.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Transform parameters on a peg. Order: scale and rotate around the
+/// pivot, then translate by position.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PegParams {
     pub x: Value,
     pub y: Value,
@@ -31,13 +37,27 @@ impl PegParams {
             .compose(Affine::scale(sx, sy))
             .compose(Affine::translate(-px, -py))
     }
+
+    /// Does any parameter have a key on `frame`?
+    pub fn has_key(&self, frame: u32) -> bool {
+        [
+            Some(&self.x),
+            Some(&self.y),
+            Some(&self.rotation),
+            self.scale_x.as_ref(),
+            self.scale_y.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| matches!(v, Value::Keys(k) if k.iter().any(|(f, _)| *f == frame)))
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     /// Shows whatever drawing its xsheet column exposes on the current frame.
     Drawing {
-        column: String,
+        column: Id,
     },
     Peg(PegParams),
     /// Stacks its inputs. Port 0 (leftmost) is in front.
@@ -48,7 +68,7 @@ pub enum NodeKind {
     Write,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
     pub kind: NodeKind,
@@ -56,16 +76,16 @@ pub struct Node {
 }
 
 /// Output of `from` feeds input port `port` of `to`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub from: NodeId,
     pub to: NodeId,
     pub port: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Graph {
-    nodes: Vec<Node>,
+    nodes: Vec<Option<Node>>,
     links: Vec<Link>,
 }
 
@@ -73,14 +93,14 @@ pub struct Graph {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderItem {
     pub node: NodeId,
-    pub column: String,
-    pub drawing: String,
+    pub column: Id,
+    pub drawing: Id,
     pub transform: Affine,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum EvalError {
-    /// Graph loops back on itself (or is absurdly deep).
+    /// The graph loops back on itself (or is absurdly deep).
     Cycle(NodeId),
     UnknownNode(NodeId),
 }
@@ -89,24 +109,47 @@ const MAX_DEPTH: usize = 512;
 
 impl Graph {
     pub fn add(&mut self, name: impl Into<String>, kind: NodeKind) -> NodeId {
-        self.nodes.push(Node {
+        self.nodes.push(Some(Node {
             name: name.into(),
             kind,
             enabled: true,
-        });
+        }));
         NodeId(self.nodes.len() - 1)
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(id.0)
+        self.nodes.get(id.0).and_then(Option::as_ref)
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
-        self.nodes.get_mut(id.0)
+        self.nodes.get_mut(id.0).and_then(Option::as_mut)
+    }
+
+    /// Remove a node and its links. Returns them so the removal can be undone.
+    pub fn remove(&mut self, id: NodeId) -> Option<(Node, Vec<Link>)> {
+        let node = self.nodes.get_mut(id.0)?.take()?;
+        let (gone, keep): (Vec<Link>, Vec<Link>) =
+            self.links.iter().partition(|l| l.from == id || l.to == id);
+        self.links = keep;
+        Some((node, gone))
+    }
+
+    /// Put a removed node back in its original slot.
+    pub fn restore(&mut self, id: NodeId, node: Node, links: &[Link]) {
+        if self.nodes.len() <= id.0 {
+            self.nodes.resize(id.0 + 1, None);
+        }
+        self.nodes[id.0] = Some(node);
+        for l in links {
+            self.connect(l.from, l.to, l.port);
+        }
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &Node)> {
-        self.nodes.iter().enumerate().map(|(i, n)| (NodeId(i), n))
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.as_ref().map(|n| (NodeId(i), n)))
     }
 
     pub fn links(&self) -> &[Link] {
@@ -117,6 +160,10 @@ impl Graph {
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: usize) {
         self.links.retain(|l| !(l.to == to && l.port == port));
         self.links.push(Link { from, to, port });
+    }
+
+    pub fn disconnect_inputs(&mut self, to: NodeId) {
+        self.links.retain(|l| l.to != to);
     }
 
     pub fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
@@ -138,8 +185,7 @@ impl Graph {
         v
     }
 
-    /// Everything visible from `out` (a Display or Write) on `frame`,
-    /// back to front.
+    /// Everything visible from `out` (a Display or Write) on `frame`, back to front.
     pub fn evaluate(
         &self,
         out: NodeId,
@@ -185,22 +231,22 @@ impl Graph {
                 }
             }
             NodeKind::Composite => {
-                // Highest port is furthest back, so emit it first.
+                // Highest port is furthest back, so it's emitted first.
                 for (_, src) in self.inputs(id).into_iter().rev() {
                     self.eval_image(src, xs, frame, depth + 1, out)?;
                 }
             }
             NodeKind::Drawing { column } => {
-                let exposed = xs.column(column).and_then(|c| c.get(frame));
-                if let Some(drawing) = exposed {
+                let col = xs.column(*column);
+                if let Some(drawing) = col.filter(|c| c.visible).and_then(|c| c.get(frame)) {
                     let transform = match self.input(id, 0) {
                         Some(p) => self.eval_transform(p, frame, depth + 1)?,
                         None => Affine::IDENTITY,
                     };
                     out.push(RenderItem {
                         node: id,
-                        column: column.clone(),
-                        drawing: drawing.to_owned(),
+                        column: *column,
+                        drawing,
                         transform,
                     });
                 }
@@ -226,35 +272,30 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xsheet::Column;
 
     /// Body (back) under a peg, Head (front); a Composite into a Display.
     fn scene() -> (Graph, Xsheet, NodeId, NodeId) {
+        let (head_c, body_c) = (Id(1), Id(2));
         let mut xs = Xsheet::default();
-        xs.add_column("Head").expose("1", 1, 4);
-        xs.add_column("Body").expose("a", 1, 2);
+        let mut head = Column::new(head_c, "Head");
+        head.expose(Id(10), 1, 4);
+        let mut body = Column::new(body_c, "Body");
+        body.expose(Id(20), 1, 2);
+        xs.columns = vec![head, body];
 
         let mut g = Graph::default();
         let mut peg = PegParams::default();
         peg.x.set_key(1, 0.0);
         peg.x.set_key(3, 20.0);
         let body_peg = g.add("Body-P", NodeKind::Peg(peg));
-        let head = g.add(
-            "Head",
-            NodeKind::Drawing {
-                column: "Head".into(),
-            },
-        );
-        let body = g.add(
-            "Body",
-            NodeKind::Drawing {
-                column: "Body".into(),
-            },
-        );
+        let head_n = g.add("Head", NodeKind::Drawing { column: head_c });
+        let body_n = g.add("Body", NodeKind::Drawing { column: body_c });
         let comp = g.add("Composite", NodeKind::Composite);
         let display = g.add("Display", NodeKind::Display);
-        g.connect(body_peg, body, 0);
-        g.connect(head, comp, 0);
-        g.connect(body, comp, 1);
+        g.connect(body_peg, body_n, 0);
+        g.connect(head_n, comp, 0);
+        g.connect(body_n, comp, 1);
         g.connect(comp, display, 0);
         (g, xs, display, body_peg)
     }
@@ -263,8 +304,8 @@ mod tests {
     fn back_to_front_with_peg() {
         let (g, xs, display, _) = scene();
         let items = g.evaluate(display, &xs, 2).unwrap();
-        let names: Vec<_> = items.iter().map(|i| i.column.as_str()).collect();
-        assert_eq!(names, ["Body", "Head"]);
+        let cols: Vec<_> = items.iter().map(|i| i.column).collect();
+        assert_eq!(cols, [Id(2), Id(1)]);
         assert_eq!(items[0].transform.tx, 10.0);
         assert_eq!(items[1].transform, Affine::IDENTITY);
     }
@@ -274,7 +315,14 @@ mod tests {
         let (g, xs, display, _) = scene();
         let items = g.evaluate(display, &xs, 3).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].column, "Head");
+        assert_eq!(items[0].column, Id(1));
+    }
+
+    #[test]
+    fn hidden_column_draws_nothing() {
+        let (g, mut xs, display, _) = scene();
+        xs.columns[0].visible = false;
+        assert_eq!(g.evaluate(display, &xs, 1).unwrap().len(), 1);
     }
 
     #[test]
@@ -285,5 +333,14 @@ mod tests {
             g.evaluate(display, &xs, 1),
             Err(EvalError::Cycle(_))
         ));
+    }
+
+    #[test]
+    fn remove_and_restore_keeps_ids() {
+        let (mut g, xs, display, body_peg) = scene();
+        let (node, links) = g.remove(body_peg).unwrap();
+        assert!(g.node(body_peg).is_none());
+        g.restore(body_peg, node, &links);
+        assert_eq!(g.evaluate(display, &xs, 2).unwrap()[0].transform.tx, 10.0);
     }
 }

@@ -1,12 +1,17 @@
-//! Symphony core: the scene model, kept free of any UI or GPU code so the
-//! front end can change without touching it.
+//! Symphony core: the document model, kept free of UI, GPU and file IO so
+//! it can be tested and scripted headless (ENGINEERING E1.2).
 //!
-//! - [`xsheet`]: columns of exposed drawings per frame (frames are 1-based).
-//! - [`graph`]: the node graph (Drawing, Peg, Composite, Display, Write).
-//! - [`anim`]: animatable values (constant or keyframed).
-//! - [`math`]: 2D affine transforms.
+//! - [`id`]: stable IDs (E2.2).
+//! - [`doc`]: the scene document: layers, xsheet, graph, drawings, palette.
+//! - [`history`]: undoable edits (E3).
+//! - [`xsheet`], [`graph`], [`stroke`], [`palette`], [`anim`], [`math`]: parts.
 
 pub mod anim;
+pub mod doc;
 pub mod graph;
+pub mod history;
+pub mod id;
 pub mod math;
+pub mod palette;
+pub mod stroke;
 pub mod xsheet;

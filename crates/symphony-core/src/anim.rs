@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 /// A parameter that is either constant or keyframed.
 /// Keys are `(frame, value)`, frames 1-based. Between keys: linear for now
 /// (Bezier/ease curves come with the Function view). Outside keys: hold.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Constant(f32),
     Keys(Vec<(u32, f32)>),
