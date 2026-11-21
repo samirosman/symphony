@@ -234,12 +234,13 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
 ## 7. Icons
 
 - **D7.1 Our own icon set**, drawn in code
-  (`crates/symphony-app/src/icons.rs`) so it stays sharp at any scale.
+  (`crates/symphony-ui/src/icons.rs`) so it stays sharp at any scale.
   **No emoji, and no Unicode symbols used as icons.** No third-party
   icon fonts mixed in.
 - **D7.2 Drawing grid.**
   - 16×16 units, with 2 units of padding.
-  - Strokes are 1.5 units with round caps and joins.
+  - Strokes are 1.5 units with round caps and joins. Check the 16 px toolbar glyph beside its 20 px tool-strip version. Keep enclosed spaces open at the smaller size.
+  - Compare related actions side by side. Directional pairs share geometry, and each drawing tool has a recognizable working tip.
   - Outline style. Solid fill only where it *means* something: play,
     record, a set keyframe, an active state.
 - **D7.3 Colour.**

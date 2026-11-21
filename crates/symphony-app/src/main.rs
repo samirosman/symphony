@@ -245,7 +245,7 @@ impl SymphonyApp {
             export: Default::default(),
             maximised: None,
             show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
-            show_icon_sheet: false,
+            show_icon_sheet: std::env::var_os("SYMPHONY_SHOT_ICONS").is_some(),
             last_time: None,
             frame_clock: 0.0,
             shot,

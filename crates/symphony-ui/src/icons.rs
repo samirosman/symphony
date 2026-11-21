@@ -89,10 +89,22 @@ impl Grid {
         Stroke::new(1.5 * self.unit, self.colour)
     }
     fn line(&self, painter: &Painter, xy: &[(f32, f32)]) {
-        painter.add(Shape::line(self.pts(xy), self.stroke()));
+        // Round each vertex explicitly: the default polyline uses pointed joins.
+        for edge in xy.windows(2) {
+            painter.line_segment(
+                [self.p(edge[0].0, edge[0].1), self.p(edge[1].0, edge[1].1)],
+                self.stroke(),
+            );
+        }
+        for &(x, y) in xy {
+            self.dot(painter, x, y, 0.75);
+        }
     }
     fn closed(&self, painter: &Painter, xy: &[(f32, f32)]) {
-        painter.add(Shape::closed_line(self.pts(xy), self.stroke()));
+        self.line(painter, xy);
+        if let (Some(&(x, y)), Some(&(u, v))) = (xy.first(), xy.last()) {
+            painter.line_segment([self.p(x, y), self.p(u, v)], self.stroke());
+        }
     }
     fn fill(&self, painter: &Painter, xy: &[(f32, f32)]) {
         painter.add(Shape::convex_polygon(
@@ -121,7 +133,7 @@ fn eye_outline(g: &Grid, painter: &Painter) {
         pts.push((2.0 + 12.0 * t, 8.0 + 4.2 * (PI * t).sin()));
     }
     g.closed(painter, &pts);
-    g.circle(painter, 8.0, 8.0, 2.0);
+    g.dot(painter, 8.0, 8.0, 1.75);
 }
 
 /// Paint `icon` filling `rect` (square) in `colour`.
@@ -161,30 +173,28 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             }
         }
         Icon::Brush => {
-            // A tapered handle, a short ferrule and a loaded tuft curling left.
-            g.fill(
+            g.closed(
                 p,
                 &[
-                    (7.1, 7.6),
-                    (12.9, 1.9),
-                    (14.0, 1.6),
-                    (14.2, 2.8),
-                    (8.8, 9.2),
+                    (7.1, 7.8),
+                    (12.7, 2.4),
+                    (13.5, 2.5),
+                    (13.7, 3.3),
+                    (9.1, 9.5),
                 ],
             );
-            g.line(p, &[(6.8, 7.8), (8.4, 9.4)]);
-            g.fill(
+            g.closed(
                 p,
                 &[
-                    (6.0, 8.7),
-                    (7.7, 10.2),
-                    (7.2, 12.1),
-                    (5.8, 13.4),
-                    (3.8, 14.0),
-                    (1.4, 13.5),
-                    (3.4, 12.0),
-                    (3.9, 10.2),
-                    (4.7, 9.1),
+                    (7.0, 8.2),
+                    (8.8, 9.8),
+                    (8.0, 11.6),
+                    (6.4, 12.8),
+                    (4.3, 13.3),
+                    (2.4, 13.1),
+                    (3.7, 11.8),
+                    (4.3, 9.9),
+                    (5.4, 8.7),
                 ],
             );
         }
@@ -202,7 +212,6 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                 ],
             );
             g.line(p, &[(9.4, 3.7), (12.3, 6.6)]);
-            g.line(p, &[(3.2, 10.2), (5.8, 12.8)]);
         }
         Icon::Eraser => {
             g.closed(
@@ -215,22 +224,22 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                     (5.9, 13.4),
                 ],
             );
-            g.fill(p, &[(6.3, 5.1), (9.3, 2.1), (14.0, 6.8), (11.0, 9.8)]);
+            g.line(p, &[(5.9, 5.5), (10.5, 10.1)]);
             g.line(p, &[(7.2, 13.5), (14.0, 13.5)]);
         }
         Icon::Paint => {
-            g.closed(p, &[(1.6, 8.3), (7.7, 2.2), (13.0, 7.5), (6.7, 13.6)]);
-            g.fill(p, &[(2.1, 8.3), (12.0, 8.3), (6.7, 13.6)]);
-            g.line(p, &[(4.5, 1.6), (7.4, 5.9)]);
+            g.closed(p, &[(2.4, 8.0), (7.4, 3.0), (12.2, 7.8), (7.0, 13.0)]);
+            g.line(p, &[(4.1, 2.1), (7.4, 5.4)]);
+            g.line(p, &[(3.2, 8.8), (11.2, 8.8)]);
             g.fill(
                 p,
                 &[
-                    (13.4, 9.4),
-                    (14.9, 12.1),
-                    (14.8, 13.2),
-                    (13.7, 13.9),
-                    (12.5, 13.6),
-                    (12.1, 12.4),
+                    (13.0, 9.6),
+                    (14.4, 12.2),
+                    (14.1, 13.3),
+                    (13.0, 13.8),
+                    (11.9, 13.3),
+                    (11.6, 12.2),
                 ],
             );
         }
@@ -250,29 +259,35 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             g.dot(p, 12.2, 3.8, 2.3);
         }
         Icon::Hand => {
-            g.fill(
+            // Side-on thumb and grouped fingers leave a single open palm at 16 px.
+            g.closed(
                 p,
                 &[
-                    (4.6, 7.7),
-                    (13.7, 7.5),
-                    (13.5, 10.7),
-                    (12.0, 13.7),
-                    (7.2, 14.0),
-                    (4.6, 11.4),
+                    (6.4, 13.4),
+                    (2.2, 8.3),
+                    (2.3, 7.5),
+                    (3.2, 7.2),
+                    (5.2, 8.9),
+                    (4.8, 4.2),
+                    (5.3, 3.4),
+                    (6.1, 3.5),
+                    (6.8, 7.0),
+                    (6.8, 2.7),
+                    (7.5, 2.1),
+                    (8.3, 2.6),
+                    (8.6, 6.7),
+                    (8.9, 3.4),
+                    (9.6, 2.9),
+                    (10.3, 3.5),
+                    (10.5, 7.0),
+                    (11.0, 5.2),
+                    (11.8, 4.8),
+                    (12.6, 5.5),
+                    (12.9, 9.1),
+                    (12.4, 11.3),
+                    (11.0, 13.4),
                 ],
             );
-            // Rounded fingertips leave open channels above the knuckles.
-            for (base, tip) in [
-                ((5.7, 8.6), (5.0, 4.2)),
-                ((8.0, 8.4), (7.7, 2.2)),
-                ((10.4, 8.4), (10.5, 3.0)),
-                ((12.7, 8.8), (13.1, 5.1)),
-                ((5.8, 10.9), (2.5, 7.7)),
-            ] {
-                let stroke = Stroke::new(1.8 * g.unit, colour);
-                p.line_segment([g.p(base.0, base.1), g.p(tip.0, tip.1)], stroke);
-                g.dot(p, tip.0, tip.1, 0.9);
-            }
         }
         Icon::Zoom => {
             g.circle(p, 7.0, 7.0, 4.2);
@@ -306,8 +321,19 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         }
         Icon::Eye => eye_outline(&g, p),
         Icon::EyeOff => {
-            eye_outline(&g, p);
-            g.line(p, &[(3.0, 13.0), (13.0, 3.0)]);
+            g.line(
+                p,
+                &[
+                    (2.2, 7.4),
+                    (4.7, 9.8),
+                    (7.8, 10.7),
+                    (11.1, 9.9),
+                    (13.8, 7.4),
+                ],
+            );
+            for (x, y, dx) in [(4.5, 9.9, -1.1), (8.0, 10.8, 0.0), (11.5, 9.9, 1.1)] {
+                g.line(p, &[(x, y), (x + dx, y + 1.8)]);
+            }
         }
         // Three overlapping sheets: onion skin.
         Icon::Onion => {
@@ -327,21 +353,20 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             g.closed(p, &[(6.0, 6.0), (10.0, 6.0), (10.0, 10.0), (6.0, 10.0)]);
         }
         Icon::RotateLeft | Icon::RotateRight => {
-            let flip = if icon == Icon::RotateLeft { -1.0 } else { 1.0 };
-            let arc: Vec<(f32, f32)> = (0..=10)
+            let direction = if icon == Icon::RotateRight { 1.0 } else { -1.0 };
+            let arc: Vec<_> = (0..=20)
                 .map(|i| {
-                    let a = (-150.0 + 240.0 * i as f32 / 10.0_f32).to_radians();
-                    (8.0 + flip * 5.0 * a.cos(), 8.5 + 5.0 * a.sin())
+                    let angle = (65.0 + 245.0 * i as f32 / 20.0).to_radians();
+                    (8.0 + direction * 5.0 * angle.cos(), 8.5 + 5.0 * angle.sin())
                 })
                 .collect();
             g.line(p, &arc);
-            let tip = arc[0];
             g.line(
                 p,
                 &[
-                    (tip.0 + flip * 2.8, tip.1 - 0.2),
-                    tip,
-                    (tip.0 + flip * 0.6, tip.1 + 2.8),
+                    (8.0 + direction * 3.3, 2.1),
+                    (8.0 + direction * 3.3, 4.8),
+                    (8.0 + direction * 0.6, 4.8),
                 ],
             );
         }

@@ -384,16 +384,35 @@ pub fn preferences(
 
 /// Help > Icon sheet: every icon side by side for review (D7.7).
 pub fn icon_sheet(ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        for icon in Icon::ALL {
-            icons::button(ui, icon, false, true, &format!("{icon:?}"));
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        for icon in Icon::ALL {
-            icons::button(ui, icon, true, true, &format!("{icon:?} (active)"));
-        }
-    });
+    egui::Grid::new("icon-proof")
+        .spacing(egui::vec2(6.0, 4.0))
+        .show(ui, |ui| {
+            for group in Icon::ALL.chunks(9) {
+                for &icon in group {
+                    ui.vertical_centered(|ui| {
+                        ui.set_width(74.0);
+                        icons::button(ui, icon, false, true, &format!("{icon:?}"));
+                        icons::tool_button(ui, icon, true, true, &format!("{icon:?}"));
+                        let label = match icon {
+                            Icon::FirstFrame => "First frame",
+                            Icon::PrevFrame => "Previous frame",
+                            Icon::NextFrame => "Next frame",
+                            Icon::LastFrame => "Last frame",
+                            Icon::EyeOff => "Hidden",
+                            Icon::Eye => "Visible",
+                            Icon::Onion => "Onion skin",
+                            Icon::RotateLeft => "Rotate left",
+                            Icon::RotateRight => "Rotate right",
+                            Icon::ZoomOut => "Zoom out",
+                            Icon::CloseGap => "Close gap",
+                            _ => &format!("{icon:?}"),
+                        };
+                        ui.small(label);
+                    });
+                }
+                ui.end_row();
+            }
+        });
 }
 
 pub fn planned(ui: &mut egui::Ui, what: &str, milestone: &str) {
