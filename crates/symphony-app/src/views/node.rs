@@ -6,7 +6,7 @@
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
 
-use crate::scene::Scene;
+use crate::session::Session;
 use symphony_ui::theme;
 
 #[derive(Default)]
@@ -30,7 +30,7 @@ fn kind_label(kind: &NodeKind) -> &'static str {
     }
 }
 
-pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
+pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     painter.rect_filled(resp.rect, 0.0, theme::BG_PANEL);
     if resp.dragged() {
@@ -47,26 +47,27 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
         }
         y += GRID;
     }
-    let n = scene.layers.len().max(1) as f32;
+    let n = s.doc.layers.len().max(1) as f32;
     let top = resp.rect.center_top() + Vec2::new(0.0, 32.0) + state.pan;
     let col_x = |i: usize| top.x + (i as f32 - (n - 1.0) / 2.0) * (W + 24.0);
 
     // Layer i's peg and drawing sit in column i (front layer on the left,
     // matching composite port order). Composite and display are centred.
     let mut pos: Vec<(NodeId, Pos2)> = Vec::new();
-    for (i, l) in scene.layers.iter().enumerate() {
+    for (i, l) in s.doc.layers.iter().enumerate() {
         pos.push((l.peg, Pos2::new(col_x(i), top.y)));
         pos.push((l.node, Pos2::new(col_x(i), top.y + 88.0)));
     }
-    pos.push((scene.composite, Pos2::new(top.x, top.y + 184.0)));
-    pos.push((scene.display, Pos2::new(top.x, top.y + 272.0)));
+    pos.push((s.doc.composite, Pos2::new(top.x, top.y + 184.0)));
+    pos.push((s.doc.display, Pos2::new(top.x, top.y + 272.0)));
     let at = |id: NodeId| pos.iter().find(|(n, _)| *n == id).map(|(_, p)| *p);
 
-    for link in scene.graph.links() {
+    for link in s.doc.graph.links() {
         let (Some(a), Some(b)) = (at(link.from), at(link.to)) else {
             continue;
         };
-        let inputs = scene
+        let inputs = s
+            .doc
             .graph
             .links()
             .iter()
@@ -91,11 +92,11 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
         painter.circle_filled(to, 3.0, theme::TEXT_PRIMARY);
     }
 
-    let selected = &scene.layers[scene.selected];
+    let selected = &s.doc.layers[s.selected];
     let (sel_peg, sel_node) = (selected.peg, selected.node);
     let mut clicked_layer = None;
     for (id, p) in &pos {
-        let Some(node) = scene.graph.node(*id) else {
+        let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
         let r = Rect::from_center_size(*p, Vec2::new(W, H));
@@ -139,13 +140,14 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, state: &mut NodeViewState) {
             );
         }
         if resp.clicked() && resp.interact_pointer_pos().is_some_and(|q| r.contains(q)) {
-            clicked_layer = scene
+            clicked_layer = s
+                .doc
                 .layers
                 .iter()
                 .position(|l| l.peg == *id || l.node == *id);
         }
     }
     if let Some(i) = clicked_layer {
-        scene.selected = i;
+        s.selected = i;
     }
 }

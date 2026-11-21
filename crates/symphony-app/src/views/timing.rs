@@ -1,24 +1,30 @@
 //! Timeline and Xsheet: two views over the same exposure data.
 //! Click a cell to go to that frame and select that layer (D8.9).
+//! Double-click a layer name to rename it; right-click for layer actions.
 //! The amber playhead and frame tag are Symphony's signature (D3.9).
 
 use eframe::egui::{self, Align2, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
-use symphony_core::anim::Value;
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
 
 use crate::keymap::{self, Action, Profile};
-use crate::scene::Scene;
+use crate::session::Session;
 
-/// View header: transport and timing fields (D3.2).
-pub fn transport(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
+#[derive(Default)]
+pub struct TimingState {
+    renaming: Option<(usize, String)>,
+    menu_row: Option<usize>,
+}
+
+/// View header: transport, timing fields and layer buttons (D3.2).
+pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 6))
+        .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if icons::button(ui, Icon::FirstFrame, false, true, "First frame").clicked() {
-                    scene.frame = 1;
+                    s.frame = 1;
                 }
                 if icons::button(
                     ui,
@@ -29,23 +35,19 @@ pub fn transport(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                 )
                 .clicked()
                 {
-                    scene.frame = scene.frame.saturating_sub(1).max(1);
+                    s.frame = s.frame.saturating_sub(1).max(1);
                 }
-                let icon = if scene.playing {
-                    Icon::Pause
-                } else {
-                    Icon::Play
-                };
+                let icon = if s.playing { Icon::Pause } else { Icon::Play };
                 if icons::button(
                     ui,
                     icon,
-                    scene.playing,
+                    s.playing,
                     true,
                     &keymap::tooltip(profile, Action::PlayPause),
                 )
                 .clicked()
                 {
-                    scene.playing = !scene.playing;
+                    s.playing = !s.playing;
                 }
                 if icons::button(
                     ui,
@@ -56,49 +58,61 @@ pub fn transport(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                 )
                 .clicked()
                 {
-                    scene.frame = (scene.frame + 1).min(scene.length);
+                    s.frame = (s.frame + 1).min(s.length());
                 }
                 if icons::button(ui, Icon::LastFrame, false, true, "Last frame").clicked() {
-                    scene.frame = scene.length;
+                    s.frame = s.length();
                 }
                 ui.add_space(16.0);
                 ui.spacing_mut().item_spacing.x = 8.0;
+                let len = s.length();
                 ui.add(
-                    egui::DragValue::new(&mut scene.frame)
-                        .range(1..=scene.length)
+                    egui::DragValue::new(&mut s.frame)
+                        .range(1..=len)
                         .prefix("Frame "),
                 );
-                ui.add(
-                    egui::DragValue::new(&mut scene.length)
+                let mut length = len;
+                let r = ui.add(
+                    egui::DragValue::new(&mut length)
                         .range(1..=10_000)
                         .prefix("Length "),
                 );
+                if r.changed() {
+                    s.set_length(length);
+                    s.frame = s.frame.min(length);
+                }
+                if r.drag_stopped() || r.lost_focus() {
+                    s.end_gesture();
+                }
                 ui.add(
-                    egui::DragValue::new(&mut scene.fps)
+                    egui::DragValue::new(&mut s.doc.settings.fps)
                         .range(1.0..=120.0)
                         .suffix(" fps"),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if icons::button(ui, Icon::Trash, false, s.layer_count() > 1, "Delete layer")
+                        .clicked()
+                    {
+                        s.delete_layer(s.selected);
+                    }
+                    if icons::button(
+                        ui,
+                        Icon::Plus,
+                        false,
+                        true,
+                        &keymap::tooltip(profile, Action::AddLayer),
+                    )
+                    .clicked()
+                    {
+                        s.add_layer();
+                    }
+                });
             });
         });
 }
 
-fn peg_has_key(scene: &Scene, layer: usize, frame: u32) -> bool {
-    let Some(p) = scene.peg_params(layer) else {
-        return false;
-    };
-    let vals = [
-        Some(&p.x),
-        Some(&p.y),
-        Some(&p.rotation),
-        p.scale_x.as_ref(),
-        p.scale_y.as_ref(),
-    ];
-    vals.into_iter()
-        .flatten()
-        .any(|v| matches!(v, Value::Keys(k) if k.iter().any(|(f, _)| *f == frame)))
-}
-
-/// Keyframe: amber diamond (amber = time, and a shape as well, D4.5).
+/// Keyframe: amber diamond (amber = time, plus a shape, D4.5).
 fn key_diamond(painter: &egui::Painter, c: Pos2, r: f32) {
     let pts = vec![
         c + Vec2::new(0.0, -r),
@@ -128,14 +142,63 @@ fn frame_tag(painter: &egui::Painter, centre: Pos2, frame: u32) {
     );
 }
 
-pub fn timeline(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
-    transport(ui, scene, profile);
+fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usize) {
+    if ui.button("Rename layer").clicked() {
+        t.renaming = Some((row, s.layer_name(row).to_owned()));
+        ui.close();
+    }
+    let vis = if s.layer_visible(row) {
+        "Hide layer"
+    } else {
+        "Show layer"
+    };
+    if ui.button(vis).clicked() {
+        s.toggle_visible(row);
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add_enabled(s.layer_count() > 1, egui::Button::new("Delete layer"))
+        .clicked()
+    {
+        s.delete_layer(row);
+        ui.close();
+    }
+}
+
+/// Inline rename field over a layer name. Enter or clicking away keeps it,
+/// Escape cancels (D8.6).
+fn rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
+    let Some((row, text)) = t.renaming.as_mut() else {
+        return;
+    };
+    let row = *row;
+    let resp = ui.put(rect, egui::TextEdit::singleline(text).font(theme::body()));
+    resp.request_focus();
+    let (enter, esc) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if esc {
+        t.renaming = None;
+    } else if enter || resp.lost_focus() {
+        let name = text.clone();
+        t.renaming = None;
+        s.rename_layer(row, &name);
+    }
+}
+
+pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {
+    header(ui, s, profile);
     const HEAD: f32 = 176.0;
     const RULER: f32 = 28.0;
     let cw = theme::FRAME_CELL;
     let rh = theme::ROW;
-    let rows = scene.layers.len();
-    let width = HEAD + scene.length as f32 * cw + 16.0;
+    let rows = s.layer_count();
+    let len = s.length();
+    let width = HEAD + len as f32 * cw + 16.0;
 
     egui::ScrollArea::both()
         .auto_shrink([false, false])
@@ -149,17 +212,14 @@ pub fn timeline(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + rows as f32 * rh;
 
-            // Every 5th frame gets a faint column line, so timing reads at a glance.
-            for f in (5..=scene.length).step_by(5) {
+            for f in (5..=len).step_by(5) {
                 let x = frame_x(f) + cw;
                 painter.line_segment(
                     [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
                     Stroke::new(1.0, theme::LINE_SUBTLE),
                 );
             }
-
-            // Ruler.
-            for f in 1..=scene.length {
+            for f in 1..=len {
                 let x = frame_x(f) + cw / 2.0;
                 let major = f % 5 == 0 || f == 1;
                 let top = if major { 16.0 } else { 21.0 };
@@ -178,9 +238,10 @@ pub fn timeline(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                 }
             }
 
-            for (i, layer) in scene.layers.iter().enumerate() {
+            for i in 0..rows {
                 let y = o.y + RULER + i as f32 * rh;
-                let sel = i == scene.selected;
+                let sel = i == s.selected;
+                let visible = s.layer_visible(i);
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
                     Vec2::new(width - 8.0, rh - 2.0),
@@ -199,47 +260,43 @@ pub fn timeline(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                         theme::ACCENT_SELECT,
                     );
                 }
-                let eye = if layer.visible {
-                    Icon::Eye
-                } else {
-                    Icon::EyeOff
-                };
+                let eye = if visible { Icon::Eye } else { Icon::EyeOff };
                 let eye_rect =
                     Rect::from_center_size(Pos2::new(o.x + 22.0, y + rh / 2.0), Vec2::splat(16.0));
                 icons::paint(
                     &painter,
                     eye_rect,
                     eye,
-                    if layer.visible {
+                    if visible {
                         theme::TEXT_SECONDARY
                     } else {
                         theme::TEXT_DISABLED
                     },
                 );
-                let name_col = if layer.visible {
-                    theme::TEXT_PRIMARY
-                } else {
-                    theme::TEXT_SECONDARY
-                };
-                painter.text(
-                    Pos2::new(o.x + 40.0, y + rh / 2.0),
-                    Align2::LEFT_CENTER,
-                    &layer.name,
-                    theme::body(),
-                    name_col,
-                );
+                if !matches!(t.renaming, Some((r, _)) if r == i) {
+                    let name_col = if visible {
+                        theme::TEXT_PRIMARY
+                    } else {
+                        theme::TEXT_SECONDARY
+                    };
+                    painter.text(
+                        Pos2::new(o.x + 40.0, y + rh / 2.0),
+                        Align2::LEFT_CENTER,
+                        s.layer_name(i),
+                        theme::body(),
+                        name_col,
+                    );
+                }
 
-                // Exposure blocks: one per run of the same drawing, neutral so the
-                // amber playhead stays the brightest thing on the timeline.
-                if let Some(col) = scene.xsheet.column(&layer.name) {
+                if let Some(col) = s.doc.column(i) {
                     let mut f = 1;
-                    while f <= scene.length {
+                    while f <= len {
                         let Some(d) = col.get(f) else {
                             f += 1;
                             continue;
                         };
                         let start = f;
-                        while f <= scene.length && col.get(f) == Some(d) {
+                        while f <= len && col.get(f) == Some(d) {
                             f += 1;
                         }
                         let block = Rect::from_min_max(
@@ -252,61 +309,97 @@ pub fn timeline(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                             theme::BG_HOVER
                         };
                         painter.rect_filled(block, theme::RADIUS_CONTROL as f32, fill);
+                        let name = s
+                            .doc
+                            .drawings
+                            .get(&d)
+                            .map(|d| d.name.as_str())
+                            .unwrap_or("?");
                         if block.width() > 14.0 {
                             painter.text(
                                 block.left_center() + Vec2::new(5.0, 0.0),
                                 Align2::LEFT_CENTER,
-                                d,
+                                name,
                                 theme::dense(),
                                 theme::TEXT_PRIMARY,
                             );
                         }
                     }
                 }
-                for f in 1..=scene.length {
-                    if peg_has_key(scene, i, f) {
-                        key_diamond(
-                            &painter,
-                            Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0),
-                            4.5,
-                        );
+                if let Some(peg) = s.doc.peg(i) {
+                    for f in 1..=len {
+                        if peg.has_key(f) {
+                            key_diamond(
+                                &painter,
+                                Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0),
+                                4.5,
+                            );
+                        }
                     }
                 }
             }
 
-            // Playhead and frame tag (D3.9).
-            let cx = frame_x(scene.frame) + cw / 2.0;
+            let cx = frame_x(s.frame.min(len)) + cw / 2.0;
             painter.line_segment(
                 [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
                 Stroke::new(1.5, theme::ACCENT_TIME),
             );
-            frame_tag(&painter, Pos2::new(cx, o.y + RULER - 12.0), scene.frame);
+            frame_tag(&painter, Pos2::new(cx, o.y + RULER - 12.0), s.frame);
 
+            let row_at = |p: Pos2| -> Option<usize> {
+                let r = ((p.y - o.y - RULER) / rh).floor();
+                (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
+            };
             if let Some(p) = resp.interact_pointer_pos() {
                 let rel = p - o;
                 if rel.x >= HEAD {
-                    scene.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, scene.length);
+                    s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);
                 }
-                if rel.y >= RULER && (resp.clicked() || resp.drag_started()) {
-                    let row = ((rel.y - RULER) / rh) as usize;
-                    if row < scene.layers.len() {
+                if let Some(row) = row_at(p) {
+                    if resp.clicked() || resp.drag_started() {
                         if rel.x < 32.0 && resp.clicked() {
-                            scene.layers[row].visible = !scene.layers[row].visible;
+                            s.toggle_visible(row);
                         }
-                        scene.selected = row;
+                        s.selected = row;
+                    }
+                    if resp.double_clicked() && rel.x < HEAD {
+                        t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
                 }
+            }
+            if resp.secondary_clicked() {
+                t.menu_row = resp.interact_pointer_pos().and_then(row_at);
+                if let Some(r) = t.menu_row {
+                    s.selected = r;
+                }
+            }
+            if let Some(row) = t.menu_row {
+                resp.context_menu(|ui| layer_menu(ui, s, t, row));
+            }
+
+            if let Some((row, _)) = t.renaming {
+                let y = o.y + RULER + row as f32 * rh;
+                rename_field(
+                    ui,
+                    s,
+                    t,
+                    Rect::from_min_size(
+                        Pos2::new(o.x + 36.0, y + 3.0),
+                        Vec2::new(HEAD - 44.0, rh - 6.0),
+                    ),
+                );
             }
         });
 }
 
-pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
-    transport(ui, scene, profile);
+pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {
+    header(ui, s, profile);
     const NUM: f32 = 48.0;
     const CW: f32 = 72.0;
     const HEAD: f32 = 28.0;
     let rh = theme::XSHEET_ROW;
-    let cols = scene.layers.len();
+    let cols = s.layer_count();
+    let len = s.length();
     let width = NUM + cols as f32 * CW + 8.0;
 
     egui::ScrollArea::both()
@@ -314,13 +407,13 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
         .show(ui, |ui| {
             let size = Vec2::new(
                 width.max(ui.available_width()),
-                HEAD + scene.length as f32 * rh + 8.0,
+                HEAD + len as f32 * rh + 8.0,
             );
             let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
             let o = resp.rect.min;
             let row_y = |f: u32| o.y + HEAD + (f - 1) as f32 * rh;
 
-            for f in 1..=scene.length {
+            for f in 1..=len {
                 let y = row_y(f);
                 if f % 2 == 0 {
                     painter.rect_filled(
@@ -342,7 +435,7 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                         Stroke::new(1.0, theme::LINE_STRONG),
                     );
                 }
-                if f != scene.frame {
+                if f != s.frame {
                     painter.text(
                         Pos2::new(o.x + NUM - 10.0, y + rh / 2.0),
                         Align2::RIGHT_CENTER,
@@ -353,9 +446,9 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                 }
             }
 
-            for (i, layer) in scene.layers.iter().enumerate() {
+            for i in 0..cols {
                 let x = o.x + NUM + i as f32 * CW;
-                let sel = i == scene.selected;
+                let sel = i == s.selected;
                 let head = Rect::from_min_size(
                     Pos2::new(x + 2.0, o.y + 2.0),
                     Vec2::new(CW - 4.0, HEAD - 6.0),
@@ -369,26 +462,29 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                         theme::BG_RAISED
                     },
                 );
-                painter.text(
-                    head.center(),
-                    Align2::CENTER_CENTER,
-                    &layer.name,
-                    theme::body(),
-                    if sel {
+                if !matches!(t.renaming, Some((r, _)) if r == i) {
+                    let text = if sel {
                         theme::ON_ACCENT
-                    } else {
+                    } else if s.layer_visible(i) {
                         theme::TEXT_PRIMARY
-                    },
-                );
+                    } else {
+                        theme::TEXT_SECONDARY
+                    };
+                    painter.text(
+                        head.center(),
+                        Align2::CENTER_CENTER,
+                        s.layer_name(i),
+                        theme::body(),
+                        text,
+                    );
+                }
                 painter.line_segment(
                     [Pos2::new(x, o.y + HEAD), Pos2::new(x, o.y + size.y)],
                     Stroke::new(1.0, theme::LINE_SUBTLE),
                 );
 
-                let Some(col) = scene.xsheet.column(&layer.name) else {
-                    continue;
-                };
-                for f in 1..=scene.length {
+                let Some(col) = s.doc.column(i) else { continue };
+                for f in 1..=len {
                     let Some(d) = col.get(f) else { continue };
                     let y = row_y(f);
                     if f > 1 && col.get(f - 1) == Some(d) {
@@ -399,10 +495,16 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                             Stroke::new(1.5, theme::TEXT_SECONDARY),
                         );
                     } else {
+                        let name = s
+                            .doc
+                            .drawings
+                            .get(&d)
+                            .map(|d| d.name.as_str())
+                            .unwrap_or("?");
                         painter.text(
                             Pos2::new(x + CW / 2.0, y + rh / 2.0),
                             Align2::CENTER_CENTER,
-                            d,
+                            name,
                             theme::numbers(),
                             theme::TEXT_PRIMARY,
                         );
@@ -410,8 +512,7 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                 }
             }
 
-            // Current frame: amber line across the sheet and the frame tag (D3.9).
-            let y = row_y(scene.frame) + rh / 2.0;
+            let y = row_y(s.frame.min(len)) + rh / 2.0;
             painter.line_segment(
                 [
                     Pos2::new(o.x + NUM, y),
@@ -419,19 +520,46 @@ pub fn xsheet(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {
                 ],
                 Stroke::new(1.0, theme::ACCENT_TIME.gamma_multiply(0.6)),
             );
-            frame_tag(&painter, Pos2::new(o.x + NUM / 2.0 + 2.0, y), scene.frame);
+            frame_tag(&painter, Pos2::new(o.x + NUM / 2.0 + 2.0, y), s.frame);
 
+            let col_at = |p: Pos2| -> Option<usize> {
+                let c = ((p.x - o.x - NUM) / CW).floor();
+                (c >= 0.0 && (c as usize) < cols).then_some(c as usize)
+            };
             if let Some(p) = resp.interact_pointer_pos() {
                 let rel = p - o;
                 if rel.y >= HEAD {
-                    scene.frame = (((rel.y - HEAD) / rh) as u32 + 1).clamp(1, scene.length);
+                    s.frame = (((rel.y - HEAD) / rh) as u32 + 1).clamp(1, len);
                 }
-                if rel.x >= NUM && (resp.clicked() || resp.drag_started()) {
-                    let c = ((rel.x - NUM) / CW) as usize;
-                    if c < scene.layers.len() {
-                        scene.selected = c;
+                if let Some(c) = col_at(p) {
+                    if resp.clicked() || resp.drag_started() {
+                        s.selected = c;
+                    }
+                    if resp.double_clicked() && rel.y < HEAD {
+                        t.renaming = Some((c, s.layer_name(c).to_owned()));
                     }
                 }
+            }
+            if resp.secondary_clicked() {
+                t.menu_row = resp.interact_pointer_pos().and_then(col_at);
+                if let Some(c) = t.menu_row {
+                    s.selected = c;
+                }
+            }
+            if let Some(c) = t.menu_row {
+                resp.context_menu(|ui| layer_menu(ui, s, t, c));
+            }
+            if let Some((c, _)) = t.renaming {
+                let x = o.x + NUM + c as f32 * CW;
+                rename_field(
+                    ui,
+                    s,
+                    t,
+                    Rect::from_min_size(
+                        Pos2::new(x + 2.0, o.y + 2.0),
+                        Vec2::new(CW - 4.0, HEAD - 6.0),
+                    ),
+                );
             }
         });
 }

@@ -27,10 +27,16 @@ pub enum Icon {
     LastFrame,
     Eye,
     EyeOff,
+    Onion,
+    Fit,
+    RotateLeft,
+    RotateRight,
+    Plus,
+    Trash,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 17] = [
+    pub const ALL: [Icon; 23] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -48,6 +54,12 @@ impl Icon {
         Icon::LastFrame,
         Icon::Eye,
         Icon::EyeOff,
+        Icon::Onion,
+        Icon::Fit,
+        Icon::RotateLeft,
+        Icon::RotateRight,
+        Icon::Plus,
+        Icon::Trash,
     ];
 }
 
@@ -210,6 +222,53 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         Icon::EyeOff => {
             eye_outline(&g, p);
             g.line(p, &[(3.0, 13.0), (13.0, 3.0)]);
+        }
+        // Three overlapping sheets: onion skin.
+        Icon::Onion => {
+            g.circle(p, 5.5, 8.0, 3.2);
+            g.circle(p, 8.0, 8.0, 3.2);
+            g.circle(p, 10.5, 8.0, 3.2);
+        }
+        Icon::Fit => {
+            for (x, y, dx, dy) in [
+                (2.5, 2.5, 1.0, 1.0),
+                (13.5, 2.5, -1.0, 1.0),
+                (2.5, 13.5, 1.0, -1.0),
+                (13.5, 13.5, -1.0, -1.0),
+            ] {
+                g.line(p, &[(x, y + 3.5 * dy), (x, y), (x + 3.5 * dx, y)]);
+            }
+            g.closed(p, &[(6.0, 6.0), (10.0, 6.0), (10.0, 10.0), (6.0, 10.0)]);
+        }
+        Icon::RotateLeft | Icon::RotateRight => {
+            let flip = if icon == Icon::RotateLeft { -1.0 } else { 1.0 };
+            let arc: Vec<(f32, f32)> = (0..=10)
+                .map(|i| {
+                    let a = (-150.0 + 240.0 * i as f32 / 10.0_f32).to_radians();
+                    (8.0 + flip * 5.0 * a.cos(), 8.5 + 5.0 * a.sin())
+                })
+                .collect();
+            g.line(p, &arc);
+            let tip = arc[0];
+            g.line(
+                p,
+                &[
+                    (tip.0 + flip * 2.8, tip.1 - 0.2),
+                    tip,
+                    (tip.0 + flip * 0.6, tip.1 + 2.8),
+                ],
+            );
+        }
+        Icon::Plus => {
+            g.line(p, &[(8.0, 3.0), (8.0, 13.0)]);
+            g.line(p, &[(3.0, 8.0), (13.0, 8.0)]);
+        }
+        Icon::Trash => {
+            g.line(p, &[(2.5, 4.5), (13.5, 4.5)]);
+            g.line(p, &[(6.0, 4.5), (6.5, 2.5), (9.5, 2.5), (10.0, 4.5)]);
+            g.closed(p, &[(4.0, 4.5), (12.0, 4.5), (11.2, 13.5), (4.8, 13.5)]);
+            g.line(p, &[(6.8, 7.0), (6.8, 11.0)]);
+            g.line(p, &[(9.2, 7.0), (9.2, 11.0)]);
         }
     }
 }

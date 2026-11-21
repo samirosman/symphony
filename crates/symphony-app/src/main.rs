@@ -1,25 +1,35 @@
 //! Symphony desktop app. Window anatomy follows docs/DESIGN.md §3: one top
 //! bar (the title bar on macOS), the Tools toolbar card, the dock of view
-//! cards, and the status bar.
-//! Shortcuts come only from the keymap (ENGINEERING E4.3).
+//! cards, and the status bar. Shortcuts come only from the keymap
+//! (ENGINEERING E4.3). Saving and autosave run off the main thread (E5.2).
 
 mod keymap;
-mod scene;
+mod session;
 mod shot;
 mod views;
 mod workspace;
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+
 use eframe::egui;
 use egui_dock::{DockArea, DockState};
 use serde::{Deserialize, Serialize};
+use symphony_core::doc::Scene;
+use symphony_io::Recovery;
 use symphony_pen::{DeviceInfo, PenInput, PenSample};
-
-use keymap::{Action, Profile};
-use scene::{Scene, Tool};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
+
+use keymap::{Action, Profile};
+use session::{Session, Tool};
 use views::{camera, node, panels, timing};
 use workspace::{View, Workspace};
+
+/// Autosave interval, seconds (E7.5).
+const AUTOSAVE_EVERY: f64 = 120.0;
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -30,14 +40,27 @@ struct Saved {
     /// DESIGN D16.2: on by default.
     #[serde(default = "yes")]
     use_no_ai: bool,
+    #[serde(default)]
+    pressure_gamma: Option<f32>,
 }
 
 fn yes() -> bool {
     true
 }
 
+/// Something waiting on "Save changes?".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Quit,
+    New,
+    Open,
+}
+
+/// Background save results: (version saved, path, result).
+type SaveResult = (u64, PathBuf, Result<(), String>);
+
 struct SymphonyApp {
-    scene: Scene,
+    s: Session,
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
     profile: Profile,
@@ -46,13 +69,24 @@ struct SymphonyApp {
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
     node_view: node::NodeViewState,
-    animate: bool,
+    timing: timing::TimingState,
     maximised: Option<View>,
     show_preferences: bool,
     show_icon_sheet: bool,
     last_time: Option<f64>,
     frame_clock: f64,
     shot: Option<shot::Shot>,
+    recovery: Option<Recovery>,
+    recovered: Vec<(String, Option<PathBuf>, Scene)>,
+    pending: Option<Pending>,
+    allow_close: bool,
+    error: Option<String>,
+    save_tx: Sender<SaveResult>,
+    save_rx: Receiver<SaveResult>,
+    autosave_at: f64,
+    autosaved_version: u64,
+    autosaving: Arc<AtomicBool>,
+    title: String,
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -83,9 +117,16 @@ fn tool_action(t: Tool) -> Action {
     }
 }
 
+fn recovery_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("Symphony").join("recovery"))
+}
+
 impl SymphonyApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        // Dark window frame on every OS (DESIGN D12.3).
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         let pen = match PenInput::attach(cc) {
             Ok(p) => Some(p),
             Err(e) => {
@@ -96,9 +137,15 @@ impl SymphonyApp {
         let saved: Option<Saved> = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
-        let (workspace, mut layouts, profile, use_no_ai) = match saved {
-            Some(s) => (s.workspace, s.layouts, s.profile, s.use_no_ai),
-            None => (Workspace::Default, Vec::new(), Profile::Harmony, true),
+        let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
+            Some(s) => (
+                s.workspace,
+                s.layouts,
+                s.profile,
+                s.use_no_ai,
+                s.pressure_gamma,
+            ),
+            None => (Workspace::Default, Vec::new(), Profile::Harmony, true, None),
         };
         for ws in Workspace::ALL {
             if !layouts.iter().any(|(w, _)| *w == ws) {
@@ -106,8 +153,15 @@ impl SymphonyApp {
             }
         }
         let shot = shot::Shot::from_env();
-        // Screenshots always use fresh presets, so reviews are repeatable.
-        let mut workspace = workspace;
+        let mut s = if shot.is_some() || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
+            Session::demo()
+        } else {
+            Session::new_scene()
+        };
+        if let Some(g) = gamma {
+            s.pressure_gamma = g;
+        }
+        // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
             layouts = Workspace::ALL.iter().map(|w| (*w, w.preset())).collect();
             if let Ok(name) = std::env::var("SYMPHONY_WORKSPACE") {
@@ -119,15 +173,15 @@ impl SymphonyApp {
                 }
             }
         }
-        let mut scene = Scene::demo();
-        if std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
-            scene.add_demo_art();
-        }
-        // Dark window frame on every OS (DESIGN D12.3).
-        cc.egui_ctx
-            .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+        let recovery = recovery_dir().map(Recovery::new);
+        let recovered = match (&recovery, &shot) {
+            (Some(r), None) => r.pending(),
+            _ => Vec::new(),
+        };
+        let (save_tx, save_rx) = channel();
+        let version = s.doc.version;
         SymphonyApp {
-            scene,
+            s,
             workspace,
             layouts,
             profile,
@@ -136,13 +190,24 @@ impl SymphonyApp {
             camera: Default::default(),
             drawing: Default::default(),
             node_view: Default::default(),
-            animate: true,
+            timing: Default::default(),
             maximised: None,
             show_preferences: false,
             show_icon_sheet: false,
             last_time: None,
             frame_clock: 0.0,
             shot,
+            recovery,
+            recovered,
+            pending: None,
+            allow_close: false,
+            error: None,
+            save_tx,
+            save_rx,
+            autosave_at: 0.0,
+            autosaved_version: version,
+            autosaving: Arc::new(AtomicBool::new(false)),
+            title: String::new(),
         }
     }
 
@@ -166,43 +231,205 @@ impl SymphonyApp {
         }
     }
 
+    // ---- Files -------------------------------------------------------------
+
+    /// Run `p` now, or ask to save unsaved work first. Losing work can't be
+    /// undone, so this is one of the few confirmations (D8.4).
+    fn guard(&mut self, ctx: &egui::Context, p: Pending) {
+        if self.s.dirty() {
+            self.pending = Some(p);
+        } else {
+            self.proceed(ctx, p);
+        }
+    }
+
+    fn proceed(&mut self, ctx: &egui::Context, p: Pending) {
+        match p {
+            Pending::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Pending::New => self.replace_session(Session::new_scene()),
+            Pending::Open => self.open_dialog(),
+        }
+    }
+
+    fn replace_session(&mut self, next: Session) {
+        if let Some(r) = &self.recovery {
+            r.clear(&self.s.key);
+        }
+        let gamma = self.s.pressure_gamma;
+        self.s = next;
+        self.s.pressure_gamma = gamma;
+        self.autosaved_version = self.s.doc.version;
+        self.camera.reset_view();
+        self.drawing.reset_view();
+    }
+
+    fn open_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open a Symphony project (.symphony folder)")
+            .pick_folder()
+        else {
+            return;
+        };
+        match symphony_io::open(&path) {
+            Ok(doc) => self.replace_session(Session::from_doc(doc, Some(path))),
+            Err(e) => self.error = Some(e.0),
+        }
+    }
+
+    fn ask_save_path(&self) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_title("Save scene")
+            .set_file_name(format!("{}.symphony", self.s.name()))
+            .save_file()
+            .map(|p| symphony_io::with_extension(&p))
+    }
+
+    fn save(&mut self, save_as: bool) {
+        let path = match (&self.s.path, save_as) {
+            (Some(p), false) => p.clone(),
+            _ => match self.ask_save_path() {
+                Some(p) => p,
+                None => return,
+            },
+        };
+        // Snapshot, then write in the background (E5.3, E6).
+        let (doc, version, tx) = (self.s.doc.clone(), self.s.doc.version, self.save_tx.clone());
+        std::thread::spawn(move || {
+            let r = symphony_io::save(&doc, &path).map_err(|e| e.0);
+            let _ = tx.send((version, path, r));
+        });
+        self.s.notice = Some("Saving".into());
+    }
+
+    /// Save synchronously. Only used right before quitting or replacing the scene.
+    fn save_now(&mut self) -> bool {
+        let Some(path) = self.s.path.clone().or_else(|| self.ask_save_path()) else {
+            return false;
+        };
+        match symphony_io::save(&self.s.doc, &path) {
+            Ok(()) => {
+                self.s.saved_version = self.s.doc.version;
+                self.s.path = Some(path);
+                if let Some(r) = &self.recovery {
+                    r.clear(&self.s.key);
+                }
+                true
+            }
+            Err(e) => {
+                self.error = Some(e.0);
+                false
+            }
+        }
+    }
+
+    fn poll_saves(&mut self) {
+        while let Ok((version, path, result)) = self.save_rx.try_recv() {
+            match result {
+                Ok(()) => {
+                    self.s.saved_version = version;
+                    self.s.path = Some(path);
+                    self.s.notice = Some(format!("Saved {}", self.s.name()));
+                    if !self.s.dirty() {
+                        if let Some(r) = &self.recovery {
+                            r.clear(&self.s.key);
+                        }
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+    }
+
+    fn autosave(&mut self, now: f64) {
+        if now - self.autosave_at < AUTOSAVE_EVERY {
+            return;
+        }
+        self.autosave_at = now;
+        let v = self.s.doc.version;
+        if !self.s.dirty() || v == self.autosaved_version || self.autosaving.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(dir) = recovery_dir() else { return };
+        self.autosaved_version = v;
+        self.autosaving.store(true, Ordering::SeqCst);
+        let (doc, key, origin, flag) = (
+            self.s.doc.clone(),
+            self.s.key.clone(),
+            self.s.path.clone(),
+            self.autosaving.clone(),
+        );
+        std::thread::spawn(move || {
+            if let Err(e) = Recovery::new(dir).write(&key, &doc, origin.as_deref()) {
+                eprintln!("Autosave failed: {e}");
+            }
+            flag.store(false, Ordering::SeqCst);
+        });
+    }
+
+    // ---- Actions -----------------------------------------------------------
+
     fn tick_playback(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let dt = self.last_time.map_or(0.0, |t| now - t);
         self.last_time = Some(now);
-        if !self.scene.playing {
+        if !self.s.playing {
             self.frame_clock = 0.0;
             return;
         }
         self.frame_clock += dt;
-        let step = 1.0 / self.scene.fps as f64;
+        let step = 1.0 / self.s.doc.settings.fps.max(1.0) as f64;
         while self.frame_clock >= step {
             self.frame_clock -= step;
-            self.scene.frame = if self.scene.frame >= self.scene.length {
+            self.s.frame = if self.s.frame >= self.s.length() {
                 1
             } else {
-                self.scene.frame + 1
+                self.s.frame + 1
             };
         }
         ctx.request_repaint();
     }
 
-    fn run(&mut self, action: Action) {
+    fn run(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::PrevFrame => self.scene.frame = self.scene.frame.saturating_sub(1).max(1),
-            Action::NextFrame => self.scene.frame = (self.scene.frame + 1).min(self.scene.length),
-            Action::PlayPause => self.scene.playing = !self.scene.playing,
-            Action::Undo => self.scene.undo(),
+            Action::NewScene => self.guard(ctx, Pending::New),
+            Action::Open => self.guard(ctx, Pending::Open),
+            Action::Save => self.save(false),
+            Action::SaveAs => self.save(true),
+            Action::ResetView => {
+                self.camera.reset_view();
+                self.drawing.reset_view();
+            }
             Action::MaximiseView => {
                 self.maximised = match self.maximised {
                     Some(_) => None,
                     None => self.layout_mut().find_active_focused().map(|(_, v)| *v),
                 };
             }
-            _ => {
-                if let Some(t) = Tool::ALL.into_iter().find(|t| tool_action(*t) == action) {
-                    if t.planned_for().is_none() {
-                        self.scene.tool = t;
+            other => {
+                let s = &mut self.s;
+                match other {
+                    Action::Undo => s.undo(),
+                    Action::Redo => s.redo(),
+                    Action::PrevFrame => s.frame = s.frame.saturating_sub(1).max(1),
+                    Action::NextFrame => s.frame = (s.frame + 1).min(s.length()),
+                    Action::FirstFrame => s.frame = 1,
+                    Action::LastFrame => s.frame = s.length(),
+                    Action::PlayPause => s.playing = !s.playing,
+                    Action::IncreaseExposure => s.change_exposure(1),
+                    Action::DecreaseExposure => s.change_exposure(-1),
+                    Action::CreateEmptyDrawing => s.new_drawing(),
+                    Action::AddLayer => s.add_layer(),
+                    Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
+                    _ => {
+                        if let Some(t) = Tool::ALL.into_iter().find(|t| tool_action(*t) == other) {
+                            if t.planned_for().is_none() {
+                                s.tool = t;
+                            }
+                        }
                     }
                 }
             }
@@ -215,39 +442,75 @@ impl SymphonyApp {
         }
         for a in Action::ALL {
             if keymap::pressed(ctx, self.profile, a) {
-                self.run(a);
+                self.run(ctx, a);
             }
         }
     }
 
+    // ---- Chrome ------------------------------------------------------------
+
     /// Menu item that shows its shortcut (D8.7).
     fn menu_action(&mut self, ui: &mut egui::Ui, action: Action) {
-        let btn =
-            egui::Button::new(action.name()).shortcut_text(keymap::label(self.profile, action));
+        self.menu_item(ui, action, action.name().to_owned());
+    }
+
+    fn menu_item(&mut self, ui: &mut egui::Ui, action: Action, label: String) {
+        let btn = egui::Button::new(label).shortcut_text(keymap::label(self.profile, action));
         if ui.add(btn).clicked() {
-            self.run(action);
+            let ctx = ui.ctx().clone();
             ui.close();
+            self.run(&ctx, action);
         }
     }
 
     fn menus(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
+            self.menu_item(ui, Action::NewScene, "New scene".into());
+            self.menu_item(ui, Action::Open, "Open...".into());
+            ui.separator();
+            self.menu_action(ui, Action::Save);
+            self.menu_item(ui, Action::SaveAs, "Save as...".into());
+            ui.separator();
             if ui.button("Quit Symphony").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
         ui.menu_button("Edit", |ui| {
-            self.menu_action(ui, Action::Undo);
+            let undo = self
+                .s
+                .history
+                .undo_name()
+                .map_or("Undo".into(), |n| format!("Undo {n}"));
+            let redo = self
+                .s
+                .history
+                .redo_name()
+                .map_or("Redo".into(), |n| format!("Redo {n}"));
+            self.menu_item(ui, Action::Undo, undo);
+            self.menu_item(ui, Action::Redo, redo);
             ui.separator();
             if ui.button("Preferences").clicked() {
                 self.show_preferences = true;
                 ui.close();
             }
         });
+        ui.menu_button("Timing", |ui| {
+            self.menu_action(ui, Action::IncreaseExposure);
+            self.menu_action(ui, Action::DecreaseExposure);
+            ui.separator();
+            self.menu_action(ui, Action::CreateEmptyDrawing);
+            self.menu_action(ui, Action::AddLayer);
+        });
         ui.menu_button("Play", |ui| {
             self.menu_action(ui, Action::PlayPause);
             self.menu_action(ui, Action::PrevFrame);
             self.menu_action(ui, Action::NextFrame);
+            self.menu_action(ui, Action::FirstFrame);
+            self.menu_action(ui, Action::LastFrame);
+        });
+        ui.menu_button("View", |ui| {
+            self.menu_action(ui, Action::ToggleOnionSkin);
+            self.menu_action(ui, Action::ResetView);
         });
         ui.menu_button("Windows", |ui| {
             for v in View::ALL {
@@ -284,10 +547,14 @@ impl SymphonyApp {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
+        let mut title = self.s.name();
+        if self.s.dirty() {
+            title.push_str("  (edited)");
+        }
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Untitled scene",
+            &title,
             theme::body(),
             theme::TEXT_SECONDARY,
         );
@@ -346,10 +613,10 @@ impl SymphonyApp {
                             tip.push_str(&format!("\nComing in {m}"));
                         }
                         let enabled = t.planned_for().is_none();
-                        if icons::tool_button(ui, tool_icon(t), self.scene.tool == t, enabled, &tip)
+                        if icons::tool_button(ui, tool_icon(t), self.s.tool == t, enabled, &tip)
                             .clicked()
                         {
-                            self.scene.tool = t;
+                            self.s.tool = t;
                         }
                     }
                 }
@@ -362,15 +629,18 @@ impl SymphonyApp {
         };
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
-            let s = &self.scene;
+            let s = &self.s;
             dense(
                 ui,
-                format!("Frame {} of {}", s.frame, s.length),
+                format!("Frame {} of {}", s.frame, s.length()),
                 theme::TEXT_SECONDARY,
             );
+            let drawing = s
+                .drawing_name(s.selected, s.frame)
+                .map_or("empty cell".into(), |d| format!("drawing {d}"));
             dense(
                 ui,
-                format!("Layer {}", s.column_name(s.selected)),
+                format!("{}, {drawing}", s.layer_name(s.selected)),
                 theme::TEXT_SECONDARY,
             );
             dense(
@@ -378,9 +648,15 @@ impl SymphonyApp {
                 format!("Tool {}", tool_action(s.tool).name()),
                 theme::TEXT_SECONDARY,
             );
-            if self.animate {
+            if s.animate {
                 // D8.5: a visible mode, in its token colour (amber = time).
                 dense(ui, "Animate mode on".into(), theme::ACCENT_TIME);
+            }
+            if s.onion.on {
+                dense(ui, "Onion skin on".into(), theme::TEXT_PRIMARY);
+            }
+            if let Some(n) = &s.notice {
+                dense(ui, n.clone(), theme::TEXT_PRIMARY);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 dense(
@@ -399,14 +675,101 @@ impl SymphonyApp {
             });
         });
     }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.pending {
+            let name = self.s.name();
+            let mut choice = None;
+            egui::Modal::new(egui::Id::unique("symphony-unsaved")).show(ctx, |ui| {
+                ui.heading(format!("Save changes to {name}?"));
+                ui.label("If you don't save, the changes since your last save are lost.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = Some(0);
+                    }
+                    if ui.button("Don't save").clicked() {
+                        choice = Some(1);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(2);
+                    }
+                });
+            });
+            match choice {
+                Some(0) => {
+                    self.pending = None;
+                    if self.save_now() {
+                        self.proceed(ctx, p);
+                    }
+                }
+                Some(1) => {
+                    self.pending = None;
+                    if let Some(r) = &self.recovery {
+                        r.clear(&self.s.key);
+                    }
+                    self.s.saved_version = self.s.doc.version;
+                    self.proceed(ctx, p);
+                }
+                Some(_) => self.pending = None,
+                None => {}
+            }
+        }
+
+        if !self.recovered.is_empty() {
+            let n = self.recovered.len();
+            let mut choice = None;
+            egui::Modal::new(egui::Id::unique("symphony-recover")).show(ctx, |ui| {
+                ui.heading("Recover unsaved work?");
+                let what = if n == 1 { "a scene".to_owned() } else { format!("{n} scenes") };
+                ui.label(format!("Symphony didn't close properly last time. It autosaved {what} you hadn't saved."));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Recover").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Discard").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+            if let Some(recover) = choice {
+                if recover {
+                    let (key, origin, doc) = self.recovered.remove(0);
+                    let mut next = Session::from_doc(doc, origin);
+                    next.key = key;
+                    // Recovered work isn't saved yet, so it shows as edited.
+                    next.saved_version = next.doc.version.wrapping_sub(1);
+                    self.s = next;
+                    self.autosaved_version = self.s.doc.version;
+                }
+                if let Some(r) = &self.recovery {
+                    for (k, _, _) in self.recovered.drain(..) {
+                        r.clear(&k);
+                    }
+                }
+            }
+        }
+
+        if let Some(e) = self.error.clone() {
+            egui::Modal::new(egui::Id::unique("symphony-error")).show(ctx, |ui| {
+                ui.heading("That didn't work");
+                ui.label(e);
+                ui.add_space(8.0);
+                if ui.button("OK").clicked() {
+                    self.error = None;
+                }
+            });
+        }
+    }
 }
 
 struct Viewer<'a> {
-    scene: &'a mut Scene,
+    s: &'a mut Session,
     camera: &'a mut camera::CanvasState,
     drawing: &'a mut camera::CanvasState,
     node_view: &'a mut node::NodeViewState,
-    animate: &'a mut bool,
+    timing: &'a mut timing::TimingState,
     samples: &'a [PenSample],
     device: Option<&'a DeviceInfo>,
     profile: Profile,
@@ -415,14 +778,14 @@ struct Viewer<'a> {
 impl Viewer<'_> {
     fn view(&mut self, ui: &mut egui::Ui, v: View) {
         match v {
-            View::Camera => camera::ui(ui, self.scene, self.camera, self.samples, false),
-            View::Drawing => camera::ui(ui, self.scene, self.drawing, self.samples, true),
-            View::Timeline => timing::timeline(ui, self.scene, self.profile),
-            View::Xsheet => timing::xsheet(ui, self.scene, self.profile),
-            View::Node => node::ui(ui, self.scene, self.node_view),
-            View::ToolProperties => panels::tool_properties(ui, self.scene, self.device),
-            View::Colour => panels::colour(ui, self.scene),
-            View::LayerProperties => panels::layer_properties(ui, self.scene, self.animate),
+            View::Camera => camera::ui(ui, self.s, self.camera, self.samples, false, self.profile),
+            View::Drawing => camera::ui(ui, self.s, self.drawing, self.samples, true, self.profile),
+            View::Timeline => timing::timeline(ui, self.s, self.timing, self.profile),
+            View::Xsheet => timing::xsheet(ui, self.s, self.timing, self.profile),
+            View::Node => node::ui(ui, self.s, self.node_view),
+            View::ToolProperties => panels::tool_properties(ui, self.s, self.device),
+            View::Colour => panels::colour(ui, self.s),
+            View::LayerProperties => panels::layer_properties(ui, self.s),
             View::Function => panels::planned(ui, "Function view (curve editor)", "M6"),
             View::Library => panels::planned(ui, "Library (templates and symbols)", "M6"),
         }
@@ -461,13 +824,35 @@ impl eframe::App for SymphonyApp {
         if let Some(s) = self.shot.as_mut() {
             s.tick(&ctx);
         }
+
+        // Closing with unsaved work asks first.
+        if ctx.input(|i| i.viewport().close_requested()) && self.s.dirty() && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending = Some(Pending::Quit);
+        }
+
         let samples = match &self.pen {
             Some(p) => p.drain(),
             None => camera::pointer_samples(&ctx),
         };
         let device = self.pen.as_ref().map(|p| p.device());
+        let now = ctx.input(|i| i.time);
+        self.poll_saves();
+        self.autosave(now);
         self.tick_playback(&ctx);
-        self.shortcuts(&ctx);
+        if self.pending.is_none() && self.recovered.is_empty() && self.error.is_none() {
+            self.shortcuts(&ctx);
+        }
+
+        let title = if self.s.dirty() {
+            format!("{} (edited) - Symphony", self.s.name())
+        } else {
+            format!("{} - Symphony", self.s.name())
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
 
         let base = egui::Frame::new().fill(theme::BG_BASE);
         egui::Panel::top("top-bar")
@@ -513,11 +898,11 @@ impl eframe::App for SymphonyApp {
             .expect("layout")
             .1;
         let mut viewer = Viewer {
-            scene: &mut self.scene,
+            s: &mut self.s,
             camera: &mut self.camera,
             drawing: &mut self.drawing,
             node_view: &mut self.node_view,
-            animate: &mut self.animate,
+            timing: &mut self.timing,
             samples: &samples,
             device: device.as_ref(),
             profile: self.profile,
@@ -538,10 +923,14 @@ impl eframe::App for SymphonyApp {
                 }
             });
 
+        self.dialogs(&ctx);
+
         let pending = self.pen.as_ref().is_some_and(|p| p.has_pending());
         if pending || self.camera.busy() || self.drawing.busy() {
             ctx.request_repaint();
         }
+        // Keep autosave ticking even when idle.
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -550,8 +939,18 @@ impl eframe::App for SymphonyApp {
             layouts: self.layouts.clone(),
             profile: self.profile,
             use_no_ai: self.use_no_ai,
+            pressure_gamma: Some(self.s.pressure_gamma),
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
+    }
+
+    fn on_exit(&mut self) {
+        // A clean exit with nothing unsaved needs no recovery file (E7.5).
+        if !self.s.dirty() {
+            if let Some(r) = &self.recovery {
+                r.clear(&self.s.key);
+            }
+        }
     }
 }
 

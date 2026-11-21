@@ -35,10 +35,23 @@ impl Profile {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
+    NewScene,
+    Open,
+    Save,
+    SaveAs,
+    Undo,
+    Redo,
     PrevFrame,
     NextFrame,
+    FirstFrame,
+    LastFrame,
     PlayPause,
-    Undo,
+    IncreaseExposure,
+    DecreaseExposure,
+    CreateEmptyDrawing,
+    AddLayer,
+    ToggleOnionSkin,
+    ResetView,
     MaximiseView,
     ToolSelect,
     ToolTransform,
@@ -52,11 +65,24 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 27] = [
+        Action::NewScene,
+        Action::Open,
+        Action::Save,
+        Action::SaveAs,
+        Action::Undo,
+        Action::Redo,
         Action::PrevFrame,
         Action::NextFrame,
+        Action::FirstFrame,
+        Action::LastFrame,
         Action::PlayPause,
-        Action::Undo,
+        Action::IncreaseExposure,
+        Action::DecreaseExposure,
+        Action::CreateEmptyDrawing,
+        Action::AddLayer,
+        Action::ToggleOnionSkin,
+        Action::ResetView,
         Action::MaximiseView,
         Action::ToolSelect,
         Action::ToolTransform,
@@ -72,10 +98,23 @@ impl Action {
     /// Stable ID, used for settings and scripting.
     pub fn id(self) -> &'static str {
         match self {
+            Action::NewScene => "file.new",
+            Action::Open => "file.open",
+            Action::Save => "file.save",
+            Action::SaveAs => "file.save_as",
+            Action::Undo => "edit.undo",
+            Action::Redo => "edit.redo",
             Action::PrevFrame => "frame.previous",
             Action::NextFrame => "frame.next",
+            Action::FirstFrame => "frame.first",
+            Action::LastFrame => "frame.last",
             Action::PlayPause => "playback.toggle",
-            Action::Undo => "edit.undo",
+            Action::IncreaseExposure => "timing.increase_exposure",
+            Action::DecreaseExposure => "timing.decrease_exposure",
+            Action::CreateEmptyDrawing => "drawing.create_empty",
+            Action::AddLayer => "layer.add",
+            Action::ToggleOnionSkin => "view.onion_skin",
+            Action::ResetView => "view.reset",
             Action::MaximiseView => "view.maximise",
             Action::ToolSelect => "tool.select",
             Action::ToolTransform => "tool.transform",
@@ -91,10 +130,23 @@ impl Action {
 
     pub fn name(self) -> &'static str {
         match self {
+            Action::NewScene => "New scene",
+            Action::Open => "Open",
+            Action::Save => "Save",
+            Action::SaveAs => "Save as",
+            Action::Undo => "Undo",
+            Action::Redo => "Redo",
             Action::PrevFrame => "Previous frame",
             Action::NextFrame => "Next frame",
+            Action::FirstFrame => "First frame",
+            Action::LastFrame => "Last frame",
             Action::PlayPause => "Play / pause",
-            Action::Undo => "Undo",
+            Action::IncreaseExposure => "Increase exposure",
+            Action::DecreaseExposure => "Decrease exposure",
+            Action::CreateEmptyDrawing => "Create empty drawing",
+            Action::AddLayer => "Add drawing layer",
+            Action::ToggleOnionSkin => "Onion skin",
+            Action::ResetView => "Reset view",
             Action::MaximiseView => "Maximise view",
             Action::ToolSelect => "Select",
             Action::ToolTransform => "Transform",
@@ -129,13 +181,27 @@ const ALT: Modifiers = Modifiers::ALT;
 const SHIFT: Modifiers = Modifiers::SHIFT;
 const NONE: Modifiers = Modifiers::NONE;
 const CMD: Modifiers = Modifiers::COMMAND;
+const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+const ALT_SHIFT: Modifiers = Modifiers::ALT.plus(Modifiers::SHIFT);
 
 fn harmony(action: Action) -> Option<Binding> {
     match action {
+        Action::NewScene => b(Key::N, CMD),
+        Action::Open => b(Key::O, CMD),
+        Action::Save => b(Key::S, CMD),
+        Action::SaveAs => b(Key::S, CMD_SHIFT),
+        Action::Undo => b(Key::Z, CMD),
+        Action::Redo => b(Key::Z, CMD_SHIFT),
         Action::PrevFrame => b(Key::Comma, NONE),
         Action::NextFrame => b(Key::Period, NONE),
+        Action::FirstFrame | Action::LastFrame => None,
         Action::PlayPause => b(Key::Enter, NONE),
-        Action::Undo => b(Key::Z, CMD),
+        Action::IncreaseExposure => b(Key::Plus, NONE),
+        Action::DecreaseExposure => b(Key::Minus, NONE),
+        Action::CreateEmptyDrawing => b(Key::R, ALT_SHIFT),
+        Action::AddLayer => b(Key::R, CMD),
+        Action::ToggleOnionSkin => b(Key::O, ALT),
+        Action::ResetView => b(Key::M, SHIFT),
         Action::MaximiseView => b(Key::Backtick, NONE),
         Action::ToolSelect => b(Key::S, ALT),
         Action::ToolTransform => b(Key::T, SHIFT),
@@ -168,7 +234,15 @@ pub fn pressed(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
     let Some(bind) = binding(profile, action) else {
         return false;
     };
-    ctx.input(|i| i.key_pressed(bind.key) && i.modifiers.matches_exact(bind.mods))
+    ctx.input(|i| {
+        // + and - are typed with Shift on some layouts, so ignore Shift there.
+        let mods_ok = if matches!(bind.key, Key::Plus | Key::Minus) {
+            i.modifiers.matches_logically(bind.mods)
+        } else {
+            i.modifiers.matches_exact(bind.mods)
+        };
+        i.key_pressed(bind.key) && mods_ok
+    })
 }
 
 /// Shortcut text for menus and tooltips, such as "Alt+B" or "Cmd+Z".

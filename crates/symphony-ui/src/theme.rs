@@ -31,6 +31,10 @@ pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
 pub const CANVAS_SURROUND: Color32 = hex(0x505359);
 pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
+/// Onion skin tints for previous and next drawings (DESIGN §4.3). Defaults
+/// follow the red-before, green-after convention; to verify against Harmony 27.
+pub const ONION_BEFORE: Color32 = hex(0xE0483E);
+pub const ONION_AFTER: Color32 = hex(0x2FA35A);
 /// Neutral shadow under the stage (D3.10) and floating windows (D6.4).
 pub const SHADOW: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
 
