@@ -6,4 +6,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-symphony-core = { version = "0.0.1", path = "../symphony-core" }
+symphony-core = { path = "../symphony-core" }

@@ -123,7 +123,8 @@ pub fn sha256_hex(mut r: impl Read) -> std::io::Result<String> {
 }
 
 fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
-    ureq::get(url)
+    crate::release::agent()
+        .get(url)
         .header("User-Agent", "symphony-launcher")
         .call()
         .map_err(|e| {

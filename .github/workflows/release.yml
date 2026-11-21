@@ -45,6 +45,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -57,7 +58,11 @@ jobs:
         run: |
           PRE=""
           [[ "$GITHUB_REF_NAME" == *-* ]] && PRE="--prerelease"
+          # Artist-facing notes when written (docs/release-notes/<version>.md),
+          # otherwise GitHub's list of changes.
+          NOTES="docs/release-notes/${GITHUB_REF_NAME#v}.md"
+          if [ -f "$NOTES" ]; then NOTE_ARGS=(--notes-file "$NOTES"); else NOTE_ARGS=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" dist/* $PRE \
             --repo "$GITHUB_REPOSITORY" \
             --title "Symphony ${GITHUB_REF_NAME#v}" \
-            --generate-notes
+            "${NOTE_ARGS[@]}"

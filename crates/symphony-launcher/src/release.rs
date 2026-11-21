@@ -106,9 +106,23 @@ pub fn expected_sha256<'a>(sums: &'a str, file: &str) -> Option<&'a str> {
     })
 }
 
+/// One HTTP agent with timeouts, so a stalled connection becomes a clear
+/// error instead of a spinner that never stops (DESIGN §17).
+pub fn agent() -> ureq::Agent {
+    use std::time::Duration;
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
+            .build(),
+    )
+}
+
 pub fn fetch_releases() -> Result<Vec<Release>, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=30");
-    ureq::get(&url)
+    agent()
+        .get(&url)
         .header("User-Agent", "symphony-launcher")
         .header("Accept", "application/vnd.github+json")
         .call()

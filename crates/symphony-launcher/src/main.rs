@@ -331,6 +331,10 @@ impl eframe::App for Launcher {
 fn main() -> eframe::Result {
     // Developer mode, used by Symphony Dev.app: build from source, then launch.
     let args: Vec<String> = std::env::args().collect();
+    // Smoke tests without the window: --check [stable|preview], --install [stable|preview].
+    if let Some(cmd @ ("--check" | "--install")) = args.get(1).map(String::as_str) {
+        std::process::exit(cli(cmd, args.get(2).map(String::as_str)));
+    }
     if args.get(1).map(String::as_str) == Some("--dev") {
         let repo = args
             .get(2)
@@ -354,4 +358,55 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(Launcher::new(cc, paths)))),
     )
+}
+
+/// Command-line checks used to test releases end to end.
+fn cli(cmd: &str, channel: Option<&str>) -> i32 {
+    let channel = if channel == Some("preview") {
+        Channel::Preview
+    } else {
+        Channel::Stable
+    };
+    let Some(paths) = Paths::default_location() else {
+        eprintln!("No data folder.");
+        return 1;
+    };
+    let releases = match release::fetch_releases() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let Some(rel) = release::newest(&releases, channel) else {
+        println!(
+            "No {} release with a build for this computer.",
+            channel.title()
+        );
+        return 2;
+    };
+    println!(
+        "Newest {}: {} ({})",
+        channel.title(),
+        rel.tag_name,
+        rel.archive().map_or("no build", |a| a.name.as_str())
+    );
+    if cmd == "--install" {
+        match install::install(&paths, rel, &|p| {
+            if let Progress::Downloading { done, total } = p {
+                eprint!(
+                    "\rDownloading {:.1} of {:.1} MB",
+                    done as f64 / 1e6,
+                    total as f64 / 1e6
+                );
+            }
+        }) {
+            Ok(v) => println!("\nInstalled {v} at {}", paths.version_dir(&v).display()),
+            Err(e) => {
+                eprintln!("\n{e}");
+                return 1;
+            }
+        }
+    }
+    0
 }
