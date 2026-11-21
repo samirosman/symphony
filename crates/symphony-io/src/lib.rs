@@ -157,7 +157,7 @@ pub fn save(scene: &Scene, path: &Path) -> Result<(), IoError> {
 /// panic (E7.6).
 pub fn open(path: &Path) -> Result<Scene, IoError> {
     let manifest_path = path.join("project.json");
-    let bytes = fs::read(&manifest_path).map_err(|e| err("open", &manifest_path, e))?;
+    let bytes = read_project_file(path, &manifest_path)?;
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
         IoError(format!(
             "{} isn't a Symphony project, or it's damaged ({e}).",
@@ -181,12 +181,31 @@ pub fn open(path: &Path) -> Result<Scene, IoError> {
         ));
     }
     let scene_path = path.join("scenes").join(scene_name).join("scene.json");
-    read_scene(&scene_path)
+    read_scene(path, &scene_path)
 }
 
-fn read_scene(path: &Path) -> Result<Scene, IoError> {
-    let bytes = fs::read(path).map_err(|e| err("open", path, e))?;
+/// Resolve links before reading so a project can only reference its own files.
+fn read_project_file(project: &Path, path: &Path) -> Result<Vec<u8>, IoError> {
+    let root = project
+        .canonicalize()
+        .map_err(|e| err("open", project, e))?;
+    let file = path.canonicalize().map_err(|e| err("open", path, e))?;
+    if !file.starts_with(root) || !file.is_file() {
+        return Err(IoError(
+            "The project needs a regular file inside its folder.".into(),
+        ));
+    }
+    fs::read(&file).map_err(|e| err("open", path, e))
+}
+
+fn read_scene(project: &Path, path: &Path) -> Result<Scene, IoError> {
+    let bytes = read_project_file(project, path)?;
     let file: SceneFile = serde_json::from_slice(&bytes).map_err(|e| err("read", path, e))?;
+    if file.format_version > FORMAT_VERSION {
+        return Err(IoError(
+            "The scene needs a newer version of Symphony.".into(),
+        ));
+    }
     validate(file.scene)
 }
 
@@ -259,6 +278,9 @@ impl Recovery {
             .flatten()
             .filter_map(|e| {
                 let p = e.path();
+                if !e.file_type().ok()?.is_file() || p.extension()?.to_str()? != "json" {
+                    return None;
+                }
                 let key = p.file_stem()?.to_string_lossy().into_owned();
                 let rec: Rec = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
                 (rec.format_version <= FORMAT_VERSION).then_some(())?;
@@ -336,6 +358,61 @@ mod tests {
         fs::write(path.join("project.json"), manifest).unwrap();
         assert!(open(&path).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_scenes_are_rejected_and_good_autosaves_still_recover() {
+        let dir = temp("damaged-scenes");
+        let project = dir.join("Test.symphony");
+        let recovery_dir = dir.join("recovery");
+        let recovery = Recovery::new(recovery_dir.clone());
+        let scene = sample();
+        save(&scene, &project).unwrap();
+        recovery.write("good", &scene, None).unwrap();
+        let file = project.join("scenes/main/scene.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let mut missing_node = original.clone();
+        missing_node["scene"]["composite"] = serde_json::json!(u64::MAX);
+        let mut future = original.clone();
+        future["format_version"] = serde_json::json!(FORMAT_VERSION + 1);
+        let mut truncated = serde_json::to_vec(&original).unwrap();
+        truncated.pop();
+        for bytes in [
+            truncated,
+            b"[]".to_vec(),
+            br#"{"format_version":1e9999,"scene":{}}"#.to_vec(),
+            serde_json::to_vec(&missing_node).unwrap(),
+            serde_json::to_vec(&future).unwrap(),
+        ] {
+            fs::write(&file, &bytes).unwrap();
+            fs::write(recovery_dir.join("damaged.json"), &bytes).unwrap();
+            assert!(open(&project).is_err());
+            let pending = recovery.pending();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].0, "good");
+        }
+        fs::copy(
+            recovery_dir.join("good.json"),
+            recovery_dir.join("partial.tmp"),
+        )
+        .unwrap();
+        assert_eq!(recovery.pending().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_scene_link_outside_project() {
+        let dir = temp("linked-scene");
+        let project = dir.join("Test.symphony");
+        save(&sample(), &project).unwrap();
+        let file = project.join("scenes/main/scene.json");
+        let external = dir.join("external.json");
+        fs::rename(&file, &external).unwrap();
+        std::os::unix::fs::symlink(external, file).unwrap();
+        assert!(open(&project).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
