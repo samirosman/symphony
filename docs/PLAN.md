@@ -5,6 +5,9 @@ and the full feature list: every feature Harmony has that we plan to match
 first. Once the big chunk is done we'll improve some of them and add new
 ones.
 
+**Target: the latest Harmony, currently 27.1.** Build every feature from the
+newest docs, not older versions (see [CLEAN-ROOM.md](CLEAN-ROOM.md)).
+
 Status key: ✅ done · 🟡 started · ⬜ not started
 
 ---
@@ -133,7 +136,7 @@ continues.
 - ⬜ Function view (curve editor)
 - ⬜ Library view (templates and symbols)
 - ⬜ Top, Side and Perspective views (3D scene planning)
-- ⬜ Reference view (a second, frozen camera view) *(verify)*
+- ⬜ Reference view (a second, frozen camera view), with Mirror mode (27)
 - ⬜ Model view (character reference)
 - ⬜ Coordinates and Control Points view
 - ⬜ Script Editor view
@@ -171,6 +174,7 @@ continues.
 - ⬜ Auto close gap
 - ⬜ Snap to contour, snap to grid, snap to alignment guides
 - ⬜ Art layers: Overlay, Line Art, Colour Art, Underlay
+- ⬜ Art Layer Manager (25.2) *(verify)*
 - ⬜ Create Colour Art from Line Art
 - ⬜ Onion skin (previous and next drawings, colours, opacity, range)
 - ⬜ Reposition All Drawings
@@ -192,6 +196,8 @@ continues.
 - ⬜ Protect colour
 - ⬜ Show Strokes, Show Unpainted Zones
 - ⬜ Colour override
+- ⬜ Generative fill (25.2 has an AI fill). Approach to decide later:
+  local model or opt-in only, never required.
 
 ### 4.4 Timing
 - ⬜ **Timeline**: layers, exposure bars, keyframes, layer parenting,
@@ -230,7 +236,13 @@ continues.
 - ⬜ Node view editing: add, connect, disconnect, reorder ports, groups,
   enable/disable, colours, navigation
 - ⬜ Groups with multi-port in/out nodes, and nested groups
-- ⬜ Master controllers (sliders, point controllers, wizards)
+- ⬜ **Attribute Controllers** (27): non-destructive pose offsets on rig
+  attributes, Setup Mode, train from keyframes, pose indicators (27.1)
+- ⬜ **Skeleton Controllers** (27.1 beta): animate once, reuse on any
+  character with the same skeleton
+- ⬜ Master controllers (sliders, point controllers, wizards). Partly
+  superseded by Attribute Controllers, but still needed for old rigs.
+- ⬜ Selection Lock node (27): make rig layers unselectable in the Camera view
 - ⬜ Cut-out rig templates and the library
 - ⬜ Symbols
 - ⬜ Rig lock / kinematic output *(verify)*
@@ -290,8 +302,10 @@ Every effect is a node in the graph.
 - ⬜ Import AI, PDF and SVG. Export SVG.
 - ⬜ Import sound (WAV, MP3, AIFF) and video
 - ⬜ Vectorise (pix2vec-style line extraction)
+- ⬜ Library audio bin with detail view (27.1)
 - ⬜ Templates: save and load (`.tpl`-style folders, our own format)
-- ⬜ Harmony interop: read `.xstage` scenes from user-made files (clean-room)
+- ⬜ Harmony interop: read `.xstage` scenes from user-made files (clean-room),
+  including the compact single-file scene format (25+)
 - ⬜ Exchange formats: OpenToonz, Krita and Blender Grease Pencil where practical
 
 ### 4.12 Scripting and automation

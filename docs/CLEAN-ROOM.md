@@ -20,6 +20,13 @@ any release.
 - Ship Toon Boom utilities (such as `tvg2xml`), or anything produced by
   running them on Toon Boom-owned files.
 
+**Always target the latest Harmony** (currently **Harmony 27.1**, June 2026).
+Research and implement each feature from the newest Premium docs
+(`docs.toonboom.com/help/harmony-27/premium/…`). Older docs are only for
+filling gaps, and their claims must be checked against the latest version,
+because behaviour, names and tools change between releases. When Toon Boom
+ships a new version, update this line and re-check the plan.
+
 **Generic terms are fine**: xsheet, exposure, peg, composite, onion skin, line
 art, colour art, cut-out, bone, envelope. These are industry vocabulary.
 

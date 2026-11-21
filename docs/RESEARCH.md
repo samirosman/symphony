@@ -4,6 +4,25 @@ Built from Toon Boom's **public** docs (docs.toonboom.com, learn.toonboom.com)
 and public talks and tutorials. Items marked *(verify)* still need checking
 against the docs or a tutorial video.
 
+## Target version
+**Harmony 27.1 (2026).** Always implement from the newest docs. The notes
+below were first gathered from versions 20–25 and must be re-checked
+against 27 before each feature is built.
+
+New since those versions:
+- **Harmony 27**: Attribute Controller, a non-destructive rig control.
+  It adds custom offsets to rig attributes, has a Setup Mode for
+  training poses, can learn from existing keyframes, and partly replaces
+  Master Controllers. Also a Reference view Mirror mode and a Selection
+  Lock node, which makes rig layers unselectable in the Camera view.
+- **Harmony 27.1**: Skeleton Controllers (beta), which let you animate
+  once and reuse it on any character with the same skeleton. Also pose
+  indicators for Attribute Controllers, and a detail view for the
+  Library audio bin.
+- **Harmony 25.2**: Art Layer Manager, and an AI Generative Fill operation.
+- **Harmony 25**: a compact scene format that packs drawings and palettes
+  into one file.
+
 ## What animators expect to feel the same
 
 ### 1. Two timing views of one scene
@@ -106,6 +125,9 @@ CLEAN-ROOM.md).
   workflow is the gap Symphony fills.
 
 ## Sources
+- What's new in Harmony 27: https://helpcentre.toonboom.com/hc/en-ca/articles/45250935914771-What-s-new-in-Harmony-27
+- Harmony 27 release notes: https://docs.toonboom.com/help/harmony-27/premium/release-notes/harmony/harmony-27-release-notes.html
+- Harmony 25.2 release notes: https://docs.toonboom.com/help/harmony-25/premium/release-notes/harmony/harmony-25-2-release-notes.html
 - About Nodes: https://docs.toonboom.com/help/harmony-20/premium/nodes/about-nodes.html
 - Peg nodes: https://docs.toonboom.com/help/harmony-24/premium/nodes/add-peg-nodes.html
 - Deformers: https://docs.toonboom.com/help/harmony-25/premium/getting-started/deformation.html

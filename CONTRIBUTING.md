@@ -11,6 +11,9 @@ contributing. In short:
 - Never copy Toon Boom code, icons, art, sample files or documentation text.
 - Describe behaviour in your own words and link to the public source.
 
+- Build features from the **latest** Harmony version's docs (currently
+  27.1), not older ones.
+
 PRs that break these rules will be closed, no matter how good the code is.
 
 ## Getting started
