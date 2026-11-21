@@ -108,8 +108,10 @@ Symphony separates areas by **tone, not lines**:
 | 2 | `bg.raised` | Controls inside cards, rows, view headers |
 | 3 | `bg.hover` | Hover, and popups or menus (plus a shadow) |
 
-- **D3.7** Each docked view is a **card**: `bg.panel`, 4 px corner radius,
-  separated from its neighbours by a 4 px `bg.base` gutter.
+- **D3.7** Each docked view is a **card**: `bg.panel`, 8 px corner radius,
+  separated from its neighbours by a 6 px `bg.base` gutter. Tabs and content share one continuous surface.
+  Use the same gap beside the tool strip and between stacked inspectors.
+  Reserve lines for timing grids, control edges, and interaction feedback.
 - **D3.8** A line is used only where tone can't separate, such as grid
   lines in the Xsheet or the divider under a tab row. Never a box around a
   box.
@@ -212,10 +214,10 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
   - List and Timeline row: 28 px. Xsheet row: 20 px.
   - Timeline frame cell: 16 px wide at default zoom.
   - Minimum pen target: 24 px.
-  - Card inner padding: 12 px. Gutter between cards: 4 px.
+  - Card inner padding: 12 px. Gutter between cards: 6 px.
 - **D6.3 Corner radius.**
   - Controls, rows and exposure blocks: 4 px.
-  - Cards (docked views and the Tools toolbar): 4 px.
+  - Cards (docked views and the Tools toolbar): 8 px.
   - Popups, menus and floating windows: 8 px.
   - The stage: 0, because paper has square corners.
 - **D6.4 Shadows** only on things that float above the dock (menus,

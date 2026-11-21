@@ -58,11 +58,11 @@ pub const ROW: f32 = 28.0;
 pub const XSHEET_ROW: f32 = 20.0;
 pub const FRAME_CELL: f32 = 16.0;
 pub const CARD_PAD: i8 = 12;
-pub const GUTTER: f32 = 4.0;
+pub const GUTTER: f32 = 6.0;
 
 // §6.3 radii.
 pub const RADIUS_CONTROL: u8 = 4;
-pub const RADIUS_CARD: u8 = 4;
+pub const RADIUS_CARD: u8 = 8;
 pub const RADIUS_FLOATING: u8 = 8;
 
 pub fn dense() -> FontId {
@@ -166,7 +166,7 @@ pub fn apply(ctx: &egui::Context) {
 
 #[cfg(feature = "dock")]
 /// Dock styling (DESIGN §3.1): every view is a card on `bg.base` with
-/// 4 px gutters. Tabs are flat, with the active one on a raised tone and the
+/// 6 px gutters. Tabs are flat, with the active one on a raised tone and the
 /// focused view's tab outlined in cel blue (D3.2). No close or collapse
 /// buttons (D3.4).
 pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
@@ -200,10 +200,10 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.separator.color_idle = BG_BASE;
     d.separator.color_hovered = LINE_STRONG;
     d.separator.color_dragged = ACCENT_SELECT;
-    d.tab_bar.bg_fill = BG_INPUT;
+    d.tab_bar.bg_fill = BG_PANEL;
     d.tab_bar.height = TAB_ROW;
     d.tab_bar.corner_radius = top;
-    d.tab_bar.hline_color = LINE_SUBTLE;
+    d.tab_bar.hline_color = Color32::TRANSPARENT;
     d.tab_bar.show_scroll_bar_on_overflow = false;
     d.tab_bar.inner_margin = Margin {
         left: 6,
@@ -212,7 +212,7 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
         bottom: 4,
     };
     d.tab.active = tab(BG_RAISED, TEXT_PRIMARY, Color32::TRANSPARENT);
-    d.tab.inactive = tab(BG_INPUT, TEXT_SECONDARY, Color32::TRANSPARENT);
+    d.tab.inactive = tab(BG_PANEL, TEXT_SECONDARY, Color32::TRANSPARENT);
     d.tab.hovered = tab(BG_RAISED, TEXT_PRIMARY, Color32::TRANSPARENT);
     d.tab.focused = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
     d.tab.active_with_kb_focus = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
@@ -220,7 +220,7 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.tab.focused_with_kb_focus = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
     d.tab.hline_below_active_tab_name = false;
     d.tab.tab_body.bg_fill = BG_PANEL;
-    d.tab.tab_body.stroke = Stroke::new(1.0, LINE_SUBTLE);
+    d.tab.tab_body.stroke = Stroke::NONE;
     d.tab.tab_body.corner_radius = bottom;
     d.tab.tab_body.inner_margin = Margin::same(0);
     d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.25);

@@ -1254,15 +1254,18 @@ impl eframe::App for SymphonyApp {
 
         let base = egui::Frame::new().fill(theme::BG_BASE);
         egui::Panel::top("top-bar")
+            .show_separator_line(false)
             .frame(base.inner_margin(egui::Margin::symmetric(10, 0)))
             .exact_size(theme::TOP_BAR)
             .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status")
+            .show_separator_line(false)
             .frame(base.inner_margin(egui::Margin::symmetric(12, 0)))
             .exact_size(theme::STATUS_BAR)
             .show(ui, |ui| self.status_bar(ui, device.as_ref()));
         let g = theme::GUTTER as i8;
         egui::Panel::left("tools")
+            .show_separator_line(false)
             .frame(base.inner_margin(egui::Margin {
                 left: g,
                 right: 0,
