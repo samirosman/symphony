@@ -10,6 +10,7 @@ use symphony_core::doc::{Scene, Settings};
 use symphony_core::graph::PegParams;
 use symphony_core::history::{Edit, History};
 use symphony_core::id::Id;
+use symphony_core::math::Affine;
 use symphony_core::stroke::{Point, Stroke, StrokeKind};
 
 /// Drawing tools, in Tools-toolbar order.
@@ -42,8 +43,13 @@ impl Tool {
     /// Which milestone brings this tool, if it isn't built yet.
     pub fn planned_for(self) -> Option<&'static str> {
         match self {
-            Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Hand | Tool::Zoom => None,
-            Tool::Select | Tool::Transform => Some("M3"),
+            Tool::Brush
+            | Tool::Pencil
+            | Tool::Eraser
+            | Tool::Hand
+            | Tool::Zoom
+            | Tool::Select
+            | Tool::Transform => None,
             Tool::Paint | Tool::Dropper => Some("M5"),
         }
     }
@@ -57,11 +63,28 @@ pub struct BrushSettings {
     pub smoothing: f32,
 }
 
+/// A peg's values at the current frame, for the Transform tool.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PegValues {
+    pub x: f32,
+    pub y: f32,
+    pub rotation: f32,
+    pub scale_x: f32,
+    pub scale_y: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Onion {
     pub on: bool,
     pub before: u32,
     pub after: u32,
+}
+
+/// Strokes picked with the Select tool, in one drawing.
+#[derive(Clone, Debug, Default)]
+pub struct Selection {
+    pub drawing: Option<Id>,
+    pub strokes: Vec<Id>,
 }
 
 pub struct Session {
@@ -84,6 +107,13 @@ pub struct Session {
     /// Harmony's Brush Size Cursor preference (DESIGN D8.11).
     pub brush_size_cursor: bool,
     pub animate: bool,
+    pub selection: Selection,
+    /// Select tool options, as in Harmony: Marquee instead of Lasso, and
+    /// Easy Drag (drag from anywhere inside the box).
+    pub marquee_mode: bool,
+    pub easy_drag: bool,
+    /// Copied strokes (Cut/Copy/Paste).
+    pub clipboard: Vec<Stroke>,
     /// Last action, for the status bar ("Undo Brush stroke").
     pub notice: Option<String>,
 }
@@ -136,6 +166,10 @@ impl Session {
                 after: 1,
             },
             brush_size_cursor: false,
+            selection: Selection::default(),
+            marquee_mode: false,
+            easy_drag: false,
+            clipboard: Vec::new(),
             animate: true,
             notice: None,
         }
@@ -378,6 +412,238 @@ impl Session {
         self.note(format!("Created drawing {name}"));
     }
 
+    // ---- Selection (Select tool) ------------------------------------------
+
+    /// Drop the selection if it no longer points at the current drawing.
+    pub fn validate_selection(&mut self) {
+        let current = self.doc.exposed(self.selected, self.frame);
+        if self.selection.drawing != current || current.is_none() {
+            self.selection = Selection {
+                drawing: current,
+                strokes: Vec::new(),
+            };
+            return;
+        }
+        if let Some(d) = current.and_then(|d| self.doc.drawings.get(&d)) {
+            self.selection
+                .strokes
+                .retain(|id| d.strokes.iter().any(|st| st.id == *id));
+        }
+    }
+
+    pub fn selected_strokes(&self) -> Vec<&Stroke> {
+        let Some(d) = self
+            .selection
+            .drawing
+            .and_then(|d| self.doc.drawings.get(&d))
+        else {
+            return Vec::new();
+        };
+        d.strokes
+            .iter()
+            .filter(|st| self.selection.strokes.contains(&st.id))
+            .collect()
+    }
+
+    pub fn select_all(&mut self) {
+        self.validate_selection();
+        if let Some(d) = self
+            .selection
+            .drawing
+            .and_then(|d| self.doc.drawings.get(&d))
+        {
+            self.selection.strokes = d.strokes.iter().map(|st| st.id).collect();
+        }
+    }
+
+    pub fn deselect(&mut self) {
+        self.selection.strokes.clear();
+    }
+
+    /// Apply `m` (drawing-local) to the selected strokes as one undo step.
+    pub fn transform_selection(&mut self, m: Affine, name: &str) {
+        let Some(drawing) = self.selection.drawing else {
+            return;
+        };
+        let before: Vec<Stroke> = self.selected_strokes().into_iter().cloned().collect();
+        if before.is_empty() {
+            return;
+        }
+        let after = before
+            .iter()
+            .map(|st| symphony_vector::transformed(st, m))
+            .collect();
+        self.history.apply(
+            &mut self.doc,
+            name,
+            vec![Edit::SetStrokes {
+                drawing,
+                before,
+                after,
+            }],
+        );
+    }
+
+    /// Flip the selection around its centre.
+    pub fn flip_selection(&mut self, horizontal: bool) {
+        let Some((lo, hi)) = symphony_vector::bounds_of(self.selected_strokes()) else {
+            return;
+        };
+        let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+        let (sx, sy) = if horizontal { (-1.0, 1.0) } else { (1.0, -1.0) };
+        let m = Affine::translate(cx, cy)
+            .compose(Affine::scale(sx, sy))
+            .compose(Affine::translate(-cx, -cy));
+        self.transform_selection(
+            m,
+            if horizontal {
+                "Flip horizontal"
+            } else {
+                "Flip vertical"
+            },
+        );
+    }
+
+    pub fn delete_selection(&mut self) {
+        let Some(drawing) = self.selection.drawing else {
+            return;
+        };
+        let ids = std::mem::take(&mut self.selection.strokes);
+        let Some(d) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        // Remove from the back so earlier indices stay valid on undo.
+        let mut edits: Vec<Edit> = d
+            .strokes
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| ids.contains(&st.id))
+            .map(|(index, st)| Edit::RemoveStroke {
+                drawing,
+                index,
+                stroke: st.clone(),
+            })
+            .collect();
+        edits.reverse();
+        self.history.apply(&mut self.doc, "Delete", edits);
+    }
+
+    pub fn copy_selection(&mut self) {
+        self.clipboard = self.selected_strokes().into_iter().cloned().collect();
+        let n = self.clipboard.len();
+        if n > 0 {
+            self.note(format!(
+                "Copied {n} stroke{}",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    pub fn cut_selection(&mut self) {
+        self.copy_selection();
+        self.delete_selection();
+    }
+
+    /// Paste into the current cell (creating a drawing there if it's empty),
+    /// with fresh IDs, and select what was pasted.
+    pub fn paste(&mut self) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+        let Some(col) = self.doc.layers.get(self.selected).map(|l| l.column) else {
+            return;
+        };
+        let mut edits = Vec::new();
+        let drawing = match self.doc.exposed(self.selected, self.frame) {
+            Some(d) => d,
+            None => {
+                let d = self.doc.make_drawing(col);
+                let id = d.id;
+                edits.push(Edit::AddDrawing { drawing: d });
+                edits.push(Edit::SetCells {
+                    column: col,
+                    from: self.frame,
+                    before: vec![None],
+                    after: vec![Some(id)],
+                });
+                id
+            }
+        };
+        let mut ids = Vec::new();
+        for st in self.clipboard.clone() {
+            let mut st = st;
+            st.id = self.doc.ids.fresh();
+            ids.push(st.id);
+            edits.push(Edit::AddStroke {
+                drawing,
+                stroke: st,
+            });
+        }
+        self.history.apply(&mut self.doc, "Paste", edits);
+        self.selection = Selection {
+            drawing: Some(drawing),
+            strokes: ids,
+        };
+    }
+
+    // ---- Transform tool (layers, through their pegs) ----------------------
+
+    /// Change the selected layer's peg in one gesture step. In Animate mode
+    /// values are keyed on the current frame; otherwise constants change.
+    pub fn adjust_peg(&mut self, layer: usize, f: impl FnOnce(&mut PegValues)) {
+        let Some(mut p) = self.doc.peg(layer).cloned() else {
+            return;
+        };
+        let frame = self.frame;
+        let mut v = PegValues {
+            x: p.x.at(frame),
+            y: p.y.at(frame),
+            rotation: p.rotation.at(frame),
+            scale_x: p.scale_x.as_ref().map_or(1.0, |s| s.at(frame)),
+            scale_y: p.scale_y.as_ref().map_or(1.0, |s| s.at(frame)),
+        };
+        let old = v;
+        f(&mut v);
+        let animate = self.animate;
+        let set = |value: &mut Value, n: f32| match value {
+            Value::Constant(c) if !animate => *c = n,
+            _ => value.set_key(frame, n),
+        };
+        if v.x != old.x {
+            set(&mut p.x, v.x);
+        }
+        if v.y != old.y {
+            set(&mut p.y, v.y);
+        }
+        if v.rotation != old.rotation {
+            set(&mut p.rotation, v.rotation);
+        }
+        if v.scale_x != old.scale_x {
+            set(p.scale_x.get_or_insert(Value::Constant(1.0)), v.scale_x);
+        }
+        if v.scale_y != old.scale_y {
+            set(p.scale_y.get_or_insert(Value::Constant(1.0)), v.scale_y);
+        }
+        self.set_peg(layer, p);
+    }
+
+    /// Put the peg's pivot at `pivot` (drawing space) if the peg has never
+    /// been rotated or scaled, so turning a drawing happens around its middle.
+    pub fn ensure_pivot(&mut self, layer: usize, pivot: (f32, f32)) {
+        let Some(p) = self.doc.peg(layer).cloned() else {
+            return;
+        };
+        let untouched = p.pivot == (0.0, 0.0)
+            && matches!(p.rotation, Value::Constant(r) if r == 0.0)
+            && p.scale_x.is_none()
+            && p.scale_y.is_none();
+        if untouched {
+            let mut p = p;
+            p.pivot = pivot;
+            self.set_peg(layer, p);
+        }
+    }
+
     // ---- Timing ----------------------------------------------------------
 
     /// Hold the current drawing one frame longer (+1) or shorter (-1),
@@ -601,5 +867,97 @@ impl Session {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(s: &mut Session, x0: f32, x1: f32) -> Stroke {
+        let swatch = s.swatch;
+        Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: 2.0,
+            points: vec![
+                Point {
+                    x: x0,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+                Point {
+                    x: x1,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn flip_selection_undoes_in_one_step() {
+        let mut s = Session::new_scene();
+        let st = line(&mut s, 0.0, 10.0);
+        s.commit_stroke(0, 1, st);
+        s.select_all();
+        assert_eq!(s.selection.strokes.len(), 1);
+        s.flip_selection(true);
+        let d = s.doc.exposed(0, 1).unwrap();
+        assert_eq!(s.doc.drawings[&d].strokes[0].points[0].x, 10.0);
+        s.undo();
+        assert_eq!(s.doc.drawings[&d].strokes[0].points[0].x, 0.0);
+    }
+
+    #[test]
+    fn copy_paste_into_empty_cell_creates_a_drawing() {
+        let mut s = Session::new_scene();
+        let st = line(&mut s, 0.0, 10.0);
+        s.commit_stroke(0, 1, st);
+        s.select_all();
+        s.copy_selection();
+        s.frame = 2;
+        s.paste();
+        let d2 = s.doc.exposed(0, 2).expect("paste created a drawing");
+        assert_ne!(Some(d2), s.doc.exposed(0, 1));
+        assert_eq!(s.doc.drawings[&d2].strokes.len(), 1);
+        // Pasted strokes get fresh IDs and are selected.
+        assert_eq!(s.selection.strokes, vec![s.doc.drawings[&d2].strokes[0].id]);
+        assert_ne!(s.doc.drawings[&d2].strokes[0].id, s.clipboard[0].id);
+    }
+
+    #[test]
+    fn delete_selection_restores_order_on_undo() {
+        let mut s = Session::new_scene();
+        for x in [0.0, 20.0, 40.0] {
+            let st = line(&mut s, x, x + 5.0);
+            s.commit_stroke(0, 1, st);
+        }
+        let d = s.doc.exposed(0, 1).unwrap();
+        let before: Vec<Id> = s.doc.drawings[&d].strokes.iter().map(|st| st.id).collect();
+        s.validate_selection();
+        s.selection.strokes = vec![before[0], before[2]];
+        s.delete_selection();
+        assert_eq!(s.doc.drawings[&d].strokes.len(), 1);
+        s.undo();
+        let after: Vec<Id> = s.doc.drawings[&d].strokes.iter().map(|st| st.id).collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn transform_tool_move_keys_the_peg_in_animate_mode() {
+        let mut s = Session::new_scene();
+        s.animate = true;
+        s.frame = 5;
+        s.adjust_peg(0, |v| v.x += 30.0);
+        s.end_gesture();
+        let p = s.doc.peg(0).unwrap();
+        assert!(p.has_key(5));
+        assert_eq!(p.x.at(5), 30.0);
+        s.undo();
+        assert_eq!(s.doc.peg(0).unwrap().x.at(5), 0.0);
     }
 }

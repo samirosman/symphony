@@ -425,6 +425,34 @@ impl SymphonyApp {
                 let s = &mut self.s;
                 match other {
                     Action::Undo => s.undo(),
+                    Action::SelectAll => {
+                        s.tool = Tool::Select;
+                        s.select_all();
+                    }
+                    Action::DeselectAll => s.deselect(),
+                    Action::Delete => s.delete_selection(),
+                    Action::Cut => s.cut_selection(),
+                    Action::Copy => s.copy_selection(),
+                    Action::Paste => {
+                        s.tool = Tool::Select;
+                        s.paste();
+                    }
+                    Action::FlipHorizontal | Action::FlipVertical => {
+                        let h = other == Action::FlipHorizontal;
+                        if s.tool == Tool::Transform {
+                            let layer = s.selected;
+                            s.adjust_peg(layer, |v| {
+                                if h {
+                                    v.scale_x = -v.scale_x
+                                } else {
+                                    v.scale_y = -v.scale_y
+                                }
+                            });
+                            s.end_gesture();
+                        } else {
+                            s.flip_selection(h);
+                        }
+                    }
                     Action::Redo => s.redo(),
                     Action::PrevFrame => s.frame = s.frame.saturating_sub(1).max(1),
                     Action::NextFrame => s.frame = (s.frame + 1).min(s.length()),
@@ -512,6 +540,17 @@ impl SymphonyApp {
                 .map_or("Redo".into(), |n| format!("Redo {n}"));
             self.menu_item(ui, Action::Undo, undo);
             self.menu_item(ui, Action::Redo, redo);
+            ui.separator();
+            self.menu_action(ui, Action::Cut);
+            self.menu_action(ui, Action::Copy);
+            self.menu_action(ui, Action::Paste);
+            self.menu_action(ui, Action::Delete);
+            ui.separator();
+            self.menu_action(ui, Action::SelectAll);
+            self.menu_action(ui, Action::DeselectAll);
+            ui.separator();
+            self.menu_action(ui, Action::FlipHorizontal);
+            self.menu_action(ui, Action::FlipVertical);
             ui.separator();
             if ui.button("Preferences").clicked() {
                 self.show_preferences = true;

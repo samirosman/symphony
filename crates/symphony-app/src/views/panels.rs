@@ -107,6 +107,56 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
                 section(ui, "Eraser");
                 hint(ui, "Removes whole strokes it touches. The eraser end of your pen works with any tool.");
             }
+            Tool::Select | Tool::Transform => {
+                let select = s.tool == Tool::Select;
+                section(ui, if select { "Select" } else { "Transform" });
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut s.marquee_mode, false, "Lasso");
+                    ui.selectable_value(&mut s.marquee_mode, true, "Marquee");
+                });
+                hint(
+                    ui,
+                    "Hold Option/Alt to use the other mode for one selection.",
+                );
+                ui.checkbox(&mut s.easy_drag, "Easy drag");
+                hint(
+                    ui,
+                    "Drag the selection from anywhere inside its box, not only on the artwork.",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Flip horizontal").clicked() {
+                        if select {
+                            s.flip_selection(true);
+                        } else {
+                            let l = s.selected;
+                            s.adjust_peg(l, |v| v.scale_x = -v.scale_x);
+                            s.end_gesture();
+                        }
+                    }
+                    if ui.button("Flip vertical").clicked() {
+                        if select {
+                            s.flip_selection(false);
+                        } else {
+                            let l = s.selected;
+                            s.adjust_peg(l, |v| v.scale_y = -v.scale_y);
+                            s.end_gesture();
+                        }
+                    }
+                });
+                if select {
+                    let n = s.selection.strokes.len();
+                    hint(
+                        ui,
+                        &format!("{n} stroke{} selected", if n == 1 { "" } else { "s" }),
+                    );
+                    if ui.add_enabled(n > 0, egui::Button::new("Delete")).clicked() {
+                        s.delete_selection();
+                    }
+                } else {
+                    hint(ui, "Click artwork to pick its layer. Drag to move, corner handles to scale, just outside a corner to rotate. Animate mode sets keys.");
+                }
+            }
             Tool::Hand => {
                 section(ui, "Hand");
                 hint(

@@ -17,6 +17,7 @@ use symphony_vector::{hits, pressure_curve, scale_of, tessellate, Smoother};
 
 use crate::keymap::{self, Action, Profile};
 use crate::session::{Session, Tool};
+use crate::views::select::{self, SelectState};
 
 /// Eraser radius, in screen points.
 const ERASER_RADIUS: f32 = 10.0;
@@ -32,6 +33,7 @@ pub struct CanvasState {
     erasing: Option<(Id, Affine)>,
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
+    pub select: SelectState,
 }
 
 impl Default for CanvasState {
@@ -43,6 +45,7 @@ impl Default for CanvasState {
             active: None,
             erasing: None,
             last_view: Affine::IDENTITY,
+            select: SelectState::default(),
         }
     }
 }
@@ -59,7 +62,7 @@ struct Active {
 
 impl CanvasState {
     pub fn busy(&self) -> bool {
-        self.active.is_some() || self.erasing.is_some()
+        self.active.is_some() || self.erasing.is_some() || self.select.busy()
     }
 
     pub fn reset_view(&mut self) {
@@ -415,24 +418,49 @@ pub fn ui(
     }
 
     // The artwork, back to front.
-    let items: Vec<(Id, Affine)> = if drawing_only {
+    let items: Vec<select::Item> = if drawing_only {
         s.doc
             .exposed(s.selected, s.frame)
-            .map(|d| vec![(d, Affine::IDENTITY)])
+            .map(|d| vec![(s.selected, d, Affine::IDENTITY)])
             .unwrap_or_default()
     } else {
+        let layers = &s.doc.layers;
         s.doc
             .graph
             .evaluate(s.doc.display, &s.doc.xsheet, s.frame)
-            .map(|v| v.into_iter().map(|i| (i.drawing, i.transform)).collect())
+            .map(|v| {
+                v.into_iter()
+                    .filter_map(|i| {
+                        layers
+                            .iter()
+                            .position(|l| l.node == i.node)
+                            .map(|layer| (layer, i.drawing, i.transform))
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     };
-    for (d, m) in &items {
+    // While the Select tool drags, the selected strokes draw through the preview.
+    let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
+    for (_, d, m) in &items {
         if let Some(dr) = s.doc.drawings.get(d) {
+            let moving = preview.is_some() && s.selection.drawing == Some(*d);
             for st in &dr.strokes {
-                paint_stroke(&painter, st, colour(s, st.swatch), view.compose(*m));
+                let m = match preview {
+                    Some(l) if moving && s.selection.strokes.contains(&st.id) => {
+                        view.compose(*m).compose(l)
+                    }
+                    _ => view.compose(*m),
+                };
+                paint_stroke(&painter, st, colour(s, st.swatch), m);
             }
         }
+    }
+    let navigating_now = space || s.tool == Tool::Hand;
+    if matches!(s.tool, Tool::Select | Tool::Transform) && !navigating_now {
+        select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
+    } else {
+        state.select.hover = None;
     }
     if let Some(a) = &state.active {
         if let Some(back) = a.to_local.inverse() {
@@ -566,9 +594,14 @@ pub fn ui(
         &response,
         rect,
         s,
-        Mods { space, shift, alt },
-        pen_eraser,
-        locked,
+        Mods {
+            space,
+            shift,
+            alt,
+            pen_eraser,
+            locked,
+            hint: state.select.hover,
+        },
     );
     bottom_toolbar(ui, state, profile);
 }
@@ -613,20 +646,19 @@ struct Mods {
     space: bool,
     shift: bool,
     alt: bool,
+    /// The pen's eraser end is in use.
+    pen_eraser: bool,
+    /// The selected layer is locked.
+    locked: bool,
+    /// Handle hint from Select/Transform.
+    hint: Option<Icon>,
 }
 
 /// Our canvas cursor (D8.11): a crosshair plus the active tool's icon, or a
 /// navigation cursor while a shortcut is held. Drawn on the foreground
 /// layer, white over a dark outline so it reads on paper and on grey.
-fn draw_cursor(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    rect: Rect,
-    s: &Session,
-    m: Mods,
-    pen_eraser: bool,
-    locked: bool,
-) {
+fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session, m: Mods) {
+    let (pen_eraser, locked, hint) = (m.pen_eraser, m.locked, m.hint);
     let Some(p) = ui
         .input(|i| i.pointer.latest_pos())
         .filter(|p| rect.contains(*p))
@@ -669,6 +701,11 @@ fn draw_cursor(
     };
     if let Some(icon) = nav {
         badge(icon, p, 18.0);
+        return;
+    }
+    // Over a Select/Transform handle: show what dragging it will do.
+    if let Some(icon) = hint.filter(|_| matches!(s.tool, Tool::Select | Tool::Transform)) {
+        badge(icon, p, 16.0);
         return;
     }
 
