@@ -143,6 +143,7 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
+#[cfg(feature = "dock")]
 /// Dock styling: flat docked panels (D6.3, D6.4), active tab marked in cel blue (D3.2).
 pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     let mut d = egui_dock::Style::from_egui(style);

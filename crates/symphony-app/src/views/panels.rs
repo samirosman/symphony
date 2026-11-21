@@ -4,10 +4,10 @@
 use eframe::egui;
 use symphony_pen::DeviceInfo;
 
-use crate::icons::{self, Icon};
 use crate::keymap::{Action, Profile};
 use crate::scene::{set_value, Scene};
-use crate::theme;
+use symphony_ui::icons::{self, Icon};
+use symphony_ui::theme;
 
 pub fn tool_properties(ui: &mut egui::Ui, scene: &mut Scene, device: Option<&DeviceInfo>) {
     ui.heading("Brush");

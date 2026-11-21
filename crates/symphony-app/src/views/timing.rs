@@ -4,10 +4,10 @@
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_core::anim::Value;
 
-use crate::icons::{self, Icon};
 use crate::keymap::{self, Action, Profile};
 use crate::scene::Scene;
-use crate::theme;
+use symphony_ui::icons::{self, Icon};
+use symphony_ui::theme;
 
 /// Transport bar shared by both views.
 pub fn transport(ui: &mut egui::Ui, scene: &mut Scene, profile: Profile) {

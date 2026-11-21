@@ -7,7 +7,7 @@ use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
 
 use crate::scene::Scene;
-use crate::theme;
+use symphony_ui::theme;
 
 #[derive(Default)]
 pub struct NodeViewState {

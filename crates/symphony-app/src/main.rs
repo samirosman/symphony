@@ -2,10 +2,8 @@
 //! workspace bar, Tools toolbar on the left, dock area, status bar.
 //! Shortcuts come only from the keymap (ENGINEERING E4.3).
 
-mod icons;
 mod keymap;
 mod scene;
-mod theme;
 mod views;
 mod workspace;
 
@@ -14,9 +12,10 @@ use egui_dock::{DockArea, DockState};
 use serde::{Deserialize, Serialize};
 use symphony_pen::{DeviceInfo, PenInput, PenSample};
 
-use icons::Icon;
 use keymap::{Action, Profile};
 use scene::{Scene, Tool};
+use symphony_ui::icons::{self, Icon};
+use symphony_ui::theme;
 use views::{camera, node, panels, timing};
 use workspace::{View, Workspace};
 

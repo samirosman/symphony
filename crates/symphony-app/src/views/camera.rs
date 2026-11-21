@@ -9,7 +9,7 @@ use symphony_core::math::Affine;
 use symphony_pen::{PenSample, Phase, Tool};
 
 use crate::scene::{Scene, Stroke, StrokePoint, Tool as SceneTool, STAGE_H, STAGE_W};
-use crate::theme;
+use symphony_ui::theme;
 
 /// Eraser radius, in screen points.
 const ERASER_RADIUS: f32 = 10.0;
