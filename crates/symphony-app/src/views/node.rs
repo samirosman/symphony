@@ -12,6 +12,7 @@ use symphony_ui::theme;
 #[derive(Default)]
 pub struct NodeViewState {
     pan: Vec2,
+    library_search: String,
 }
 
 const W: f32 = 132.0;
@@ -150,4 +151,48 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
     if let Some(i) = clicked_layer {
         s.selected = i;
     }
+}
+
+/// Documented names and links come from the Harmony 27 Premium reference index.
+pub fn library(ui: &mut egui::Ui, s: &Session, state: &mut NodeViewState) {
+    egui::Frame::new().inner_margin(egui::Margin::same(theme::CARD_PAD)).show(ui, |ui| {
+        ui.add(egui::TextEdit::singleline(&mut state.library_search).hint_text("Find a node"));
+        let query = state.library_search.trim().to_lowercase();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if !s.doc.harmony_nodes.is_empty() {
+                ui.heading("Imported scene");
+                ui.label("Layers and exposure timing are editable. Cells have no artwork. Source wiring and attributes are retained. Effects and rigs still need conversion.");
+                for (name, count) in &s.doc.harmony_nodes {
+                    if name.to_lowercase().contains(&query) { ui.label(format!("{name} × {count}")); }
+                }
+            }
+            if !s.doc.harmony_connections.is_empty() {
+                ui.collapsing("Source connections", |ui| {
+                    for link in &s.doc.harmony_connections {
+                        if [link.group.as_str(), link.from.as_str(), link.to.as_str()].iter().any(|name| name.to_lowercase().contains(&query)) {
+                            ui.label(format!("{} [{}] → {} [{}]", link.from, link.output, link.to, link.input))
+                                .on_hover_text(&link.group);
+                        }
+                    }
+                });
+            }
+            ui.heading("Symphony nodes");
+            for &(id, name) in symphony_io::harmony::NODE_LIBRARY {
+                if name.to_lowercase().contains(&query) || id.to_lowercase().contains(&query) {
+                    ui.label(format!("{name} ({id})"));
+                }
+            }
+            ui.heading("Harmony reference");
+            let mut matches = 0;
+            for row in include_str!("../../../../docs/reference/harmony-27-nodes.tsv").lines() {
+                let mut fields = row.split('\t');
+                let (Some(category), Some(name), Some(path)) = (fields.next(), fields.next(), fields.next()) else {continue};
+                if category.contains(&query) || name.to_lowercase().contains(&query) {
+                    ui.hyperlink_to(name, format!("https://docs.toonboom.com/help/harmony-27/premium/{path}")).on_hover_text(category);
+                    matches += 1;
+                }
+            }
+            if matches == 0 { ui.label("No matching reference entries."); }
+        });
+    });
 }

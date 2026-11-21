@@ -89,10 +89,22 @@ impl Grid {
         Stroke::new(1.5 * self.unit, self.colour)
     }
     fn line(&self, painter: &Painter, xy: &[(f32, f32)]) {
-        painter.add(Shape::line(self.pts(xy), self.stroke()));
+        // Round each vertex explicitly: the default polyline uses pointed joins.
+        for edge in xy.windows(2) {
+            painter.line_segment(
+                [self.p(edge[0].0, edge[0].1), self.p(edge[1].0, edge[1].1)],
+                self.stroke(),
+            );
+        }
+        for &(x, y) in xy {
+            self.dot(painter, x, y, 0.75);
+        }
     }
     fn closed(&self, painter: &Painter, xy: &[(f32, f32)]) {
-        painter.add(Shape::closed_line(self.pts(xy), self.stroke()));
+        self.line(painter, xy);
+        if let (Some(&(x, y)), Some(&(u, v))) = (xy.first(), xy.last()) {
+            painter.line_segment([self.p(x, y), self.p(u, v)], self.stroke());
+        }
     }
     fn fill(&self, painter: &Painter, xy: &[(f32, f32)]) {
         painter.add(Shape::convex_polygon(
@@ -121,7 +133,7 @@ fn eye_outline(g: &Grid, painter: &Painter) {
         pts.push((2.0 + 12.0 * t, 8.0 + 4.2 * (PI * t).sin()));
     }
     g.closed(painter, &pts);
-    g.circle(painter, 8.0, 8.0, 2.0);
+    g.dot(painter, 8.0, 8.0, 1.75);
 }
 
 /// Paint `icon` filling `rect` (square) in `colour`.
@@ -161,51 +173,121 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             }
         }
         Icon::Brush => {
-            g.line(p, &[(13.5, 2.5), (8.0, 8.0)]);
-            g.fill(
+            g.closed(
                 p,
-                &[(9.2, 9.2), (6.8, 6.8), (4.6, 8.6), (3.0, 13.0), (7.4, 11.4)],
+                &[
+                    (7.1, 7.8),
+                    (12.7, 2.4),
+                    (13.5, 2.5),
+                    (13.7, 3.3),
+                    (9.1, 9.5),
+                ],
+            );
+            g.closed(
+                p,
+                &[
+                    (7.0, 8.2),
+                    (8.8, 9.8),
+                    (8.0, 11.6),
+                    (6.4, 12.8),
+                    (4.3, 13.3),
+                    (2.4, 13.1),
+                    (3.7, 11.8),
+                    (4.3, 9.9),
+                    (5.4, 8.7),
+                ],
             );
         }
         Icon::Pencil => {
             g.closed(
                 p,
                 &[
-                    (10.8, 2.6),
-                    (13.4, 5.2),
-                    (5.2, 13.4),
-                    (2.6, 13.4),
-                    (2.6, 10.8),
+                    (2.2, 13.8),
+                    (3.0, 10.1),
+                    (10.8, 2.3),
+                    (12.0, 2.0),
+                    (14.0, 4.0),
+                    (13.7, 5.2),
+                    (5.9, 13.0),
                 ],
             );
-            g.line(p, &[(9.2, 4.2), (11.8, 6.8)]);
+            g.line(p, &[(9.4, 3.7), (12.3, 6.6)]);
         }
         Icon::Eraser => {
-            g.closed(p, &[(9.0, 2.6), (13.4, 7.0), (8.0, 12.4), (3.6, 8.0)]);
-            g.line(p, &[(6.3, 5.3), (10.7, 9.7)]);
-            g.line(p, &[(6.5, 13.5), (13.5, 13.5)]);
+            g.closed(
+                p,
+                &[
+                    (2.0, 9.4),
+                    (9.3, 2.1),
+                    (14.0, 6.8),
+                    (7.4, 13.4),
+                    (5.9, 13.4),
+                ],
+            );
+            g.line(p, &[(5.9, 5.5), (10.5, 10.1)]);
+            g.line(p, &[(7.2, 13.5), (14.0, 13.5)]);
         }
         Icon::Paint => {
-            g.closed(p, &[(2.8, 7.6), (7.6, 2.8), (12.4, 7.6), (7.6, 12.4)]);
-            g.line(p, &[(2.8, 7.6), (12.4, 7.6)]);
-            g.fill(p, &[(13.2, 10.0), (14.4, 12.4), (13.2, 13.6), (12.0, 12.4)]);
+            g.closed(p, &[(2.4, 8.0), (7.4, 3.0), (12.2, 7.8), (7.0, 13.0)]);
+            g.line(p, &[(4.1, 2.1), (7.4, 5.4)]);
+            g.line(p, &[(3.2, 8.8), (11.2, 8.8)]);
+            g.fill(
+                p,
+                &[
+                    (13.0, 9.6),
+                    (14.4, 12.2),
+                    (14.1, 13.3),
+                    (13.0, 13.8),
+                    (11.9, 13.3),
+                    (11.6, 12.2),
+                ],
+            );
         }
         Icon::Dropper => {
-            g.line(p, &[(3.0, 13.0), (9.6, 6.4)]);
-            g.line(p, &[(8.0, 4.8), (11.2, 8.0)]);
-            g.dot(p, 11.6, 4.4, 2.2);
+            g.closed(
+                p,
+                &[
+                    (2.0, 14.0),
+                    (2.8, 10.5),
+                    (8.8, 4.5),
+                    (11.5, 7.2),
+                    (5.5, 13.2),
+                ],
+            );
+            g.line(p, &[(7.5, 3.8), (12.1, 8.4)]);
+            g.line(p, &[(10.0, 5.8), (12.6, 3.2)]);
+            g.dot(p, 12.2, 3.8, 2.3);
         }
         Icon::Hand => {
-            g.line(p, &[(8.0, 2.5), (8.0, 13.5)]);
-            g.line(p, &[(2.5, 8.0), (13.5, 8.0)]);
-            for pts in [
-                [(6.2, 4.3), (8.0, 2.5), (9.8, 4.3)],
-                [(6.2, 11.7), (8.0, 13.5), (9.8, 11.7)],
-                [(4.3, 6.2), (2.5, 8.0), (4.3, 9.8)],
-                [(11.7, 6.2), (13.5, 8.0), (11.7, 9.8)],
-            ] {
-                g.line(p, &pts);
-            }
+            // Side-on thumb and grouped fingers leave a single open palm at 16 px.
+            g.closed(
+                p,
+                &[
+                    (6.4, 13.4),
+                    (2.2, 8.3),
+                    (2.3, 7.5),
+                    (3.2, 7.2),
+                    (5.2, 8.9),
+                    (4.8, 4.2),
+                    (5.3, 3.4),
+                    (6.1, 3.5),
+                    (6.8, 7.0),
+                    (6.8, 2.7),
+                    (7.5, 2.1),
+                    (8.3, 2.6),
+                    (8.6, 6.7),
+                    (8.9, 3.4),
+                    (9.6, 2.9),
+                    (10.3, 3.5),
+                    (10.5, 7.0),
+                    (11.0, 5.2),
+                    (11.8, 4.8),
+                    (12.6, 5.5),
+                    (12.9, 9.1),
+                    (12.4, 11.3),
+                    (11.0, 13.4),
+                ],
+            );
         }
         Icon::Zoom => {
             g.circle(p, 7.0, 7.0, 4.2);
@@ -226,27 +308,38 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             g.line(p, &[(3.5, 3.5), (3.5, 12.5)]);
             g.fill(p, &[(12.5, 3.5), (12.5, 12.5), (5.5, 8.0)]);
         }
-        Icon::PrevFrame => g.fill(p, &[(11.0, 3.5), (11.0, 12.5), (4.0, 8.0)]),
+        Icon::PrevFrame => g.line(p, &[(10.5, 3.2), (5.6, 8.0), (10.5, 12.8)]),
         Icon::Play => g.fill(p, &[(4.5, 2.8), (4.5, 13.2), (13.0, 8.0)]),
         Icon::Pause => {
             g.fill(p, &[(4.0, 3.0), (6.8, 3.0), (6.8, 13.0), (4.0, 13.0)]);
             g.fill(p, &[(9.2, 3.0), (12.0, 3.0), (12.0, 13.0), (9.2, 13.0)]);
         }
-        Icon::NextFrame => g.fill(p, &[(5.0, 3.5), (5.0, 12.5), (12.0, 8.0)]),
+        Icon::NextFrame => g.line(p, &[(5.5, 3.2), (10.4, 8.0), (5.5, 12.8)]),
         Icon::LastFrame => {
             g.fill(p, &[(3.5, 3.5), (3.5, 12.5), (10.5, 8.0)]);
             g.line(p, &[(12.5, 3.5), (12.5, 12.5)]);
         }
         Icon::Eye => eye_outline(&g, p),
         Icon::EyeOff => {
-            eye_outline(&g, p);
-            g.line(p, &[(3.0, 13.0), (13.0, 3.0)]);
+            g.line(
+                p,
+                &[
+                    (2.2, 7.4),
+                    (4.7, 9.8),
+                    (7.8, 10.7),
+                    (11.1, 9.9),
+                    (13.8, 7.4),
+                ],
+            );
+            for (x, y, dx) in [(4.5, 9.9, -1.1), (8.0, 10.8, 0.0), (11.5, 9.9, 1.1)] {
+                g.line(p, &[(x, y), (x + dx, y + 1.8)]);
+            }
         }
         // Three overlapping sheets: onion skin.
         Icon::Onion => {
-            g.circle(p, 5.5, 8.0, 3.2);
-            g.circle(p, 8.0, 8.0, 3.2);
-            g.circle(p, 10.5, 8.0, 3.2);
+            g.closed(p, &[(2.2, 2.2), (10.4, 2.2), (10.4, 10.4), (2.2, 10.4)]);
+            g.line(p, &[(12.6, 4.8), (12.6, 12.6), (4.8, 12.6)]);
+            g.line(p, &[(14.8, 7.2), (14.8, 14.8), (7.2, 14.8)]);
         }
         Icon::Fit => {
             for (x, y, dx, dy) in [
@@ -260,32 +353,31 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             g.closed(p, &[(6.0, 6.0), (10.0, 6.0), (10.0, 10.0), (6.0, 10.0)]);
         }
         Icon::RotateLeft | Icon::RotateRight => {
-            let flip = if icon == Icon::RotateLeft { -1.0 } else { 1.0 };
-            let arc: Vec<(f32, f32)> = (0..=10)
+            let direction = if icon == Icon::RotateRight { 1.0 } else { -1.0 };
+            let arc: Vec<_> = (0..=20)
                 .map(|i| {
-                    let a = (-150.0 + 240.0 * i as f32 / 10.0_f32).to_radians();
-                    (8.0 + flip * 5.0 * a.cos(), 8.5 + 5.0 * a.sin())
+                    let angle = (65.0 + 245.0 * i as f32 / 20.0).to_radians();
+                    (8.0 + direction * 5.0 * angle.cos(), 8.5 + 5.0 * angle.sin())
                 })
                 .collect();
             g.line(p, &arc);
-            let tip = arc[0];
             g.line(
                 p,
                 &[
-                    (tip.0 + flip * 2.8, tip.1 - 0.2),
-                    tip,
-                    (tip.0 + flip * 0.6, tip.1 + 2.8),
+                    (8.0 + direction * 3.3, 2.1),
+                    (8.0 + direction * 3.3, 4.8),
+                    (8.0 + direction * 0.6, 4.8),
                 ],
             );
         }
         Icon::Minus => g.line(p, &[(3.0, 8.0), (13.0, 8.0)]),
         // Two line ends with a dotted bridge between them.
         Icon::CloseGap => {
-            g.line(p, &[(2.5, 12.0), (5.5, 9.0)]);
-            g.line(p, &[(13.5, 12.0), (10.5, 9.0)]);
-            for x in [7.0, 8.0, 9.0] {
-                g.dot(p, x, 8.6, 0.6);
-            }
+            g.line(p, &[(1.5, 12.0), (3.0, 9.5), (5.0, 7.0)]);
+            g.line(p, &[(11.0, 7.0), (13.2, 5.0), (14.5, 2.8)]);
+            g.dot(p, 5.0, 7.0, 1.35);
+            g.dot(p, 11.0, 7.0, 1.35);
+            g.dot(p, 8.0, 7.0, 0.65);
         }
         Icon::Plus => {
             g.line(p, &[(8.0, 3.0), (8.0, 13.0)]);
@@ -356,18 +448,24 @@ fn sized_button(
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
     let painter = ui.painter();
-    let (bg, fg) = if !enabled {
-        (None, theme::TEXT_DISABLED)
-    } else if active {
-        (Some(theme::ACCENT_SELECT_FILL), theme::ON_ACCENT)
-    } else if response.hovered() {
-        (Some(theme::BG_HOVER), theme::TEXT_PRIMARY)
-    } else {
-        (None, theme::TEXT_PRIMARY)
+    let transition = |key, on| {
+        if ui.style().animation_time > 0.0 {
+            ui.ctx().animate_bool_responsive(response.id.with(key), on)
+        } else {
+            f32::from(on)
+        }
     };
-    if let Some(bg) = bg {
-        painter.rect_filled(rect, theme::RADIUS_CONTROL as f32, bg);
-    }
+    let hover = transition("hover", enabled && response.hovered());
+    let selected = transition("selected", enabled && active);
+    let bg = egui::Color32::TRANSPARENT
+        .lerp_to_gamma(theme::BG_HOVER, hover)
+        .lerp_to_gamma(theme::ACCENT_SELECT_FILL, selected);
+    painter.rect_filled(rect, theme::RADIUS_CONTROL as f32, bg);
+    let fg = if enabled {
+        theme::TEXT_PRIMARY.lerp_to_gamma(theme::ON_ACCENT, selected)
+    } else {
+        theme::TEXT_DISABLED
+    };
     paint(
         painter,
         Rect::from_center_size(rect.center(), Vec2::splat(icon_size)),
