@@ -1,0 +1,12 @@
+[package]
+name = "symphony-render"
+description = "Renders Symphony scenes to pixels on the CPU (tiny-skia), for export and tests (ENGINEERING E10)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphony-core = { version = "0.0.1", path = "../symphony-core" }
+symphony-vector = { version = "0.0.1", path = "../symphony-vector" }
+tiny-skia = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }
