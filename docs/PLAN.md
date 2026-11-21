@@ -1,0 +1,317 @@
+# Symphony: where we are and where we're going
+
+This is the master plan. It covers how the app works today, what's left,
+and the full feature list: every feature Harmony has that we plan to match
+first. Once the big chunk is done we'll improve some of them and add new
+ones.
+
+Status key: ✅ done · 🟡 started · ⬜ not started
+
+---
+
+## 1. How Symphony works so far
+
+Symphony is a Rust workspace with three crates. The engine never depends on
+UI code, so the front end can change without touching it.
+
+```
+symphony-core     scene model: xsheet, node graph, pegs, keyframes, evaluation
+symphony-pen      our own pen/tablet input, one backend per OS
+symphony-pentest  test window: draws with pressure, logs every sample
+```
+
+### Scene model (`symphony-core`) ✅
+- **Xsheet.** Columns of cells, where each cell names the drawing exposed on
+  that frame ("1", "2", "a"…). Frames are 1-based, the way animators count.
+  `expose("1", 1, 2)` means drawing 1 held for 2 frames (animating on twos).
+  An empty cell shows nothing. The scene length is the longest column.
+- **Node graph.** Nodes connected by links. Each link goes from a node's
+  output into a numbered input port on another node.
+  - *Drawing* shows whatever its column exposes on the current frame.
+  - *Peg* holds a transform (position, rotation, scale, pivot). A peg feeds
+    a drawing or another peg, and chained pegs make a rig hierarchy.
+  - *Composite* stacks its inputs. Port 0 (leftmost) is in front.
+  - *Display* is what the camera shows. *Write* is the render output.
+- **Animatable values.** A value is either constant or keyframed. It
+  interpolates linearly between keys and holds the first or last key
+  outside them. Bézier and ease curves come later.
+- **Evaluation.** For a given Display node and frame, the graph returns a
+  back-to-front list of drawings, each with its full transform after all
+  parent pegs are applied. Cycles are reported as errors instead of hanging.
+- 6 unit tests cover exposure on twos, empty cells, render order, peg
+  interpolation, transform maths and cycle detection.
+
+### Pen input (`symphony-pen`) ✅ on macOS
+- Every tablet produces one sample format: position, pressure (0–1), tilt
+  (x/y, −1 to 1), barrel rotation, tangential pressure, phase
+  (hover/down/move/up), tool (mouse/pen/eraser), pen buttons and a
+  timestamp.
+- **macOS** reads AppKit tablet events directly through a local event
+  monitor. Input-event merging is switched off, so every sample arrives.
+  Proximity events tell us whether the pen tip or the eraser end is in use.
+  - AppKit crashes the app if tablet-only fields are read from a plain
+    mouse event, so every read is checked against the event type first.
+- **Verified 2026-11-21 on a Veikk tablet:** full pressure range with 244
+  distinct levels, tilt on both axes, about 340 samples per second, and the
+  tip button detected. (That pen has no barrel rotation, which is expected.)
+- Windows and Linux backends: ⬜ (see §3).
+
+### Pen test (`symphony-pentest`) ✅
+- A winit window with a CPU canvas (softbuffer + tiny-skia).
+- Line width follows pressure, and the eraser end erases.
+- Shows a pressure bar, a tilt dial, a tool indicator and a hover cursor.
+- Logs every sample to `target/pen-log.csv` and prints samples/sec and
+  max pressure/tilt each second.
+- Run it: `cargo run --release -p symphony-pentest`
+
+---
+
+## 2. What's left (big picture)
+
+See [ROADMAP.md](ROADMAP.md) for milestone order. In short:
+
+1. **App shell**: a real window with dockable views and workspaces.
+2. **Drawing engine**: vector strokes, art layers, onion skin, undo.
+3. **Timing**: Timeline and Xsheet views over the same data, plus playback.
+4. **Ink & paint**: palettes with colour IDs, the paint tools, gap closing.
+5. **Rigging**: Node view editing, pegs, Function view, substitution.
+6. **Deformers**: bone, curve, envelope and more.
+7. **Effects and compositing.**
+8. **Render and export.**
+9. **Import and interop**, including reading Harmony scenes from user files.
+10. **Scripting.**
+11. **Windows and Linux pen backends**, and wide tablet compatibility.
+12. **Native file format**: save, load, autosave, crash recovery.
+
+---
+
+## 3. Tablet compatibility plan
+
+The goal is **every tablet**. One person can't own every tablet, so
+compatibility will be a community effort.
+
+### Simulating tablets
+| OS | How to fake a tablet | What it tests |
+|---|---|---|
+| macOS | Post synthetic `CGEvent`s with tablet fields (pressure, tilt, proximity). | Our AppKit backend end to end, in CI. |
+| Windows | `InjectSyntheticPointerInput` with `PT_PEN` (Windows 10 1809+). | The Windows Ink path in CI. Wintab can't be faked this way and needs real hardware or a community report. |
+| Linux | A virtual tablet through `uinput` (evdev `ABS_PRESSURE`, `ABS_TILT_X/Y`, `BTN_TOOL_PEN`/`RUBBER`). | XInput2 and Wayland tablet-v2, in CI under a headless compositor. |
+| All | **Replay recorded logs.** `pen-log.csv` files from real tablets are fed straight into the drawing pipeline. | Stroke smoothing, pressure curves and drawing behaviour, independent of the device. |
+
+### Community testing
+- A "Tablet report" issue template asks for brand, model, OS, driver
+  version and the pen test summary, with `pen-log.csv` attached.
+- A compatibility table (`docs/TABLETS.md`) gets updated from those reports.
+- Real logs from reports become regression tests through log replay.
+
+### Backends still to write
+- **Windows**: Windows Ink (`WM_POINTER`) plus Wintab for older Wacom,
+  Huion and XP-Pen drivers, with a switch in Preferences, like other
+  professional apps have.
+- **Linux**: Wayland `tablet-unstable-v2`, and XInput2 valuators on X11.
+
+---
+
+## 4. Full Harmony feature list (target: all of it)
+
+Built clean-room from Toon Boom's public documentation
+([CLEAN-ROOM.md](CLEAN-ROOM.md)). Items marked *(verify)* still need
+checking against the docs or a video. This list will grow as research
+continues.
+
+### 4.1 Workspace and interface
+- ⬜ Dockable, tabbable, floating views
+- ⬜ Saved workspaces (Drawing, Animation, Rigging, Compositing…) and fast switching
+- ⬜ Camera view (rendered scene, animate mode)
+- ⬜ Drawing view (one drawing at a time, no transforms)
+- ⬜ Timeline view
+- ⬜ Xsheet view
+- ⬜ Node view and Node Library
+- ⬜ Tool Properties view
+- ⬜ Colour view (palettes and swatches)
+- ⬜ Layer Properties view
+- ⬜ Function view (curve editor)
+- ⬜ Library view (templates and symbols)
+- ⬜ Top, Side and Perspective views (3D scene planning)
+- ⬜ Reference view (a second, frozen camera view) *(verify)*
+- ⬜ Model view (character reference)
+- ⬜ Coordinates and Control Points view
+- ⬜ Script Editor view
+- ⬜ Message log
+- ⬜ Customisable toolbars
+- ⬜ Keyboard shortcut sets: a Harmony-style set built from the published
+  default list, plus custom sets
+- ⬜ Preferences dialog (all tabs)
+- ⬜ Rotate, flip and zoom the canvas. Reset view.
+- ⬜ Field guide, grid, rulers, safe areas, guides (including perspective guides)
+- ⬜ Light table and Shift & Trace
+
+### 4.2 Drawing
+- 🟡 Pressure and tilt input (macOS ✅)
+- ⬜ **Pencil**: centreline with thickness, pressure-driven thickness, editable afterwards
+- ⬜ Pencil line textures and pencil presets
+- ⬜ **Brush**: filled contour, pressure size and opacity, smoothing
+- ⬜ Textured vector brushes (greyscale bitmap mask)
+- ⬜ Bitmap layers and bitmap brushes (tip and paper textures, blending)
+- ⬜ Eraser (vector and bitmap)
+- ⬜ Line, Rectangle, Ellipse and Polyline tools
+- ⬜ Text tool
+- ⬜ Stroke tool (invisible lines used for painting zones)
+- ⬜ Contour Editor (edit vector points and Béziers)
+- ⬜ Centerline Editor
+- ⬜ Pencil Editor (reshape thickness)
+- ⬜ Smooth Editor
+- ⬜ Cutter (lasso cut)
+- ⬜ Select tool (lasso, marquee, transform selection)
+- ⬜ Perspective tool
+- ⬜ Envelope tool (warp a selection)
+- ⬜ Morphing tool and morph sequences (Premium)
+- ⬜ Stabiliser, smoothing and pressure curve settings
+- ⬜ Auto-flatten, auto-merge, draw behind, and "Draw on Colour Art" options
+- ⬜ Auto close gap
+- ⬜ Snap to contour, snap to grid, snap to alignment guides
+- ⬜ Art layers: Overlay, Line Art, Colour Art, Underlay
+- ⬜ Create Colour Art from Line Art
+- ⬜ Onion skin (previous and next drawings, colours, opacity, range)
+- ⬜ Reposition All Drawings
+- ⬜ Rotary table
+- ⬜ Hand and Zoom tools
+- ⬜ Undo/redo history view
+
+### 4.3 Ink and paint, colour
+- ⬜ **Palettes with colour IDs**: edit a swatch and everything using it recolours
+- ⬜ Solid, linear gradient, radial gradient and bitmap texture swatches
+- ⬜ Palette levels: scene, element, job and environment *(verify naming)*
+- ⬜ Palette lists, palette browser and master palettes
+- ⬜ Palette cloning (for example day and night versions of the same palette)
+- ⬜ Paint tool modes: Paint, Paint Unpainted, Repaint, Unpaint
+- ⬜ Ink tool (recolour lines)
+- ⬜ Dropper
+- ⬜ Close Gap tool
+- ⬜ Edit Gradient/Texture tool
+- ⬜ Protect colour
+- ⬜ Show Strokes, Show Unpainted Zones
+- ⬜ Colour override
+
+### 4.4 Timing
+- ⬜ **Timeline**: layers, exposure bars, keyframes, layer parenting,
+  extend and reduce exposure, drag timing
+- ⬜ **Xsheet**: columns, cells with drawing names, Increase/Decrease
+  Exposure, Fill Empty Cells, Sequence Fill, holds, keyframe markers
+- ⬜ Timeline and Xsheet editing the same data, live
+- ⬜ Drawing substitution (swap the exposed drawing, substitution browser)
+- ⬜ Annotation column (notes and drawings in the Xsheet)
+- ⬜ Function columns in the Xsheet (Bézier, Ease, Expression, 3D Path, Quaternion)
+- ⬜ Timing column (drawings from another element)
+- ⬜ Scene markers and ranges
+- ⬜ Frame rate setting, scene length, start and stop
+- ⬜ Playback: real-time playback, loop, range, playback speed, sound
+  scrubbing, jog/shuttle, real-time cache
+- ⬜ Sound: sound column, waveform, scrubbing
+- ⬜ **Lip-sync**: automatic mouth-shape detection (A–H, X chart) and mapping to drawings
+
+### 4.5 Animation
+- ⬜ Animate mode (on/off)
+- ⬜ Transform tool (move, rotate, scale, skew, pivot)
+- ⬜ Keyframes: motion and stop-motion keyframes, ease in/out, constant segments
+- ⬜ Motion paths (on-screen editing)
+- ⬜ 3D paths and 3D transforms
+- ⬜ Function editor: Bézier, ease, velocity graphs, expressions
+- 🟡 Linear keyframe interpolation (core ✅)
+- ⬜ Pivots: permanent pivot, temporary pivot, pivot per drawing
+- ⬜ Copy, paste and Paste Special (with keyframe options)
+- ⬜ Inverse kinematics (IK tool, IK constraints, nail/hold)
+- ⬜ Animate Current Drawing Only, plus the other animate modes
+- ⬜ Show/hide manipulators and control points
+
+### 4.6 Rigging and node view
+- 🟡 Pegs and peg hierarchy (core model ✅, no UI)
+- 🟡 Drawing nodes and Composite stacking order (core model ✅)
+- ⬜ Node view editing: add, connect, disconnect, reorder ports, groups,
+  enable/disable, colours, navigation
+- ⬜ Groups with multi-port in/out nodes, and nested groups
+- ⬜ Master controllers (sliders, point controllers, wizards)
+- ⬜ Cut-out rig templates and the library
+- ⬜ Symbols
+- ⬜ Rig lock / kinematic output *(verify)*
+- ⬜ Auto-patch
+- ⬜ Backdrops in the Node view
+
+### 4.7 Deformation
+- ⬜ Bone deformer (bias, regions of influence, chains)
+- ⬜ Game Bone deformer (game export, no bias or regions)
+- ⬜ Curve deformer (Bézier chain)
+- ⬜ Envelope deformer (closed loop)
+- ⬜ Free-form deformer *(verify)*
+- ⬜ Weighted deformation *(verify)*
+- ⬜ Deformation Composite node
+- ⬜ Rigging tool and deformation animation tool
+- ⬜ Deformation on bitmap and textured drawings (with the quality caveats Harmony documents)
+
+### 4.8 Camera and 3D scene
+- ⬜ Camera node, camera framing, multiple cameras, camera switching
+- ⬜ Multiplane (Z depth), with Top and Side view editing
+- ⬜ 3D rotation of 2D layers
+- ⬜ Import 3D models (OBJ, FBX, Alembic, 3DS) *(verify list)*
+- ⬜ Camera shake (Quake effect)
+
+### 4.9 Effects (nodes)
+Every effect is a node in the graph.
+- ⬜ Blur: Gaussian, Directional, Radial, Variable
+- ⬜ Glow, Bloom
+- ⬜ Shadow and Highlight (tone shading on drawings)
+- ⬜ Drop Shadow
+- ⬜ Light shading and surface normals (2D lighting)
+- ⬜ Colour Card, Colour Override, Colour Scale, Colour Fade
+- ⬜ Brightness-Contrast, Hue-Saturation, Gradient, Grain, Noise
+- ⬜ Transparency
+- ⬜ Cutter and Inverse Cutter (matte cutting)
+- ⬜ Matte Composite, Matte Resize
+- ⬜ Glare, Refract, Turbulence *(verify)*
+- ⬜ Motion blur
+- ⬜ Particle system (generators, forces, baking)
+- ⬜ Line Art / Colour Art separation in effects
+- ⬜ Effect SDK / plugins (Premium)
+
+### 4.10 Compositing and render
+- 🟡 Composite node render order (core ✅)
+- ⬜ Composite modes: bitmap, pass-through, vector
+- ⬜ GPU preview render (OpenGL-style) and full-quality Render view
+- ⬜ Write node with output settings
+- ⬜ Image sequences: PNG, TGA, TIFF, PSD, OpenEXR, JPEG
+- ⬜ Movies: MP4/H.264, MOV (ProRes), GIF
+- ⬜ Command-line and batch rendering
+- ⬜ Sprite sheet export
+- ⬜ Game engine export (Unity / Godot)
+
+### 4.11 Import and export
+- ⬜ Import bitmaps (as bitmaps, or vectorised)
+- ⬜ PSD import as separate layers, PSD export
+- ⬜ Import AI, PDF and SVG. Export SVG.
+- ⬜ Import sound (WAV, MP3, AIFF) and video
+- ⬜ Vectorise (pix2vec-style line extraction)
+- ⬜ Templates: save and load (`.tpl`-style folders, our own format)
+- ⬜ Harmony interop: read `.xstage` scenes from user-made files (clean-room)
+- ⬜ Exchange formats: OpenToonz, Krita and Blender Grease Pencil where practical
+
+### 4.12 Scripting and automation
+- ⬜ Scripting engine (JavaScript-like API: `scene`, `node`, `column`, `frame`, `selection`…)
+- ⬜ Python API
+- ⬜ Script Editor, script toolbar buttons, script UIs
+- ⬜ Command-line utilities (render, scene inspection, conversion)
+
+### 4.13 Production
+- ⬜ Native scene format: save, autosave, crash recovery, versions
+- ⬜ Project and scene browser
+- ⬜ Scene setup (resolution, frame rate, alignment)
+- ⬜ Multi-user database mode (like Harmony Server) — last, and optional
+- ⬜ Scan/paper workflow (import scanned drawings, registration)
+
+### 4.14 Symphony extras (after the main chunk)
+These are improvements and new features. They come after the Harmony list
+above is in place.
+- Ideas go here as they come up.
+
+---
+
+*Last updated: 2026-11-21*

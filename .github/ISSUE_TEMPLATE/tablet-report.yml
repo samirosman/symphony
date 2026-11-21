@@ -1,0 +1,45 @@
+name: Tablet report
+description: Tell us how your drawing tablet works with Symphony's pen test.
+title: "Tablet: <brand> <model> on <OS>"
+labels: [tablet]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Run `cargo run --release -p symphony-pentest`. Draw light and
+        heavy strokes, lean the pen, try the eraser end, then press Esc.
+  - type: input
+    id: tablet
+    attributes:
+      label: Tablet brand and model
+      placeholder: Veikk VK1060
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: macOS 26.1 / Windows 11 24H2 / Ubuntu 26.04 (Wayland)
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: Tablet driver and version
+  - type: textarea
+    id: summary
+    attributes:
+      label: Pen test summary
+      description: The last lines the pen test printed (samples/s, pressure seen, tilt seen).
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: feel
+    attributes:
+      label: Did drawing feel right?
+      options: ["Yes", "Mostly", "No"]
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything odd? Attach target/pen-log.csv if you can.
