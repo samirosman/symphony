@@ -3817,6 +3817,7 @@ dependencies = [
 name = "symphony-io"
 version = "0.1.0-preview.1"
 dependencies = [
+ "roxmltree",
  "serde",
  "serde_json",
  "symphony-core",

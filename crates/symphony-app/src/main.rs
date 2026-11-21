@@ -36,6 +36,8 @@ const AUTOSAVE_EVERY: f64 = 120.0;
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
+    #[serde(default = "yes")]
+    interface_animations: bool,
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
     #[serde(default)]
@@ -59,6 +61,7 @@ fn yes() -> bool {
 /// Something waiting on "Save changes?".
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending {
+    ImportHarmony,
     Update,
     Quit,
     New,
@@ -79,6 +82,7 @@ struct CodecDownload {
 
 /// A project being read in the background (DESIGN D17.1).
 struct Opening {
+    harmony: bool,
     path: PathBuf,
     started: f64,
     rx: Receiver<Result<Scene, String>>,
@@ -91,6 +95,7 @@ const NOTICE_SECONDS: f64 = 4.0;
 type SaveResult = (u64, PathBuf, Result<(), String>);
 
 struct SymphonyApp {
+    interface_animations: bool,
     s: Session,
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
@@ -177,6 +182,8 @@ impl SymphonyApp {
         let saved: Option<Saved> = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
+        let interface_animations = saved.as_ref().is_none_or(|s| s.interface_animations);
+        theme::set_motion(&cc.egui_ctx, interface_animations);
         let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
         let use_openh264 = saved.as_ref().is_none_or(|s| s.use_openh264);
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
@@ -224,6 +231,7 @@ impl SymphonyApp {
         let (save_tx, save_rx) = channel();
         let version = s.doc.version;
         SymphonyApp {
+            interface_animations,
             s,
             workspace,
             layouts,
@@ -304,7 +312,8 @@ impl SymphonyApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Pending::New => self.replace_session(Session::new_scene()),
-            Pending::Open => self.open_dialog(),
+            Pending::Open => self.open_dialog(false),
+            Pending::ImportHarmony => self.open_dialog(true),
         }
     }
 
@@ -321,20 +330,32 @@ impl SymphonyApp {
         self.drawing.reset_view();
     }
 
-    fn open_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Open a Symphony project (.symphony folder)")
-            .pick_folder()
-        else {
-            return;
+    fn open_dialog(&mut self, harmony: bool) {
+        let dialog = rfd::FileDialog::new();
+        let path = if harmony {
+            dialog
+                .set_title("Import Harmony scene structure")
+                .add_filter("Harmony scene", &["xstage"])
+                .pick_file()
+        } else {
+            dialog
+                .set_title("Open a Symphony project (.symphony folder)")
+                .pick_folder()
         };
+        let Some(path) = path else { return };
         // Read in the background; a loading dialog shows meanwhile (D17.1).
         let (tx, rx) = channel();
         let p = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(symphony_io::open(&p).map_err(|e| e.0));
+            let result = if harmony {
+                symphony_io::harmony::import(&p)
+            } else {
+                symphony_io::open(&p).map_err(|e| e.0)
+            };
+            let _ = tx.send(result);
         });
         self.opening = Some(Opening {
+            harmony,
             path,
             started: self.last_time.unwrap_or(0.0),
             rx,
@@ -345,9 +366,17 @@ impl SymphonyApp {
         let Some(o) = &self.opening else { return };
         match o.rx.try_recv() {
             Ok(Ok(doc)) => {
-                let path = o.path.clone();
+                let harmony = o.harmony;
+                let path = (!harmony).then(|| o.path.clone());
                 self.opening = None;
-                self.replace_session(Session::from_doc(doc, Some(path)));
+                self.replace_session(Session::from_doc(doc, path));
+                if harmony {
+                    self.s.doc.version += 1;
+                    self.show_view(View::NodeLibrary);
+                    self.s.notice =
+                        Some("Imported scene structure. See Node Library for coverage.".into());
+                    return;
+                }
                 self.s.notice = Some(format!("Opened {}", self.s.name()));
             }
             Ok(Err(e)) => {
@@ -728,6 +757,16 @@ impl SymphonyApp {
         ui.menu_button("File", |ui| {
             self.menu_item(ui, Action::NewScene, "New scene".into());
             self.menu_item(ui, Action::Open, "Open...".into());
+            if ui
+                .button("Import Harmony scene structure…")
+                .on_hover_text(
+                    "Import scene settings, drawing layers and exposures from an .xstage file",
+                )
+                .clicked()
+            {
+                ui.close();
+                self.guard(ui.ctx(), Pending::ImportHarmony);
+            }
             ui.separator();
             self.menu_action(ui, Action::Save);
             self.menu_item(ui, Action::SaveAs, "Save as...".into());
@@ -1149,6 +1188,7 @@ impl SymphonyApp {
 }
 
 struct Viewer<'a> {
+    workspace: Workspace,
     s: &'a mut Session,
     camera: &'a mut camera::CanvasState,
     drawing: &'a mut camera::CanvasState,
@@ -1161,6 +1201,28 @@ struct Viewer<'a> {
 
 impl Viewer<'_> {
     fn view(&mut self, ui: &mut egui::Ui, v: View) {
+        // Fade the incoming content in place. Pen coordinates and hit targets stay fixed.
+        let duration = ui.style().animation_time as f64;
+        if duration > 0.0 {
+            let key = egui::Id::unique(("view-appearance", self.workspace, v));
+            let frame = ui.ctx().cumulative_frame_nr();
+            let now = ui.input(|i| i.time);
+            let start = ui.data_mut(|data| {
+                let (last, since) = data.get_temp::<(u64, f64)>(key).unwrap_or((frame, now));
+                let start = if frame > last.saturating_add(1) {
+                    now
+                } else {
+                    since
+                };
+                data.insert_temp(key, (frame, start));
+                start
+            });
+            let progress = ((now - start) / duration).clamp(0.0, 1.0) as f32;
+            if progress < 1.0 {
+                ui.multiply_opacity(1.0 - 0.5 * (1.0 - progress).powi(3));
+                ui.ctx().request_repaint();
+            }
+        }
         match v {
             View::Camera => camera::ui(ui, self.s, self.camera, self.samples, false, self.profile),
             View::Drawing => camera::ui(ui, self.s, self.drawing, self.samples, true, self.profile),
@@ -1171,6 +1233,7 @@ impl Viewer<'_> {
             View::Colour => panels::colour(ui, self.s),
             View::LayerProperties => panels::layer_properties(ui, self.s),
             View::Function => panels::planned(ui, "Function view (curve editor)", "M6"),
+            View::NodeLibrary => node::library(ui, self.s, self.node_view),
             View::Library => panels::planned(ui, "Library (templates and symbols)", "M6"),
         }
     }
@@ -1286,6 +1349,17 @@ impl eframe::App for SymphonyApp {
                 egui::ScrollArea::vertical()
                     .max_height(560.0)
                     .show(ui, |ui| {
+                        ui.heading("Interface");
+                        if symphony_ui::widgets::checkbox(
+                            ui,
+                            &mut self.interface_animations,
+                            "Animate interface transitions",
+                        )
+                        .changed()
+                        {
+                            theme::set_motion(&ctx, self.interface_animations);
+                        }
+                        ui.separator();
                         panels::preferences(
                             ui,
                             &mut self.profile,
@@ -1313,6 +1387,7 @@ impl eframe::App for SymphonyApp {
             .expect("layout")
             .1;
         let mut viewer = Viewer {
+            workspace: ws,
             s: &mut self.s,
             camera: &mut self.camera,
             drawing: &mut self.drawing,
@@ -1378,6 +1453,7 @@ impl eframe::App for SymphonyApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let saved = Saved {
+            interface_animations: self.interface_animations,
             workspace: self.workspace,
             layouts: self.layouts.clone(),
             profile: self.profile,

@@ -21,10 +21,11 @@ pub enum View {
     LayerProperties,
     Function,
     Library,
+    NodeLibrary,
 }
 
 impl View {
-    pub const ALL: [View; 10] = [
+    pub const ALL: [View; 11] = [
         View::Camera,
         View::Drawing,
         View::Timeline,
@@ -35,6 +36,7 @@ impl View {
         View::LayerProperties,
         View::Function,
         View::Library,
+        View::NodeLibrary,
     ];
 
     pub fn title(self) -> &'static str {
@@ -48,6 +50,7 @@ impl View {
             View::Colour => "Colour",
             View::LayerProperties => "Layer Properties",
             View::Function => "Function",
+            View::NodeLibrary => "Node Library",
             View::Library => "Library",
         }
     }

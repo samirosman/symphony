@@ -58,3 +58,17 @@ Click **Update** beside Help. Save any edits when prompted. A release build
 checks your selected release channel and installs an available update.
 Click **Launch** when it finishes. Symphony Dev instead rebuilds the
 current source checkout and opens the resulting app, including local edits.
+
+## Harmony scene structure
+
+Choose **File → Import Harmony scene structure** and select a standalone
+`.xstage` file. Save the result as a new Symphony project. The importer
+reads scene resolution, frame rate, frame count, drawing layers and exposure
+ranges. Direct drawing inputs to the display composite follow source port
+order. Cells are editable empty drawings with the source drawing names.
+
+**Windows → Node Library** lists native node types, the imported scene’s
+node counts, and a searchable [Harmony 27 Premium node reference](https://docs.toonboom.com/help/harmony-27/premium/nodes/about-node-view.html).
+The original scene XML is retained in the native save. Linked artwork,
+palettes, keyframed rigs, nested compositing, and effects still require
+conversion. The reference list describes Harmony’s catalogue.

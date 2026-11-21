@@ -356,18 +356,24 @@ fn sized_button(
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
     let painter = ui.painter();
-    let (bg, fg) = if !enabled {
-        (None, theme::TEXT_DISABLED)
-    } else if active {
-        (Some(theme::ACCENT_SELECT_FILL), theme::ON_ACCENT)
-    } else if response.hovered() {
-        (Some(theme::BG_HOVER), theme::TEXT_PRIMARY)
-    } else {
-        (None, theme::TEXT_PRIMARY)
+    let transition = |key, on| {
+        if ui.style().animation_time > 0.0 {
+            ui.ctx().animate_bool_responsive(response.id.with(key), on)
+        } else {
+            f32::from(on)
+        }
     };
-    if let Some(bg) = bg {
-        painter.rect_filled(rect, theme::RADIUS_CONTROL as f32, bg);
-    }
+    let hover = transition("hover", enabled && response.hovered());
+    let selected = transition("selected", enabled && active);
+    let bg = egui::Color32::TRANSPARENT
+        .lerp_to_gamma(theme::BG_HOVER, hover)
+        .lerp_to_gamma(theme::ACCENT_SELECT_FILL, selected);
+    painter.rect_filled(rect, theme::RADIUS_CONTROL as f32, bg);
+    let fg = if enabled {
+        theme::TEXT_PRIMARY.lerp_to_gamma(theme::ON_ACCENT, selected)
+    } else {
+        theme::TEXT_DISABLED
+    };
     paint(
         painter,
         Rect::from_center_size(rect.center(), Vec2::splat(icon_size)),

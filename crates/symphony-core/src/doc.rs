@@ -50,8 +50,26 @@ pub struct LayerSnapshot {
     pub links: Vec<Link>,
 }
 
+/// A connection in the imported source graph, including its enclosing group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceConnection {
+    pub group: String,
+    pub from: String,
+    pub output: usize,
+    pub to: String,
+    pub input: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scene {
+    /// Source node counts for the Harmony import report.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub harmony_nodes: BTreeMap<String, usize>,
+    /// Original scene XML retains source wiring, attributes and unknown modules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harmony_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harmony_connections: Vec<SourceConnection>,
     pub settings: Settings,
     pub xsheet: Xsheet,
     pub graph: Graph,
@@ -91,6 +109,9 @@ impl Scene {
             ],
         };
         Scene {
+            harmony_nodes: BTreeMap::new(),
+            harmony_source: None,
+            harmony_connections: Vec::new(),
             settings,
             xsheet: Xsheet::default(),
             graph,

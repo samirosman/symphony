@@ -114,6 +114,12 @@ fn widget(bg: Color32, fg: Color32, stroke: Stroke) -> egui::style::WidgetVisual
     }
 }
 
+/// Shared duration for controls, menus and windows (DESIGN D9).
+pub fn set_motion(ctx: &egui::Context, enabled: bool) {
+    ctx.clear_animations();
+    ctx.all_styles_mut(|style| style.animation_time = if enabled { 0.12 } else { 0.0 });
+}
+
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
     ctx.all_styles_mut(|style| {
