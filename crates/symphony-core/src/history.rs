@@ -9,6 +9,12 @@ use crate::stroke::{Drawing, Stroke};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
+    /// Replace strokes in place, matched by ID (move, scale, rotate, flip).
+    SetStrokes {
+        drawing: Id,
+        before: Vec<Stroke>,
+        after: Vec<Stroke>,
+    },
     AddStroke {
         drawing: Id,
         stroke: Stroke,
@@ -102,6 +108,20 @@ impl Edit {
                     } else {
                         d.strokes
                             .insert((*index).min(d.strokes.len()), stroke.clone());
+                    }
+                }
+            }
+            Edit::SetStrokes {
+                drawing,
+                before,
+                after,
+            } => {
+                let new = if forward { after } else { before };
+                if let Some(d) = s.drawings.get_mut(drawing) {
+                    for st in d.strokes.iter_mut() {
+                        if let Some(n) = new.iter().find(|n| n.id == st.id) {
+                            *st = n.clone();
+                        }
                     }
                 }
             }
@@ -453,6 +473,40 @@ mod tests {
         h.undo(&mut s);
         let cells: Vec<_> = (1..=4).map(|f| s.exposed(0, f)).collect();
         assert_eq!(cells, [Some(a), Some(a), Some(b), None]);
+    }
+
+    #[test]
+    fn set_strokes_round_trips() {
+        let (mut s, mut h) = scene_with_layer();
+        let col = s.layers[0].column;
+        let d = s.make_drawing(col);
+        let did = d.id;
+        let st = stroke(&mut s);
+        h.apply(
+            &mut s,
+            "Draw",
+            vec![
+                Edit::AddDrawing { drawing: d },
+                Edit::AddStroke {
+                    drawing: did,
+                    stroke: st.clone(),
+                },
+            ],
+        );
+        let mut moved = st.clone();
+        moved.points[0].x += 10.0;
+        h.apply(
+            &mut s,
+            "Move",
+            vec![Edit::SetStrokes {
+                drawing: did,
+                before: vec![st.clone()],
+                after: vec![moved],
+            }],
+        );
+        assert_eq!(s.drawings[&did].strokes[0].points[0].x, 10.0);
+        h.undo(&mut s);
+        assert_eq!(s.drawings[&did].strokes[0].points[0].x, 0.0);
     }
 
     #[test]

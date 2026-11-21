@@ -182,6 +182,63 @@ pub fn hits(stroke: &Stroke, x: f32, y: f32, r: f32) -> bool {
     }
 }
 
+/// Bounding box of a stroke including its width, as (min, max).
+pub fn bounds(stroke: &Stroke) -> Option<([f32; 2], [f32; 2])> {
+    let mut it = stroke.points.iter();
+    let first = it.next()?;
+    let r0 = stroke.width_at(first.pressure) * 0.5;
+    let (mut lo, mut hi) = ([first.x - r0, first.y - r0], [first.x + r0, first.y + r0]);
+    for p in it {
+        let r = stroke.width_at(p.pressure) * 0.5;
+        lo = [lo[0].min(p.x - r), lo[1].min(p.y - r)];
+        hi = [hi[0].max(p.x + r), hi[1].max(p.y + r)];
+    }
+    Some((lo, hi))
+}
+
+/// Bounding box of several strokes.
+pub fn bounds_of<'a>(
+    strokes: impl IntoIterator<Item = &'a Stroke>,
+) -> Option<([f32; 2], [f32; 2])> {
+    strokes
+        .into_iter()
+        .filter_map(bounds)
+        .reduce(|(a0, a1), (b0, b1)| {
+            (
+                [a0[0].min(b0[0]), a0[1].min(b0[1])],
+                [a1[0].max(b1[0]), a1[1].max(b1[1])],
+            )
+        })
+}
+
+/// The stroke moved by `m`. Widths scale with the transform's average
+/// scale, so a scaled-up drawing gets thicker lines, as on paper.
+pub fn transformed(stroke: &Stroke, m: Affine) -> Stroke {
+    let k = scale_of(m);
+    let mut out = stroke.clone();
+    for p in out.points.iter_mut() {
+        let (x, y) = m.apply(p.x, p.y);
+        p.x = x;
+        p.y = y;
+    }
+    out.min_width *= k;
+    out.max_width *= k;
+    out
+}
+
+/// Is a point inside a closed polygon (even-odd rule)? For lasso selection.
+pub fn inside_polygon(x: f32, y: f32, poly: &[[f32; 2]]) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + n - 1) % n]);
+        if (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0] {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +308,22 @@ mod tests {
     fn single_point_is_a_dot() {
         let m = tessellate(&stroke(&[(5.0, 5.0)]), Affine::IDENTITY, 0.1);
         assert!(!m.indices.is_empty());
+    }
+
+    #[test]
+    fn bounds_include_width_and_transform_scales_it() {
+        let s = stroke(&[(0.0, 0.0), (10.0, 0.0)]);
+        assert_eq!(bounds(&s), Some(([-1.0, -1.0], [11.0, 1.0])));
+        let t = transformed(&s, Affine::scale(2.0, 2.0));
+        assert_eq!(t.points[1].x, 20.0);
+        assert_eq!(t.max_width, 4.0);
+    }
+
+    #[test]
+    fn lasso_contains_points() {
+        let sq = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        assert!(inside_polygon(5.0, 5.0, &sq));
+        assert!(!inside_polygon(15.0, 5.0, &sq));
     }
 
     #[test]
