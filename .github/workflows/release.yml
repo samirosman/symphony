@@ -1,0 +1,63 @@
+name: Release
+
+# Push a tag like v0.1.0 (stable) or v0.2.0-preview.1 (preview, for testers).
+# Builds Symphony and the launcher for every OS, writes SHA256SUMS and
+# publishes a GitHub Release, which is what the launcher reads (ENGINEERING E13).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo test --workspace
+        if: matrix.target != 'x86_64-apple-darwin'
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p symphony-app -p symphony-launcher
+      - name: Package
+        shell: bash
+        run: scripts/package.sh "${GITHUB_REF_NAME#v}" "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRE=""
+          [[ "$GITHUB_REF_NAME" == *-* ]] && PRE="--prerelease"
+          gh release create "$GITHUB_REF_NAME" dist/* $PRE \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Symphony ${GITHUB_REF_NAME#v}" \
+            --generate-notes

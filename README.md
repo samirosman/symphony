@@ -11,6 +11,7 @@ Not affiliated with Toon Boom. Built clean-room from public documentation
 - **[Plan: status, what's left, full feature list](docs/PLAN.md)**
 - **[Design rules](docs/DESIGN.md)** and **[engineering rules](docs/ENGINEERING.md)**: every change follows these.
 - [Research](docs/RESEARCH.md) · [Language choice](docs/LANGUAGE.md) · [Roadmap](docs/ROADMAP.md) · [Tablets](docs/TABLETS.md)
+- [Testing Symphony](docs/TESTERS.md): install the launcher.
 - [Contributing](CONTRIBUTING.md): please read the clean-room rules first.
 
 Licensed under GPL-3.0-or-later.

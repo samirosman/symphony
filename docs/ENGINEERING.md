@@ -325,3 +325,6 @@ These are known gaps from early prototyping, and each one is a task.
 | E4.3 | Shortcuts go through the new keymap, but menus don't read the registry yet. | M2 polish |
 | E7 | No save or load yet. | M12, though autosave comes early, alongside save |
 | E10.2 | The canvas draws with egui shapes, not the shared renderer. | M3 / renderer |
+| E13.5 | The launcher doesn't update itself yet. Testers download a new launcher by hand when one is announced. | Before the first stable release |
+| E13.6 | Builds aren't code-signed. Testers follow the "Open anyway" steps in TESTERS.md. | Before the first stable release |
+| E13.4 | The macOS app is launched as a plain binary, not a `.app` bundle (it gets no Dock icon of its own). | With app icons |
