@@ -16,6 +16,15 @@ contributing. In short:
 
 PRs that break these rules will be closed, no matter how good the code is.
 
+## The rules every change follows
+- [docs/DESIGN.md](docs/DESIGN.md): how Symphony looks, reads and behaves.
+  UI pull requests go through its review checklist (§14).
+- [docs/ENGINEERING.md](docs/ENGINEERING.md): how the software works
+  (commands and undo, threads, files, profiles, releases).
+- Shortcuts and workflows come in two profiles: **Harmony** (as the latest
+  Harmony does it) and **Symphony** (our improvements). Improvements go
+  in the Symphony profile and never replace the Harmony way (DESIGN §11).
+
 ## Getting started
 1. Install Rust (stable) from https://rustup.rs
 2. `cargo test --workspace`
