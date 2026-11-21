@@ -4,6 +4,8 @@
 //!
 //! Export runs on a background thread with progress and cancel (E5.2).
 
+pub mod movie;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -75,6 +77,8 @@ pub enum Format {
     /// One PNG per frame: name_0001.png, ...
     PngSequence,
     AnimatedGif,
+    /// H.264 in MP4, through Cisco's OpenH264 binary (`ExportJob::codec`).
+    Mp4Movie,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +90,8 @@ pub struct ExportJob {
     pub last: u32,
     /// Output size as a fraction of the scene resolution (1.0, 0.5, ...).
     pub scale: f32,
+    /// Path to Cisco's OpenH264 binary, for movies.
+    pub codec: Option<PathBuf>,
 }
 
 /// Run an export. `progress` gets (done, total). Stops early, cleanly, when
@@ -115,6 +121,12 @@ pub fn export(
                 progress(i as u32 + 1, total);
             }
             Ok(())
+        }
+        Format::Mp4Movie => {
+            let codec = job.codec.as_deref().ok_or(
+                "Movie export needs the OpenH264 codec. Download it in Preferences > Video.",
+            )?;
+            movie::export_mp4(scene, codec, &job.path, first, last, w, h, cancel, progress)
         }
         Format::AnimatedGif => {
             let file = std::fs::File::create(&job.path)
@@ -239,6 +251,7 @@ mod tests {
             first: 1,
             last: 3,
             scale: 0.5,
+            codec: None,
         };
         export(&s, &gif, &cancel, &|_, _| {}).unwrap();
         assert!(std::fs::metadata(dir.join("a.gif")).unwrap().len() > 0);
@@ -248,9 +261,28 @@ mod tests {
             first: 2,
             last: 3,
             scale: 1.0,
+            codec: None,
         };
         export(&s, &png, &cancel, &|_, _| {}).unwrap();
         assert!(dir.join("shot_0002.png").is_file() && dir.join("shot_0003.png").is_file());
+        // Movie export runs when a Cisco binary is available:
+        // SYMPHONY_TEST_OPENH264=/path/to/libopenh264-2.7.0-<platform>.
+        if let Some(codec) = std::env::var_os("SYMPHONY_TEST_OPENH264") {
+            let mp4 = ExportJob {
+                format: Format::Mp4Movie,
+                path: dir.join("m.mp4"),
+                first: 1,
+                last: 3,
+                scale: 1.0,
+                codec: Some(codec.into()),
+            };
+            export(&s, &mp4, &cancel, &|_, _| {}).unwrap();
+            let bytes = std::fs::read(dir.join("m.mp4")).unwrap();
+            assert_eq!(&bytes[4..8], b"ftyp", "an MP4 file starts with ftyp");
+            if let Some(keep) = std::env::var_os("SYMPHONY_TEST_MP4_OUT") {
+                std::fs::write(keep, &bytes).unwrap();
+            }
+        }
         cancel.store(true, Ordering::SeqCst);
         assert!(export(&s, &png, &cancel, &|_, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);

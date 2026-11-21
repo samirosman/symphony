@@ -3,6 +3,7 @@
 //! cards, and the status bar. Shortcuts come only from the keymap
 //! (ENGINEERING E4.3). Saving and autosave run off the main thread (E5.2).
 
+mod codec;
 mod keymap;
 mod session;
 mod shot;
@@ -45,6 +46,9 @@ struct Saved {
     pressure_gamma: Option<f32>,
     #[serde(default)]
     brush_size_cursor: bool,
+    /// Use Cisco's OpenH264 for movies (Cisco requires the user can turn it off).
+    #[serde(default = "yes")]
+    use_openh264: bool,
 }
 
 fn yes() -> bool {
@@ -57,6 +61,18 @@ enum Pending {
     Quit,
     New,
     Open,
+}
+
+enum CodecMsg {
+    Progress(u64, Option<u64>),
+    Done(Result<PathBuf, String>),
+}
+
+/// Downloading Cisco's codec in the background (D17.5).
+struct CodecDownload {
+    rx: Receiver<CodecMsg>,
+    done: u64,
+    total: Option<u64>,
 }
 
 /// A project being read in the background (DESIGN D17.1).
@@ -102,6 +118,9 @@ struct SymphonyApp {
     autosaving: Arc<AtomicBool>,
     title: String,
     saving_jobs: u32,
+    use_openh264: bool,
+    codec_download: Option<CodecDownload>,
+    show_licences: bool,
     opening: Option<Opening>,
     notice_seen: Option<(String, f64)>,
 }
@@ -155,6 +174,7 @@ impl SymphonyApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
         let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
+        let use_openh264 = saved.as_ref().is_none_or(|s| s.use_openh264);
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -229,6 +249,9 @@ impl SymphonyApp {
             autosaving: Arc::new(AtomicBool::new(false)),
             title: String::new(),
             saving_jobs: 0,
+            use_openh264,
+            codec_download: None,
+            show_licences: false,
             opening: None,
             notice_seen: None,
         }
@@ -389,6 +412,112 @@ impl SymphonyApp {
                 }
                 Err(e) => self.error = Some(e),
             }
+        }
+    }
+
+    /// The codec to hand to movie export: downloaded and turned on.
+    fn codec(&self) -> Option<PathBuf> {
+        self.use_openh264.then(codec::installed).flatten()
+    }
+
+    /// Fetch Cisco's OpenH264 in the background, at the user's request.
+    fn start_codec_download(&mut self, ctx: &egui::Context) {
+        if self.codec_download.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let t2 = tx.clone();
+            let c2 = ctx.clone();
+            let r = codec::download(&move |d, t| {
+                let _ = t2.send(CodecMsg::Progress(d, t));
+                c2.request_repaint();
+            });
+            let _ = tx.send(CodecMsg::Done(r));
+            ctx.request_repaint();
+        });
+        self.use_openh264 = true;
+        self.codec_download = Some(CodecDownload {
+            rx,
+            done: 0,
+            total: None,
+        });
+    }
+
+    fn poll_codec(&mut self) {
+        let Some(d) = self.codec_download.as_mut() else {
+            return;
+        };
+        while let Ok(m) = d.rx.try_recv() {
+            match m {
+                CodecMsg::Progress(done, total) => (d.done, d.total) = (done, total),
+                CodecMsg::Done(r) => {
+                    match r {
+                        Ok(_) => self.s.notice = Some("OpenH264 is ready for movie export".into()),
+                        Err(e) => self.error = Some(e),
+                    }
+                    self.codec_download = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Preferences > Video: Cisco's codec, with the notice and controls its
+    /// licence requires (docs/CODECS.md).
+    fn video_preferences(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("Video");
+        ui.label(egui::RichText::new(codec::NOTICE).color(theme::TEXT_PRIMARY));
+        symphony_ui::widgets::checkbox(ui, &mut self.use_openh264, "Use OpenH264 for movie export");
+        let dense = |ui: &mut egui::Ui, t: String| {
+            ui.label(
+                egui::RichText::new(t)
+                    .font(theme::dense())
+                    .color(theme::TEXT_SECONDARY),
+            );
+        };
+        if let Some(d) = &self.codec_download {
+            ui.horizontal(|ui| {
+                feedback::spinner(ui, 14.0);
+                ui.label("Downloading from Cisco");
+            });
+            feedback::progress_bar(
+                ui,
+                d.total.map(|t| d.done as f32 / t.max(1) as f32),
+                ui.available_width(),
+            );
+        } else if let Some(p) = codec::installed() {
+            dense(
+                ui,
+                format!(
+                    "Version {} is installed at {}.",
+                    codec::VERSION,
+                    p.display()
+                ),
+            );
+            if ui.button("Remove OpenH264").clicked() {
+                codec::remove();
+            }
+        } else if codec::file_name().is_some() {
+            dense(
+                ui,
+                "Not downloaded. Movie export downloads it from Cisco when you ask.".into(),
+            );
+            if ui.button("Download OpenH264 from Cisco").clicked() {
+                let ctx = ui.ctx().clone();
+                self.start_codec_download(&ctx);
+            }
+        } else {
+            dense(
+                ui,
+                "Cisco doesn't publish OpenH264 for this kind of computer.".into(),
+            );
+        }
+        dense(ui, "Cisco's licence covers personal and other unpaid use. Commercial work may need its own H.264 licence.".into());
+        if ui.link("Show licence").clicked() {
+            self.show_licences = true;
         }
     }
 
@@ -592,8 +721,10 @@ impl SymphonyApp {
                         .open(symphony_render::Format::PngSequence, &self.s);
                     ui.close();
                 }
-                ui.add_enabled(false, egui::Button::new("Movie..."))
-                    .on_disabled_hover_text("Coming soon: needs a video encoder");
+                if ui.button("Movie (H.264 MP4)...").clicked() {
+                    self.export.open(symphony_render::Format::Mp4Movie, &self.s);
+                    ui.close();
+                }
             });
             ui.separator();
             if ui.button("Quit Symphony").clicked() {
@@ -668,6 +799,10 @@ impl SymphonyApp {
             self.menu_action(ui, Action::MaximiseView);
         });
         ui.menu_button("Help", |ui| {
+            if ui.button("Licences").clicked() {
+                self.show_licences = true;
+                ui.close();
+            }
             if ui.button("Icon sheet").clicked() {
                 self.show_icon_sheet = true;
                 ui.close();
@@ -824,6 +959,12 @@ impl SymphonyApp {
                     jobs.push((
                         format!("Exporting frame {done} of {total}"),
                         Some(done as f32 / total.max(1) as f32),
+                    ));
+                }
+                if let Some(d) = &self.codec_download {
+                    jobs.push((
+                        "Downloading OpenH264".into(),
+                        d.total.map(|t| d.done as f32 / t.max(1) as f32),
                     ));
                 }
                 if self.saving_jobs > 0 {
@@ -1050,6 +1191,7 @@ impl eframe::App for SymphonyApp {
         let now = ctx.input(|i| i.time);
         self.poll_saves();
         self.poll_open();
+        self.poll_codec();
         self.expire_notice(now);
         self.autosave(now);
         self.tick_playback(&ctx);
@@ -1095,12 +1237,17 @@ impl eframe::App for SymphonyApp {
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(&ctx, |ui| {
-                panels::preferences(
-                    ui,
-                    &mut self.profile,
-                    &mut self.use_no_ai,
-                    &mut self.s.brush_size_cursor,
-                )
+                egui::ScrollArea::vertical()
+                    .max_height(560.0)
+                    .show(ui, |ui| {
+                        panels::preferences(
+                            ui,
+                            &mut self.profile,
+                            &mut self.use_no_ai,
+                            &mut self.s.brush_size_cursor,
+                        );
+                        self.video_preferences(ui);
+                    })
             });
         self.show_preferences = open;
         let mut open = self.show_icon_sheet;
@@ -1145,7 +1292,31 @@ impl eframe::App for SymphonyApp {
                 }
             });
 
-        self.export.ui(&ctx, &self.s);
+        let codec_path = self.codec();
+        let downloading = self.codec_download.is_some();
+        if self
+            .export
+            .ui(&ctx, &self.s, codec_path, downloading)
+            .download_codec
+        {
+            self.start_codec_download(&ctx);
+        }
+        let mut open = self.show_licences;
+        egui::Window::new("Licences")
+            .open(&mut open)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_size([560.0, 480.0])
+            .show(&ctx, |ui| {
+                ui.label("Symphony is free software under the GNU General Public License, version 3 or later.");
+                ui.separator();
+                ui.heading("OpenH264");
+                ui.label(codec::NOTICE);
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    ui.label(egui::RichText::new(codec::LICENSE).font(theme::dense()));
+                });
+            });
+        self.show_licences = open;
         self.dialogs(&ctx);
 
         let pending = self.pen.as_ref().is_some_and(|p| p.has_pending());
@@ -1167,6 +1338,7 @@ impl eframe::App for SymphonyApp {
             use_no_ai: self.use_no_ai,
             pressure_gamma: Some(self.s.pressure_gamma),
             brush_size_cursor: self.s.brush_size_cursor,
+            use_openh264: self.use_openh264,
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

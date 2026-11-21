@@ -10,15 +10,19 @@ name = "symphony"
 path = "src/main.rs"
 
 [dependencies]
+bzip2 = "0.6"
 dirs = "7"
 eframe = { version = "0.37", features = ["persistence"] }
 egui_dock = { version = "0.22", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
 rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
 symphony-core = { path = "../symphony-core" }
 symphony-io = { path = "../symphony-io" }
 symphony-pen = { path = "../symphony-pen" }
 symphony-render = { path = "../symphony-render" }
 symphony-ui = { path = "../symphony-ui" }
 symphony-vector = { path = "../symphony-vector" }
+ureq = "3"

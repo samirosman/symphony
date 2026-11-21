@@ -291,7 +291,7 @@ Every effect is a node in the graph.
 - ⬜ GPU preview render (OpenGL-style) and full-quality Render view
 - ⬜ Write node with output settings
 - 🟡 Image sequences: PNG, TGA, TIFF, PSD, OpenEXR, JPEG (PNG done)
-- 🟡 Movies: MP4/H.264, MOV (ProRes), GIF (GIF done; movies need an encoder decision)
+- 🟡 Movies: MP4/H.264, MOV (ProRes), GIF (GIF and H.264 MP4 done, through Cisco's OpenH264; ProRes later)
 - ⬜ Command-line and batch rendering
 - ⬜ Sprite sheet export
 - ⬜ Game engine export (Unity / Godot)

@@ -56,7 +56,15 @@ fn title(f: Format) -> &'static str {
     match f {
         Format::AnimatedGif => "Export to Animated GIF",
         Format::PngSequence => "Export Image Sequence (PNG)",
+        Format::Mp4Movie => "Export Movie (H.264 MP4)",
     }
+}
+
+/// What the dialog asks the app to do.
+#[derive(Default)]
+pub struct Request {
+    /// Download Cisco's OpenH264 (the user clicked the button).
+    pub download_codec: bool,
 }
 
 impl ExportDialog {
@@ -85,6 +93,7 @@ impl ExportDialog {
         let (ext, name) = match f {
             Format::AnimatedGif => ("gif", format!("{}.gif", s.name())),
             Format::PngSequence => ("png", format!("{}.png", s.name())),
+            Format::Mp4Movie => ("mp4", format!("{}.mp4", s.name())),
         };
         if let Some(mut p) = rfd::FileDialog::new()
             .set_title(title(f))
@@ -99,7 +108,7 @@ impl ExportDialog {
         }
     }
 
-    fn start(&mut self, s: &Session, ctx: &egui::Context) {
+    fn start(&mut self, s: &Session, ctx: &egui::Context, codec: Option<std::path::PathBuf>) {
         let (Some(format), Some(path)) = (self.format, self.path.clone()) else {
             return;
         };
@@ -114,6 +123,7 @@ impl ExportDialog {
             first,
             last,
             scale: self.scale,
+            codec,
         };
         let scene = s.doc.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -137,7 +147,16 @@ impl ExportDialog {
         self.result = None;
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, s: &Session) {
+    /// `codec` is Cisco's OpenH264 when it's downloaded and turned on.
+    /// `downloading` is true while it's being fetched.
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        s: &Session,
+        codec: Option<std::path::PathBuf>,
+        downloading: bool,
+    ) -> Request {
+        let mut request = Request::default();
         if let Some(r) = self.running.as_mut() {
             while let Ok(m) = r.rx.try_recv() {
                 match m {
@@ -150,7 +169,9 @@ impl ExportDialog {
                 }
             }
         }
-        let Some(format) = self.format else { return };
+        let Some(format) = self.format else {
+            return request;
+        };
         let mut open = true;
         egui::Window::new(title(format))
             .open(&mut open)
@@ -234,19 +255,40 @@ impl ExportDialog {
                         }
                         None => {}
                     }
-                    let ready = self.path.is_some();
+                    let needs_codec = format == Format::Mp4Movie && codec.is_none();
+                    if needs_codec {
+                        ui.label(
+                            egui::RichText::new(
+                                "Movies use Cisco's OpenH264 codec. Symphony downloads it from Cisco when you ask, \
+                                 and you can turn it off or remove it in Preferences > Video.",
+                            )
+                            .font(theme::dense())
+                            .color(theme::TEXT_SECONDARY),
+                        );
+                        ui.label(egui::RichText::new(crate::codec::NOTICE).font(theme::dense()).color(theme::TEXT_SECONDARY));
+                        if downloading {
+                            ui.horizontal(|ui| {
+                                symphony_ui::feedback::spinner(ui, 14.0);
+                                ui.label("Downloading OpenH264 from Cisco");
+                            });
+                        } else if ui.button("Download OpenH264 from Cisco").clicked() {
+                            request.download_codec = true;
+                        }
+                    }
+                    let ready = self.path.is_some() && !needs_codec;
                     if ui
                         .add_enabled(ready, egui::Button::new("Export"))
-                        .on_disabled_hover_text("Choose where to save first")
+                        .on_disabled_hover_text(if needs_codec { "Download the codec first" } else { "Choose where to save first" })
                         .clicked()
                     {
-                        self.start(s, ctx);
+                        self.start(s, ctx, codec.clone());
                     }
                 }
             });
         if !open && self.running.is_none() {
             self.format = None;
         }
+        request
     }
 }
 
