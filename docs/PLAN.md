@@ -142,10 +142,10 @@ continues.
 - ⬜ Script Editor view
 - ⬜ Message log
 - ⬜ Customisable toolbars
-- ⬜ Keyboard shortcut sets: a Harmony-style set built from the published
-  default list, plus custom sets
+- 🟡 Keyboard shortcut sets: a Harmony-style set built from the published
+  default list, plus custom sets (Harmony 27 defaults verified for every built action; custom sets later)
 - ⬜ Preferences dialog (all tabs)
-- 🟡 Rotate, flip and zoom the canvas. Reset view. (flip still to do)
+- 🟡 Rotate, flip and zoom the canvas. Reset view. (Harmony toolbars and resets done; flipping the view still to do)
 - ⬜ Field guide, grid, rulers, safe areas, guides (including perspective guides)
 - ⬜ Light table and Shift & Trace
 
@@ -165,7 +165,7 @@ continues.
 - ⬜ Pencil Editor (reshape thickness)
 - ⬜ Smooth Editor
 - ⬜ Cutter (lasso cut)
-- ⬜ Select tool (lasso, marquee, transform selection)
+- ✅ Select tool (lasso, marquee, transform selection)
 - ⬜ Perspective tool
 - ⬜ Envelope tool (warp a selection)
 - ⬜ Morphing tool and morph sequences (Premium)
@@ -218,7 +218,7 @@ continues.
 
 ### 4.5 Animation
 - ⬜ Animate mode (on/off)
-- ⬜ Transform tool (move, rotate, scale, skew, pivot)
+- 🟡 Transform tool (move, rotate, scale, skew, pivot): move, rotate, scale and flip done; skew and pivot dragging next
 - ⬜ Keyframes: motion and stop-motion keyframes, ease in/out, constant segments
 - ⬜ Motion paths (on-screen editing)
 - ⬜ 3D paths and 3D transforms
@@ -290,8 +290,8 @@ Every effect is a node in the graph.
 - ⬜ Composite modes: bitmap, pass-through, vector
 - ⬜ GPU preview render (OpenGL-style) and full-quality Render view
 - ⬜ Write node with output settings
-- ⬜ Image sequences: PNG, TGA, TIFF, PSD, OpenEXR, JPEG
-- ⬜ Movies: MP4/H.264, MOV (ProRes), GIF
+- 🟡 Image sequences: PNG, TGA, TIFF, PSD, OpenEXR, JPEG (PNG done)
+- 🟡 Movies: MP4/H.264, MOV (ProRes), GIF (GIF done; movies need an encoder decision)
 - ⬜ Command-line and batch rendering
 - ⬜ Sprite sheet export
 - ⬜ Game engine export (Unity / Godot)
