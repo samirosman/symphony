@@ -212,7 +212,7 @@ impl SymphonyApp {
             timing: Default::default(),
             export: Default::default(),
             maximised: None,
-            show_preferences: false,
+            show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
             show_icon_sheet: false,
             last_time: None,
             frame_clock: 0.0,
@@ -1092,6 +1092,8 @@ impl eframe::App for SymphonyApp {
         egui::Window::new("Preferences")
             .open(&mut open)
             .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(&ctx, |ui| {
                 panels::preferences(
                     ui,
@@ -1104,6 +1106,8 @@ impl eframe::App for SymphonyApp {
         let mut open = self.show_icon_sheet;
         egui::Window::new("Icon sheet")
             .open(&mut open)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(&ctx, panels::icon_sheet);
         self.show_icon_sheet = open;
 
@@ -1180,9 +1184,17 @@ impl eframe::App for SymphonyApp {
 /// On macOS the top bar becomes the title bar: content runs under it and
 /// the window buttons float at its left (D3.1, D12.2).
 fn viewport() -> egui::ViewportBuilder {
+    // Design review can force a window size: SYMPHONY_SHOT_SIZE=1280x800.
+    let size = std::env::var("SYMPHONY_SHOT_SIZE")
+        .ok()
+        .and_then(|v| {
+            v.split_once('x')
+                .and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))
+        })
+        .unwrap_or([1440.0, 900.0]);
     let v = egui::ViewportBuilder::default()
         .with_title("Symphony")
-        .with_inner_size([1440.0, 900.0])
+        .with_inner_size(size)
         .with_min_inner_size([960.0, 600.0]);
     if cfg!(target_os = "macos") {
         v.with_fullsize_content_view(true)
@@ -1196,6 +1208,8 @@ fn viewport() -> egui::ViewportBuilder {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: viewport(),
+        // A forced review size must win over the remembered window size.
+        persist_window: std::env::var_os("SYMPHONY_SHOT_SIZE").is_none(),
         ..Default::default()
     };
     eframe::run_native(

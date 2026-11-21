@@ -137,7 +137,8 @@ Tokens live in `crates/symphony-app/src/theme.rs`.
 | `bg.hover` | `#3A3F47` | Hovered buttons and rows |
 | `bg.input` | `#1A1C20` | Text fields, slider rails, wells |
 | `line.subtle` | `#3A3E46` | Dividers and grid lines |
-| `line.strong` | `#565B65` | Outlines of containers and inactive controls |
+| `line.strong` | `#565B65` | Outlines of containers |
+| `line.control` | `#80868F` | Edges of checkboxes and radios when off (3.9:1 on cards, 3.4:1 on raised) |
 | `text.primary` | `#DDE0E6` | Labels, values, icons |
 | `text.secondary` | `#A0A5AF` | Hints, units, secondary info. Never on `bg.hover`. |
 | `text.disabled` | `#686D77` | Disabled controls only, never information |

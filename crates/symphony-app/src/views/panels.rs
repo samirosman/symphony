@@ -5,7 +5,7 @@ use eframe::egui;
 use symphony_core::graph::PegParams;
 use symphony_pen::DeviceInfo;
 use symphony_ui::icons::{self, Icon};
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 
 use crate::keymap::{Action, Profile};
 use crate::session::{BrushSettings, Session, Tool};
@@ -118,7 +118,7 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
                     ui,
                     "Hold Option/Alt to use the other mode for one selection.",
                 );
-                ui.checkbox(&mut s.easy_drag, "Easy drag");
+                widgets::checkbox(ui, &mut s.easy_drag, "Easy drag");
                 hint(
                     ui,
                     "Drag the selection from anywhere inside its box, not only on the artwork.",
@@ -271,10 +271,10 @@ pub fn layer_properties(ui: &mut egui::Ui, s: &mut Session) {
             ui.data_mut(|d| d.remove::<String>(id));
         }
         let mut visible = s.layer_visible(i);
-        if ui.checkbox(&mut visible, "Visible").changed() {
+        if widgets::checkbox(ui, &mut visible, "Visible").changed() {
             s.toggle_visible(i);
         }
-        ui.checkbox(&mut s.animate, "Animate mode (edits set keyframes)");
+        widgets::checkbox(ui, &mut s.animate, "Animate mode (edits set keyframes)");
         ui.separator();
         hint(ui, &format!("Peg at frame {frame}"));
         let Some(p) = s.doc.peg(i).cloned() else {
@@ -311,14 +311,14 @@ pub fn preferences(
     brush_size_cursor: &mut bool,
 ) {
     ui.heading("Tools");
-    ui.checkbox(brush_size_cursor, "Brush size cursor");
+    widgets::checkbox(ui, brush_size_cursor, "Brush size cursor");
     hint(
         ui,
         "Shows the brush size as a circle around the cursor, as in Harmony.",
     );
     ui.separator();
     ui.heading("AI");
-    ui.checkbox(use_no_ai, "Use no AI");
+    widgets::checkbox(ui, use_no_ai, "Use no AI");
     hint(ui, "Symphony has no generative AI. It has no assisted tools yet either, so nothing in it uses AI.");
     ui.hyperlink_to(
         "How Symphony uses AI",
@@ -327,7 +327,7 @@ pub fn preferences(
     ui.separator();
     ui.heading("Workflow");
     for p in [Profile::Harmony, Profile::Symphony] {
-        ui.radio_value(profile, p, p.title());
+        widgets::radio_value(ui, profile, p, p.title());
         hint(ui, p.blurb());
         ui.add_space(4.0);
     }

@@ -20,6 +20,8 @@ pub const BG_HOVER: Color32 = hex(0x3A3F47);
 pub const BG_INPUT: Color32 = hex(0x1A1C20);
 pub const LINE_SUBTLE: Color32 = hex(0x3A3E46);
 pub const LINE_STRONG: Color32 = hex(0x565B65);
+/// Edges of controls that would otherwise vanish (checkbox, radio): 3:1 or more on every surface (D4.4).
+pub const LINE_CONTROL: Color32 = hex(0x80868F);
 pub const TEXT_PRIMARY: Color32 = hex(0xDDE0E6);
 pub const TEXT_SECONDARY: Color32 = hex(0xA0A5AF);
 pub const TEXT_DISABLED: Color32 = hex(0x686D77);
@@ -156,6 +158,9 @@ pub fn apply(ctx: &egui::Context) {
             Stroke::new(1.0, ACCENT_SELECT),
         );
         v.widgets.open = widget(BG_RAISED, TEXT_PRIMARY, Stroke::new(1.0, LINE_STRONG));
+        // Sliders: the filled part shows the value at a glance, and the handle is a round knob.
+        v.slider_trailing_fill = true;
+        v.handle_shape = egui::style::HandleShape::Circle;
     });
 }
 
@@ -199,6 +204,7 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.tab_bar.height = TAB_ROW;
     d.tab_bar.corner_radius = top;
     d.tab_bar.hline_color = LINE_SUBTLE;
+    d.tab_bar.show_scroll_bar_on_overflow = false;
     d.tab_bar.inner_margin = Margin {
         left: 6,
         right: 6,

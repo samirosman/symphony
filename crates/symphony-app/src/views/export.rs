@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use symphony_render::{ExportJob, Format};
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 
 use crate::session::Session;
 
@@ -186,13 +186,14 @@ impl ExportDialog {
                     }
                     ui.add_space(6.0);
                     ui.label("Export range");
-                    ui.radio_value(
+                    widgets::radio_value(
+                        ui,
                         &mut self.all_frames,
                         true,
-                        format!("All (1 to {})", s.length()),
+                        &format!("All (1 to {})", s.length()),
                     );
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.all_frames, false, "Frames");
+                        widgets::radio_value(ui, &mut self.all_frames, false, "Frames");
                         let len = s.length();
                         ui.add(egui::DragValue::new(&mut self.first).range(1..=len));
                         ui.label("to");

@@ -35,8 +35,20 @@ impl Shot {
             return;
         }
         ctx.request_repaint();
+        // Review sizes (SYMPHONY_SHOT_SIZE=1280x800): resize once the window
+        // exists, so a maximised or remembered window can't override it.
+        if self.frames == 2 {
+            if let Some((w, h)) = std::env::var("SYMPHONY_SHOT_SIZE").ok().and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+            }) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+        }
         // A few frames first, so fonts and layout have settled.
-        if self.frames >= 12 && !self.requested {
+        if self.frames >= 20 && !self.requested {
             self.requested = true;
             let (path, done, ctx2) = (self.path.clone(), self.done.clone(), ctx.clone());
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(

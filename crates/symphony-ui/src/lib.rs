@@ -4,3 +4,4 @@
 pub mod feedback;
 pub mod icons;
 pub mod theme;
+pub mod widgets;

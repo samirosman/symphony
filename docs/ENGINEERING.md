@@ -249,13 +249,11 @@ A CI benchmark tracks these once the renderer exists.
   bindings, and every action reachable.
 - **E11.4 CI** builds, tests and lints (`clippy -D warnings`) on macOS,
   Linux and Windows for every push and pull request.
-- **E11.5 UI changes** come with a before/after screenshot in the pull
-  request, checked against DESIGN §15.
-
----
-
-## E12. Code rules
-
+- **E11.5 UI changes** come with before and after screenshots from
+  `scripts/screenshot.sh` (every workspace at 1280×800 and 1024×640, plus
+  Preferences and the loading screen), checked against DESIGN §15. Larger
+  changes get a written review in `docs/reviews/`, using the
+  *design-review* method: Must / Should / Could, plus what works.
 - **E12.1** Stable Rust. `cargo fmt`. `clippy -D warnings` clean.
 - **E12.2 `unsafe` is only allowed in platform backends** (pen, windowing
   glue), and every block has a `// SAFETY:` comment.

@@ -66,11 +66,17 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
                 ui.add_space(16.0);
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let len = s.length();
+                // In a narrow card (like the Hand-Drawn Xsheet) keep only the
+                // frame field, so nothing runs past the card edge.
+                let compact = ui.available_width() < 330.0;
                 ui.add(
                     egui::DragValue::new(&mut s.frame)
                         .range(1..=len)
                         .prefix("Frame "),
                 );
+                if compact {
+                    return;
+                }
                 let mut length = len;
                 let r = ui.add(
                     egui::DragValue::new(&mut length)
@@ -315,9 +321,25 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                             .get(&d)
                             .map(|d| d.name.as_str())
                             .unwrap_or("?");
-                        if block.width() > 14.0 {
+                        // The drawing name must stay readable: step it past the
+                        // playhead and any keyframe diamond it would sit under.
+                        let text_w = 7.0 * name.len() as f32;
+                        let mut obstacles: Vec<f32> = (start..f)
+                            .filter(|fr| {
+                                s.doc.peg(i).is_some_and(|p| p.has_key(*fr)) || *fr == s.frame
+                            })
+                            .map(|fr| frame_x(fr) + cw / 2.0)
+                            .collect();
+                        obstacles.sort_by(f32::total_cmp);
+                        let mut x = block.left() + 5.0;
+                        for ob in obstacles {
+                            if ob + 6.0 > x - 2.0 && ob - 6.0 < x + text_w {
+                                x = ob + 7.0;
+                            }
+                        }
+                        if x + text_w < block.right() - 2.0 {
                             painter.text(
-                                block.left_center() + Vec2::new(5.0, 0.0),
+                                Pos2::new(x, block.center().y),
                                 Align2::LEFT_CENTER,
                                 name,
                                 theme::dense(),

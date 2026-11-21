@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Render the app in each workspace and save PNGs for design review
-# (ENGINEERING E11.5). Usage: scripts/screenshot.sh [out-dir]   (default target/shots)
+# Design review screenshots (ENGINEERING E11.5, DESIGN §15): every
+# workspace at 1280x800 and 1024x640, plus Preferences and the loading
+# screen. Usage: scripts/screenshot.sh [out-dir]   (default target/shots)
 set -euo pipefail
 OUT="${1:-target/shots}"
 mkdir -p "$OUT"
 cargo build -q --release -p symphony-app
-for ws in Default HandDrawn Compositing; do
-  SYMPHONY_SCREENSHOT="$OUT/$ws.png" SYMPHONY_WORKSPACE="$ws" SYMPHONY_DEMO_ART=1 ./target/release/symphony
+shot() { env "$@" ./target/release/symphony; }
+for size in 1280x800 1024x640; do
+  for ws in Default HandDrawn Compositing; do
+    shot SYMPHONY_SHOT_SIZE=$size SYMPHONY_WORKSPACE=$ws SYMPHONY_SCREENSHOT="$OUT/$ws-$size.png"
+  done
 done
+shot SYMPHONY_SHOT_SIZE=1280x800 SYMPHONY_SHOT_PREFS=1 SYMPHONY_SCREENSHOT="$OUT/preferences-1280x800.png"
+shot SYMPHONY_SHOT_SIZE=1280x800 SYMPHONY_SHOT_LOADING=1 SYMPHONY_SCREENSHOT="$OUT/loading-1280x800.png"
