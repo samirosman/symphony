@@ -2,7 +2,7 @@
 //! placeholders for views that aren't built yet.
 
 use eframe::egui;
-use symphony_core::graph::PegParams;
+use symphony_core::{graph::PegParams, id::Id};
 use symphony_pen::DeviceInfo;
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
@@ -211,69 +211,110 @@ pub fn tool_properties(ui: &mut egui::Ui, s: &mut Session, device: Option<&Devic
     });
 }
 
-/// Swatch grid. Editing a swatch recolours every stroke that uses it (E2.3).
+/// A colour chip edits the paint; its name selects the swatch for drawing.
 pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
     padded(ui, |ui| {
-        let chip = 32.0;
-        let gap = 6.0;
-        let per_row = (((ui.available_width() + gap) / (chip + gap)).floor() as usize).max(1);
-        let swatches: Vec<_> = s
-            .doc
-            .palette
-            .swatches
-            .iter()
-            .map(|w| (w.id, w.name.clone(), w.rgb))
-            .collect();
-        for row in swatches.chunks(per_row) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for (id, name, [r, g, b]) in row {
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(chip, chip), egui::Sense::click());
-                    let p = ui.painter();
-                    p.rect_filled(
-                        rect,
-                        theme::RADIUS_CONTROL as f32,
-                        egui::Color32::from_rgb(*r, *g, *b),
-                    );
-                    if s.swatch == *id {
-                        p.rect_stroke(
-                            rect.expand(2.5),
-                            6.0,
-                            egui::Stroke::new(2.0, theme::ACCENT_SELECT),
-                            egui::StrokeKind::Middle,
-                        );
-                    } else if resp.hovered() {
-                        p.rect_stroke(
-                            rect.expand(1.5),
-                            5.0,
-                            egui::Stroke::new(1.0, theme::LINE_STRONG),
-                            egui::StrokeKind::Middle,
-                        );
-                    }
-                    if resp.on_hover_text(name.as_str()).clicked() {
-                        s.swatch = *id;
-                    }
-                }
-            });
-            ui.add_space(gap - ui.spacing().item_spacing.y);
-        }
-        ui.add_space(8.0);
-        let id = s.swatch;
-        let mut rgb = s.doc.swatch_rgb(id);
-        let name = s
-            .doc
-            .palette
-            .get(id)
-            .map(|w| w.name.clone())
-            .unwrap_or_default();
+        let state = ui.scope_id().with(("colour-edit", &s.key));
+        let rename = state.with("rename");
+        let removal = state.with("remove");
         ui.horizontal(|ui| {
-            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                s.set_swatch(id, rgb);
+            if icons::button(ui, Icon::Plus, false, true, "Add colour").clicked() {
+                s.add_swatch();
+                ui.data_mut(|d| d.insert_temp(rename, (s.swatch, String::from("New colour"))));
             }
-            ui.label(name);
+            let options = &s.doc.palette.swatches;
+            if icons::button(ui, Icon::Minus, false, options.len() > 1, "Remove colour").clicked() {
+                if let Some(other) = options.iter().find(|sw| sw.id != s.swatch) {
+                    ui.data_mut(|d| d.insert_temp(removal, (s.swatch, other.id)));
+                }
+            }
+            ui.label(&s.doc.palette.name);
         });
-        hint(ui, "Editing a swatch recolours every stroke that uses it.");
+        let swatches = s.doc.palette.swatches.clone();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (index, sw) in swatches.iter().enumerate() {
+                ui.push_id(sw.id.0, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut rgb = sw.rgb;
+                        let chip = ui
+                            .color_edit_button_srgb(&mut rgb)
+                            .on_hover_text("Edit colour");
+                        if chip.clicked() || chip.changed() {
+                            s.swatch = sw.id;
+                        }
+                        if chip.changed() {
+                            s.set_swatch(sw.id, rgb);
+                        }
+                        let draft = ui.data(|d| d.get_temp::<(Id, String)>(rename));
+                        if let Some((id, mut text)) = draft.filter(|(id, _)| *id == sw.id) {
+                            let edit = ui.text_edit_singleline(&mut text);
+                            if !edit.has_focus() && !edit.lost_focus() {
+                                edit.request_focus();
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                ui.data_mut(|d| d.remove::<(Id, String)>(rename));
+                            } else if edit.lost_focus() {
+                                s.rename_swatch(id, &text);
+                                ui.data_mut(|d| d.remove::<(Id, String)>(rename));
+                            } else {
+                                ui.data_mut(|d| d.insert_temp(rename, (id, text)));
+                            }
+                        } else {
+                            let row = ui.selectable_label(s.swatch == sw.id, &sw.name);
+                            if row.clicked() {
+                                s.swatch = sw.id;
+                            }
+                            if row.double_clicked() {
+                                ui.data_mut(|d| d.insert_temp(rename, (sw.id, sw.name.clone())));
+                            }
+                            row.context_menu(|ui| {
+                                if ui.button("Rename").clicked() {
+                                    ui.data_mut(|d| {
+                                        d.insert_temp(rename, (sw.id, sw.name.clone()))
+                                    });
+                                    ui.close();
+                                }
+                                for (label, delta, enabled) in [
+                                    ("Move up", -1, index > 0),
+                                    ("Move down", 1, index + 1 < swatches.len()),
+                                ] {
+                                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                        s.move_swatch(sw.id, delta);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                    })
+                });
+            }
+        });
+        let pending = ui.data(|d| d.get_temp::<(Id, Id)>(removal));
+        if let Some((id, mut next)) = pending {
+            if let Some(sw_name) = s.doc.palette.get(id).map(|sw| sw.name.clone()) {
+                egui::Modal::new(removal).show(ui.ctx(), |ui| {
+                    ui.heading(format!("Remove {}?", sw_name));
+                    ui.label("Use this colour for its strokes and fills:");
+                    egui::ComboBox::from_id_salt("replacement")
+                        .selected_text(s.doc.palette.get(next).map_or("", |sw| sw.name.as_str()))
+                        .show_ui(ui, |ui| {
+                            for item in swatches.iter().filter(|item| item.id != id) {
+                                ui.selectable_value(&mut next, item.id, &item.name);
+                            }
+                        });
+                    ui.data_mut(|d| d.insert_temp(removal, (id, next)));
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            ui.data_mut(|d| d.remove::<(Id, Id)>(removal));
+                        }
+                        if ui.button("Remove colour").clicked() {
+                            s.delete_swatch(id, next);
+                            ui.data_mut(|d| d.remove::<(Id, Id)>(removal));
+                        }
+                    });
+                });
+            }
+        }
     });
 }
 
