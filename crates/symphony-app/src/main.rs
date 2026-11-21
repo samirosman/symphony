@@ -42,6 +42,8 @@ struct Saved {
     use_no_ai: bool,
     #[serde(default)]
     pressure_gamma: Option<f32>,
+    #[serde(default)]
+    brush_size_cursor: bool,
 }
 
 fn yes() -> bool {
@@ -137,6 +139,7 @@ impl SymphonyApp {
         let saved: Option<Saved> = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
+        let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -161,6 +164,7 @@ impl SymphonyApp {
         if let Some(g) = gamma {
             s.pressure_gamma = g;
         }
+        s.brush_size_cursor = brush_size_cursor;
         // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
             layouts = Workspace::ALL.iter().map(|w| (*w, w.preset())).collect();
@@ -258,9 +262,10 @@ impl SymphonyApp {
         if let Some(r) = &self.recovery {
             r.clear(&self.s.key);
         }
-        let gamma = self.s.pressure_gamma;
+        let (gamma, cursor) = (self.s.pressure_gamma, self.s.brush_size_cursor);
         self.s = next;
         self.s.pressure_gamma = gamma;
+        self.s.brush_size_cursor = cursor;
         self.autosaved_version = self.s.doc.version;
         self.camera.reset_view();
         self.drawing.reset_view();
@@ -399,9 +404,16 @@ impl SymphonyApp {
             Action::Open => self.guard(ctx, Pending::Open),
             Action::Save => self.save(false),
             Action::SaveAs => self.save(true),
-            Action::ResetView => {
-                self.camera.reset_view();
-                self.drawing.reset_view();
+            Action::ZoomIn
+            | Action::ZoomOut
+            | Action::RotateCw
+            | Action::RotateCcw
+            | Action::ResetZoom
+            | Action::ResetRotation
+            | Action::ResetPan
+            | Action::ResetView => {
+                self.camera.apply(action);
+                self.drawing.apply(action);
             }
             Action::MaximiseView => {
                 self.maximised = match self.maximised {
@@ -424,6 +436,18 @@ impl SymphonyApp {
                     Action::CreateEmptyDrawing => s.new_drawing(),
                     Action::AddLayer => s.add_layer(),
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
+                    Action::OnionMorePrevious => s.onion_step(true, 1),
+                    Action::OnionLessPrevious => s.onion_step(true, -1),
+                    Action::OnionMoreNext => s.onion_step(false, 1),
+                    Action::OnionLessNext => s.onion_step(false, -1),
+                    Action::OnionPrevious1 => s.onion_set(true, 1),
+                    Action::OnionPrevious2 => s.onion_set(true, 2),
+                    Action::OnionPrevious3 => s.onion_set(true, 3),
+                    Action::OnionNoPrevious => s.onion_set(true, 0),
+                    Action::OnionNext1 => s.onion_set(false, 1),
+                    Action::OnionNext2 => s.onion_set(false, 2),
+                    Action::OnionNext3 => s.onion_set(false, 3),
+                    Action::OnionNoNext => s.onion_set(false, 0),
                     _ => {
                         if let Some(t) = Tool::ALL.into_iter().find(|t| tool_action(*t) == other) {
                             if t.planned_for().is_none() {
@@ -510,6 +534,15 @@ impl SymphonyApp {
         });
         ui.menu_button("View", |ui| {
             self.menu_action(ui, Action::ToggleOnionSkin);
+            ui.separator();
+            self.menu_action(ui, Action::ZoomIn);
+            self.menu_action(ui, Action::ZoomOut);
+            self.menu_action(ui, Action::RotateCw);
+            self.menu_action(ui, Action::RotateCcw);
+            ui.separator();
+            self.menu_action(ui, Action::ResetZoom);
+            self.menu_action(ui, Action::ResetRotation);
+            self.menu_action(ui, Action::ResetPan);
             self.menu_action(ui, Action::ResetView);
         });
         ui.menu_button("Windows", |ui| {
@@ -880,7 +913,12 @@ impl eframe::App for SymphonyApp {
             .open(&mut open)
             .resizable(false)
             .show(&ctx, |ui| {
-                panels::preferences(ui, &mut self.profile, &mut self.use_no_ai)
+                panels::preferences(
+                    ui,
+                    &mut self.profile,
+                    &mut self.use_no_ai,
+                    &mut self.s.brush_size_cursor,
+                )
             });
         self.show_preferences = open;
         let mut open = self.show_icon_sheet;
@@ -940,6 +978,7 @@ impl eframe::App for SymphonyApp {
             profile: self.profile,
             use_no_ai: self.use_no_ai,
             pressure_gamma: Some(self.s.pressure_gamma),
+            brush_size_cursor: self.s.brush_size_cursor,
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

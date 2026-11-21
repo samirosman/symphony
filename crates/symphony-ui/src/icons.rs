@@ -35,10 +35,11 @@ pub enum Icon {
     Trash,
     ZoomOut,
     Forbidden,
+    Minus,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 25] = [
+    pub const ALL: [Icon; 26] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -64,6 +65,7 @@ impl Icon {
         Icon::Trash,
         Icon::ZoomOut,
         Icon::Forbidden,
+        Icon::Minus,
     ];
 }
 
@@ -274,6 +276,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                 ],
             );
         }
+        Icon::Minus => g.line(p, &[(3.0, 8.0), (13.0, 8.0)]),
         Icon::Plus => {
             g.line(p, &[(8.0, 3.0), (8.0, 13.0)]);
             g.line(p, &[(3.0, 8.0), (13.0, 8.0)]);

@@ -81,6 +81,8 @@ pub struct Session {
     /// Pressure response, as a gamma (E4.1). 1 = linear.
     pub pressure_gamma: f32,
     pub onion: Onion,
+    /// Harmony's Brush Size Cursor preference (DESIGN D8.11).
+    pub brush_size_cursor: bool,
     pub animate: bool,
     /// Last action, for the status bar ("Undo Brush stroke").
     pub notice: Option<String>,
@@ -133,6 +135,7 @@ impl Session {
                 before: 1,
                 after: 1,
             },
+            brush_size_cursor: false,
             animate: true,
             notice: None,
         }
@@ -447,6 +450,27 @@ impl Session {
         let before = walk(&mut (1..self.frame).rev(), self.onion.before);
         let after = walk(&mut (self.frame + 1..=self.length()), self.onion.after);
         (before, after)
+    }
+
+    /// Add or remove one earlier (`before`) or later drawing from onion skin.
+    pub fn onion_step(&mut self, before: bool, delta: i32) {
+        let n = if before {
+            &mut self.onion.before
+        } else {
+            &mut self.onion.after
+        };
+        *n = (*n as i32 + delta).clamp(0, 9) as u32;
+        self.onion.on = true;
+    }
+
+    /// Harmony's "Onion Skin: N Previous/Next" shortcuts set a count and show it.
+    pub fn onion_set(&mut self, before: bool, n: u32) {
+        if before {
+            self.onion.before = n;
+        } else {
+            self.onion.after = n;
+        }
+        self.onion.on = true;
     }
 
     // ---- Layers ----------------------------------------------------------

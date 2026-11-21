@@ -254,7 +254,19 @@ pub fn layer_properties(ui: &mut egui::Ui, s: &mut Session) {
 }
 
 /// Preferences: Workflow (DESIGN §11) and AI (DESIGN §16).
-pub fn preferences(ui: &mut egui::Ui, profile: &mut Profile, use_no_ai: &mut bool) {
+pub fn preferences(
+    ui: &mut egui::Ui,
+    profile: &mut Profile,
+    use_no_ai: &mut bool,
+    brush_size_cursor: &mut bool,
+) {
+    ui.heading("Tools");
+    ui.checkbox(brush_size_cursor, "Brush size cursor");
+    hint(
+        ui,
+        "Shows the brush size as a circle around the cursor, as in Harmony.",
+    );
+    ui.separator();
     ui.heading("AI");
     ui.checkbox(use_no_ai, "Use no AI");
     hint(ui, "Symphony has no generative AI. It has no assisted tools yet either, so nothing in it uses AI.");

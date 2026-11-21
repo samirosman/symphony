@@ -62,6 +62,14 @@ pub enum Action {
     OnionLessPrevious,
     OnionMoreNext,
     OnionLessNext,
+    OnionPrevious1,
+    OnionPrevious2,
+    OnionPrevious3,
+    OnionNoPrevious,
+    OnionNext1,
+    OnionNext2,
+    OnionNext3,
+    OnionNoNext,
     MaximiseView,
     ToolSelect,
     ToolTransform,
@@ -75,7 +83,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 38] = [
+    pub const ALL: [Action; 46] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -104,6 +112,14 @@ impl Action {
         Action::OnionLessPrevious,
         Action::OnionMoreNext,
         Action::OnionLessNext,
+        Action::OnionPrevious1,
+        Action::OnionPrevious2,
+        Action::OnionPrevious3,
+        Action::OnionNoPrevious,
+        Action::OnionNext1,
+        Action::OnionNext2,
+        Action::OnionNext3,
+        Action::OnionNoNext,
         Action::MaximiseView,
         Action::ToolSelect,
         Action::ToolTransform,
@@ -147,6 +163,14 @@ impl Action {
             Action::OnionLessPrevious => "onion.previous_less",
             Action::OnionMoreNext => "onion.next_more",
             Action::OnionLessNext => "onion.next_less",
+            Action::OnionPrevious1 => "onion.previous_1",
+            Action::OnionPrevious2 => "onion.previous_2",
+            Action::OnionPrevious3 => "onion.previous_3",
+            Action::OnionNoPrevious => "onion.previous_none",
+            Action::OnionNext1 => "onion.next_1",
+            Action::OnionNext2 => "onion.next_2",
+            Action::OnionNext3 => "onion.next_3",
+            Action::OnionNoNext => "onion.next_none",
             Action::MaximiseView => "view.maximise",
             Action::ToolSelect => "tool.select",
             Action::ToolTransform => "tool.transform",
@@ -190,6 +214,14 @@ impl Action {
             Action::OnionLessPrevious => "Onion skin: remove previous drawing",
             Action::OnionMoreNext => "Onion skin: add next drawing",
             Action::OnionLessNext => "Onion skin: remove next drawing",
+            Action::OnionPrevious1 => "Onion skin: 1 previous",
+            Action::OnionPrevious2 => "Onion skin: 2 previous",
+            Action::OnionPrevious3 => "Onion skin: 3 previous",
+            Action::OnionNoPrevious => "Onion skin: no previous",
+            Action::OnionNext1 => "Onion skin: 1 next",
+            Action::OnionNext2 => "Onion skin: 2 next",
+            Action::OnionNext3 => "Onion skin: 3 next",
+            Action::OnionNoNext => "Onion skin: no next",
             Action::MaximiseView => "Maximise view",
             Action::ToolSelect => "Select",
             Action::ToolTransform => "Transform",
@@ -265,6 +297,15 @@ fn harmony(action: Action) -> Option<Binding> {
         | Action::OnionLessPrevious
         | Action::OnionMoreNext
         | Action::OnionLessNext => None,
+        // Harmony 27: ! @ # ~ for previous, Cmd+1/2/3/` for next.
+        Action::OnionPrevious1 => b(Key::Exclamationmark, SHIFT),
+        Action::OnionPrevious2 => b(Key::Num2, SHIFT),
+        Action::OnionPrevious3 => b(Key::Num3, SHIFT),
+        Action::OnionNoPrevious => b(Key::Backtick, SHIFT),
+        Action::OnionNext1 => b(Key::Num1, CMD),
+        Action::OnionNext2 => b(Key::Num2, CMD),
+        Action::OnionNext3 => b(Key::Num3, CMD),
+        Action::OnionNoNext => b(Key::Backtick, CMD),
         Action::MaximiseView => b(Key::F, CMD), // Toggle Full Screen
         Action::ToolSelect => b(Key::S, ALT),
         Action::ToolTransform => b(Key::T, SHIFT),
@@ -303,7 +344,7 @@ pub fn pressed(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
     };
     ctx.input(|i| {
         // + and - are typed with Shift on some layouts, so ignore Shift there.
-        let mods_ok = if matches!(bind.key, Key::Plus | Key::Minus) {
+        let mods_ok = if matches!(bind.key, Key::Plus | Key::Minus | Key::Exclamationmark) {
             i.modifiers.matches_logically(bind.mods)
         } else {
             i.modifiers.matches_exact(bind.mods)

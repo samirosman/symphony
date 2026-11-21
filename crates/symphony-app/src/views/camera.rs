@@ -71,6 +71,21 @@ impl CanvasState {
     pub fn rotate_by(&mut self, degrees: f32) {
         self.rotation = (self.rotation + degrees).rem_euclid(360.0);
     }
+
+    /// Run a View action on this canvas (Harmony's View menu).
+    pub fn apply(&mut self, action: Action) {
+        match action {
+            Action::ZoomIn => self.zoom = (self.zoom * 1.25).min(MAX_ZOOM),
+            Action::ZoomOut => self.zoom = (self.zoom / 1.25).max(MIN_ZOOM),
+            Action::RotateCw => self.rotate_by(ROTATE_STEP),
+            Action::RotateCcw => self.rotate_by(-ROTATE_STEP),
+            Action::ResetZoom => self.zoom = 1.0,
+            Action::ResetRotation => self.rotation = 0.0,
+            Action::ResetPan => self.pan = Vec2::ZERO,
+            Action::ResetView => self.reset_view(),
+            _ => {}
+        }
+    }
 }
 
 /// Scene units -> screen points for this canvas rect.
@@ -133,42 +148,109 @@ pub fn pointer_samples(ctx: &egui::Context) -> Vec<PenSample> {
     })
 }
 
-/// View header (D3.2): onion skin, zoom, rotation and fit.
-fn header(
-    ui: &mut egui::Ui,
-    s: &mut Session,
-    state: &mut CanvasState,
-    profile: Profile,
-    drawing_only: bool,
-) {
+/// Rotate View steps 30 degrees, like an animation table (D3.5a).
+pub const ROTATE_STEP: f32 = 30.0;
+
+fn dense_label(ui: &mut egui::Ui, text: impl Into<String>) {
+    ui.label(
+        egui::RichText::new(text.into())
+            .font(theme::dense())
+            .color(theme::TEXT_SECONDARY),
+    );
+}
+
+/// Top toolbar (D3.5a): display options, here onion skin.
+fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_only: bool) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if icons::button(
-                    ui,
-                    Icon::Onion,
-                    s.onion.on,
-                    true,
-                    &keymap::tooltip(profile, Action::ToggleOnionSkin),
-                )
-                .clicked()
-                {
+                let tip = keymap::tooltip(profile, Action::ToggleOnionSkin);
+                if icons::button(ui, Icon::Onion, s.onion.on, true, &tip).clicked() {
                     s.onion.on = !s.onion.on;
                 }
-                if s.onion.on {
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::DragValue::new(&mut s.onion.before)
-                            .range(0..=5)
-                            .prefix("Before "),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut s.onion.after)
-                            .range(0..=5)
-                            .prefix("After "),
-                    );
+                ui.add_space(8.0);
+                let counts: [(&str, Action, Action, bool); 2] = [
+                    (
+                        "Previous",
+                        Action::OnionLessPrevious,
+                        Action::OnionMorePrevious,
+                        true,
+                    ),
+                    ("Next", Action::OnionLessNext, Action::OnionMoreNext, false),
+                ];
+                for (label, less, more, before) in counts {
+                    dense_label(ui, label);
+                    let n = if before {
+                        s.onion.before
+                    } else {
+                        s.onion.after
+                    };
+                    if icons::button(
+                        ui,
+                        Icon::Minus,
+                        false,
+                        n > 0,
+                        &keymap::tooltip(profile, less),
+                    )
+                    .clicked()
+                    {
+                        s.onion_step(before, -1);
+                    }
+                    dense_label(ui, n.to_string());
+                    if icons::button(
+                        ui,
+                        Icon::Plus,
+                        false,
+                        n < 9,
+                        &keymap::tooltip(profile, more),
+                    )
+                    .clicked()
+                    {
+                        s.onion_step(before, 1);
+                    }
+                    ui.add_space(10.0);
+                }
+                if drawing_only {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dense_label(ui, "Selected drawing only, without pegs");
+                    });
+                }
+            });
+        });
+}
+
+/// Bottom toolbar (D3.5a): navigation.
+fn bottom_toolbar(ui: &mut egui::Ui, state: &mut CanvasState, profile: Profile) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let mut zoom = state.zoom;
+                egui::ComboBox::from_id_salt(ui.scope_id().with("zoom"))
+                    .width(72.0)
+                    .selected_text(format!("{:.0}%", state.zoom * 100.0))
+                    .show_ui(ui, |ui| {
+                        for z in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0] {
+                            ui.selectable_value(&mut zoom, z, format!("{:.0}%", z * 100.0));
+                        }
+                    });
+                state.zoom = zoom;
+                ui.add_space(8.0);
+                for (label, action) in [
+                    ("Reset zoom", Action::ResetZoom),
+                    ("Reset rotation", Action::ResetRotation),
+                    ("Reset pan", Action::ResetPan),
+                ] {
+                    if ui
+                        .small_button(label)
+                        .on_hover_text(keymap::tooltip(profile, action))
+                        .clicked()
+                    {
+                        state.apply(action);
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -181,50 +263,32 @@ fn header(
                     )
                     .clicked()
                     {
-                        state.reset_view();
+                        state.apply(Action::ResetView);
                     }
-                    if icons::button(ui, Icon::RotateRight, false, true, "Rotate view clockwise")
-                        .clicked()
+                    if icons::button(
+                        ui,
+                        Icon::RotateRight,
+                        false,
+                        true,
+                        &keymap::tooltip(profile, Action::RotateCw),
+                    )
+                    .clicked()
                     {
-                        state.rotate_by(15.0);
+                        state.apply(Action::RotateCw);
                     }
                     if icons::button(
                         ui,
                         Icon::RotateLeft,
                         false,
                         true,
-                        "Rotate view counter-clockwise",
+                        &keymap::tooltip(profile, Action::RotateCcw),
                     )
                     .clicked()
                     {
-                        state.rotate_by(-15.0);
+                        state.apply(Action::RotateCcw);
                     }
-                    ui.add_space(8.0);
-                    let label = format!("{:.0}%", state.zoom * 100.0);
-                    ui.label(
-                        egui::RichText::new(label)
-                            .font(theme::dense())
-                            .color(theme::TEXT_SECONDARY),
-                    );
                     if state.rotation != 0.0 {
-                        let r = format!("{:.0} deg", state.rotation);
-                        ui.label(
-                            egui::RichText::new(r)
-                                .font(theme::dense())
-                                .color(theme::TEXT_SECONDARY),
-                        );
-                    }
-                    let mode = if drawing_only {
-                        "Drawing view: selected drawing only, without pegs"
-                    } else {
-                        ""
-                    };
-                    if !mode.is_empty() {
-                        ui.label(
-                            egui::RichText::new(mode)
-                                .font(theme::dense())
-                                .color(theme::TEXT_SECONDARY),
-                        );
+                        dense_label(ui, format!("{:.0} deg", state.rotation));
                     }
                 });
             });
@@ -239,8 +303,9 @@ pub fn ui(
     drawing_only: bool,
     profile: Profile,
 ) {
-    header(ui, s, state, profile, drawing_only);
-    let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+    top_toolbar(ui, s, profile, drawing_only);
+    let canvas_size = ui.available_size() - Vec2::new(0.0, theme::TAB_ROW);
+    let (response, painter) = ui.allocate_painter(canvas_size, Sense::click_and_drag());
     let rect = response.rect;
     let painter = painter.with_clip_rect(rect);
     let (w, h) = (s.doc.settings.width as f32, s.doc.settings.height as f32);
@@ -474,16 +539,6 @@ pub fn ui(
         }
     }
 
-    // Eraser cursor (D7.3: destructive tools tint red while in use).
-    if let Some(last) = samples.last() {
-        if last.tool == PenTool::Eraser || s.tool == Tool::Eraser {
-            let p = Pos2::new(last.x as f32 / zoom_factor, last.y as f32 / zoom_factor);
-            if rect.contains(p) {
-                painter.circle_stroke(p, ERASER_RADIUS, EStroke::new(1.0, theme::STATE_DANGER));
-            }
-        }
-    }
-
     // D10.4: an empty cell invites drawing. On the surround for contrast (D4.4).
     let hint = if locked {
         Some(format!("{} is locked", s.layer_name(s.selected)))
@@ -504,6 +559,18 @@ pub fn ui(
             theme::TEXT_PRIMARY,
         );
     }
+
+    let pen_eraser = samples.last().is_some_and(|l| l.tool == PenTool::Eraser);
+    draw_cursor(
+        ui,
+        &response,
+        rect,
+        s,
+        Mods { space, shift, alt },
+        pen_eraser,
+        locked,
+    );
+    bottom_toolbar(ui, state, profile);
 }
 
 fn zoom_at(state: &mut CanvasState, rect: Rect, w: f32, h: f32, p: Pos2, factor: f32) {
@@ -539,4 +606,123 @@ fn erase_at(s: &mut Session, state: &CanvasState, scene_pt: (f32, f32), radius: 
     if !ids.is_empty() {
         s.erase(d, &ids);
     }
+}
+
+#[derive(Clone, Copy)]
+struct Mods {
+    space: bool,
+    shift: bool,
+    alt: bool,
+}
+
+/// Our canvas cursor (D8.11): a crosshair plus the active tool's icon, or a
+/// navigation cursor while a shortcut is held. Drawn on the foreground
+/// layer, white over a dark outline so it reads on paper and on grey.
+fn draw_cursor(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    rect: Rect,
+    s: &Session,
+    m: Mods,
+    pen_eraser: bool,
+    locked: bool,
+) {
+    let Some(p) = ui
+        .input(|i| i.pointer.latest_pos())
+        .filter(|p| rect.contains(*p))
+    else {
+        return;
+    };
+    if !(response.hovered() || response.dragged() || response.contains_pointer()) {
+        return;
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("symphony-canvas-cursor"),
+        ))
+        .with_clip_rect(rect);
+    let dark = theme::BG_BASE;
+    let light = theme::CANVAS_STAGE;
+
+    // A navigation cursor replaces the crosshair: the icon itself is the pointer.
+    let nav = if m.space && m.shift {
+        Some(Icon::RotateRight)
+    } else if m.space || s.tool == Tool::Hand {
+        Some(Icon::Hand)
+    } else if s.tool == Tool::Zoom {
+        Some(if m.alt { Icon::ZoomOut } else { Icon::Zoom })
+    } else {
+        None
+    };
+    let badge = |icon: Icon, centre: Pos2, size: f32| {
+        let r = Rect::from_center_size(centre, Vec2::splat(size + 6.0));
+        painter.rect_filled(r, theme::RADIUS_CONTROL as f32, dark.gamma_multiply(0.85));
+        icons::paint(
+            &painter,
+            Rect::from_center_size(centre, Vec2::splat(size)),
+            icon,
+            light,
+        );
+    };
+    if let Some(icon) = nav {
+        badge(icon, p, 18.0);
+        return;
+    }
+
+    let draws = matches!(s.tool, Tool::Brush | Tool::Pencil | Tool::Eraser) || pen_eraser;
+    if locked && draws {
+        badge(Icon::Forbidden, p, 18.0);
+        return;
+    }
+
+    // Size circle: always for the eraser, and for brush tools when the
+    // Brush Size Cursor preference is on (as in Harmony).
+    let erasing = pen_eraser || s.tool == Tool::Eraser;
+    let radius = if erasing {
+        Some(ERASER_RADIUS)
+    } else if s.brush_size_cursor && matches!(s.tool, Tool::Brush | Tool::Pencil) {
+        let b = if s.tool == Tool::Pencil {
+            s.pencil
+        } else {
+            s.brush
+        };
+        Some((b.max_width * 0.5).max(1.5))
+    } else {
+        None
+    };
+    if let Some(r) = radius {
+        painter.circle_stroke(p, r, EStroke::new(3.0, dark.gamma_multiply(0.6)));
+        let ring = if erasing { theme::STATE_DANGER } else { light };
+        painter.circle_stroke(p, r, EStroke::new(1.0, ring));
+    }
+
+    // Crosshair with a gap at the hotspot.
+    let (gap, arm) = (3.0, 9.0);
+    for (a, b) in [
+        (Vec2::new(-arm, 0.0), Vec2::new(-gap, 0.0)),
+        (Vec2::new(gap, 0.0), Vec2::new(arm, 0.0)),
+        (Vec2::new(0.0, -arm), Vec2::new(0.0, -gap)),
+        (Vec2::new(0.0, gap), Vec2::new(0.0, arm)),
+    ] {
+        painter.line_segment([p + a, p + b], EStroke::new(3.0, dark));
+        painter.line_segment([p + a, p + b], EStroke::new(1.0, light));
+    }
+
+    // Tool icon beside the crosshair, so the active tool is always clear.
+    let icon = if erasing {
+        Icon::Eraser
+    } else {
+        match s.tool {
+            Tool::Select => Icon::Select,
+            Tool::Transform => Icon::Transform,
+            Tool::Pencil => Icon::Pencil,
+            Tool::Paint => Icon::Paint,
+            Tool::Dropper => Icon::Dropper,
+            _ => Icon::Brush,
+        }
+    };
+    badge(icon, p + Vec2::new(16.0, 16.0), 12.0);
 }
