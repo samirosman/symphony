@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use symphony_core::doc::Scene;
 use symphony_io::Recovery;
 use symphony_pen::{DeviceInfo, PenInput, PenSample};
+use symphony_ui::feedback;
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
 
@@ -58,6 +59,16 @@ enum Pending {
     Open,
 }
 
+/// A project being read in the background (DESIGN D17.1).
+struct Opening {
+    path: PathBuf,
+    started: f64,
+    rx: Receiver<Result<Scene, String>>,
+}
+
+/// Confirmations clear after this many seconds (D17.6).
+const NOTICE_SECONDS: f64 = 4.0;
+
 /// Background save results: (version saved, path, result).
 type SaveResult = (u64, PathBuf, Result<(), String>);
 
@@ -90,6 +101,9 @@ struct SymphonyApp {
     autosaved_version: u64,
     autosaving: Arc<AtomicBool>,
     title: String,
+    saving_jobs: u32,
+    opening: Option<Opening>,
+    notice_seen: Option<(String, f64)>,
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -214,6 +228,9 @@ impl SymphonyApp {
             autosaved_version: version,
             autosaving: Arc::new(AtomicBool::new(false)),
             title: String::new(),
+            saving_jobs: 0,
+            opening: None,
+            notice_seen: None,
         }
     }
 
@@ -280,9 +297,33 @@ impl SymphonyApp {
         else {
             return;
         };
-        match symphony_io::open(&path) {
-            Ok(doc) => self.replace_session(Session::from_doc(doc, Some(path))),
-            Err(e) => self.error = Some(e.0),
+        // Read in the background; a loading dialog shows meanwhile (D17.1).
+        let (tx, rx) = channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(symphony_io::open(&p).map_err(|e| e.0));
+        });
+        self.opening = Some(Opening {
+            path,
+            started: self.last_time.unwrap_or(0.0),
+            rx,
+        });
+    }
+
+    fn poll_open(&mut self) {
+        let Some(o) = &self.opening else { return };
+        match o.rx.try_recv() {
+            Ok(Ok(doc)) => {
+                let path = o.path.clone();
+                self.opening = None;
+                self.replace_session(Session::from_doc(doc, Some(path)));
+                self.s.notice = Some(format!("Opened {}", self.s.name()));
+            }
+            Ok(Err(e)) => {
+                self.opening = None;
+                self.error = Some(e);
+            }
+            Err(_) => {}
         }
     }
 
@@ -308,7 +349,7 @@ impl SymphonyApp {
             let r = symphony_io::save(&doc, &path).map_err(|e| e.0);
             let _ = tx.send((version, path, r));
         });
-        self.s.notice = Some("Saving".into());
+        self.saving_jobs += 1;
     }
 
     /// Save synchronously. Only used right before quitting or replacing the scene.
@@ -334,6 +375,7 @@ impl SymphonyApp {
 
     fn poll_saves(&mut self) {
         while let Ok((version, path, result)) = self.save_rx.try_recv() {
+            self.saving_jobs = self.saving_jobs.saturating_sub(1);
             match result {
                 Ok(()) => {
                     self.s.saved_version = version;
@@ -347,6 +389,20 @@ impl SymphonyApp {
                 }
                 Err(e) => self.error = Some(e),
             }
+        }
+    }
+
+    /// Confirmations show briefly, then clear (D17.6).
+    fn expire_notice(&mut self, now: f64) {
+        match (&self.s.notice, &self.notice_seen) {
+            (Some(n), Some((seen, at))) if n == seen => {
+                if now - at > NOTICE_SECONDS {
+                    self.s.notice = None;
+                    self.notice_seen = None;
+                }
+            }
+            (Some(n), _) => self.notice_seen = Some((n.clone(), now)),
+            (None, _) => self.notice_seen = None,
         }
     }
 
@@ -761,11 +817,66 @@ impl SymphonyApp {
                 dense(ui, pen.into(), theme::TEXT_SECONDARY);
                 let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(r.center(), 3.5, dot);
+
+                // Activity area (D17.5): background work stays visible.
+                let mut jobs: Vec<(String, Option<f32>)> = Vec::new();
+                if let Some((done, total)) = self.export.progress() {
+                    jobs.push((
+                        format!("Exporting frame {done} of {total}"),
+                        Some(done as f32 / total.max(1) as f32),
+                    ));
+                }
+                if self.saving_jobs > 0 {
+                    jobs.push(("Saving".into(), None));
+                }
+                if self.autosaving.load(Ordering::SeqCst) {
+                    jobs.push(("Autosaving".into(), None));
+                }
+                for (label, frac) in jobs {
+                    ui.add_space(8.0);
+                    if let Some(f) = frac {
+                        feedback::progress_bar(ui, Some(f), 64.0);
+                    }
+                    dense(ui, label, theme::TEXT_PRIMARY);
+                    feedback::spinner(ui, 12.0);
+                }
             });
         });
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(o) = &self.opening {
+            let name = symphony_io::project_name(&o.path);
+            let elapsed = self.last_time.unwrap_or(0.0) - o.started;
+            let mut cancel = false;
+            egui::Modal::new(egui::Id::unique("symphony-opening")).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.horizontal(|ui| {
+                    feedback::spinner(ui, 16.0);
+                    ui.label(format!("Opening {name}"));
+                });
+                ui.add_space(8.0);
+                feedback::progress_bar(ui, None, ui.available_width());
+                if let Some(e) = feedback::elapsed_label(elapsed) {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(e)
+                                .font(theme::dense())
+                                .color(theme::TEXT_SECONDARY),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            cancel = ui.button("Cancel").clicked();
+                        });
+                    });
+                }
+            });
+            if cancel {
+                // The read finishes in the background and is ignored.
+                self.opening = None;
+            }
+        }
+
         if let Some(p) = self.pending {
             let name = self.s.name();
             let mut choice = None;
@@ -913,6 +1024,17 @@ impl eframe::App for SymphonyApp {
         if let Some(s) = self.shot.as_mut() {
             s.tick(&ctx);
         }
+        // Design review only: show the shared loading screen (DESIGN D17.7).
+        if self.shot.is_some() && std::env::var_os("SYMPHONY_SHOT_LOADING").is_some() {
+            feedback::loading_screen(
+                ui,
+                "Building the latest Symphony",
+                Some("Compiling symphony-core (148 of about 246)"),
+                Some(0.6),
+                12.4,
+            );
+            return;
+        }
 
         // Closing with unsaved work asks first.
         if ctx.input(|i| i.viewport().close_requested()) && self.s.dirty() && !self.allow_close {
@@ -927,6 +1049,8 @@ impl eframe::App for SymphonyApp {
         let device = self.pen.as_ref().map(|p| p.device());
         let now = ctx.input(|i| i.time);
         self.poll_saves();
+        self.poll_open();
+        self.expire_notice(now);
         self.autosave(now);
         self.tick_playback(&ctx);
         if self.pending.is_none() && self.recovered.is_empty() && self.error.is_none() {

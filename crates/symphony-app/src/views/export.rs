@@ -75,6 +75,11 @@ impl ExportDialog {
         self.running.is_some()
     }
 
+    /// Frames rendered so far, for the status bar (DESIGN D17.5).
+    pub fn progress(&self) -> Option<(u32, u32)> {
+        self.running.as_ref().map(|r| (r.done, r.total))
+    }
+
     fn browse(&mut self, s: &Session) {
         let Some(f) = self.format else { return };
         let (ext, name) = match f {
