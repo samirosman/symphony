@@ -9,6 +9,16 @@ use crate::stroke::{Drawing, Fill, Stroke};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
+    SetPalette {
+        before: crate::palette::Palette,
+        after: crate::palette::Palette,
+    },
+    SetStrokeSwatch {
+        drawing: Id,
+        stroke: Id,
+        before: Id,
+        after: Id,
+    },
     /// Paint a zone.
     AddFill {
         drawing: Id,
@@ -149,6 +159,23 @@ impl Edit {
                     } else {
                         d.fills.insert((*index).min(d.fills.len()), fill.clone());
                     }
+                }
+            }
+            Edit::SetPalette { before, after } => {
+                s.palette = if forward { after } else { before }.clone();
+            }
+            Edit::SetStrokeSwatch {
+                drawing,
+                stroke,
+                before,
+                after,
+            } => {
+                if let Some(st) = s
+                    .drawings
+                    .get_mut(drawing)
+                    .and_then(|d| d.strokes.iter_mut().find(|st| st.id == *stroke))
+                {
+                    st.swatch = if forward { *after } else { *before };
                 }
             }
             Edit::SetFillSwatch {

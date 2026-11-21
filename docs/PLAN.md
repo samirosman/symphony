@@ -131,7 +131,7 @@ continues.
 - ⬜ Xsheet view
 - ⬜ Node view and Node Library
 - ⬜ Tool Properties view
-- ⬜ Colour view (palettes and swatches)
+- 🟨 Colour view: scene palette and named solid swatches; multiple palettes pending
 - ⬜ Layer Properties view
 - ⬜ Function view (curve editor)
 - ⬜ Library view (templates and symbols)
@@ -183,7 +183,7 @@ continues.
 - 🟡 Undo/redo history view (undo and redo work everywhere; the history view itself is later)
 
 ### 4.3 Ink and paint, colour
-- ⬜ **Palettes with colour IDs**: edit a swatch and everything using it recolours
+- ✅ **Scene palette with colour IDs**: edit a swatch and everything using it recolours
 - ⬜ Solid, linear gradient, radial gradient and bitmap texture swatches
 - ⬜ Palette levels: scene, element, job and environment *(verify naming)*
 - ⬜ Palette lists, palette browser and master palettes

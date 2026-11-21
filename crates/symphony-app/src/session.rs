@@ -367,6 +367,11 @@ impl Session {
     }
 
     fn clamp_selection(&mut self) {
+        if self.doc.palette.get(self.swatch).is_none() {
+            if let Some(first) = self.doc.palette.swatches.first() {
+                self.swatch = first.id;
+            }
+        }
         self.selected = self.selected.min(self.layer_count().saturating_sub(1));
     }
 
@@ -815,6 +820,9 @@ impl Session {
         let mut ids = Vec::new();
         for st in self.clipboard.clone() {
             let mut st = st;
+            if self.doc.palette.get(st.swatch).is_none() {
+                st.swatch = self.swatch;
+            }
             st.id = self.doc.ids.fresh();
             ids.push(st.id);
             edits.push(Edit::AddStroke {
@@ -1095,6 +1103,91 @@ impl Session {
         self.set_peg(layer, p);
     }
 
+    fn apply_palette(
+        &mut self,
+        name: &str,
+        palette: symphony_core::palette::Palette,
+        mut edits: Vec<Edit>,
+    ) {
+        edits.push(Edit::SetPalette {
+            before: self.doc.palette.clone(),
+            after: palette,
+        });
+        self.history.apply(&mut self.doc, name, edits);
+    }
+
+    pub fn add_swatch(&mut self) {
+        let rgb = self.doc.palette.get(self.swatch).map_or([0; 3], |s| s.rgb);
+        let id = self.doc.ids.fresh();
+        let mut palette = self.doc.palette.clone();
+        palette.swatches.push(symphony_core::palette::Swatch {
+            id,
+            name: "New colour".into(),
+            rgb,
+        });
+        self.apply_palette("Add colour", palette, Vec::new());
+        self.swatch = id;
+    }
+
+    pub fn rename_swatch(&mut self, id: Id, name: &str) {
+        let mut palette = self.doc.palette.clone();
+        let Some(swatch) = palette.get_mut(id) else {
+            return;
+        };
+        let name = name.trim();
+        if name.is_empty() || swatch.name == name {
+            return;
+        }
+        swatch.name = name.into();
+        self.apply_palette("Rename colour", palette, Vec::new());
+    }
+
+    pub fn move_swatch(&mut self, id: Id, delta: isize) {
+        let mut palette = self.doc.palette.clone();
+        let Some(index) = palette.swatches.iter().position(|sw| sw.id == id) else {
+            return;
+        };
+        let Some(next) = index
+            .checked_add_signed(delta)
+            .filter(|i| *i < palette.swatches.len())
+        else {
+            return;
+        };
+        palette.swatches.swap(index, next);
+        self.apply_palette("Move colour", palette, Vec::new());
+    }
+
+    pub fn delete_swatch(&mut self, id: Id, replacement: Id) {
+        let mut palette = self.doc.palette.clone();
+        if id == replacement || palette.get(id).is_none() || palette.get(replacement).is_none() {
+            return;
+        }
+        palette.swatches.retain(|sw| sw.id != id);
+        let mut edits = Vec::new();
+        for (&drawing, d) in &self.doc.drawings {
+            for st in d.strokes.iter().filter(|s| s.swatch == id) {
+                edits.push(Edit::SetStrokeSwatch {
+                    drawing,
+                    stroke: st.id,
+                    before: id,
+                    after: replacement,
+                });
+            }
+            for fill in d.fills.iter().filter(|f| f.swatch == id) {
+                edits.push(Edit::SetFillSwatch {
+                    drawing,
+                    fill: fill.id,
+                    before: id,
+                    after: replacement,
+                });
+            }
+        }
+        self.apply_palette("Remove colour", palette, edits);
+        if self.swatch == id {
+            self.swatch = replacement;
+        }
+    }
+
     /// Recolour a swatch. Every stroke using it changes (E2.3).
     pub fn set_swatch(&mut self, swatch: Id, rgb: [u8; 3]) {
         let before = self.doc.swatch_rgb(swatch);
@@ -1221,6 +1314,31 @@ mod tests {
     fn fills(s: &Session) -> Vec<symphony_core::stroke::Fill> {
         let d = s.doc.exposed(0, 1).unwrap();
         s.doc.drawings[&d].fills.clone()
+    }
+
+    #[test]
+    fn palette_edits_preserve_and_restore_art_references() {
+        let mut s = Session::new_scene();
+        let original = s.swatch;
+        square_drawing(&mut s);
+        s.paint_mode = PaintMode::Paint;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        s.add_swatch();
+        let replacement = s.swatch;
+        s.rename_swatch(replacement, "Shadow ink");
+        s.move_swatch(replacement, -1);
+        let before = s.doc.palette.clone();
+        s.delete_swatch(original, replacement);
+        let d = s.doc.exposed(0, 1).unwrap();
+        assert_eq!(s.doc.drawings[&d].strokes[0].swatch, replacement);
+        assert_eq!(fills(&s)[0].swatch, replacement);
+        assert!(s.doc.palette.get(original).is_none());
+        s.undo();
+        assert_eq!(s.doc.palette, before);
+        assert_eq!(s.doc.drawings[&d].strokes[0].swatch, original);
+        assert_eq!(fills(&s)[0].swatch, original);
+        s.redo();
+        assert_eq!(fills(&s)[0].swatch, replacement);
     }
 
     #[test]
