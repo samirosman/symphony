@@ -19,5 +19,6 @@ serde = { version = "1", features = ["derive"] }
 symphony-core = { version = "0.0.1", path = "../symphony-core" }
 symphony-io = { version = "0.0.1", path = "../symphony-io" }
 symphony-pen = { version = "0.0.1", path = "../symphony-pen" }
+symphony-render = { version = "0.0.1", path = "../symphony-render" }
 symphony-ui = { version = "0.0.1", path = "../symphony-ui" }
 symphony-vector = { version = "0.0.1", path = "../symphony-vector" }

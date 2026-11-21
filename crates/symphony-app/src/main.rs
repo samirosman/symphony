@@ -25,7 +25,7 @@ use symphony_ui::theme;
 
 use keymap::{Action, Profile};
 use session::{Session, Tool};
-use views::{camera, node, panels, timing};
+use views::{camera, export, node, panels, timing};
 use workspace::{View, Workspace};
 
 /// Autosave interval, seconds (E7.5).
@@ -72,6 +72,7 @@ struct SymphonyApp {
     drawing: camera::CanvasState,
     node_view: node::NodeViewState,
     timing: timing::TimingState,
+    export: export::ExportDialog,
     maximised: Option<View>,
     show_preferences: bool,
     show_icon_sheet: bool,
@@ -195,6 +196,7 @@ impl SymphonyApp {
             drawing: Default::default(),
             node_view: Default::default(),
             timing: Default::default(),
+            export: Default::default(),
             maximised: None,
             show_preferences: false,
             show_icon_sheet: false,
@@ -522,6 +524,21 @@ impl SymphonyApp {
             ui.separator();
             self.menu_action(ui, Action::Save);
             self.menu_item(ui, Action::SaveAs, "Save as...".into());
+            ui.separator();
+            ui.menu_button("Export", |ui| {
+                if ui.button("Animated GIF...").clicked() {
+                    self.export
+                        .open(symphony_render::Format::AnimatedGif, &self.s);
+                    ui.close();
+                }
+                if ui.button("Image Sequence (PNG)...").clicked() {
+                    self.export
+                        .open(symphony_render::Format::PngSequence, &self.s);
+                    ui.close();
+                }
+                ui.add_enabled(false, egui::Button::new("Movie..."))
+                    .on_disabled_hover_text("Coming soon: needs a video encoder");
+            });
             ui.separator();
             if ui.button("Quit Symphony").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1000,11 +1017,15 @@ impl eframe::App for SymphonyApp {
                 }
             });
 
+        self.export.ui(&ctx, &self.s);
         self.dialogs(&ctx);
 
         let pending = self.pen.as_ref().is_some_and(|p| p.has_pending());
         if pending || self.camera.busy() || self.drawing.busy() {
             ctx.request_repaint();
+        }
+        if self.export.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Keep autosave ticking even when idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
