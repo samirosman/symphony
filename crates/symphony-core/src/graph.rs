@@ -49,7 +49,7 @@ impl PegParams {
         ]
         .into_iter()
         .flatten()
-        .any(|v| matches!(v, Value::Keys(k) if k.iter().any(|(f, _)| *f == frame)))
+        .any(|v| v.has_key(frame))
     }
 }
 
