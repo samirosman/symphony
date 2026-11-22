@@ -67,6 +67,8 @@ struct Saved {
     overlay_underlay: bool,
     #[serde(default)]
     size_follows_zoom: bool,
+    #[serde(default)]
+    stroke_detail: Option<f32>,
     /// Use Cisco's OpenH264 for movies (Cisco requires the user can turn it off).
     #[serde(default = "yes")]
     use_openh264: bool,
@@ -260,6 +262,7 @@ impl SymphonyApp {
         let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
         let overlay_underlay = saved.as_ref().is_some_and(|s| s.overlay_underlay);
         let size_follows_zoom = saved.as_ref().is_some_and(|s| s.size_follows_zoom);
+        let stroke_detail = saved.as_ref().and_then(|s| s.stroke_detail);
         let use_openh264 = saved.as_ref().is_none_or(|s| s.use_openh264);
         let presets = saved
             .as_ref()
@@ -296,6 +299,9 @@ impl SymphonyApp {
         s.brush_size_cursor = brush_size_cursor;
         s.overlay_underlay = overlay_underlay;
         s.size_follows_zoom = size_follows_zoom;
+        if let Some(d) = stroke_detail {
+            s.stroke_detail = d.clamp(0.1, 1.0);
+        }
         // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
             layouts = Workspace::ALL.iter().map(|w| (*w, w.preset())).collect();
@@ -457,6 +463,7 @@ impl SymphonyApp {
         let (gamma, cursor) = (self.s.pressure_gamma, self.s.brush_size_cursor);
         let layers = self.s.overlay_underlay;
         let follows = self.s.size_follows_zoom;
+        let detail = self.s.stroke_detail;
         let (brush, pencil, eraser) = (self.s.brush, self.s.pencil, self.s.eraser);
         let eraser_tip = self.s.eraser_tip;
         self.s = next;
@@ -464,6 +471,7 @@ impl SymphonyApp {
         self.s.brush_size_cursor = cursor;
         self.s.overlay_underlay = layers;
         self.s.size_follows_zoom = follows;
+        self.s.stroke_detail = detail;
         // Tool settings belong to the artist, not the scene.
         self.s.brush = brush;
         self.s.pencil = pencil;
@@ -2399,6 +2407,7 @@ impl eframe::App for SymphonyApp {
             brush_size_cursor: self.s.brush_size_cursor,
             overlay_underlay: self.s.overlay_underlay,
             size_follows_zoom: self.s.size_follows_zoom,
+            stroke_detail: Some(self.s.stroke_detail),
             use_openh264: self.use_openh264,
             presets: Some(self.presets.clone()),
             search_uses: self.search_uses.clone(),

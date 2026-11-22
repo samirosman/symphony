@@ -417,3 +417,59 @@ fn frame_cost() {
     let resizing = time(&mut h, true);
     println!("frame_cost: still {still:?} per frame, resizing {resizing:?} per frame");
 }
+
+#[test]
+fn drawn_lines_keep_few_points_and_follow_the_stroke_detail_setting() {
+    // A gentle curve drawn with many pen samples.
+    let curve: Vec<(f32, f32)> = (0..=120)
+        .map(|i| {
+            let t = i as f32 / 120.0;
+            (-200.0 + t * 400.0, (t * std::f32::consts::PI).sin() * 80.0)
+        })
+        .collect();
+    let mut h = rig();
+    h.state_mut().s.tool = Tool::Brush;
+    h.state_mut().s.brush.smoothing = 0.0;
+    h.state_mut().s.stroke_detail = 1.0;
+    drag(&mut h, &curve, 1.0, PenTool::Pen);
+    let full = strokes(&h, 0)[0].points.len();
+    h.state_mut().s.stroke_detail = 0.3;
+    drag(&mut h, &curve, 1.0, PenTool::Pen);
+    let light = strokes(&h, 0)[1].points.len();
+    assert!(full > 100, "full detail keeps every sample: {full}");
+    assert!(
+        light * 4 < full,
+        "lower detail keeps far fewer: {light} of {full}"
+    );
+}
+
+/// Renders a lightly kept curve big, for a human look at its smoothness:
+/// `SYMPHONY_UI_SHOT=path cargo test -p symphony-app curve_look`.
+#[test]
+fn curve_look() {
+    let Ok(path) = std::env::var("SYMPHONY_UI_SHOT") else {
+        return;
+    };
+    let mut h = rig();
+    h.state_mut().s.tool = Tool::Brush;
+    h.state_mut().s.brush.max_width = 30.0;
+    h.state_mut().s.brush.min_width = 4.0;
+    h.state_mut().s.stroke_detail = 0.3;
+    let curve: Vec<(f32, f32)> = (0..=150)
+        .map(|i| {
+            let t = i as f32 / 150.0;
+            (-600.0 + t * 1200.0, (t * 9.0).sin() * 250.0)
+        })
+        .collect();
+    drag(&mut h, &curve, 1.0, PenTool::Pen);
+    let s = &h.state().s;
+    eprintln!(
+        "kept {} of {} points",
+        strokes(&h, 0)[0].points.len(),
+        curve.len()
+    );
+    symphony_render::render_frame(&s.doc, 1, 1920, 1080)
+        .unwrap()
+        .save(path)
+        .unwrap();
+}

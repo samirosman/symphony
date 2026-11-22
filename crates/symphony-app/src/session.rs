@@ -280,6 +280,10 @@ pub struct Session {
     /// Preference: tool sizes are screen points, so the brush looks the
     /// same size at any zoom. Off by default: sizes are scene units.
     pub size_follows_zoom: bool,
+    /// Preference: how much of a drawn line's detail to keep, 0.1..=1.0.
+    /// Lower keeps fewer points; lines are drawn as smooth curves through
+    /// them either way. 1.0 keeps every pen sample.
+    pub stroke_detail: f32,
     /// Select tool options, as in Harmony: Marquee instead of Lasso, and
     /// Easy Drag (drag from anywhere inside the box).
     pub marquee_mode: bool,
@@ -364,6 +368,7 @@ impl Session {
             art_preview: true,
             overlay_underlay: false,
             size_follows_zoom: false,
+            stroke_detail: 0.6,
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),

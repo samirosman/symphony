@@ -7,6 +7,7 @@
 //!   round caps, for any renderer.
 //! - [`hits`]: does a circle touch a stroke (eraser, selection)?
 
+pub mod curve;
 pub mod cut;
 pub mod fill;
 pub mod shape;
@@ -93,7 +94,9 @@ pub fn tessellate(stroke: &Stroke, transform: Affine, min_step: f32) -> Mesh {
     }
     let k = scale_of(transform);
     let mut pts: Vec<([f32; 2], f32)> = Vec::with_capacity(stroke.points.len());
-    for p in &stroke.points {
+    // A smooth curve through the stored points, as fine as this zoom needs.
+    let curve = curve::spline(&stroke.points, (min_step * 2.0 / k.max(1e-6)).max(1e-3));
+    for p in &curve {
         let (x, y) = transform.apply(p.x, p.y);
         let w = stroke.width_at(p.pressure) * k * 0.5;
         if let Some((last, lw)) = pts.last_mut() {

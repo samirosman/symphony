@@ -132,6 +132,12 @@ fn rasterize(st: &Stroke, ink: &mut [bool], w: usize, h: usize, origin: [f32; 2]
         }
         return;
     }
+    // Zones close along the same smooth curve that is drawn.
+    let curved = Stroke {
+        points: crate::curve::spline(&st.points, cell),
+        ..st.clone()
+    };
+    let st = &curved;
     let to_grid = |px: f32, py: f32| ((px - origin[0]) / cell, (py - origin[1]) / cell);
     let radius = |p: f32| (st.width_at(p) * 0.5 / cell).max(0.75);
     let mut mark = |ax: f32, ay: f32, ar: f32, bx: f32, by: f32, br: f32| {

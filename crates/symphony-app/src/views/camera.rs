@@ -799,6 +799,19 @@ pub fn ui(
                     if let Some(st) = &a.stencil {
                         apply_stencil(&mut a.stroke.points, st);
                     }
+                    // Keep only the points that matter (Stroke detail): the
+                    // tolerance is in screen pixels, so it means the same at
+                    // any zoom, and the line is drawn as a curve through them.
+                    if a.stroke.kind != StrokeKind::Invisible {
+                        let tolerance_px = (1.0 - s.stroke_detail).clamp(0.0, 0.9) * 3.0;
+                        let local_px = a.min_step * 2.0;
+                        let span = a.stroke.max_width - a.stroke.min_width;
+                        a.stroke.points = symphony_vector::curve::simplify(
+                            &a.stroke.points,
+                            tolerance_px * local_px,
+                            span,
+                        );
+                    }
                     if a.stroke.kind == StrokeKind::Invisible {
                         // Close Gap: the rough stroke only says where; it isn't kept.
                         let reach = 40.0 * a.min_step / 0.5;

@@ -60,8 +60,14 @@ pub fn rasterize(
     m: Affine,
     clip: [i32; 4],
 ) -> Option<Coverage> {
+    // Stamp along the same smooth curve that untextured lines follow.
+    let step = 0.75 / scale_of(m).max(1e-6);
+    let curved = Stroke {
+        points: crate::curve::spline(&stroke.points, step),
+        ..stroke.clone()
+    };
     let mut s = Stamper::new(*tex, m, clip);
-    s.extend(stroke, tip);
+    s.extend(&curved, tip);
     s.coverage(grain)
 }
 
@@ -446,7 +452,9 @@ mod tests {
                 pressure: 1.0,
             })
             .collect();
-        let whole = rasterize(&long, &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
+        let mut at_once = Stamper::new(tex(), Affine::IDENTITY, ALL);
+        at_once.extend(&long, None);
+        let whole = at_once.coverage(None).unwrap();
         let mut s = Stamper::new(tex(), Affine::IDENTITY, ALL);
         let mut part = long.clone();
         for n in [1, 5, 6, 20, 41] {
