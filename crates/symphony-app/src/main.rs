@@ -76,8 +76,54 @@ impl PrefsPage {
 /// Autosave interval, seconds (E7.5).
 const AUTOSAVE_EVERY: f64 = 120.0;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum ToolDock {
+    #[default]
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ToolDock {
+    const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
+        }
+    }
+
+    fn horizontal(self) -> bool {
+        matches!(self, Self::Top | Self::Bottom)
+    }
+
+    fn nearest(rect: egui::Rect, pos: egui::Pos2) -> Self {
+        let centre = rect.center();
+        let local = pos - centre;
+        let x = local.x / rect.width().max(1.0);
+        let y = local.y / rect.height().max(1.0);
+        if x.abs() > y.abs() {
+            if x < 0.0 {
+                Self::Left
+            } else {
+                Self::Right
+            }
+        } else if y < 0.0 {
+            Self::Top
+        } else {
+            Self::Bottom
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
+    #[serde(default)]
+    tool_dock: ToolDock,
     #[serde(default)]
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
@@ -159,6 +205,8 @@ type SaveResult = (u64, PathBuf, Result<(), String>);
 type RecoveredScene = (String, Option<PathBuf>, Scene);
 
 struct SymphonyApp {
+    tool_dock: ToolDock,
+    tool_options_open: bool,
     save_dialog: Option<(save_dialog::SaveDialog, Option<Pending>)>,
     inbetween_count: u32,
     welcome: Option<welcome::Welcome>,
@@ -364,6 +412,9 @@ impl SymphonyApp {
             .as_ref()
             .map(|s| s.search_uses.clone())
             .unwrap_or_default();
+        let tool_dock = saved
+            .as_ref()
+            .map_or(ToolDock::Left, |saved| saved.tool_dock);
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -447,6 +498,8 @@ impl SymphonyApp {
         let (save_tx, save_rx) = channel();
         let version = s.doc.version;
         SymphonyApp {
+            tool_dock,
+            tool_options_open: false,
             save_dialog: std::env::var_os("SYMPHONY_SHOT_SAVE").map(|_| {
                 (
                     save_dialog::SaveDialog::new("Untitled scene".into(), None),
@@ -1278,6 +1331,12 @@ impl SymphonyApp {
                 ui.close();
                 self.guard(ui.ctx(), Pending::Update);
             }
+            ui.separator();
+            ui.label(format!(
+                "v{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("SYMPHONY_BUILD")
+            ));
         });
     }
 
@@ -1351,40 +1410,160 @@ impl SymphonyApp {
         });
     }
 
-    /// The Tools toolbar card, in groups (D6.2).
-    fn tools_strip(&mut self, ui: &mut egui::Ui) {
+    fn tools_panel(&mut self, ui: &mut egui::Ui) {
+        let dock = self.tool_dock;
+        let panel = match dock {
+            ToolDock::Left => egui::Panel::left("tools-left"),
+            ToolDock::Right => egui::Panel::right("tools-right"),
+            ToolDock::Top => egui::Panel::top("tools-top"),
+            ToolDock::Bottom => egui::Panel::bottom("tools-bottom"),
+        };
+        let gap = theme::GUTTER as i8;
+        let margins = match dock {
+            ToolDock::Left => egui::Margin {
+                left: gap,
+                right: 0,
+                top: gap,
+                bottom: gap,
+            },
+            ToolDock::Right => egui::Margin {
+                left: 0,
+                right: gap,
+                top: gap,
+                bottom: gap,
+            },
+            ToolDock::Top => egui::Margin {
+                left: gap,
+                right: gap,
+                top: gap,
+                bottom: 0,
+            },
+            ToolDock::Bottom => egui::Margin {
+                left: gap,
+                right: gap,
+                top: 0,
+                bottom: gap,
+            },
+        };
+        panel
+            .show_separator_line(false)
+            .frame(egui::Frame::new().inner_margin(margins))
+            .exact_size(theme::TOOLS_STRIP + theme::GUTTER)
+            .resizable(false)
+            .show(ui, |ui| self.tools_strip(ui, dock.horizontal()));
+    }
+
+    /// A grip moves the toolbar between window edges. The context menu
+    /// offers the same docking choices for keyboard and pen users.
+    fn tools_strip(&mut self, ui: &mut egui::Ui, horizontal: bool) {
+        let frame = egui::Frame::new()
+            .fill(theme::GLASS_PANEL)
+            .corner_radius(theme::GLASS_RADIUS)
+            .inner_margin(egui::Margin::same(theme::GLASS_TOOL_INSET))
+            .show(ui, |ui| {
+                let layout = if horizontal {
+                    ui.set_min_width(ui.available_width());
+                    egui::Layout::left_to_right(egui::Align::Center)
+                } else {
+                    ui.set_min_height(ui.available_height());
+                    egui::Layout::top_down(egui::Align::Center)
+                };
+                ui.with_layout(layout, |ui| {
+                    let size = if horizontal {
+                        egui::vec2(16.0, 28.0)
+                    } else {
+                        egui::vec2(26.0, 15.0)
+                    };
+                    let (rect, grip) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    let grip = grip.on_hover_cursor(egui::CursorIcon::Grab);
+                    for primary in [-3.0, 3.0] {
+                        for cross in [-5.0, 0.0, 5.0] {
+                            let offset = if horizontal {
+                                egui::vec2(primary, cross)
+                            } else {
+                                egui::vec2(cross, primary)
+                            };
+                            ui.painter().circle_filled(
+                                rect.center() + offset,
+                                1.1,
+                                theme::TEXT_SECONDARY,
+                            );
+                        }
+                    }
+                    let grip = grip.on_hover_text(
+                        "Drag Tools to a window edge, or right-click to choose a side",
+                    );
+                    if grip.drag_stopped() {
+                        if let Some(pos) = grip.interact_pointer_pos() {
+                            self.tool_dock = ToolDock::nearest(ui.ctx().content_rect(), pos);
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                    grip.context_menu(|ui| {
+                        for side in ToolDock::ALL {
+                            if ui
+                                .selectable_value(&mut self.tool_dock, side, side.label())
+                                .clicked()
+                            {
+                                ui.close();
+                            }
+                        }
+                    });
+                    let scroll = if horizontal {
+                        egui::ScrollArea::horizontal()
+                    } else {
+                        egui::ScrollArea::vertical()
+                    };
+                    scroll
+                        .id_salt("tools-buttons")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.with_layout(layout, |ui| self.tool_buttons(ui));
+                        });
+                });
+            });
+        theme::glass_rim(ui.painter(), frame.response.rect);
+    }
+
+    fn tool_buttons(&mut self, ui: &mut egui::Ui) {
         const GROUPS: [&[Tool]; 4] = [
             &[Tool::Select, Tool::Transform],
             &[Tool::Brush, Tool::Pencil, Tool::Eraser, Tool::LineEditor],
             &[Tool::Paint, Tool::CloseGap, Tool::Dropper],
             &[Tool::Hand, Tool::Zoom],
         ];
-        let frame = egui::Frame::new()
-            .fill(theme::GLASS_PANEL)
-            .corner_radius(theme::GLASS_RADIUS)
-            .inner_margin(egui::Margin::same(theme::GLASS_TOOL_INSET))
-            .show(ui, |ui| {
-                ui.set_min_height(ui.available_height());
-                ui.spacing_mut().item_spacing.y = 2.0;
-                for (g, group) in GROUPS.iter().enumerate() {
-                    if g > 0 {
-                        ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
-                    }
-                    for &t in group.iter() {
-                        let mut tip = keymap::tooltip(self.profile, tool_action(t));
-                        if let Some(m) = t.planned_for() {
-                            tip.push_str(&format!("\nComing in {m}"));
-                        }
-                        let enabled = t.planned_for().is_none();
-                        if icons::tool_button(ui, tool_icon(t), self.s.tool == t, enabled, &tip)
-                            .clicked()
-                        {
-                            self.s.tool = t;
-                        }
+        ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
+        for (group, tools) in GROUPS.iter().enumerate() {
+            if group > 0 {
+                ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
+            }
+            for &tool in *tools {
+                let mut tip = keymap::tooltip(self.profile, tool_action(tool));
+                if let Some(milestone) = tool.planned_for() {
+                    tip.push_str(&format!("\nComing in {milestone}"));
+                }
+                let response = icons::tool_button(
+                    ui,
+                    tool_icon(tool),
+                    self.s.tool == tool,
+                    tool.planned_for().is_none(),
+                    &tip,
+                );
+                if response.clicked() {
+                    self.s.tool = tool;
+                }
+                if response.double_clicked() {
+                    self.s.tool = tool;
+                    if self.layout_mut().find_tab(&View::ToolProperties).is_some() {
+                        self.maximised = None;
+                        self.show_view(View::ToolProperties);
+                        self.tool_options_open = false;
+                    } else {
+                        self.tool_options_open = true;
                     }
                 }
-            });
-        theme::glass_rim(ui.painter(), frame.response.rect);
+            }
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui, device: Option<&DeviceInfo>) {
@@ -1396,58 +1575,30 @@ impl SymphonyApp {
             let s = &self.s;
             dense(
                 ui,
-                format!("Frame {} of {}", s.frame, s.length()),
-                theme::TEXT_SECONDARY,
-            );
-            let drawing = s
-                .drawing_name(s.selected, s.frame)
-                .map_or("empty cell".into(), |d| format!("drawing {d}"));
-            dense(
-                ui,
-                format!("{}, {drawing}", s.layer_name(s.selected)),
-                theme::TEXT_SECONDARY,
-            );
-            dense(
-                ui,
                 format!(
-                    "Tool {}, {}",
-                    tool_action(s.tool).name(),
-                    session::art_name(s.art)
+                    "{} × {} · {} fps",
+                    s.doc.settings.width, s.doc.settings.height, s.doc.settings.fps
                 ),
                 theme::TEXT_SECONDARY,
             );
-            if s.animate {
-                // D8.5: a visible mode, in its token colour (amber = time).
-                dense(ui, "Animate mode on".into(), theme::ACCENT_TIME);
+            if s.doc.column(s.selected).is_some_and(|column| column.locked) {
+                dense(ui, "Layer locked".into(), theme::TEXT_PRIMARY);
             }
-            if s.onion.on {
-                dense(ui, "Onion skin on".into(), theme::TEXT_PRIMARY);
+            if s.tool == Tool::Select && !s.selection.strokes.is_empty() {
+                dense(
+                    ui,
+                    format!("{} selected", s.selection.strokes.len()),
+                    theme::TEXT_PRIMARY,
+                );
+            }
+            if s.animate {
+                dense(ui, "Auto-key".into(), theme::ACCENT_TIME);
             }
             let notice = s.notice.clone();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Which build this is, so testers know what they're running.
-                dense(
-                    ui,
-                    format!(
-                        "v{} ({})",
-                        env!("CARGO_PKG_VERSION"),
-                        env!("SYMPHONY_BUILD")
-                    ),
-                    theme::TEXT_DISABLED,
-                );
-                dense(
-                    ui,
-                    format!("{} profile", self.profile.title()),
-                    theme::TEXT_SECONDARY,
-                );
-                let (pen, dot) = match device {
-                    Some(d) if d.in_proximity => ("Pen in range", theme::STATE_OK),
-                    Some(_) => ("Pen ready", theme::TEXT_SECONDARY),
-                    None => ("Mouse only", theme::TEXT_DISABLED),
-                };
-                dense(ui, pen.into(), theme::TEXT_SECONDARY);
-                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(r.center(), 3.5, dot);
+                if device.is_some_and(|pen| pen.in_proximity) {
+                    dense(ui, "Pen in range".into(), theme::STATE_OK);
+                }
 
                 // Activity area (D17.5): background work stays visible.
                 let mut jobs: Vec<(String, Option<f32>)> = Vec::new();
@@ -1685,10 +1836,10 @@ impl SymphonyApp {
                 &[View::Colour][..],
             ),
             (
-                "Toggle Animate Mode",
+                "Toggle Auto-key",
                 Command::ToggleAnimate,
                 "timing.animate",
-                "auto key animation",
+                "auto key animation animate mode",
                 &[View::LayerProperties, View::Timeline][..],
             ),
             (
@@ -2353,6 +2504,84 @@ impl SymphonyApp {
     }
 }
 
+fn add_tab_menu(
+    ui: &mut egui::Ui,
+    section: egui_dock::NodePath,
+    locations: &[(egui_dock::NodePath, View)],
+) -> Option<View> {
+    let mut chosen = None;
+    ui.menu_button("Add Tab", |ui| {
+        for view in View::ALL {
+            let here = locations.contains(&(section, view));
+            let elsewhere = locations.iter().any(|(_, existing)| *existing == view);
+            let option = ui.add_enabled(!here, egui::Button::new(view.title()));
+            if elsewhere && !here {
+                option
+                    .clone()
+                    .on_hover_text("Move this tab here from its current section");
+            }
+            if option.clicked() {
+                chosen = Some(view);
+                ui.close();
+            }
+        }
+    });
+    if chosen.is_some() {
+        ui.close();
+    }
+    chosen
+}
+
+fn add_tab_to(layout: &mut DockState<View>, section: egui_dock::NodePath, tab: View) {
+    if let Ok(leaf) = layout.leaf(section) {
+        if leaf.tabs.contains(&tab) {
+            return;
+        }
+        let end = egui_dock::TabIndex(leaf.tabs.len());
+        if let Some(from) = layout.find_tab(&tab) {
+            layout.move_tab(from, (section, egui_dock::TabInsert::Insert(end)));
+        } else if let Ok(leaf) = layout.leaf_mut(section) {
+            leaf.append_tab(tab);
+            layout.set_focused_node_and_surface(section);
+        }
+    }
+}
+
+fn tab_strip_menu(
+    ui: &mut egui::Ui,
+    layout: &DockState<View>,
+    workspace: Workspace,
+    locations: &[(egui_dock::NodePath, View)],
+) -> Option<(egui_dock::NodePath, View)> {
+    let ctx = ui.ctx();
+    let popup = egui::Id::unique(("add-tab-at-strip", workspace));
+    if !egui::Popup::is_any_open(ctx) && ctx.input(|i| i.pointer.secondary_clicked()) {
+        if let Some(pos) = ctx.pointer_interact_pos() {
+            let section = layout.iter_leaves().find_map(|(section, leaf)| {
+                let rect = leaf.rect();
+                let bottom = if leaf.viewport.is_positive() {
+                    leaf.viewport.top().min(rect.top() + theme::TAB_ROW)
+                } else {
+                    (rect.top() + theme::TAB_ROW).min(rect.bottom())
+                };
+                let strip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), bottom));
+                (!leaf.tab_bar_hidden && strip.contains(pos)).then_some(section)
+            });
+            if let Some(section) = section {
+                ctx.data_mut(|data| data.insert_temp(popup, (section, pos)));
+                egui::Popup::open_id(ctx, popup);
+            }
+        }
+    }
+    let (section, pos) =
+        ctx.data(|data| data.get_temp::<(egui_dock::NodePath, egui::Pos2)>(popup))?;
+    egui::Popup::new(popup, ctx.clone(), pos, ui.layer_id())
+        .kind(egui::PopupKind::Menu)
+        .open_memory(None)
+        .show(|ui| add_tab_menu(ui, section, locations))
+        .and_then(|response| response.inner.map(|view| (section, view)))
+}
+
 struct Viewer<'a> {
     workspace: Workspace,
     s: &'a mut Session,
@@ -2369,6 +2598,8 @@ struct Viewer<'a> {
     /// For tab animations: the context, and each leaf's open tab.
     ctx: egui::Context,
     active: Vec<View>,
+    tab_locations: Vec<(egui_dock::NodePath, View)>,
+    tab_request: Option<(egui_dock::NodePath, View)>,
 }
 
 impl Viewer<'_> {
@@ -2427,6 +2658,12 @@ impl egui_dock::TabViewer for Viewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut View) {
         self.view(ui, *tab);
+    }
+
+    fn context_menu(&mut self, ui: &mut egui::Ui, _tab: &mut View, path: egui_dock::NodePath) {
+        if let Some(view) = add_tab_menu(ui, path, &self.tab_locations) {
+            self.tab_request = Some((path, view));
+        }
     }
 
     /// Tabs ease between their open and closed look instead of switching at
@@ -2588,18 +2825,18 @@ impl eframe::App for SymphonyApp {
             .frame(base.inner_margin(egui::Margin::symmetric(12, 0)))
             .exact_size(theme::STATUS_BAR)
             .show(ui, |ui| self.status_bar(ui, device.as_ref()));
-        let g = theme::GUTTER as i8;
-        egui::Panel::left("tools")
-            .show_separator_line(false)
-            .frame(egui::Frame::new().inner_margin(egui::Margin {
-                left: g,
-                right: 0,
-                top: g,
-                bottom: g,
-            }))
-            .exact_size(theme::TOOLS_STRIP + theme::GUTTER)
-            .resizable(false)
-            .show(ui, |ui| self.tools_strip(ui));
+        self.tools_panel(ui);
+
+        if self.tool_options_open {
+            egui::Window::new("Tool Properties")
+                .id(egui::Id::unique("floating-tool-properties"))
+                .open(&mut self.tool_options_open)
+                .default_width(310.0)
+                .default_height(380.0)
+                .show(&ctx, |ui| {
+                    panels::tool_properties(ui, &mut self.s, &mut self.presets, device.as_ref())
+                });
+        }
 
         let mut open = self.show_preferences;
         egui::Window::new("Preferences")
@@ -2694,10 +2931,17 @@ impl eframe::App for SymphonyApp {
             .filter_map(|node| node.get_leaf())
             .filter_map(|leaf| leaf.tabs.get(leaf.active.0).copied())
             .collect();
+        let tab_locations = layout
+            .iter_all_tabs()
+            .map(|(path, tab)| (path.node_path(), *tab))
+            .collect();
+        layout.translations.tab_context_menu.close_button = "Remove".into();
         self.hovered_view = None;
         let mut viewer = Viewer {
             ctx: ctx.clone(),
             active,
+            tab_locations,
+            tab_request: None,
             workspace: ws,
             s: &mut self.s,
             camera: &mut self.camera,
@@ -2733,10 +2977,18 @@ impl eframe::App for SymphonyApp {
                     DockArea::new(layout)
                         .style(theme::dock_style(ui.style()))
                         .show_add_buttons(false)
-                        .show_close_buttons(false)
+                        .show_close_buttons(true)
                         .show_leaf_close_all_buttons(false)
                         .show_leaf_collapse_buttons(false)
                         .show_inside(ui, &mut viewer);
+                    let tab_request = viewer
+                        .tab_request
+                        .take()
+                        .or_else(|| tab_strip_menu(ui, layout, ws, &viewer.tab_locations));
+                    if let Some((section, tab)) = tab_request {
+                        add_tab_to(layout, section, tab);
+                        ui.ctx().request_repaint();
+                    }
                     let mut fills = Vec::new();
                     for leaf in layout
                         .main_surface()
@@ -2826,6 +3078,7 @@ impl eframe::App for SymphonyApp {
             return;
         }
         let saved = Saved {
+            tool_dock: self.tool_dock,
             recent_projects: self.recent_projects.clone(),
             wallpaper: self.wallpaper.choice.clone(),
             interface_animations: self.interface_animations,
@@ -2903,4 +3156,143 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(SymphonyApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod workspace_control_tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    #[test]
+    fn slider_click_keeps_the_rail_focused_for_precise_arrow_steps() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(500.0, 200.0))
+            .build_ui_state(
+                |ui, (value, position)| {
+                    let response = symphony_ui::widgets::precise_slider(
+                        ui,
+                        egui::Slider::new(value, 0.0..=10.0)
+                            .text("Test slider")
+                            .step_by(0.1)
+                            .show_value(false),
+                    );
+                    *position = response.rect.center();
+                },
+                (5.0f32, egui::Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let pos = harness.state().1;
+        for pressed in [true, false] {
+            harness.input_mut().events.extend([
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            harness.run_steps(1);
+        }
+        let before = harness.state().0;
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        assert!((harness.state().0 - before - 0.1).abs() < 0.0001);
+    }
+
+    #[test]
+    fn add_tab_moves_existing_views_and_adds_missing_views_here() {
+        let mut layout = DockState::new(vec![View::Camera, View::Drawing]);
+        layout.main_surface_mut().split_right(
+            egui_dock::NodeIndex::root(),
+            0.5,
+            vec![View::Timeline],
+        );
+        let target = layout.find_tab(&View::Timeline).unwrap().node_path();
+        super::add_tab_to(&mut layout, target, View::Camera);
+        super::add_tab_to(&mut layout, target, View::Node);
+        assert_eq!(layout.find_tab(&View::Camera).unwrap().node_path(), target);
+        assert_eq!(layout.find_tab(&View::Node).unwrap().node_path(), target);
+        assert_eq!(
+            layout
+                .iter_all_tabs()
+                .filter(|(_, view)| **view == View::Camera)
+                .count(),
+            1
+        );
+        let path = layout.find_tab(&View::Camera).unwrap();
+        assert_eq!(layout.remove_tab(path), Some(View::Camera));
+        assert!(layout.find_tab(&View::Camera).is_none());
+    }
+
+    #[test]
+    fn right_click_in_empty_tab_strip_opens_the_add_tab_menu() {
+        struct TestViewer;
+        impl egui_dock::TabViewer for TestViewer {
+            type Tab = View;
+            fn id(&mut self, tab: &mut View) -> egui::Id {
+                egui::Id::unique(("workspace-test-tab", *tab))
+            }
+            fn title(&mut self, tab: &mut View) -> egui::WidgetText {
+                tab.title().into()
+            }
+            fn ui(&mut self, _: &mut egui::Ui, _: &mut View) {}
+        }
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui_state(
+                |ui, (layout, pos, open)| {
+                    DockArea::new(layout)
+                        .style(theme::dock_style(ui.style()))
+                        .show_inside(ui, &mut TestViewer);
+                    let (_, leaf) = layout.iter_leaves().next().unwrap();
+                    *pos = egui::pos2(leaf.rect().right() - 40.0, leaf.rect().top() + 8.0);
+                    let _ = super::tab_strip_menu(ui, layout, Workspace::Default, &[]);
+                    *open = egui::Popup::is_id_open(
+                        ui.ctx(),
+                        egui::Id::unique(("add-tab-at-strip", Workspace::Default)),
+                    );
+                },
+                (DockState::new(vec![View::Camera]), egui::Pos2::ZERO, false),
+            );
+        harness.run_steps(2);
+        let pos = harness.state().1;
+        for pressed in [true, false] {
+            harness.input_mut().events.extend([
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            harness.run_steps(1);
+        }
+        assert!(harness.state().2);
+    }
+
+    #[test]
+    fn horizontal_toolbar_docks_at_top_and_bottom() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        assert_eq!(
+            ToolDock::nearest(rect, egui::pos2(630.0, 20.0)),
+            ToolDock::Top
+        );
+        assert_eq!(
+            ToolDock::nearest(rect, egui::pos2(630.0, 780.0)),
+            ToolDock::Bottom
+        );
+        assert!(ToolDock::Top.horizontal() && ToolDock::Bottom.horizontal());
+        assert_eq!(
+            ToolDock::nearest(rect, egui::pos2(1240.0, 420.0)),
+            ToolDock::Right
+        );
+    }
 }

@@ -8,6 +8,16 @@ use crate::theme;
 
 const BOX: f32 = 14.0;
 
+/// Keep a slider's rail focused after pointer adjustment so its configured
+/// step is immediately available from Left and Right.
+pub fn precise_slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> Response {
+    let response = ui.add(slider);
+    if response.drag_started() || response.drag_stopped() {
+        response.request_focus();
+    }
+    response
+}
+
 /// The commit action in a dialog or workflow.
 pub fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response {
     let enabled = enabled && ui.is_enabled();

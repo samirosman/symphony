@@ -60,6 +60,12 @@ pub struct SourceConnection {
     pub input: usize,
 }
 
+pub const DEFAULT_CAMERA_FOV: f32 = 60.0;
+
+fn default_camera_fov() -> crate::anim::Value {
+    crate::anim::Value::Constant(DEFAULT_CAMERA_FOV)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scene {
     /// Source node counts for the Harmony import report.
@@ -87,6 +93,8 @@ pub struct Scene {
     pub textures: BTreeMap<u64, crate::stroke::Texture>,
     pub composite: NodeId,
     pub display: NodeId,
+    #[serde(default = "default_camera_fov")]
+    pub camera_fov: crate::anim::Value,
     pub ids: IdGen,
     /// Bumped by every applied edit (E3.6). Not saved.
     #[serde(skip)]
@@ -94,6 +102,17 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Horizontal framing for the 2D camera. The original framing is 60°.
+    pub fn camera_scale(&self, frame: u32) -> f32 {
+        let fov = self.camera_fov.at(frame);
+        let fov = if fov.is_finite() {
+            fov.clamp(20.0, 120.0)
+        } else {
+            DEFAULT_CAMERA_FOV
+        };
+        (DEFAULT_CAMERA_FOV.to_radians() * 0.5).tan() / (fov.to_radians() * 0.5).tan()
+    }
+
     pub fn new(settings: Settings) -> Self {
         let mut graph = Graph::default();
         let composite = graph.add("Composite", NodeKind::Composite);
@@ -133,6 +152,7 @@ impl Scene {
             textures: BTreeMap::new(),
             composite,
             display,
+            camera_fov: default_camera_fov(),
             ids,
             version: 0,
         }

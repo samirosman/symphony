@@ -43,25 +43,27 @@ fn picker(ui: &mut egui::Ui, rgba: &mut [u8; 4], edit_opacity: bool) -> egui::Re
                 hsv.h = ui.data(|d| d.get_temp::<f32>(hue_id)).unwrap_or(hsv.h);
             }
             let mut hue = hsv.h * 360.0;
-            let hue_changed = ui
-                .add(
-                    egui::Slider::new(&mut hue, 0.0..=360.0)
-                        .text("Hue")
-                        .suffix("°"),
-                )
-                .changed();
+            let hue_changed = symphony_ui::widgets::precise_slider(
+                ui,
+                egui::Slider::new(&mut hue, 0.0..=360.0)
+                    .step_by(1.0)
+                    .text("Hue")
+                    .suffix("°"),
+            )
+            .changed();
             hsv.h = hue / 360.0;
             ui.data_mut(|d| d.insert_temp(hue_id, hsv.h));
             let picked = saturation_value(ui, &mut hsv, triangle);
             let mut opacity = hsv.a * 100.0;
             let alpha_changed = edit_opacity
-                && ui
-                    .add(
-                        egui::Slider::new(&mut opacity, 0.0..=100.0)
-                            .text("Opacity")
-                            .suffix("%"),
-                    )
-                    .changed();
+                && symphony_ui::widgets::precise_slider(
+                    ui,
+                    egui::Slider::new(&mut opacity, 0.0..=100.0)
+                        .step_by(1.0)
+                        .text("Opacity")
+                        .suffix("%"),
+                )
+                .changed();
             if hue_changed || picked || alpha_changed {
                 hsv.a = opacity / 100.0;
                 let changed = hsv.to_srgba_unmultiplied();

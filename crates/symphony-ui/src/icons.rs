@@ -33,6 +33,7 @@ pub enum Icon {
     RotateRight,
     Plus,
     AddKeyframe,
+    RemoveKeyframe,
     Trash,
     ZoomOut,
     Forbidden,
@@ -47,7 +48,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 34] = [
+    pub const ALL: [Icon; 35] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -71,6 +72,7 @@ impl Icon {
         Icon::RotateRight,
         Icon::Plus,
         Icon::AddKeyframe,
+        Icon::RemoveKeyframe,
         Icon::Trash,
         Icon::ZoomOut,
         Icon::Forbidden,
@@ -425,9 +427,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         Icon::ArtColour => {
             g.dot(p, 8.0, 8.0, 5.0);
         }
-        Icon::AddKeyframe => {
+        Icon::AddKeyframe | Icon::RemoveKeyframe => {
             g.closed(p, &[(8.0, 1.6), (14.4, 8.0), (8.0, 14.4), (1.6, 8.0)]);
-            g.line(p, &[(8.0, 5.8), (8.0, 10.2)]);
+            if icon == Icon::AddKeyframe {
+                g.line(p, &[(8.0, 5.8), (8.0, 10.2)]);
+            }
             g.line(p, &[(5.8, 8.0), (10.2, 8.0)]);
         }
         Icon::Plus => {

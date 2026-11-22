@@ -97,6 +97,26 @@ Drop it near a compatible open socket to connect it, or onto a cable
 to insert it between the connected nodes. Proposed wires are highlighted
 during the drag. Undo restores the old wiring and node position together.
 
+Option-click a cable or a connected input to cut that wire. Option-drag
+a single connected node away to disconnect its wires. Shift-click to
+add a node to the selection, then drag a selected node to move the group.
+
+Double-click **Camera** in the Node view to change the horizontal field
+of view. The presets are **Tight** (35°), **Standard** (60°) and **Wide**
+(90°), with a custom slider. The framing affects Camera and exports.
+Click or drag a slider and press Left or Right for small adjustments.
+
+**Auto-key** records changes at the current frame. With it off, an
+unanimated setting remains constant until you set a key. The diamond
+button sets a key at the playhead or removes it if that track already
+has one there.
+
+Drag the Tools grip to any window edge. Top and bottom make the toolbar
+horizontal. Double-click a tool to open its properties in the docked
+tab or in a floating panel. Right-click a tab for **Eject**, **Remove**,
+or **Add Tab**, and right-click the empty tab strip to add a view to that
+section.
+
 ## Timeline keys and frames
 
 In Timeline, press **K** or click the diamond-plus button to set a

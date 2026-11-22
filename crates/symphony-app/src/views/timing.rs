@@ -203,16 +203,22 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
                         .range(1..=len)
                         .prefix("Frame "),
                 );
-                if icons::button(
-                    ui,
-                    Icon::AddKeyframe,
-                    super::node::selected_has_key(s),
-                    TimelineAction::SetKey.enabled(s),
-                    "Set keyframe (K in Timeline)",
-                )
-                .clicked()
-                {
-                    TimelineAction::SetKey.run(s);
+                let keyed = super::node::selected_has_key(s);
+                let (icon, action, tooltip) = if keyed {
+                    (
+                        Icon::RemoveKeyframe,
+                        TimelineAction::DeleteKey,
+                        "Remove keyframe",
+                    )
+                } else {
+                    (
+                        Icon::AddKeyframe,
+                        TimelineAction::SetKey,
+                        "Set keyframe (K in Timeline)",
+                    )
+                };
+                if icons::button(ui, icon, keyed, action.enabled(s), tooltip).clicked() {
+                    action.run(s);
                 }
                 ui.menu_button("Frames", |ui| frame_menu(ui, s));
                 if compact {

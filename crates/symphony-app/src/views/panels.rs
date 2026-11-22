@@ -47,9 +47,9 @@ pub const MAX_TOOL_SIZE: f32 = 2000.0;
 fn size_slider(ui: &mut egui::Ui, label: &str, v: &mut f32, recommended: f32) {
     hint(ui, label);
     ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
-    ui.add(
+    widgets::precise_slider(ui,
         egui::Slider::new(v, 0.0..=recommended)
-            .clamping(egui::SliderClamping::Never),
+            .step_by(0.1).clamping(egui::SliderClamping::Never),
     )
     .on_hover_text(format!(
         "The slider goes to {recommended:.0}, a size that stays fast. Type a bigger number to go up to {MAX_TOOL_SIZE:.0}."
@@ -60,7 +60,8 @@ fn size_slider(ui: &mut egui::Ui, label: &str, v: &mut f32, recommended: f32) {
 fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>) {
     hint(ui, label);
     ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
-    ui.add(egui::Slider::new(v, range));
+    let step = f64::from((range.end() - range.start()) / 200.0);
+    widgets::precise_slider(ui, egui::Slider::new(v, range).step_by(step));
 }
 
 /// A sample stroke that shows what the settings will do: pressure rises
@@ -632,7 +633,7 @@ fn tool_properties_body(
                         }
                     }
                 } else {
-                    hint(ui, "Click artwork to pick its layer. Drag to move, corner handles to scale, just outside a corner to rotate. Animate mode sets keys.");
+                    hint(ui, "Click artwork to pick its layer. Drag to move, corner handles to scale, just outside a corner to rotate. Auto-key records changes at the current frame.");
                 }
             }
             Tool::Paint => {
@@ -844,8 +845,10 @@ pub fn prefs_drawing(ui: &mut egui::Ui, s: &mut Session) {
     section(ui, "Lines");
     hint(ui, "Stroke detail");
     ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
-    ui.add(
+    widgets::precise_slider(
+        ui,
         egui::Slider::new(&mut s.stroke_detail, 0.1..=1.0)
+            .step_by(0.01)
             .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
             .custom_parser(|t| {
                 t.trim_end_matches('%')

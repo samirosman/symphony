@@ -1697,6 +1697,18 @@ impl Session {
                 ));
             }
         }
+        if let Value::Keys(keys) = &self.doc.camera_fov {
+            let mut after = keys.clone();
+            for key in after.iter_mut().filter(|key| key.frame >= from) {
+                key.frame = key.frame.saturating_add(count);
+            }
+            if &after != keys {
+                edits.push(Edit::SetCameraFov {
+                    before: self.doc.camera_fov.clone(),
+                    after: Value::Keys(after),
+                });
+            }
+        }
         for (id, node) in self.doc.graph.nodes() {
             if let Some(before) = self.doc.graph.keys(id) {
                 let after = before

@@ -126,6 +126,10 @@ pub enum Edit {
         before: String,
         after: String,
     },
+    SetCameraFov {
+        before: crate::anim::Value,
+        after: crate::anim::Value,
+    },
     SetFrameRate {
         before: f32,
         after: f32,
@@ -397,6 +401,9 @@ impl Edit {
                         n.name = format!("{name}-P");
                     }
                 }
+            }
+            Edit::SetCameraFov { before, after } => {
+                s.camera_fov = if forward { after } else { before }.clone();
             }
             Edit::SetFrameRate { before, after } => {
                 s.settings.fps = if forward { *after } else { *before };

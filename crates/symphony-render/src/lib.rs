@@ -58,7 +58,7 @@ fn render_display(
     if white_paper {
         paper.fill(tiny_skia::Color::WHITE);
     }
-    let k = width as f32 / scene.settings.width.max(1) as f32;
+    let k = width as f32 / scene.settings.width.max(1) as f32 * scene.camera_scale(frame);
     // Scene units have their origin at the stage centre, y down.
     let view =
         Affine::translate(width as f32 / 2.0, height as f32 / 2.0).compose(Affine::scale(k, k));
@@ -441,6 +441,19 @@ mod tests {
         let ink = s.palette.swatches[0].rgb[0];
         assert!(row.contains(&255), "paper shows through the grain: {row:?}");
         assert!(row.contains(&ink), "ink where the grain is white: {row:?}");
+    }
+
+    #[test]
+    fn field_of_view_changes_the_framing_without_changing_image_size() {
+        let mut scene = scene_with_line();
+        let standard = render_camera(&scene, 1, 200, 100, None).unwrap();
+        scene.camera_fov = symphony_core::anim::Value::Constant(90.0);
+        let wide = render_camera(&scene, 1, 200, 100, None).unwrap();
+        assert_eq!(standard.width(), wide.width());
+        assert_eq!(standard.height(), wide.height());
+        assert_eq!(standard.pixel(58, 50).unwrap().alpha(), 255);
+        assert_eq!(wide.pixel(58, 50).unwrap().alpha(), 0);
+        assert_eq!(wide.pixel(100, 50).unwrap().alpha(), 255);
     }
 
     #[test]

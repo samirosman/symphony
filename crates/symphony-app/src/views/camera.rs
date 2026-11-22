@@ -32,6 +32,7 @@ pub struct CanvasState {
     /// actual size and resizing the view keeps the drawing's scale (and
     /// re-stamps nothing). Fitted to the view when first shown and on Fit.
     zoom: f32,
+    framing: f32,
     /// Fit the stage to the view on the next frame.
     fit_pending: bool,
     /// Degrees, clockwise.
@@ -54,6 +55,7 @@ impl Default for CanvasState {
         CanvasState {
             pan: Vec2::ZERO,
             zoom: 1.0,
+            framing: 1.0,
             fit_pending: true,
             rotation: 0.0,
             active: None,
@@ -187,9 +189,10 @@ fn fit_zoom(rect: Rect, w: f32, h: f32) -> f32 {
 /// absolute: the rect only places the centre.
 fn view_transform(state: &CanvasState, rect: Rect) -> Affine {
     let c = rect.center() + state.pan;
+    let scale = state.zoom * state.framing;
     Affine::translate(c.x, c.y)
         .compose(Affine::rotate_deg(state.rotation))
-        .compose(Affine::scale(state.zoom, state.zoom))
+        .compose(Affine::scale(scale, scale))
 }
 
 fn to_pos((x, y): (f32, f32)) -> Pos2 {
@@ -470,6 +473,12 @@ pub fn ui(
     state.strokes.begin_frame(ui.ctx());
     let (w, h) = (s.doc.settings.width as f32, s.doc.settings.height as f32);
 
+    state.framing = if drawing_only {
+        1.0
+    } else {
+        s.doc.camera_scale(s.frame)
+    };
+
     // Navigation (before drawing, so this frame already shows the result).
     let (space, shift, zoom_delta, scroll, alt) = ui.input(|i| {
         (
@@ -529,6 +538,7 @@ pub fn ui(
             Color32::BLACK
         },
     );
+    let (w, h) = (w / state.framing, h / state.framing);
     let corners = [
         (-w / 2.0, -h / 2.0),
         (w / 2.0, -h / 2.0),

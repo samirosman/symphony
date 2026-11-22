@@ -1,5 +1,5 @@
 //! Editable scene graph, with separate transform and image ports.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::{
@@ -24,6 +24,8 @@ enum Drag {
 #[derive(Default)]
 pub struct NodeViewState {
     pan: Vec2,
+    selection: BTreeSet<NodeId>,
+    selection_scene: String,
     zoom: Option<f32>,
     anchor_x: Option<f32>,
     fit_next: Option<Rect>,
@@ -41,6 +43,8 @@ struct PropertyDraft {
     version: u64,
     frame: u32,
     initial: Node,
+    initial_fov: Option<f32>,
+    fov: Option<f32>,
     node: Node,
 }
 
@@ -48,12 +52,15 @@ impl PropertyDraft {
     fn new(s: &Session, id: NodeId) -> Option<Self> {
         let mut node = s.doc.graph.node_at_frame(id, s.frame)?;
         node.name = node_name(&node).to_owned();
+        let fov = (id == s.doc.display).then(|| s.doc.camera_fov.at(s.frame));
         Some(Self {
             id,
             scene: s.key.clone(),
             version: s.doc.version,
             frame: s.frame,
             initial: node.clone(),
+            initial_fov: fov,
+            fov,
             node,
         })
     }
@@ -479,7 +486,8 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         ui.text_edit_singleline(&mut draft.node.name);
     });
     ui.checkbox(&mut draft.node.enabled, "Enabled");
-    ui.checkbox(&mut s.animate, "Animate mode");
+    ui.checkbox(&mut s.animate, "Auto-key")
+        .on_hover_text("Record property or peg changes at the current frame when you apply them. With Auto-key off, unanimated properties keep one value until you set a key.");
     ui.separator();
     match &mut draft.node.kind {
         NodeKind::Peg(peg) => {
@@ -505,10 +513,10 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 ui.label(format!("Exposure column  {}", source.name));
                 ui.label(format!(
                     "Current drawing  {}",
-                    source
-                        .get(s.frame)
-                        .and_then(|drawing| s.doc.drawings.get(&drawing))
-                        .map_or("Empty", |d| &d.name)
+                    s.doc
+                        .layer_of(*column)
+                        .and_then(|layer| s.drawing_name(layer, s.frame))
+                        .unwrap_or("Empty")
                 ));
             }
         }
@@ -537,16 +545,37 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 "Stage  {} × {}",
                 s.doc.settings.width, s.doc.settings.height
             ));
+            if let Some(fov) = &mut draft.fov {
+                ui.horizontal_wrapped(|ui| {
+                    for (title, angle) in [("Tight", 35.0), ("Standard", 60.0), ("Wide", 90.0)] {
+                        ui.selectable_value(fov, angle, title);
+                    }
+                });
+                widgets::precise_slider(
+                    ui,
+                    egui::Slider::new(fov, 20.0..=120.0)
+                        .step_by(0.1)
+                        .text("Horizontal FOV")
+                        .suffix("°"),
+                );
+            }
         }
         NodeKind::Effect(Effect::Blur { radius }) => {
-            ui.add(
+            widgets::precise_slider(
+                ui,
                 egui::Slider::new(radius, 0.0..=128.0)
+                    .step_by(0.1)
                     .text("Radius")
                     .suffix(" px"),
             );
         }
         NodeKind::Effect(Effect::Grain { amount, seed }) => {
-            ui.add(egui::Slider::new(amount, 0.0..=1.0).text("Amount"));
+            widgets::precise_slider(
+                ui,
+                egui::Slider::new(amount, 0.0..=1.0)
+                    .step_by(0.01)
+                    .text("Amount"),
+            );
             ui.horizontal(|ui| {
                 ui.label("Seed");
                 ui.add(egui::DragValue::new(seed));
@@ -554,13 +583,14 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         }
         NodeKind::Effect(Effect::Opacity { amount }) => {
             let mut percent = *amount * 100.0;
-            if ui
-                .add(
-                    egui::Slider::new(&mut percent, 0.0..=100.0)
-                        .text("Opacity")
-                        .suffix("%"),
-                )
-                .changed()
+            if widgets::precise_slider(
+                ui,
+                egui::Slider::new(&mut percent, 0.0..=100.0)
+                    .step_by(1.0)
+                    .text("Opacity")
+                    .suffix("%"),
+            )
+            .changed()
             {
                 *amount = percent / 100.0;
             }
@@ -572,15 +602,19 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 super::colour_picker::swatch(ui, &mut gradient.end);
                 ui.label("End");
             });
-            ui.add(
+            widgets::precise_slider(
+                ui,
                 egui::Slider::new(&mut gradient.angle, 0.0..=360.0)
+                    .step_by(0.1)
                     .text("Angle")
                     .suffix("°"),
             );
         }
         _ => {}
     }
-    let changed = draft.node != draft.initial && !draft.node.name.trim().is_empty();
+    let fov_changed = draft.fov != draft.initial_fov;
+    let changed =
+        (draft.node != draft.initial || fov_changed) && !draft.node.name.trim().is_empty();
     let keyed = s.doc.graph.has_key(draft.id, s.frame);
     ui.horizontal_wrapped(|ui| {
         if ui
@@ -588,7 +622,8 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             .clicked()
         {
             let animatable_changed = draft.node.enabled != draft.initial.enabled
-                || draft.node.kind != draft.initial.kind;
+                || draft.node.kind != draft.initial.kind
+                || fov_changed;
             let use_key = animatable_changed && (s.animate || s.doc.graph.keys(draft.id).is_some());
             if !animatable_changed {
                 apply_name(s, draft);
@@ -688,6 +723,23 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                 }
             }
             after.kind = NodeKind::Peg(peg);
+        }
+    }
+    if let Some(fov) = draft.fov {
+        use symphony_core::anim::Value;
+        let before = s.doc.camera_fov.clone();
+        let mut after = before.clone();
+        if delete {
+            after.remove_key(s.frame);
+        } else if key
+            || (fov != draft.initial_fov.unwrap_or(fov) && matches!(before, Value::Keys(_)))
+        {
+            after.set_key(s.frame, fov);
+        } else if fov != draft.initial_fov.unwrap_or(fov) {
+            after = Value::Constant(fov);
+        }
+        if before != after {
+            edits.push(Edit::SetCameraFov { before, after });
         }
     }
     if before != after {
@@ -892,7 +944,22 @@ fn minimap(painter: &egui::Painter, viewport: Rect, bounds: Rect) {
     );
 }
 
+fn select_in_graph(s: &mut Session, state: &mut NodeViewState, id: NodeId, extend: bool) {
+    if !extend {
+        state.selection.clear();
+    }
+    state.selection.insert(id);
+    s.select_graph_node(id, true);
+}
+
 fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Option<NodeKind>) {
+    let primary = selected_node(s);
+    if state.selection_scene != s.key || !primary.is_some_and(|id| state.selection.contains(&id)) {
+        state.selection_scene.clone_from(&s.key);
+        state.selection.clear();
+        state.selection.extend(primary);
+    }
+    state.selection.retain(|&id| s.doc.graph.node(id).is_some());
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let viewport = resp.rect;
     let anchor =
@@ -926,12 +993,21 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             (origin.x - viewport.left()).rem_euclid(grid),
             state.pan.y.rem_euclid(grid),
         );
-    painter.rect_filled(viewport, 0.0, theme::BG_INPUT);
+    let radius = f32::from(theme::GLASS_RADIUS.saturating_sub(4));
+    painter.rect_filled(viewport, radius, theme::BG_INPUT);
+    let inset = viewport.shrink(radius);
+    let rounded_contains = |point: Pos2| {
+        let closest = point.clamp(inset.min, inset.max);
+        point.distance_sq(closest) < radius * radius
+    };
     let mut y = grid_origin.y;
     while y < viewport.bottom() {
         let mut x = grid_origin.x;
         while x < viewport.right() {
-            painter.circle_filled(Pos2::new(x, y), 0.65, theme::LINE_SUBTLE);
+            let dot = Pos2::new(x, y);
+            if inset.is_positive() && rounded_contains(dot) {
+                painter.circle_filled(dot, 0.65, theme::LINE_SUBTLE);
+            }
             x += grid;
         }
         y += grid;
@@ -960,7 +1036,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .or_else(|| positions.get(&id).copied())
             .unwrap_or_else(|| Vec2::new(W + 36.0, 43.0 + id.0 as f32 * 58.0));
         if let Some(Drag::Node(moving, delta)) = state.drag {
-            if id == moving {
+            if id == moving || state.selection.contains(&id) {
                 position += delta;
             }
         }
@@ -1001,7 +1077,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
 
     let alt = ui.input(|i| i.modifiers.alt);
     if let Some(Drag::Node(id, _)) = state.drag {
-        if !alt && ui.input(|i| i.modifiers.shift) {
+        if !alt && state.selection.len() <= 1 && ui.input(|i| i.modifiers.shift) {
             let connected = s
                 .doc
                 .graph
@@ -1091,7 +1167,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     old_input: None,
                 })
             } else if let Some(node) = node_at(point) {
-                s.select_graph_node(node, true);
+                let extend = state.selection.contains(&node);
+                select_in_graph(s, state, node, extend);
                 Some(Drag::Node(node, Vec2::ZERO))
             } else {
                 Some(Drag::Pan)
@@ -1110,25 +1187,61 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         state.drag = None;
     }
     let mut auto_wire = match state.drag {
-        Some(Drag::Node(id, delta)) if alt && delta.length_sq() > 0.0 => cards
-            .get(&id)
-            .and_then(|(card, _)| nearby_wiring(&s.doc.graph, id, *card, &inputs, &outputs)),
+        Some(Drag::Node(id, delta))
+            if alt && state.selection.len() <= 1 && delta.length_sq() > 0.0 =>
+        {
+            cards
+                .get(&id)
+                .and_then(|(card, _)| nearby_wiring(&s.doc.graph, id, *card, &inputs, &outputs))
+        }
+        _ => None,
+    };
+    let detach = match state.drag {
+        Some(Drag::Node(id, delta))
+            if alt
+                && state.selection.len() <= 1
+                && auto_wire.is_none()
+                && delta.length() * zoom >= 48.0
+                && s.doc
+                    .graph
+                    .links()
+                    .iter()
+                    .any(|link| link.from == id || link.to == id) =>
+        {
+            Some(id)
+        }
         _ => None,
     };
     if resp.drag_stopped() {
         match state.drag.take() {
             Some(Drag::Node(id, delta)) if delta.length_sq() > 0.0 => {
-                if let Some((_, position)) = cards.get(&id) {
-                    // cards reflect the drag offset accumulated before this frame.
-                    let before = s.doc.node_positions.get(&id).copied();
-                    let mut edits = vec![Edit::MoveNode {
-                        id,
-                        before,
-                        after: [position.x, position.y],
-                    }];
+                if cards.contains_key(&id) {
+                    // Keep every selected node's relative position during a group move.
+                    let mut edits: Vec<_> = cards
+                        .iter()
+                        .filter(|(moving, _)| **moving == id || state.selection.contains(moving))
+                        .map(|(&id, (_, position))| Edit::MoveNode {
+                            id,
+                            before: s.doc.node_positions.get(&id).copied(),
+                            after: [position.x, position.y],
+                        })
+                        .collect();
                     let action = if let Some(wiring) = auto_wire.take() {
                         edits.push(wiring.edit(s));
                         "Move and connect node"
+                    } else if detach == Some(id) {
+                        let before = s.doc.graph.links().to_vec();
+                        let after = before
+                            .iter()
+                            .copied()
+                            .filter(|link| link.from != id && link.to != id)
+                            .collect();
+                        edits.push(Edit::RewireNodes {
+                            before,
+                            after,
+                            was_custom: s.doc.custom_wiring,
+                        });
+                        "Move and disconnect node"
                     } else {
                         "Move node"
                     };
@@ -1155,9 +1268,41 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
         ui.ctx().request_repaint();
     }
+    let wire_at = |point: Pos2| {
+        if let Some(input) = input_at(point) {
+            return s.doc.graph.input(input.0, input.1).map(|from| Link {
+                from,
+                to: input.0,
+                port: input.1,
+            });
+        }
+        if node_at(point).is_some() {
+            return None;
+        }
+        s.doc
+            .graph
+            .links()
+            .iter()
+            .filter_map(|&link| {
+                let from = *outputs.get(&link.from)?;
+                let to = *inputs.get(&(link.to, link.port))?;
+                let distance = near_cable(point, from, to);
+                (distance <= 8.0).then_some((distance, link))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, link)| link)
+    };
+    let cut = if alt && state.drag.is_none() {
+        resp.hover_pos().and_then(wire_at)
+    } else {
+        None
+    };
     if resp.clicked() || resp.double_clicked() {
-        if let Some(id) = resp.interact_pointer_pos().and_then(node_at) {
-            s.select_graph_node(id, true);
+        if let Some(link) = cut.filter(|_| resp.clicked()) {
+            edit_link(s, None, (link.to, link.port), None);
+        } else if let Some(id) = resp.interact_pointer_pos().and_then(node_at) {
+            let extend = ui.input(|i| i.modifiers.shift);
+            select_in_graph(s, state, id, extend);
             ui.ctx().request_repaint();
             if resp.double_clicked() {
                 open_properties(s, state, id);
@@ -1174,7 +1319,13 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             continue;
         }
         if let (Some(&from), Some(&to)) = (outputs.get(&link.from), inputs.get(&input)) {
-            let ink = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
+            let removing =
+                cut == Some(*link) || detach.is_some_and(|id| link.from == id || link.to == id);
+            let ink = if removing {
+                theme::STATE_DANGER
+            } else {
+                peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL)
+            };
             curve(&painter, from, to, Stroke::new(1.5, ink));
         }
     }
@@ -1199,7 +1350,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
-        let selected = selected_node(s) == Some(*id);
+        let selected = state.selection.contains(id);
         let peg = peg_colour(&s.doc.graph, *id);
         let edge = if selected {
             theme::ACCENT_SELECT
@@ -1418,6 +1569,94 @@ mod tests {
         assert_eq!(state.anchor_x, Some(anchor));
         assert_eq!(state.pan, pan);
         assert_eq!(state.zoom, Some(zoom));
+    }
+
+    fn pointer_gesture<S>(
+        harness: &mut Harness<'_, S>,
+        positions: [Pos2; 3],
+        modifiers: egui::Modifiers,
+    ) {
+        for (pos, pressed) in positions.into_iter().zip([Some(true), None, Some(false)]) {
+            harness.input_mut().events.extend([
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::PointerMoved(pos),
+            ]);
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                });
+            }
+            harness.run_steps(1);
+        }
+    }
+
+    #[test]
+    fn option_click_cuts_one_wire_and_option_drag_detaches_a_node() {
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (s, state, origin)| {
+                    *origin = ui.available_rect_before_wrap().center_top();
+                    canvas(ui, s, state, None);
+                },
+                (Session::new_scene(), NodeViewState::default(), Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let origin = harness.state().2;
+        let layer = harness.state().0.doc.layers[0];
+        let cable = origin + Vec2::Y * 82.0;
+        pointer_gesture(&mut harness, [cable; 3], egui::Modifiers::ALT);
+        assert_eq!(harness.state().0.doc.graph.input(layer.node, 0), None);
+        harness.state_mut().0.undo();
+        assert_eq!(
+            harness.state().0.doc.graph.input(layer.node, 0),
+            Some(layer.peg)
+        );
+
+        let from = origin + Vec2::Y * 120.0;
+        let away = from + Vec2::X * 180.0;
+        pointer_gesture(&mut harness, [from, away, away], egui::Modifiers::ALT);
+        let s = &harness.state().0;
+        assert_eq!(s.doc.graph.input(layer.node, 0), None);
+        assert_eq!(s.doc.graph.input(s.doc.composite, 0), None);
+    }
+
+    #[test]
+    fn shift_click_selects_both_nodes_and_drag_moves_the_group() {
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (s, state, origin)| {
+                    *origin = ui.available_rect_before_wrap().center_top();
+                    canvas(ui, s, state, None);
+                },
+                (Session::new_scene(), NodeViewState::default(), Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let origin = harness.state().2;
+        let layer = harness.state().0.doc.layers[0];
+        let peg = origin + Vec2::Y * 43.0;
+        let drawing = origin + Vec2::Y * 120.0;
+        pointer_gesture(&mut harness, [peg; 3], egui::Modifiers::NONE);
+        pointer_gesture(&mut harness, [drawing; 3], egui::Modifiers::SHIFT);
+        assert_eq!(
+            harness.state().1.selection,
+            BTreeSet::from([layer.peg, layer.node])
+        );
+        assert_eq!(harness.state().0.selected_node, Some(layer.node));
+        let end = drawing + Vec2::new(50.0, 10.0);
+        pointer_gesture(&mut harness, [drawing, end, end], egui::Modifiers::NONE);
+        assert_eq!(
+            harness.state().0.doc.node_positions[&layer.node],
+            [50.0, 130.0]
+        );
+        assert_eq!(
+            harness.state().0.doc.node_positions[&layer.peg],
+            [50.0, 53.0]
+        );
     }
 
     #[test]
