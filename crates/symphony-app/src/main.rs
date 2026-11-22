@@ -225,6 +225,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Paint => Icon::Paint,
         Tool::CloseGap => Icon::CloseGap,
         Tool::Dropper => Icon::Dropper,
+        Tool::LineEditor => Icon::LineEdit,
         Tool::Hand => Icon::Hand,
         Tool::Zoom => Icon::Zoom,
     }
@@ -240,6 +241,7 @@ fn tool_action(t: Tool) -> Action {
         Tool::Paint => Action::ToolPaint,
         Tool::CloseGap => Action::ToolCloseGap,
         Tool::Dropper => Action::ToolDropper,
+        Tool::LineEditor => Action::ToolLineEditor,
         Tool::Hand => Action::ToolHand,
         Tool::Zoom => Action::ToolZoom,
     }
@@ -1262,7 +1264,7 @@ impl SymphonyApp {
     fn tools_strip(&mut self, ui: &mut egui::Ui) {
         const GROUPS: [&[Tool]; 4] = [
             &[Tool::Select, Tool::Transform],
-            &[Tool::Brush, Tool::Pencil, Tool::Eraser],
+            &[Tool::Brush, Tool::Pencil, Tool::Eraser, Tool::LineEditor],
             &[Tool::Paint, Tool::CloseGap, Tool::Dropper],
             &[Tool::Hand, Tool::Zoom],
         ];

@@ -515,3 +515,59 @@ fn erasing_a_textured_line_keeps_its_texture_and_cuts_its_shape() {
         }
     }
 }
+
+#[test]
+fn line_editor_pushes_lines_and_moves_shift_picked_points() {
+    let mut h = rig();
+    h.state_mut().s.tool = Tool::Pencil;
+    h.state_mut().s.pencil.smoothing = 0.0;
+    drag(
+        &mut h,
+        &line((-200.0, 0.0), (200.0, 0.0), 20),
+        1.0,
+        PenTool::Pen,
+    );
+    let before = strokes(&h, 0)[0].clone();
+
+    // Push the middle of the line downwards.
+    h.state_mut().s.tool = Tool::LineEditor;
+    h.state_mut().s.line_edit_radius = 60.0;
+    drag(&mut h, &line((0.0, 0.0), (0.0, 30.0), 6), 1.0, PenTool::Pen);
+    let pushed = strokes(&h, 0)[0].clone();
+    let y_near = |st: &symphony_core::stroke::Stroke, x: f32| {
+        st.points
+            .iter()
+            .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
+            .map(|p| p.y)
+            .unwrap()
+    };
+    assert!(
+        y_near(&pushed, 0.0) > 20.0,
+        "the middle moved: {}",
+        y_near(&pushed, 0.0)
+    );
+    assert!(y_near(&pushed, -200.0).abs() < 0.5, "the ends stayed");
+    // One drag, one undo.
+    h.state_mut().s.undo();
+    assert_eq!(strokes(&h, 0)[0], before);
+
+    // Shift-drag over the right end picks its points...
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    drag(
+        &mut h,
+        &line((190.0, 0.0), (200.0, 0.0), 2),
+        1.0,
+        PenTool::Pen,
+    );
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    assert!(!h.state().s.line_points.is_empty(), "points picked");
+    // ...then a plain drag moves only those.
+    drag(&mut h, &line((0.0, 0.0), (0.0, 50.0), 4), 1.0, PenTool::Pen);
+    let moved = strokes(&h, 0)[0].clone();
+    assert!(y_near(&moved, 200.0) > 40.0, "the picked end moved");
+    assert!(y_near(&moved, -200.0).abs() < 0.5, "the other end didn't");
+}

@@ -37,6 +37,7 @@ pub enum Icon {
     Forbidden,
     Minus,
     CloseGap,
+    LineEdit,
     ArtPreview,
     ArtOverlay,
     ArtLine,
@@ -45,7 +46,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 32] = [
+    pub const ALL: [Icon; 33] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -73,6 +74,7 @@ impl Icon {
         Icon::Forbidden,
         Icon::Minus,
         Icon::CloseGap,
+        Icon::LineEdit,
         Icon::ArtPreview,
         Icon::ArtOverlay,
         Icon::ArtLine,
@@ -382,6 +384,22 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         }
         Icon::Minus => g.line(p, &[(3.0, 8.0), (13.0, 8.0)]),
         // Two line ends with a dotted bridge between them.
+        // A curve with a point being pulled off it.
+        Icon::LineEdit => {
+            g.line(
+                p,
+                &[
+                    (1.5, 12.5),
+                    (4.5, 8.5),
+                    (8.0, 6.5),
+                    (11.5, 8.5),
+                    (14.5, 12.5),
+                ],
+            );
+            g.dot(p, 8.0, 6.5, 1.6);
+            g.line(p, &[(8.0, 4.5), (8.0, 1.5)]);
+            g.line(p, &[(6.5, 3.0), (8.0, 1.5), (9.5, 3.0)]);
+        }
         Icon::CloseGap => {
             g.line(p, &[(1.5, 12.0), (3.0, 9.5), (5.0, 7.0)]);
             g.line(p, &[(11.0, 7.0), (13.2, 5.0), (14.5, 2.8)]);

@@ -26,6 +26,9 @@ pub enum Tool {
     Dropper,
     Hand,
     Zoom,
+    /// Reshape vector lines: push points with a soft brush, or Shift-paint
+    /// to select points and move only those.
+    LineEditor,
 }
 
 /// Harmony's four Paint tool modes.
@@ -53,7 +56,7 @@ impl PaintMode {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 10] = [
+    pub const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Transform,
         Tool::Brush,
@@ -62,6 +65,7 @@ impl Tool {
         Tool::Paint,
         Tool::CloseGap,
         Tool::Dropper,
+        Tool::LineEditor,
         Tool::Hand,
         Tool::Zoom,
     ];
@@ -78,6 +82,7 @@ impl Tool {
             | Tool::Transform
             | Tool::Paint
             | Tool::CloseGap
+            | Tool::LineEditor
             | Tool::Dropper => None,
         }
     }
@@ -101,6 +106,41 @@ pub struct BrushSettings {
     /// Textured Vector Brush (tip, grain, spacing, opacity).
     #[serde(default)]
     pub texture: Option<symphony_core::stroke::StrokeTexture>,
+}
+
+/// Add points along segments that come within `radius` of `at`, no more
+/// than `step` apart, so a push bends the line smoothly instead of moving a
+/// few far-apart points.
+fn densify_near(points: &[Point], at: [f32; 2], radius: f32, step: f32) -> Vec<Point> {
+    let step = step.max(1e-3);
+    let near = |a: &Point, b: &Point| {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((at[0] - a.x) * dx + (at[1] - a.y) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (a.x + dx * t - at[0]).hypot(a.y + dy * t - at[1]) <= radius
+    };
+    let mut out = Vec::with_capacity(points.len());
+    for (i, p) in points.iter().enumerate() {
+        out.push(*p);
+        let Some(q) = points.get(i + 1) else { break };
+        if near(p, q) {
+            let len = (q.x - p.x).hypot(q.y - p.y);
+            let n = ((len / step).ceil() as usize).min(512);
+            for k in 1..n {
+                let t = k as f32 / n as f32;
+                out.push(Point {
+                    x: p.x + (q.x - p.x) * t,
+                    y: p.y + (q.y - p.y) * t,
+                    pressure: p.pressure + (q.pressure - p.pressure) * t,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Compare names with runs of digits as numbers, so "2" < "10".
@@ -284,6 +324,12 @@ pub struct Session {
     pub erase_all_art: bool,
     pub erase_all_layers: bool,
     pub erase_all_frames: bool,
+    /// Line Editor: radius (scene units, like tool sizes), how strongly a
+    /// push moves points, and the points picked with Shift
+    /// (stroke, point index).
+    pub line_edit_radius: f32,
+    pub line_edit_strength: f32,
+    pub line_points: Vec<(Id, usize)>,
     pub swatch: Id,
     /// Pressure response, as a gamma (E4.1). 1 = linear.
     pub pressure_gamma: f32,
@@ -382,6 +428,9 @@ impl Session {
             erase_all_art: false,
             erase_all_layers: false,
             erase_all_frames: false,
+            line_edit_radius: 40.0,
+            line_edit_strength: 1.0,
+            line_points: Vec::new(),
             swatch,
             pressure_gamma: 1.0,
             onion: Onion {
@@ -1793,6 +1842,147 @@ impl Session {
         ));
     }
 
+    // ---- Line Editor ------------------------------------------------------
+
+    /// Strokes of `drawing` the Line Editor can change: vector lines on the
+    /// current art layer (not erased outlines).
+    fn editable(&self, drawing: Id) -> Vec<Stroke> {
+        let art = self.art;
+        self.doc
+            .drawings
+            .get(&drawing)
+            .map(|d| {
+                d.strokes
+                    .iter()
+                    .filter(|st| st.art == art && st.shape.is_empty())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn commit_line_edit(&mut self, drawing: Id, before: Vec<Stroke>, after: Vec<Stroke>) {
+        if before != after {
+            self.history.apply_merged(
+                &mut self.doc,
+                "Edit lines",
+                "line-edit",
+                Edit::SetStrokes {
+                    drawing,
+                    before,
+                    after,
+                },
+            );
+        }
+    }
+
+    /// Push: points within `radius` of `at` follow `delta`, fully at the
+    /// centre and fading smoothly to nothing at the edge. Lines get extra
+    /// points near the brush first, so they bend smoothly.
+    pub fn line_push(&mut self, drawing: Id, at: [f32; 2], radius: f32, delta: [f32; 2]) {
+        let strength = self.line_edit_strength.clamp(0.0, 1.0);
+        let r = radius.max(1e-3);
+        let weight = |p: &Point| {
+            let d = (p.x - at[0]).hypot(p.y - at[1]) / r;
+            if d >= 1.0 {
+                0.0
+            } else {
+                // Smooth falloff: 1 at the centre, 0 at the edge, no step.
+                let t = 1.0 - d;
+                t * t * (3.0 - 2.0 * t) * strength
+            }
+        };
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for st in self.editable(drawing) {
+            if !st.points.iter().any(|p| weight(p) > 0.0)
+                && !st.points.windows(2).any(|w| {
+                    // A long segment can pass through the brush with both
+                    // ends outside it.
+                    let mid = Point {
+                        x: (w[0].x + w[1].x) * 0.5,
+                        y: (w[0].y + w[1].y) * 0.5,
+                        pressure: 1.0,
+                    };
+                    weight(&mid) > 0.0
+                })
+            {
+                continue;
+            }
+            let mut moved = st.clone();
+            moved.points = densify_near(&st.points, at, r, r * 0.25);
+            for p in &mut moved.points {
+                let w = weight(p);
+                p.x += delta[0] * w;
+                p.y += delta[1] * w;
+            }
+            before.push(st);
+            after.push(moved);
+        }
+        self.commit_line_edit(drawing, before, after);
+    }
+
+    /// Shift-paint: add the points within `radius` of `at` to the
+    /// Line Editor's selection.
+    pub fn line_select(&mut self, drawing: Id, at: [f32; 2], radius: f32) {
+        for st in self.editable(drawing) {
+            for (i, p) in st.points.iter().enumerate() {
+                if (p.x - at[0]).hypot(p.y - at[1]) <= radius
+                    && !self.line_points.contains(&(st.id, i))
+                {
+                    self.line_points.push((st.id, i));
+                }
+            }
+        }
+    }
+
+    /// Move only the selected points.
+    pub fn line_move_selected(&mut self, drawing: Id, delta: [f32; 2]) {
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for st in self.editable(drawing) {
+            let picked: Vec<usize> = self
+                .line_points
+                .iter()
+                .filter(|(id, _)| *id == st.id)
+                .map(|(_, i)| *i)
+                .collect();
+            if picked.is_empty() {
+                continue;
+            }
+            let mut moved = st.clone();
+            for i in picked {
+                if let Some(p) = moved.points.get_mut(i) {
+                    p.x += delta[0];
+                    p.y += delta[1];
+                }
+            }
+            before.push(st);
+            after.push(moved);
+        }
+        self.commit_line_edit(drawing, before, after);
+    }
+
+    /// After a push: slim the lines it touched back down to the stroke
+    /// detail setting (the push added points to bend smoothly).
+    pub fn line_edit_finish(&mut self, drawing: Id, tolerance: f32) {
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for st in self.editable(drawing) {
+            let span = st.max_width - st.min_width;
+            let slim = symphony_vector::curve::simplify(&st.points, tolerance, span);
+            if slim.len() < st.points.len() {
+                let mut s2 = st.clone();
+                s2.points = slim;
+                before.push(st);
+                after.push(s2);
+            }
+        }
+        // Part of the same gesture, so the whole drag is one undo step.
+        self.commit_line_edit(drawing, before, after);
+        self.end_gesture();
+    }
+
     /// The thickness profile of the one selected pencil line, for Harmony's
     /// New Thickness Stencil.
     pub fn selected_stencil(&self) -> Option<Stencil> {
@@ -2157,6 +2347,64 @@ mod tests {
         assert_eq!(s.frame, 3);
         s.go_to_drawing(false);
         assert_eq!(s.frame, 1);
+    }
+
+    #[test]
+    fn line_editor_pushes_softly_and_moves_picked_points() {
+        let mut s = Session::new_scene();
+        let swatch = s.swatch;
+        let line = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: 2.0,
+            points: vec![
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+                Point {
+                    x: 200.0,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+            ],
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        let id = line.id;
+        s.commit_stroke(0, 1, line);
+        let d = s.doc.exposed(0, 1).unwrap();
+        let pts = |s: &Session| s.doc.drawings[&d].strokes[0].points.clone();
+
+        // A push in the middle bends the line most there, less at the
+        // sides, and not at all past the radius.
+        s.line_push(d, [100.0, 0.0], 40.0, [0.0, 20.0]);
+        let p = pts(&s);
+        let y_at = |x: f32| {
+            p.iter()
+                .find(|q| (q.x - x).abs() < 0.01)
+                .map(|q| q.y)
+                .unwrap()
+        };
+        assert!((y_at(100.0) - 20.0).abs() < 1e-3, "centre moves fully");
+        let side = y_at(80.0);
+        assert!(side > 0.0 && side < 20.0, "sides move less: {side}");
+        assert_eq!(y_at(0.0), 0.0, "far points stay");
+        s.line_edit_finish(d, 0.5);
+        s.undo();
+        assert_eq!(pts(&s).len(), 2, "one drag, one undo");
+
+        // Shift-paint selects points; moving moves only those.
+        s.line_select(d, [200.0, 0.0], 5.0);
+        assert_eq!(s.line_points, vec![(id, 1)]);
+        s.line_move_selected(d, [0.0, 30.0]);
+        let p = pts(&s);
+        assert_eq!((p[0].y, p[1].y), (0.0, 30.0));
     }
 
     #[test]

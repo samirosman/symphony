@@ -36,6 +36,8 @@ pub struct CanvasState {
     active: Option<Active>,
     /// An eraser drag in progress.
     erasing: Option<Erasing>,
+    /// A Line Editor drag in progress.
+    line_edit: Option<LineDrag>,
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
     pub select: SelectState,
@@ -52,11 +54,49 @@ impl Default for CanvasState {
             rotation: 0.0,
             active: None,
             erasing: None,
+            line_edit: None,
             last_view: Affine::IDENTITY,
             select: SelectState::default(),
             strokes: Default::default(),
         }
     }
+}
+
+/// What a Line Editor drag does: push lines, Shift-paint a point
+/// selection, or move the selected points.
+#[derive(Clone, Copy, PartialEq)]
+enum LineMode {
+    Push,
+    Select,
+    MoveSelected,
+}
+
+struct LineDrag {
+    drawing: Id,
+    to_local: Affine,
+    /// Last position, drawing space.
+    last: [f32; 2],
+    mode: LineMode,
+    moved: bool,
+    /// Drawing units per screen point, for tolerances.
+    local_px: f32,
+}
+
+/// One step of a Line Editor drag to scene point `to`; `radius` is in
+/// drawing units.
+fn line_step(s: &mut Session, le: &mut LineDrag, to: (f32, f32), radius: f32) {
+    let (x, y) = le.to_local.apply(to.0, to.1);
+    let delta = [x - le.last[0], y - le.last[1]];
+    if delta[0] == 0.0 && delta[1] == 0.0 {
+        return;
+    }
+    le.moved = true;
+    match le.mode {
+        LineMode::Push => s.line_push(le.drawing, le.last, radius, delta),
+        LineMode::Select => s.line_select(le.drawing, [x, y], radius),
+        LineMode::MoveSelected => s.line_move_selected(le.drawing, delta),
+    }
+    le.last = [x, y];
 }
 
 /// What one eraser drag erases: drawings with their scene -> drawing
@@ -96,7 +136,10 @@ impl CanvasState {
     }
 
     pub fn busy(&self) -> bool {
-        self.active.is_some() || self.erasing.is_some() || self.select.busy()
+        self.active.is_some()
+            || self.erasing.is_some()
+            || self.line_edit.is_some()
+            || self.select.busy()
     }
 
     /// Harmony's Reset View: centred, upright, and the stage fitted to the view.
@@ -612,6 +655,32 @@ pub fn ui(
             }
         }
     }
+    // Line Editor: the picked points, as dots; Esc clears them.
+    if s.tool == Tool::LineEditor {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            s.line_points.clear();
+        }
+        if let Some(d) = s
+            .doc
+            .exposed(s.selected, s.frame)
+            .and_then(|d| s.doc.drawings.get(&d))
+        {
+            let m = view.compose(layer_world);
+            for (id, i) in &s.line_points {
+                let Some(p) = d
+                    .strokes
+                    .iter()
+                    .find(|st| st.id == *id)
+                    .and_then(|st| st.points.get(*i))
+                else {
+                    continue;
+                };
+                let at = to_pos(m.apply(p.x, p.y));
+                painter.circle_filled(at, 4.5, theme::BG_BASE);
+                painter.circle_filled(at, 3.0, theme::ACCENT_SELECT);
+            }
+        }
+    }
     let navigating_now = space || s.tool == Tool::Hand;
     if matches!(s.tool, Tool::Select | Tool::Transform) && !navigating_now {
         select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
@@ -672,7 +741,13 @@ pub fn ui(
     let zoom_factor = ui.ctx().zoom_factor();
     let draws = matches!(
         s.tool,
-        Tool::Brush | Tool::Pencil | Tool::Eraser | Tool::Paint | Tool::CloseGap | Tool::Dropper
+        Tool::Brush
+            | Tool::Pencil
+            | Tool::Eraser
+            | Tool::Paint
+            | Tool::CloseGap
+            | Tool::Dropper
+            | Tool::LineEditor
     ) && !space;
     let locked = s.doc.column(s.selected).is_some_and(|c| c.locked);
     for sm in samples {
@@ -697,6 +772,32 @@ pub fn ui(
                 }
                 if !erasing && s.tool == Tool::Dropper {
                     s.pick_colour(s.selected, s.frame, lx, ly, local_px);
+                    continue;
+                }
+                if !erasing && s.tool == Tool::LineEditor {
+                    let Some(drawing) = s.doc.exposed(s.selected, s.frame) else {
+                        continue;
+                    };
+                    let mode = if shift {
+                        LineMode::Select
+                    } else if !s.line_points.is_empty() {
+                        LineMode::MoveSelected
+                    } else {
+                        LineMode::Push
+                    };
+                    if mode == LineMode::Select {
+                        let r =
+                            s.line_edit_radius * size_unit(s, px) / scale_of(layer_world).max(1e-6);
+                        s.line_select(drawing, [lx, ly], r);
+                    }
+                    state.line_edit = Some(LineDrag {
+                        drawing,
+                        to_local,
+                        last: [lx, ly],
+                        mode,
+                        moved: false,
+                        local_px,
+                    });
                     continue;
                 }
                 if erasing {
@@ -785,9 +886,28 @@ pub fn ui(
                 } else if state.erasing.is_some() {
                     let r = eraser_radius(s, sm.pressure) * size_unit(s, px);
                     erase_at(s, state, (sx, sy), r);
+                } else if let Some(le) = state.line_edit.as_mut() {
+                    let r = s.line_edit_radius * size_unit(s, px) / scale_of(layer_world).max(1e-6);
+                    line_step(s, le, (sx, sy), r);
                 }
             }
             Phase::Up => {
+                if let Some(mut le) = state.line_edit.take() {
+                    // The last stretch, up to where the pen lifted.
+                    let r = s.line_edit_radius * size_unit(s, px) / scale_of(layer_world).max(1e-6);
+                    line_step(s, &mut le, (sx, sy), r);
+                    match le.mode {
+                        LineMode::Push if le.moved => {
+                            // Slim the pushed lines back to the detail setting.
+                            let tolerance =
+                                (1.0 - s.stroke_detail).clamp(0.0, 0.9) * 3.0 * le.local_px;
+                            s.line_edit_finish(le.drawing, tolerance);
+                        }
+                        // A click without dragging clears the point selection.
+                        LineMode::MoveSelected if !le.moved => s.line_points.clear(),
+                        _ => s.end_gesture(),
+                    }
+                }
                 if let Some(mut a) = state.active.take() {
                     // Where the pen lifted is part of the line: without it,
                     // every stroke lost its last stretch and drawn shapes
@@ -1122,6 +1242,8 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
     let erasing = pen_eraser || s.tool == Tool::Eraser;
     let radius = if erasing {
         Some((s.eraser.max_width * 0.5 * m.screen_per_size).max(1.5))
+    } else if s.tool == Tool::LineEditor {
+        Some((s.line_edit_radius * m.screen_per_size).max(1.5))
     } else if s.brush_size_cursor && matches!(s.tool, Tool::Brush | Tool::Pencil) {
         let b = if s.tool == Tool::Pencil {
             s.pencil
@@ -1175,6 +1297,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
             Tool::Paint => Icon::Paint,
             Tool::CloseGap => Icon::CloseGap,
             Tool::Dropper => Icon::Dropper,
+            Tool::LineEditor => Icon::LineEdit,
             _ => Icon::Brush,
         }
     };

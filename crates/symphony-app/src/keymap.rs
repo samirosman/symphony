@@ -101,12 +101,13 @@ pub enum Action {
     GoToPreviousDrawing,
     Search,
     ToolDropper,
+    ToolLineEditor,
     ToolHand,
     ToolZoom,
 }
 
 impl Action {
-    pub const ALL: [Action; 69] = [
+    pub const ALL: [Action; 70] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -174,6 +175,7 @@ impl Action {
         Action::GoToPreviousDrawing,
         Action::Search,
         Action::ToolDropper,
+        Action::ToolLineEditor,
         Action::ToolHand,
         Action::ToolZoom,
     ];
@@ -248,6 +250,7 @@ impl Action {
             Action::GoToPreviousDrawing => "timing.previous_drawing",
             Action::Search => "app.search",
             Action::ToolDropper => "tool.dropper",
+            Action::ToolLineEditor => "tool.line_editor",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
         }
@@ -322,6 +325,7 @@ impl Action {
             Action::GoToPreviousDrawing => "Go to Previous Drawing",
             Action::Search => "Search everything",
             Action::ToolDropper => "Dropper",
+            Action::ToolLineEditor => "Line Editor",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
         }
@@ -440,6 +444,8 @@ fn harmony(action: Action) -> Option<Binding> {
         // free, so both profiles have it.
         Action::Search => b(Key::Tab, NONE),
         Action::ToolDropper => b(Key::D, ALT),
+        // Symphony's own tool: no Harmony shortcut to follow. Tab search finds it.
+        Action::ToolLineEditor => None,
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),
     }

@@ -673,6 +673,25 @@ fn tool_properties_body(
                 hint(ui, "Draw a rough line near a gap. Symphony joins the two nearest line ends with an invisible stroke, so the area can be painted.");
                 widgets::checkbox(ui, &mut s.show_strokes, "Show strokes");
             }
+            Tool::LineEditor => {
+                section(ui, "Line Editor");
+                size_slider(ui, "Radius", &mut s.line_edit_radius, 200.0);
+                s.line_edit_radius = s.line_edit_radius.max(1.0);
+                slider(ui, "Strength", &mut s.line_edit_strength, 0.05..=1.0);
+                hint(ui, "Drag to push the lines under the brush: points in the middle move most and the effect fades out towards the edge.");
+                ui.add_space(4.0);
+                hint(ui, "Shift-drag to paint over points and select them. Then drag to move only those points.");
+                let n = s.line_points.len();
+                if ui
+                    .add_enabled(
+                        n > 0,
+                        egui::Button::new(format!("Clear point selection ({n})")),
+                    )
+                    .clicked()
+                {
+                    s.line_points.clear();
+                }
+            }
             Tool::Dropper => {
                 section(ui, "Dropper");
                 hint(ui, "Click a line or painted area to pick up its colour.");
