@@ -82,6 +82,10 @@ fn paint_strokes(
             .iter()
             .filter(|s| s.art == art && s.kind != StrokeKind::Invisible)
         {
+            if let Some(tex) = &st.texture {
+                paint_textured(pix, scene, st, tex, m);
+                continue;
+            }
             let mesh = tessellate(st, m, 0.35);
             if mesh.indices.is_empty() {
                 continue;
@@ -115,6 +119,42 @@ fn paint_strokes(
                 Transform::identity(),
                 None,
             );
+        }
+    }
+}
+
+/// A textured vector stroke: stamped coverage, composited source-over in
+/// the stroke's swatch colour.
+fn paint_textured(
+    pix: &mut Pixmap,
+    scene: &Scene,
+    st: &symphony_core::stroke::Stroke,
+    tex: &symphony_core::stroke::StrokeTexture,
+    m: Affine,
+) {
+    let clip = [0, 0, pix.width() as i32, pix.height() as i32];
+    let tip = tex.tip.and_then(|k| scene.textures.get(&k));
+    let grain = tex.grain.and_then(|k| scene.textures.get(&k));
+    let Some(c) = symphony_vector::stamp::rasterize(st, tex, tip, grain, m, clip) else {
+        return;
+    };
+    let [r, g, b] = scene.swatch_rgb(st.swatch);
+    let width = pix.width() as i32;
+    let data = pix.data_mut();
+    for row in 0..c.height as i32 {
+        for col in 0..c.width as i32 {
+            let a = c.data[(row * c.width as i32 + col) as usize] as u32;
+            if a == 0 {
+                continue;
+            }
+            let (x, y) = (c.x + col, c.y + row);
+            let i = ((y * width + x) * 4) as usize;
+            // Premultiplied source-over.
+            let inv = 255 - a;
+            for (k, src) in [r, g, b].into_iter().enumerate() {
+                data[i + k] = ((src as u32 * a + data[i + k] as u32 * inv) / 255) as u8;
+            }
+            data[i + 3] = (a + data[i + 3] as u32 * inv / 255) as u8;
         }
     }
 }
@@ -253,6 +293,7 @@ mod tests {
                 },
             ],
             tips: Default::default(),
+            texture: None,
         };
         let cells = Edit::splice(&s, col, 1, 0, vec![Some(did), Some(did), Some(did)]).unwrap();
         h.apply(
@@ -268,6 +309,36 @@ mod tests {
             ],
         );
         s
+    }
+
+    #[test]
+    fn renders_textured_strokes_with_their_grain() {
+        let mut s = scene_with_line();
+        // Grain: alternating black and white columns, one pixel each.
+        s.textures.insert(
+            1,
+            symphony_core::stroke::Texture {
+                width: 2,
+                height: 1,
+                pixels: vec![0, 255],
+            },
+        );
+        let d = *s.drawings.keys().next().unwrap();
+        s.drawings.get_mut(&d).unwrap().strokes[0].texture =
+            Some(symphony_core::stroke::StrokeTexture {
+                tip: None,
+                grain: Some(1),
+                spacing: 0.1,
+                opacity: 1.0,
+                angle: 0.0,
+                follow: false,
+                grain_scale: 1.0,
+            });
+        let img = render_frame(&s, 1, 200, 100).unwrap();
+        let row: Vec<u8> = (90..110).map(|x| img.get_pixel(x, 50).0[0]).collect();
+        let ink = s.palette.swatches[0].rgb[0];
+        assert!(row.contains(&255), "paper shows through the grain: {row:?}");
+        assert!(row.contains(&ink), "ink where the grain is white: {row:?}");
     }
 
     #[test]

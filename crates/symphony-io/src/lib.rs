@@ -210,7 +210,10 @@ fn read_scene(project: &Path, path: &Path) -> Result<Scene, IoError> {
 }
 
 /// Reject scenes whose references don't line up, instead of crashing later.
-fn validate(scene: Scene) -> Result<Scene, IoError> {
+fn validate(mut scene: Scene) -> Result<Scene, IoError> {
+    // A damaged brush texture only loses its texture: its strokes draw
+    // with a plain round tip instead of refusing the whole scene.
+    scene.textures.retain(|_, t| t.is_valid());
     let bad = |what: &str| Err(IoError(format!("The scene is damaged: {what}.")));
     if scene.graph.node(scene.composite).is_none() || scene.graph.node(scene.display).is_none() {
         return bad("its output nodes are missing");
@@ -320,6 +323,32 @@ mod tests {
         let back = open(&p).unwrap();
         assert_eq!(back.layers, s.layers);
         assert_eq!(project_name(&p), "Walk");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn textures_survive_saving_and_bad_ones_are_dropped() {
+        let dir = temp("textures");
+        let path = dir.join("Tex");
+        let mut s = sample();
+        let good = symphony_core::stroke::Texture {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 64, 128, 255],
+        };
+        s.textures.insert(7, good.clone());
+        s.textures.insert(
+            8,
+            symphony_core::stroke::Texture {
+                width: 9,
+                height: 9,
+                pixels: vec![1],
+            },
+        );
+        save(&s, &path).unwrap();
+        let back = open(&with_extension(&path)).unwrap();
+        assert_eq!(back.textures.get(&7), Some(&good));
+        assert!(!back.textures.contains_key(&8));
         let _ = fs::remove_dir_all(&dir);
     }
 

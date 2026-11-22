@@ -320,6 +320,7 @@ mod tests {
                 })
                 .collect(),
             tips: Default::default(),
+            texture: None,
         }
     }
 

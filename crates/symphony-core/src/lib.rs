@@ -7,6 +7,7 @@
 //! - [`xsheet`], [`graph`], [`stroke`], [`palette`], [`anim`], [`math`]: parts.
 
 pub mod anim;
+pub mod b64;
 pub mod doc;
 pub mod graph;
 pub mod history;

@@ -8,6 +8,7 @@
 //! - [`hits`]: does a circle touch a stroke (eraser, selection)?
 
 pub mod fill;
+pub mod stamp;
 
 use symphony_core::math::Affine;
 use symphony_core::stroke::{Point, Stroke, Tip};
@@ -268,6 +269,7 @@ mod tests {
                 })
                 .collect(),
             tips: Default::default(),
+            texture: None,
         }
     }
 

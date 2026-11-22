@@ -77,6 +77,10 @@ pub struct Scene {
     pub layers: Vec<Layer>,
     pub drawings: BTreeMap<Id, Drawing>,
     pub palette: Palette,
+    /// Brush tips and paper grains used by textured strokes, by content
+    /// key, so a scene carries its brushes with it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub textures: BTreeMap<u64, crate::stroke::Texture>,
     pub composite: NodeId,
     pub display: NodeId,
     pub ids: IdGen,
@@ -119,6 +123,7 @@ impl Scene {
             layers: Vec::new(),
             drawings: BTreeMap::new(),
             palette,
+            textures: BTreeMap::new(),
             composite,
             display,
             ids,

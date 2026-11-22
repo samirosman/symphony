@@ -457,6 +457,7 @@ mod tests {
                 pressure: 1.0,
             }],
             tips: Default::default(),
+            texture: None,
         }
     }
 

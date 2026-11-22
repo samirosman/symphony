@@ -60,6 +60,57 @@ pub struct Tips {
     pub end: Tip,
 }
 
+/// Harmony's Textured Vector Brush: the stroke stays a vector line, and
+/// its look comes from stamping a bitmap tip along it, multiplied by a
+/// paper grain. It's redrawn from the line, so editing or transforming the
+/// line re-samples the texture instead of stretching pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StrokeTexture {
+    /// Tip image in `Scene::textures` (none = a hard round tip).
+    #[serde(default)]
+    pub tip: Option<u64>,
+    /// Paper grain in `Scene::textures`, tiled in drawing space.
+    #[serde(default)]
+    pub grain: Option<u64>,
+    /// Distance between stamps as a fraction of the tip size.
+    pub spacing: f32,
+    /// Most opacity the stroke can reach (non-cumulative), 0..=1.
+    pub opacity: f32,
+    /// Tip rotation in degrees, counter-clockwise.
+    #[serde(default)]
+    pub angle: f32,
+    /// Turn the tip with the stroke's direction (Harmony's Heading).
+    #[serde(default)]
+    pub follow: bool,
+    /// Grain pixels per drawing unit.
+    #[serde(default = "one")]
+    pub grain_scale: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// A greyscale image used by textured strokes: 255 paints fully.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Texture {
+    pub width: u32,
+    pub height: u32,
+    #[serde(with = "crate::b64")]
+    pub pixels: Vec<u8>,
+}
+
+impl Texture {
+    /// Sizes match and nothing is absurd (hostile files, E7.6).
+    pub fn is_valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.width <= 4096
+            && self.height <= 4096
+            && self.pixels.len() == (self.width * self.height) as usize
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     pub id: Id,
@@ -73,6 +124,9 @@ pub struct Stroke {
     pub points: Vec<Point>,
     #[serde(default)]
     pub tips: Tips,
+    /// Set for textured vector brush strokes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<StrokeTexture>,
 }
 
 impl Stroke {
