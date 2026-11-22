@@ -386,9 +386,9 @@ impl Live {
         let tip = tex.tip.and_then(|k| textures.get(&k));
         let grain = tex.grain.and_then(|k| textures.get(&k));
         if stroke.points.len() != live.points || live.image.is_none() {
-            live.stamper.extend(stroke, tip);
+            live.stamper.extend(stroke, tip, grain);
             live.points = stroke.points.len();
-            if let Some(c) = live.stamper.coverage(grain) {
+            if let Some(c) = live.stamper.coverage() {
                 live.image = Some(Image::upload(ctx, &c, px, "live-stroke"));
             }
         }

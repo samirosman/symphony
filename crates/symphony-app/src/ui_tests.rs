@@ -489,6 +489,7 @@ fn erasing_a_textured_line_keeps_its_texture_and_cuts_its_shape() {
         flow: 1.0,
         hardness: 1.0,
         opacity_by_pressure: [1.0; 4],
+        ..Default::default()
     });
     h.state_mut().s.brush.min_width = 20.0;
     h.state_mut().s.brush.max_width = 20.0;

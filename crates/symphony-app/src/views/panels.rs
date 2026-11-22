@@ -453,6 +453,7 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
                     flow: 1.0,
                     hardness: 1.0,
                     opacity_by_pressure: [1.0; 4],
+                    ..Default::default()
                 });
             }
         });

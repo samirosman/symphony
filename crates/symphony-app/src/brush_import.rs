@@ -62,9 +62,33 @@ impl BrushImport {
 const MAX_WIDTH: f32 = crate::views::panels::MAX_TOOL_SIZE;
 
 fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
+    use symphony_brushes::Texturing;
+    use symphony_core::stroke::{GrainMode, PressureCurve};
     let max = b.diameter.clamp(0.5, MAX_WIDTH);
+    // The thinnest the size curve goes sets the line's minimum width; the
+    // curve's shape between minimum and maximum goes with the texture.
+    let lightest = (0..=32)
+        .map(|i| b.size_at(i as f32 / 32.0))
+        .fold(1.0f32, f32::min)
+        .clamp(0.0, 1.0);
+    let size_curve = (!b.size_curve.is_empty()).then(|| {
+        PressureCurve::sample(|p| {
+            if lightest >= 1.0 {
+                1.0
+            } else {
+                (b.size_at(p) - lightest) / (1.0 - lightest)
+            }
+        })
+    });
+    let grain_mode = match b.texturing {
+        Texturing::Multiply => GrainMode::Multiply,
+        Texturing::Subtract => GrainMode::Subtract,
+        Texturing::Darken => GrainMode::Darken,
+        Texturing::Height => GrainMode::Height,
+        Texturing::LinearHeight => GrainMode::LinearHeight,
+    };
     BrushSettings {
-        min_width: (max * b.min_fraction).min(max),
+        min_width: (max * lightest).min(max),
         max_width: max,
         smoothing: b.smoothing.clamp(0.0, 0.95),
         tips: Tips::default(),
@@ -87,6 +111,15 @@ fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
                 b.opacity_at(2.0 / 3.0),
                 b.opacity_at(1.0),
             ],
+            opacity_curve: (!b.opacity_curve.is_empty())
+                .then(|| PressureCurve::sample(|p| b.opacity_at(p))),
+            size_curve,
+            flow_curve: (!b.flow_curve.is_empty()).then(|| PressureCurve::sample(|p| b.flow_at(p))),
+            grain_mode,
+            grain_strength: (b.grain_strength < 1.0 || !b.grain_strength_curve.is_empty())
+                .then(|| PressureCurve::sample(|p| b.grain_strength_at(p))),
+            grain_offset: b.grain_offset,
+            auto_spacing: b.auto_spacing,
         }),
     }
 }
@@ -238,5 +271,99 @@ mod tests {
         assert!(out.presets.is_empty());
         assert_eq!(out.messages.len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Renders every brush in `SYMPHONY_BRUSH_SHEET_IN` (a brush file) as a
+/// test stroke into `SYMPHONY_BRUSH_SHEET_OUT/<name>.png`, for comparing
+/// imports with the source app by eye. Not pass/fail:
+/// `SYMPHONY_BRUSH_SHEET_IN=… SYMPHONY_BRUSH_SHEET_OUT=… cargo test --release
+///  -p symphony-app brush_sheet -- --ignored`.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn brush_sheet() {
+    use symphony_core::id::Id;
+    use symphony_core::math::Affine;
+    use symphony_core::stroke::{Point, Stroke, StrokeKind, Texture};
+    let (Ok(input), Ok(out)) = (
+        std::env::var("SYMPHONY_BRUSH_SHEET_IN"),
+        std::env::var("SYMPHONY_BRUSH_SHEET_OUT"),
+    ) else {
+        return;
+    };
+    let out = PathBuf::from(out);
+    std::fs::create_dir_all(&out).unwrap();
+    let got = symphony_brushes::import(Path::new(&input)).unwrap();
+    let to_tex = |img: &image::GrayImage| Texture {
+        width: img.width(),
+        height: img.height(),
+        pixels: img.as_raw().clone(),
+    };
+    let (w, h) = (900u32, 220u32);
+    for b in &got.brushes {
+        let s = settings(b, None, None);
+        let tex = s.texture.unwrap();
+        // A wave left to right; pressure rises to full and falls again.
+        let points: Vec<Point> = (0..=400)
+            .map(|i| {
+                let t = i as f32 / 400.0;
+                Point {
+                    x: 60.0 + t * 780.0,
+                    y: 110.0 + (t * std::f32::consts::TAU * 1.5).sin() * 45.0,
+                    pressure: (t * std::f32::consts::PI).sin(),
+                }
+            })
+            .collect();
+        let stroke = Stroke {
+            id: Id(7),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: s.min_width,
+            max_width: s.max_width,
+            points,
+            tips: Default::default(),
+            texture: Some(tex),
+            shape: Vec::new(),
+        };
+        let tip = b.tip.as_ref().map(to_tex);
+        let grain = b.grain.as_ref().map(to_tex);
+        let cov = symphony_vector::stamp::rasterize(
+            &stroke,
+            &tex,
+            tip.as_ref(),
+            grain.as_ref(),
+            Affine::IDENTITY,
+            [0, 0, w as i32, h as i32],
+        );
+        let mut img = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+        if let Some(c) = cov {
+            for y in 0..c.height {
+                for x in 0..c.width {
+                    let (px, py) = (c.x + x as i32, c.y + y as i32);
+                    if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                        let a = c.data[(y * c.width + x) as usize];
+                        img.put_pixel(px as u32, py as u32, image::Luma([255 - a]));
+                    }
+                }
+            }
+        }
+        let name: String = b
+            .name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        img.save(out.join(format!("{name}.png"))).unwrap();
+        println!(
+            "{name}: d={:.1} spacing={:.2} auto={:.2} flow={:.2} mode={:?} strength={:.2} grain={}",
+            b.diameter,
+            b.spacing,
+            b.auto_spacing,
+            b.flow,
+            b.texturing,
+            b.grain_strength,
+            b.grain.is_some()
+        );
     }
 }

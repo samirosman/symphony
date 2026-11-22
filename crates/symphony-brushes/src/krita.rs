@@ -8,7 +8,9 @@ use std::io::Read;
 
 use base64::Engine;
 
-use crate::{mask, parse_curve, read_entry, Brush, Error, Imported, Source};
+use crate::{
+    mask, parse_curve, read_entry, smooth_curve, Brush, Error, Imported, Source, Texturing,
+};
 
 /// Look up a resource (tip or pattern) by file name.
 pub type Lookup<'a> = dyn Fn(&str) -> Option<Vec<u8>> + 'a;
@@ -89,12 +91,39 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
     let find = |file: &str| embedded.get(file).cloned().or_else(|| lookup(file));
     let num = |k: &str| params.get(k).and_then(|v| v.trim().parse::<f32>().ok());
 
+    let flag = |k: &str| params.get(k).map(|v| v.trim() == "true");
+    // A Color Smudge preset with its Color Rate off only smears paint that's
+    // already there (a blending stump). Symphony can't smear yet, and
+    // drawing it as ink would look nothing like it.
+    let paintop = root.attribute("paintopid").unwrap_or("");
+    if paintop == "colorsmudge" && flag("PressureColorRate") != Some(true) {
+        return Err(Error::NotYet(
+            "blending brushes (they smear paint instead of laying it down)",
+        ));
+    }
+    // A curve option's pressure curve, unless "use curve" is off. Krita's
+    // curves are smooth splines through their points.
+    let curve_of = |prefix: &str| -> Option<Vec<[f32; 2]>> {
+        if flag(&format!("{prefix}UseCurve")) == Some(false) {
+            return None;
+        }
+        pressure_curve(
+            params
+                .get(format!("{prefix}Sensor").as_str())
+                .copied()
+                .unwrap_or(""),
+        )
+        .map(|c| smooth_curve(&c))
+    };
     b.opacity = num("OpacityValue").unwrap_or(1.0);
     b.flow = num("FlowValue").unwrap_or(1.0);
-    // Opacity follows the pen when the opacity sensor has a pressure curve
-    // (alone, or among several sensors).
-    if let Some(curve) = pressure_curve(params.get("OpacitySensor").copied().unwrap_or("")) {
+    // Opacity and flow follow the pen when their sensor has a pressure
+    // curve (alone, or among several sensors).
+    if let Some(curve) = curve_of("Opacity") {
         b.opacity_curve = curve;
+    }
+    if let Some(curve) = curve_of("Flow") {
+        b.flow_curve = curve;
     }
     b.eraser = params.get("EraserMode").is_some_and(|v| v.trim() == "true")
         || params
@@ -110,7 +139,7 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
                 .find(|n| n.has_tag_name("curve"))
                 .and_then(|n| n.text().map(str::to_owned))
         }) {
-            b.size_curve = parse_curve(&curve);
+            b.size_curve = smooth_curve(&parse_curve(&curve));
         }
         if b.size_curve.is_empty() {
             b.size_curve = vec![[0.0, 0.0], [1.0, 1.0]];
@@ -124,6 +153,10 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         let brush = d.root_element();
         let attr = |k: &str| brush.attribute(k).and_then(|v| v.parse::<f32>().ok());
         b.spacing = attr("spacing").unwrap_or(0.1);
+        // Auto spacing: stamps coefficient x sqrt(size) apart.
+        if brush.attribute("useAutoSpacing") == Some("1") {
+            b.auto_spacing = attr("autoSpacingCoeff").unwrap_or(1.0);
+        }
         // Krita stores the tip angle in radians.
         b.angle = attr("angle").unwrap_or(0.0).to_degrees();
         let scale = attr("scale").unwrap_or(1.0);
@@ -170,9 +203,124 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
             .get("Texture/Pattern/PatternFileName")
             .copied()
             .unwrap_or("");
-        b.grain = find(file).and_then(|data| mask(&data, false));
+        let adjust = PatternAdjust {
+            scale: num("Texture/Pattern/Scale").unwrap_or(1.0),
+            brightness: num("Texture/Pattern/Brightness").unwrap_or(0.0),
+            contrast: num("Texture/Pattern/Contrast").unwrap_or(1.0),
+            neutral: num("Texture/Pattern/NeutralPoint").unwrap_or(0.5),
+            invert: flag("Texture/Pattern/Invert") == Some(true),
+            cutoff_policy: num("Texture/Pattern/CutoffPolicy").unwrap_or(0.0) as i32,
+            cutoff: [
+                num("Texture/Pattern/CutoffLeft").unwrap_or(0.0),
+                num("Texture/Pattern/CutoffRight").unwrap_or(255.0),
+            ],
+        };
+        b.grain = find(file).and_then(|data| pattern(&data, &adjust));
+        // Krita 5.0's texturing modes; lightness and gradient fall back to
+        // subtract, as Krita does where they can't apply.
+        b.texturing = match num("Texture/Pattern/TexturingMode").unwrap_or(0.0) as i32 {
+            1..=3 => Texturing::Subtract,
+            4 => Texturing::Darken,
+            12 | 14 => Texturing::Height,
+            13 | 15 => Texturing::LinearHeight,
+            _ => Texturing::Multiply,
+        };
+        b.grain_strength = num("Texture/Strength/Value").unwrap_or(1.0);
+        if flag("PressureTexture/Strength/") == Some(true) {
+            if let Some(curve) = curve_of("Texture/Strength/") {
+                b.grain_strength_curve = curve;
+            }
+        }
+        // Krita samples the pattern at (canvas - offset).
+        b.grain_offset = [
+            -num("Texture/Pattern/OffsetX").unwrap_or(0.0),
+            -num("Texture/Pattern/OffsetY").unwrap_or(0.0),
+        ];
     }
     Ok(b)
+}
+
+/// Krita's pattern adjustments (KisTextureMaskInfo).
+struct PatternAdjust {
+    scale: f32,
+    brightness: f32,
+    contrast: f32,
+    neutral: f32,
+    invert: bool,
+    cutoff_policy: i32,
+    cutoff: [f32; 2],
+}
+
+/// A Krita pattern as the grain Krita uses, following Krita 5.0's
+/// KisTextureMaskInfo::recalculateMask: grey from (11 R + 16 G + 5 B) / 32,
+/// transparency counts as white, then brightness, contrast, invert,
+/// neutral point and cutoff, after scaling the pattern.
+fn pattern(bytes: &[u8], a: &PatternAdjust) -> Option<image::GrayImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    reader.limits(limits);
+    let mut img = reader.decode().ok()?.to_rgba8();
+    let scale = if a.scale.is_finite() {
+        a.scale.clamp(0.05, 10.0)
+    } else {
+        1.0
+    };
+    if (scale - 1.0).abs() > 1e-3 {
+        let w = ((img.width() as f32 * scale).round() as u32).clamp(1, crate::MAX_IMAGE);
+        let h = ((img.height() as f32 * scale).round() as u32).clamp(1, crate::MAX_IMAGE);
+        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    }
+    if img.width().max(img.height()) > crate::MAX_IMAGE {
+        let r = crate::MAX_IMAGE as f32 / img.width().max(img.height()) as f32;
+        let (w, h) = (
+            ((img.width() as f32 * r) as u32).max(1),
+            ((img.height() as f32 * r) as u32).max(1),
+        );
+        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    }
+    let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+    let (bright, contrast, neutral) = (
+        fin(a.brightness, 0.0),
+        fin(a.contrast, 1.0),
+        fin(a.neutral, 0.5).clamp(0.0, 1.0),
+    );
+    let (lo, hi) = (
+        fin(a.cutoff[0], 0.0) / 255.0,
+        fin(a.cutoff[1], 255.0) / 255.0,
+    );
+    Some(image::GrayImage::from_fn(
+        img.width(),
+        img.height(),
+        |x, y| {
+            let p = img.get_pixel(x, y);
+            let grey = (u32::from(p[0]) * 11 + u32::from(p[1]) * 16 + u32::from(p[2]) * 5) / 32;
+            let alpha = f32::from(p[3]) / 255.0;
+            let mut v = (grey as f32 / 255.0) * alpha + (1.0 - alpha);
+            v -= bright;
+            v = ((v - 0.5) * contrast) + 0.5;
+            v = v.clamp(0.0, 1.0);
+            if a.invert {
+                v = 1.0 - v;
+            }
+            let mut n = if neutral == 1.0 || (neutral != 0.0 && v <= neutral) {
+                v / (2.0 * neutral)
+            } else {
+                0.5 + (v - neutral) / (2.0 - 2.0 * neutral)
+            };
+            let outside = n < lo || n > hi;
+            if a.cutoff_policy == 1 && outside {
+                n = 0.0;
+            } else if a.cutoff_policy == 2 && outside {
+                n = 1.0;
+            }
+            image::Luma([(n.clamp(0.0, 1.0) * 255.0).round() as u8])
+        },
+    ))
 }
 
 /// Krita's settings start with `<!DOCTYPE params>`, which the XML reader
@@ -288,5 +436,61 @@ mod tests {
         assert!((b.hardness - 0.4).abs() < 1e-4);
         assert_eq!(b.diameter, 24.0);
         assert!((b.min_fraction - 0.5).abs() < 1e-4);
+    }
+
+    /// A 2x1 PNG pattern: one grey pixel, one fully transparent one.
+    fn pattern_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_raw(2, 1, vec![128, 128, 128, 255, 0, 0, 0, 0]).unwrap();
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn reads_krita_texture_settings_like_krita() {
+        let xml = r#"<Preset name="c)_Pencil" paintopid="paintbrush">
+<param name="FlowValue" type="string"><![CDATA[0.5]]></param>
+<param name="FlowUseCurve" type="string"><![CDATA[true]]></param>
+<param name="FlowSensor" type="string"><![CDATA[<!DOCTYPE params><params id="pressure"><curve>0,0.2;1,1;</curve></params>]]></param>
+<param name="Texture/Pattern/Enabled" type="string"><![CDATA[true]]></param>
+<param name="Texture/Pattern/PatternFileName" type="string"><![CDATA[grain.png]]></param>
+<param name="Texture/Pattern/TexturingMode" type="string"><![CDATA[1]]></param>
+<param name="Texture/Pattern/Contrast" type="string"><![CDATA[2]]></param>
+<param name="Texture/Pattern/OffsetX" type="string"><![CDATA[10]]></param>
+<param name="Texture/Strength/Value" type="string"><![CDATA[0.8]]></param>
+<param name="PressureTexture/Strength/" type="string"><![CDATA[true]]></param>
+<param name="Texture/Strength/Sensor" type="string"><![CDATA[<!DOCTYPE params><params id="pressure"><curve>0,0.5;1,1;</curve></params>]]></param>
+<param name="brush_definition" type="string"><![CDATA[<Brush type="auto_brush" spacing="0.1" useAutoSpacing="1" autoSpacingCoeff="0.3"><MaskGenerator diameter="20" id="default" type="circle"/></Brush>]]></param>
+</Preset>"#;
+        let png = pattern_png();
+        let b = preset(&kpp(xml), &|f| (f == "grain.png").then(|| png.clone()))
+            .unwrap()
+            .sanitise();
+        assert_eq!(b.texturing, Texturing::Subtract);
+        assert!((b.auto_spacing - 0.3).abs() < 1e-5);
+        assert!((b.flow_at(0.0) - 0.2).abs() < 1e-3 && (b.flow_at(1.0) - 1.0).abs() < 1e-3);
+        assert!((b.grain_strength_at(0.0) - 0.4).abs() < 1e-3, "0.8 x curve");
+        assert!((b.grain_strength_at(1.0) - 0.8).abs() < 1e-3);
+        assert_eq!(b.grain_offset, [-10.0, 0.0]);
+        // Krita: grey (128*32/32)/255 = 0.502, contrast 2 around 0.5 ->
+        // 0.504; transparency counts as white.
+        let g = b.grain.unwrap();
+        assert_eq!(g.get_pixel(0, 0)[0], 129);
+        assert_eq!(g.get_pixel(1, 0)[0], 255);
+    }
+
+    #[test]
+    fn blending_stumps_are_skipped_with_a_reason() {
+        let xml = r#"<Preset name="Stump" paintopid="colorsmudge">
+<param name="PressureColorRate" type="string"><![CDATA[false]]></param>
+</Preset>"#;
+        let e = preset(&kpp(xml), &|_| None).unwrap_err();
+        assert!(e.to_string().contains("blending"), "{e}");
+        // A colour smudge brush that does lay paint down still imports.
+        let xml = r#"<Preset name="Waxy" paintopid="colorsmudge">
+<param name="PressureColorRate" type="string"><![CDATA[true]]></param>
+</Preset>"#;
+        assert!(preset(&kpp(xml), &|_| None).is_ok());
     }
 }

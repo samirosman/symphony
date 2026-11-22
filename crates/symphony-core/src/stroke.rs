@@ -96,6 +96,126 @@ pub struct StrokeTexture {
     /// fades the stroke. All 1 means pressure doesn't change opacity.
     #[serde(default = "full")]
     pub opacity_by_pressure: [f32; 4],
+    /// A finer opacity curve, used instead of `opacity_by_pressure` when
+    /// set (imported brushes).
+    #[serde(default)]
+    pub opacity_curve: Option<PressureCurve>,
+    /// Pressure to size, 0 = the stroke's minimum width .. 1 = maximum.
+    /// None means straight between them.
+    #[serde(default)]
+    pub size_curve: Option<PressureCurve>,
+    /// Pressure to flow, multiplying `flow`.
+    #[serde(default)]
+    pub flow_curve: Option<PressureCurve>,
+    /// How the grain shapes each stamp (Krita's texturing modes).
+    #[serde(default)]
+    pub grain_mode: GrainMode,
+    /// Pressure to grain strength, 0..=1 (Krita's texture Strength).
+    #[serde(default)]
+    pub grain_strength: Option<PressureCurve>,
+    /// Grain offset in grain pixels (Krita's texture Offset X/Y).
+    #[serde(default)]
+    pub grain_offset: [f32; 2],
+    /// Krita's auto spacing: stamps are `coefficient * sqrt(size)` apart
+    /// instead of `spacing * size`. 0 is off.
+    #[serde(default)]
+    pub auto_spacing: f32,
+}
+
+/// How the grain combines with each stamp. Formulas follow Krita 5.0's
+/// masking composite ops (alpha `a`, grain `m`, strength `s`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrainMode {
+    /// `a * m * s`: dark grain removes paint.
+    #[default]
+    Multiply,
+    /// `a - (m + 1 - s)`: light grain removes paint, harder as strength
+    /// drops.
+    Subtract,
+    /// `min(m, a * s)`.
+    Darken,
+    /// Paper height: light grain is high and catches paint first.
+    Height,
+    /// Height blended with multiply.
+    LinearHeight,
+}
+
+impl GrainMode {
+    /// One stamp's alpha `a` after the grain `m` at strength `s`.
+    pub fn apply(self, a: f32, m: f32, s: f32) -> f32 {
+        let r = match self {
+            GrainMode::Multiply => a * m * s,
+            GrainMode::Subtract => a - (m + 1.0 - s),
+            GrainMode::Darken => m.min(a * s),
+            GrainMode::Height => {
+                let s = 0.99 * s;
+                let inv = 1.0 - s;
+                a / inv - (m + inv)
+            }
+            GrainMode::LinearHeight => {
+                let s = 0.99 * s;
+                let inv = 1.0 - s;
+                let dst = a / inv - inv;
+                (dst * (1.0 - m)).max(dst - m)
+            }
+        };
+        r.clamp(0.0, 1.0)
+    }
+}
+
+/// A pressure response sampled at nine even pressures, 0 to 1.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PressureCurve(pub [f32; 9]);
+
+impl PressureCurve {
+    /// Sample any curve function at the nine pressures.
+    pub fn sample(f: impl Fn(f32) -> f32) -> Self {
+        let mut v = [0.0; 9];
+        for (i, slot) in v.iter_mut().enumerate() {
+            let y = f(i as f32 / 8.0);
+            *slot = if y.is_finite() {
+                y.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+        }
+        PressureCurve(v)
+    }
+
+    pub fn at(&self, pressure: f32) -> f32 {
+        let x = if pressure.is_finite() {
+            pressure.clamp(0.0, 1.0)
+        } else {
+            1.0
+        } * 8.0;
+        let i = (x.floor() as usize).min(7);
+        let f = x - i as f32;
+        (self.0[i] * (1.0 - f) + self.0[i + 1] * f).clamp(0.0, 1.0)
+    }
+}
+
+impl Default for StrokeTexture {
+    fn default() -> Self {
+        StrokeTexture {
+            tip: None,
+            grain: None,
+            spacing: 0.1,
+            opacity: 1.0,
+            angle: 0.0,
+            follow: false,
+            grain_scale: 1.0,
+            flow: 1.0,
+            hardness: 1.0,
+            opacity_by_pressure: [1.0; 4],
+            opacity_curve: None,
+            size_curve: None,
+            flow_curve: None,
+            grain_mode: GrainMode::Multiply,
+            grain_strength: None,
+            grain_offset: [0.0, 0.0],
+            auto_spacing: 0.0,
+        }
+    }
 }
 
 fn full() -> [f32; 4] {
@@ -105,11 +225,40 @@ fn full() -> [f32; 4] {
 impl StrokeTexture {
     /// Stamp opacity for a pen pressure.
     pub fn opacity_at(&self, pressure: f32) -> f32 {
+        if let Some(c) = &self.opacity_curve {
+            return c.at(pressure);
+        }
         let x = pressure.clamp(0.0, 1.0) * 3.0;
         let i = (x.floor() as usize).min(2);
         let f = x - i as f32;
         let c = &self.opacity_by_pressure;
         (c[i] * (1.0 - f) + c[i + 1] * f).clamp(0.0, 1.0)
+    }
+}
+
+impl StrokeTexture {
+    /// Stamp flow for a pen pressure.
+    pub fn flow_at(&self, pressure: f32) -> f32 {
+        let f = if self.flow.is_finite() {
+            self.flow.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        f * self.flow_curve.map_or(1.0, |c| c.at(pressure))
+    }
+
+    /// Grain strength for a pen pressure.
+    pub fn grain_strength_at(&self, pressure: f32) -> f32 {
+        self.grain_strength.map_or(1.0, |c| c.at(pressure))
+    }
+
+    /// Where between the stroke's minimum and maximum width a pressure
+    /// lands, 0..=1.
+    pub fn size_at(&self, pressure: f32) -> f32 {
+        match &self.size_curve {
+            Some(c) => c.at(pressure),
+            None => pressure.clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -207,5 +356,44 @@ impl Fill {
             }
         }
         inside
+    }
+}
+
+#[cfg(test)]
+mod grain_tests {
+    use super::*;
+
+    #[test]
+    fn grain_modes_follow_krita() {
+        // Subtract: light grain removes paint; strength below 1 removes more.
+        assert_eq!(GrainMode::Subtract.apply(1.0, 1.0, 1.0), 0.0);
+        assert_eq!(GrainMode::Subtract.apply(1.0, 0.0, 1.0), 1.0);
+        assert!((GrainMode::Subtract.apply(1.0, 0.5, 0.92) - 0.42).abs() < 1e-6);
+        // Multiply scales by grain and strength.
+        assert!((GrainMode::Multiply.apply(0.8, 0.5, 1.0) - 0.4).abs() < 1e-6);
+        assert!((GrainMode::Darken.apply(1.0, 0.3, 1.0) - 0.3).abs() < 1e-6);
+        for m in [
+            GrainMode::Multiply,
+            GrainMode::Subtract,
+            GrainMode::Darken,
+            GrainMode::Height,
+            GrainMode::LinearHeight,
+        ] {
+            for a in [0.0, 0.5, 1.0] {
+                for g in [0.0, 0.5, 1.0] {
+                    let v = m.apply(a, g, 0.7);
+                    assert!((0.0..=1.0).contains(&v), "{m:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn old_scenes_load_with_the_new_texture_fields() {
+        let old = r#"{"tip":null,"grain":null,"spacing":0.1,"opacity":1.0}"#;
+        let t: StrokeTexture = serde_json::from_str(old).unwrap();
+        assert_eq!(t.grain_mode, GrainMode::Multiply);
+        assert_eq!(t.flow_at(0.3), 1.0);
+        assert_eq!(t.size_at(0.3), 0.3);
     }
 }

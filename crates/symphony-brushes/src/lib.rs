@@ -80,8 +80,34 @@ pub struct Brush {
     pub eraser: bool,
     /// Tip shape (white = paint), at most [`MAX_IMAGE`] pixels a side.
     pub tip: Option<GrayImage>,
-    /// Paper or grain texture, same limits.
+    /// Paper or grain texture, same limits. For Krita, already adjusted
+    /// (brightness, contrast, invert, neutral point, cutoff, scale).
     pub grain: Option<GrayImage>,
+    /// Pressure to flow, as (pressure, factor) points multiplying `flow`.
+    /// Empty means pressure doesn't change flow.
+    pub flow_curve: Vec<[f32; 2]>,
+    /// Krita's auto spacing coefficient (stamps `coefficient * sqrt(size)`
+    /// apart), 0 when off.
+    pub auto_spacing: f32,
+    /// How the grain shapes each stamp.
+    pub texturing: Texturing,
+    /// Grain strength, 0..=1, and its pressure curve (empty: constant).
+    pub grain_strength: f32,
+    pub grain_strength_curve: Vec<[f32; 2]>,
+    /// Grain offset in grain pixels.
+    pub grain_offset: [f32; 2],
+}
+
+/// How a grain shapes each stamp (Krita's texturing modes; other apps
+/// multiply).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Texturing {
+    #[default]
+    Multiply,
+    Subtract,
+    Darken,
+    Height,
+    LinearHeight,
 }
 
 impl Brush {
@@ -102,6 +128,12 @@ impl Brush {
             eraser: false,
             tip: None,
             grain: None,
+            flow_curve: Vec::new(),
+            auto_spacing: 0.0,
+            texturing: Texturing::Multiply,
+            grain_strength: 1.0,
+            grain_strength_curve: Vec::new(),
+            grain_offset: [0.0, 0.0],
         }
     }
 
@@ -132,6 +164,18 @@ impl Brush {
         }
         self.opacity_curve.sort_by(|a, b| a[0].total_cmp(&b[0]));
         self.spacing = fix(self.spacing, 0.001, 10.0, 0.1);
+        self.auto_spacing = fix(self.auto_spacing, 0.0, 10.0, 0.0);
+        self.grain_strength = fix(self.grain_strength, 0.0, 1.0, 1.0);
+        self.grain_offset = self.grain_offset.map(|v| fix(v, -1.0e5, 1.0e5, 0.0));
+        for c in [&mut self.flow_curve, &mut self.grain_strength_curve] {
+            c.retain(|p| p[0].is_finite() && p[1].is_finite());
+            c.truncate(64);
+            for p in c.iter_mut() {
+                p[0] = p[0].clamp(0.0, 1.0);
+                p[1] = p[1].clamp(0.0, 1.0);
+            }
+            c.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        }
         self.smoothing = fix(self.smoothing, 0.0, 1.0, 0.0);
         self.angle = fix(self.angle, -360.0, 360.0, 0.0);
         self.size_curve
@@ -146,6 +190,16 @@ impl Brush {
             self.min_fraction = first[1];
         }
         self
+    }
+
+    /// Flow factor at `pressure` (1 without a curve).
+    pub fn flow_at(&self, pressure: f32) -> f32 {
+        curve_at(&self.flow_curve, pressure).unwrap_or(1.0)
+    }
+
+    /// Grain strength at `pressure`.
+    pub fn grain_strength_at(&self, pressure: f32) -> f32 {
+        self.grain_strength * curve_at(&self.grain_strength_curve, pressure).unwrap_or(1.0)
     }
 
     /// Stamp opacity at `pressure`, from the opacity curve (1 without one).
@@ -336,6 +390,62 @@ fn read_entry<R: Read>(entry: R, size: u64) -> Option<Vec<u8>> {
     (buf.len() as u64 <= MAX_ENTRY).then_some(buf)
 }
 
+/// Krita's curves are natural cubic splines through their points
+/// (KisCubicCurve): x is held to the first..last point, y to 0..=1. This
+/// samples one finely so the rest of the importer can treat it as
+/// piecewise linear.
+fn smooth_curve(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut p: Vec<[f64; 2]> = points
+        .iter()
+        .filter(|q| q[0].is_finite() && q[1].is_finite())
+        .map(|q| [f64::from(q[0]), f64::from(q[1])])
+        .collect();
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    p.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-9);
+    if p.len() < 3 {
+        return p.iter().map(|q| [q[0] as f32, q[1] as f32]).collect();
+    }
+    let n = p.len() - 1;
+    let h: Vec<f64> = (0..n).map(|i| p[i + 1][0] - p[i][0]).collect();
+    // Second derivatives, zero at both ends (natural), from the
+    // tridiagonal system, as Krita's KisCubicSpline builds it.
+    let mut c = vec![0.0f64; n + 1];
+    if n > 1 {
+        let m = n - 1;
+        let mut diag: Vec<f64> = (0..m).map(|i| 2.0 * (h[i] + h[i + 1])).collect();
+        let mut rhs: Vec<f64> = (0..m)
+            .map(|i| {
+                6.0 * ((p[i + 2][1] - p[i + 1][1]) / h[i + 1] - (p[i + 1][1] - p[i][1]) / h[i])
+            })
+            .collect();
+        for i in 1..m {
+            let w = h[i] / diag[i - 1];
+            diag[i] -= w * h[i];
+            rhs[i] -= w * rhs[i - 1];
+        }
+        let mut sol = vec![0.0f64; m];
+        sol[m - 1] = rhs[m - 1] / diag[m - 1];
+        for i in (0..m - 1).rev() {
+            sol[i] = (rhs[i] - h[i + 1] * sol[i + 1]) / diag[i];
+        }
+        c[1..=m].copy_from_slice(&sol);
+    }
+    let value = |x: f64| -> f64 {
+        let x = x.clamp(p[0][0], p[n][0]);
+        let i = (0..n).find(|&i| x <= p[i + 1][0]).unwrap_or(n - 1);
+        let (hi, dx) = (h[i], x - p[i][0]);
+        let d = (c[i + 1] - c[i]) / hi;
+        let b = -0.5 * c[i] * hi - d * hi * hi / 6.0 + (p[i + 1][1] - p[i][1]) / hi;
+        (p[i][1] + b * dx + 0.5 * c[i] * dx * dx + d * dx * dx * dx / 6.0).clamp(0.0, 1.0)
+    };
+    (0..=32)
+        .map(|k| {
+            let x = f64::from(k) / 32.0;
+            [x as f32, value(x) as f32]
+        })
+        .collect()
+}
+
 /// A piecewise-linear curve's value at `x`, or `None` if it's empty.
 fn curve_at(c: &[[f32; 2]], x: f32) -> Option<f32> {
     let x = x.clamp(0.0, 1.0);
@@ -377,6 +487,21 @@ fn parse_curve(text: &str) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn krita_curves_are_natural_splines_through_their_points() {
+        let pts = [[0.0, 0.1], [0.5, 0.8], [1.0, 0.9]];
+        let c = smooth_curve(&pts);
+        let at = |x: f32| curve_at(&c, x).unwrap();
+        for p in pts {
+            assert!((at(p[0]) - p[1]).abs() < 1e-3, "{p:?}");
+        }
+        // Natural spline through three points: the middle of the first
+        // span bulges above the straight line (0.45).
+        assert!(at(0.25) > 0.5, "{}", at(0.25));
+        // Held to 0..=1 even where the spline overshoots.
+        assert!(c.iter().all(|p| (0.0..=1.0).contains(&p[1])));
+    }
 
     #[test]
     fn garbage_never_panics() {

@@ -11,6 +11,11 @@ fn main() {
         height: 256,
         pixels: (0..256 * 256).map(|i| (i % 7 * 40) as u8).collect(),
     };
+    let grain = Texture {
+        width: 512,
+        height: 512,
+        pixels: (0..512 * 512).map(|i| ((i * 37) % 255) as u8).collect(),
+    };
     for (len, width, spacing) in [
         (1000.0, 20.0, 0.1),
         (1000.0, 20.0, 0.03),
@@ -49,25 +54,33 @@ fn main() {
             flow: 1.0,
             hardness: 1.0,
             opacity_by_pressure: [1.0; 4],
+            ..Default::default()
         };
-        let start = std::time::Instant::now();
-        let n = 10;
-        for _ in 0..n {
-            stamp_once(&st, &tex, &tip);
+        for grained in [false, true] {
+            let start = std::time::Instant::now();
+            let n = 10;
+            for _ in 0..n {
+                stamp_once(&st, &tex, &tip, grained.then_some(&grain));
+            }
+            println!(
+                "{len}px long, {width}px wide, spacing {spacing}{}: {:?} per stroke",
+                if grained { ", subtract grain" } else { "" },
+                start.elapsed() / n
+            );
         }
-        println!(
-            "{len}px long, {width}px wide, spacing {spacing}: {:?} per stroke",
-            start.elapsed() / n
-        );
     }
 }
 
-fn stamp_once(st: &Stroke, tex: &StrokeTexture, tip: &Texture) {
+fn stamp_once(st: &Stroke, tex: &StrokeTexture, tip: &Texture, grain: Option<&Texture>) {
+    let tex = StrokeTexture {
+        grain_mode: symphony_core::stroke::GrainMode::Subtract,
+        ..*tex
+    };
     let c = symphony_vector::stamp::rasterize(
         st,
-        tex,
+        &tex,
         Some(tip),
-        None,
+        grain,
         Affine::scale(2.0, 2.0),
         [-100_000, -100_000, 100_000, 100_000],
     );

@@ -1,5 +1,7 @@
 //! Textured vector strokes (Harmony's Textured Vector Brush): stamp a tip
-//! image along the stroke's centreline, then multiply by a paper grain.
+//! image along the stroke's centreline. A paper grain shapes each stamp as
+//! it lands (Krita's texturing modes), fixed to the drawing so overlapping
+//! stamps agree on where the paper is high.
 //!
 //! The stroke stays vector data. This turns it into coverage for a given
 //! transform each time, so moving, scaling or reshaping the line re-samples
@@ -67,8 +69,8 @@ pub fn rasterize(
         ..stroke.clone()
     };
     let mut s = Stamper::new(*tex, m, clip);
-    s.extend(&curved, tip);
-    let mut c = s.coverage(grain)?;
+    s.extend(&curved, tip, grain);
+    let mut c = s.coverage()?;
     // An erased textured stroke: keep only what's inside its outline.
     if !stroke.shape.is_empty() {
         let inv = m.inverse()?;
@@ -97,6 +99,8 @@ pub struct Stamper {
     clip: [i32; 4],
     /// Coverage buffer and its bounds in output pixels.
     acc: Vec<f32>,
+    /// The grain under each pixel (NaN until looked up), same layout.
+    grain_at: Vec<f32>,
     bounds: [i32; 4],
     /// Points already stamped, and the distance left over to the next stamp.
     done: usize,
@@ -114,6 +118,7 @@ impl Stamper {
             k: scale_of(m),
             clip,
             acc: Vec::new(),
+            grain_at: Vec::new(),
             bounds: [0, 0, 0, 0],
             done: 0,
             carry: 0.0,
@@ -124,13 +129,31 @@ impl Stamper {
 
     /// Stamp the points of `stroke` not stamped yet. The stroke must only
     /// have grown since the last call (true while drawing).
-    pub fn extend(&mut self, stroke: &Stroke, tip: Option<&Texture>) {
+    pub fn extend(&mut self, stroke: &Stroke, tip: Option<&Texture>, grain: Option<&Texture>) {
         let tip = tip.filter(|t| t.is_valid());
+        let grain = grain.filter(|t| t.is_valid());
         let spacing = if self.tex.spacing.is_finite() {
             self.tex.spacing.clamp(0.01, 10.0)
         } else {
             0.1
         };
+        let tex = self.tex;
+        let k = self.k;
+        // Krita's auto spacing: coefficient x sqrt(size), in drawing units.
+        let auto = if tex.auto_spacing.is_finite() && tex.auto_spacing > 0.0 {
+            tex.auto_spacing.min(10.0)
+        } else {
+            0.0
+        };
+        let gap = move |w: f32| -> f32 {
+            if auto > 0.0 {
+                let du = w / k.max(1e-6);
+                auto * if du < 1.0 { du } else { du.sqrt() } * k
+            } else {
+                spacing * w
+            }
+        };
+        let (lo, hi) = (stroke.min_width, stroke.max_width);
         let new: Vec<([f32; 2], f32, f32)> = stroke
             .points
             .iter()
@@ -139,7 +162,7 @@ impl Stamper {
                 let (x, y) = self.m.apply(p.x, p.y);
                 (
                     [x, y],
-                    (stroke.width_at(p.pressure) * self.k).max(0.0),
+                    ((lo + (hi - lo) * tex.size_at(p.pressure)) * k).max(0.0),
                     p.pressure,
                 )
             })
@@ -150,7 +173,7 @@ impl Stamper {
                 continue;
             }
             let Some((a, wa, pa)) = self.last else {
-                self.stamp(c, d, 0.0, pr, tip);
+                self.stamp(c, d, 0.0, pr, tip, grain);
                 self.last = Some((c, d, pr));
                 continue;
             };
@@ -165,8 +188,8 @@ impl Stamper {
                 let f = t / len;
                 let w = wa + (d - wa) * f;
                 let p = pa + (pr - pa) * f;
-                self.stamp([a[0] + dx * f, a[1] + dy * f], w, heading, p, tip);
-                t += (spacing * w).max(0.5);
+                self.stamp([a[0] + dx * f, a[1] + dy * f], w, heading, p, tip, grain);
+                t += gap(w).max(0.5);
             }
             self.carry = t - len;
             self.last = Some((c, d, pr));
@@ -237,21 +260,34 @@ impl Stamper {
             (nb[3] - nb[1]).max(0) as usize,
         );
         let mut acc = vec![0.0f32; nw * nh];
+        let mut grain_at = vec![f32::NAN; nw * nh];
         if !empty {
             let ow = (b[2] - b[0]) as usize;
             for y in b[1].max(nb[1])..b[3].min(nb[3]) {
                 for x in b[0].max(nb[0])..b[2].min(nb[2]) {
-                    acc[(y - nb[1]) as usize * nw + (x - nb[0]) as usize] =
-                        self.acc[(y - b[1]) as usize * ow + (x - b[0]) as usize];
+                    let to = (y - nb[1]) as usize * nw + (x - nb[0]) as usize;
+                    let from = (y - b[1]) as usize * ow + (x - b[0]) as usize;
+                    acc[to] = self.acc[from];
+                    grain_at[to] = self.grain_at[from];
                 }
             }
         }
         self.acc = acc;
+        self.grain_at = grain_at;
         self.bounds = nb;
         true
     }
 
-    fn stamp(&mut self, c: [f32; 2], d: f32, heading: f32, pressure: f32, tip: Option<&Texture>) {
+    #[allow(clippy::too_many_arguments)]
+    fn stamp(
+        &mut self,
+        c: [f32; 2],
+        d: f32,
+        heading: f32,
+        pressure: f32,
+        tip: Option<&Texture>,
+        grain: Option<&Texture>,
+    ) {
         self.stamps += 1;
         // Each stamp raises pixels toward its own opacity (faded by
         // pressure) and never past it; flow is how far each step goes.
@@ -259,7 +295,19 @@ impl Stamper {
         // edges stay soft and low flow builds up gently.
         let clean = |v: f32, d: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { d };
         let level = clean(self.tex.opacity_at(pressure), 1.0);
-        let flow = clean(self.tex.flow, 1.0);
+        let flow = clean(self.tex.flow_at(pressure), 1.0);
+        let strength = clean(self.tex.grain_strength_at(pressure), 1.0);
+        let mode = self.tex.grain_mode;
+        let gscale = if self.tex.grain_scale.is_finite() && self.tex.grain_scale > 0.0 {
+            self.tex.grain_scale.clamp(0.01, 100.0)
+        } else {
+            1.0
+        };
+        let goff = self
+            .tex
+            .grain_offset
+            .map(|v| if v.is_finite() { v } else { 0.0 });
+        let inv = grain.and_then(|_| self.m.inverse());
         if level <= 0.0 || flow <= 0.0 {
             return;
         }
@@ -324,6 +372,23 @@ impl Stamper {
                 };
                 if a > 0.0 {
                     let i = row + (px - b[0]) as usize;
+                    // The grain shapes the stamp before it lands (Krita
+                    // applies its texture to each dab).
+                    let a = match (grain, inv) {
+                        (Some(g), Some(inv)) => {
+                            let mut m = self.grain_at[i];
+                            if m.is_nan() {
+                                let (gx, gy) = inv.apply(px as f32 + 0.5, py as f32 + 0.5);
+                                m = tiled(g, gx * gscale + goff[0], gy * gscale + goff[1]);
+                                self.grain_at[i] = m;
+                            }
+                            mode.apply(a, m, strength)
+                        }
+                        _ => a,
+                    };
+                    if a <= 0.0 {
+                        continue;
+                    }
                     let target = a * level;
                     if target > self.acc[i] {
                         self.acc[i] += (target - self.acc[i]) * flow;
@@ -333,10 +398,8 @@ impl Stamper {
         }
     }
 
-    /// The coverage so far, with the opacity cap and paper grain (grain is
-    /// in drawing space, so it moves with the art).
-    pub fn coverage(&self, grain: Option<&Texture>) -> Option<Coverage> {
-        let grain = grain.filter(|t| t.is_valid());
+    /// The coverage so far, with the stroke's opacity cap.
+    pub fn coverage(&self) -> Option<Coverage> {
         let b = self.bounds;
         if b[2] <= b[0] || b[3] <= b[1] {
             return None;
@@ -363,12 +426,6 @@ impl Stamper {
         } else {
             1.0
         };
-        let inv = self.m.inverse();
-        let gscale = if self.tex.grain_scale.is_finite() && self.tex.grain_scale > 0.0 {
-            self.tex.grain_scale.clamp(0.01, 100.0)
-        } else {
-            1.0
-        };
         let (cw, ch) = (x1 - x0, y1 - y0);
         let mut data = vec![0u8; cw * ch];
         for y in 0..ch {
@@ -377,13 +434,7 @@ impl Stamper {
                 if a <= 0.0 {
                     continue;
                 }
-                let mut v = a * opacity;
-                if let (Some(g), Some(inv)) = (grain, inv) {
-                    let px = b[0] as f32 + (x + x0) as f32 + 0.5;
-                    let py = b[1] as f32 + (y + y0) as f32 + 0.5;
-                    let (gx, gy) = inv.apply(px, py);
-                    v *= tiled(g, gx * gscale, gy * gscale);
-                }
+                let v = a * opacity;
                 data[y * cw + x] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
@@ -437,6 +488,7 @@ mod tests {
             flow: 1.0,
             hardness: 1.0,
             opacity_by_pressure: [1.0; 4],
+            ..Default::default()
         }
     }
 
@@ -455,6 +507,48 @@ mod tests {
         let c = rasterize(&line(8.0), &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
         assert_eq!(at(&c, 50, 20), 255);
         assert_eq!(at(&c, 50, 27), 0);
+    }
+
+    #[test]
+    fn subtract_grain_shapes_each_stamp_like_krita() {
+        use symphony_core::stroke::GrainMode;
+        let t = StrokeTexture {
+            grain_mode: GrainMode::Subtract,
+            ..tex()
+        };
+        // White grain removes all paint, black keeps it all (strength 1).
+        let grain = |v: u8| Texture {
+            width: 4,
+            height: 4,
+            pixels: vec![v; 16],
+        };
+        let white = rasterize(
+            &line(8.0),
+            &t,
+            None,
+            Some(&grain(255)),
+            Affine::IDENTITY,
+            ALL,
+        );
+        assert!(white.is_none_or(|c| c.data.iter().all(|&v| v == 0)));
+        let black =
+            rasterize(&line(8.0), &t, None, Some(&grain(0)), Affine::IDENTITY, ALL).unwrap();
+        assert_eq!(at(&black, 50, 20), 255);
+        // Mid grey at strength 1 leaves half of each stamp.
+        let grey = rasterize(
+            &line(8.0),
+            &t,
+            None,
+            Some(&grain(128)),
+            Affine::IDENTITY,
+            ALL,
+        )
+        .unwrap();
+        assert!(
+            (120..=135).contains(&at(&grey, 50, 20)),
+            "{}",
+            at(&grey, 50, 20)
+        );
     }
 
     #[test]
@@ -497,15 +591,15 @@ mod tests {
             })
             .collect();
         let mut at_once = Stamper::new(tex(), Affine::IDENTITY, ALL);
-        at_once.extend(&long, None);
-        let whole = at_once.coverage(None).unwrap();
+        at_once.extend(&long, None, None);
+        let whole = at_once.coverage().unwrap();
         let mut s = Stamper::new(tex(), Affine::IDENTITY, ALL);
         let mut part = long.clone();
         for n in [1, 5, 6, 20, 41] {
             part.points = long.points[..n].to_vec();
-            s.extend(&part, None);
+            s.extend(&part, None, None);
         }
-        assert_eq!(s.coverage(None).unwrap(), whole);
+        assert_eq!(s.coverage().unwrap(), whole);
     }
 
     #[test]

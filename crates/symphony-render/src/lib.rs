@@ -440,6 +440,7 @@ mod tests {
                 flow: 1.0,
                 hardness: 1.0,
                 opacity_by_pressure: [1.0; 4],
+                ..Default::default()
             });
         let img = render_frame(&s, 1, 200, 100).unwrap();
         let row: Vec<u8> = (90..110).map(|x| img.get_pixel(x, 50).0[0]).collect();
@@ -537,6 +538,7 @@ mod tests {
             flow: 1.0,
             hardness: 1.0,
             opacity_by_pressure: [0.0, 0.33, 0.66, 1.0],
+            ..Default::default()
         });
         let brush_swatch = scene.palette.get_mut(stroke.swatch).unwrap();
         brush_swatch.opacity = 128;
