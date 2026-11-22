@@ -200,111 +200,150 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
             }
         });
     });
+    // List (name beside its stroke) or Grid (more presets at a glance).
+    ui.horizontal(|ui| {
+        hint(ui, "View");
+        ui.selectable_value(&mut presets.grid, false, "List");
+        ui.selectable_value(&mut presets.grid, true, "Grid");
+    });
     let list = presets.list(tool).clone();
     let [r, g, b] = s.doc.swatch_rgb(s.swatch);
     let ink = egui::Color32::from_rgb(r, g, b);
     egui::ScrollArea::vertical()
         .id_salt(("preset-scroll", pencil))
-        .max_height(168.0)
+        .max_height(if presets.grid { 240.0 } else { 168.0 })
         .show(ui, |ui| {
-            for preset in &list {
-                let selected = current.as_deref() == Some(preset.name.as_str());
-                let draft = ui.data(|d| d.get_temp::<(String, String)>(rename));
-                if let Some((from, mut text)) = draft.filter(|(from, _)| *from == preset.name) {
-                    let edit = ui.text_edit_singleline(&mut text);
-                    if !edit.has_focus() && !edit.lost_focus() {
-                        edit.request_focus();
+            let grid = presets.grid;
+            let mut body = |ui: &mut egui::Ui| {
+                for preset in &list {
+                    let selected = current.as_deref() == Some(preset.name.as_str());
+                    let draft = ui.data(|d| d.get_temp::<(String, String)>(rename));
+                    if let Some((from, mut text)) = draft.filter(|(from, _)| *from == preset.name) {
+                        let edit = ui.text_edit_singleline(&mut text);
+                        if !edit.has_focus() && !edit.lost_focus() {
+                            edit.request_focus();
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            ui.data_mut(|d| d.remove::<(String, String)>(rename));
+                        } else if edit.lost_focus() {
+                            presets.rename(tool, &from, &text);
+                            ui.data_mut(|d| d.remove::<(String, String)>(rename));
+                        } else {
+                            ui.data_mut(|d| d.insert_temp(rename, (from, text)));
+                        }
+                        continue;
                     }
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        ui.data_mut(|d| d.remove::<(String, String)>(rename));
-                    } else if edit.lost_focus() {
-                        presets.rename(tool, &from, &text);
-                        ui.data_mut(|d| d.remove::<(String, String)>(rename));
+                    let (rect, row) = if grid {
+                        ui.allocate_exact_size(egui::vec2(88.0, 70.0), egui::Sense::click())
                     } else {
-                        ui.data_mut(|d| d.insert_temp(rename, (from, text)));
-                    }
-                    continue;
-                }
-                let width = ui.available_width();
-                let (rect, row) =
-                    ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
-                let fill = if selected {
-                    theme::ACCENT_SELECT_FILL
-                } else if row.hovered() {
-                    theme::BG_HOVER
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-                let p = ui.painter();
-                p.rect_filled(rect, theme::RADIUS_CONTROL as f32, fill);
-                let sample = egui::Rect::from_min_size(
-                    rect.min + egui::vec2(4.0, 3.0),
-                    egui::vec2(72.0, rect.height() - 6.0),
-                );
-                p.rect_filled(
-                    sample,
-                    3.0,
-                    crate::session::CanvasColours::get(s.colours.stage),
-                );
-                paint_sample(p, sample, ink, &preset.settings, 1.0, pencil);
-                // Long names end in an ellipsis; the row's tooltip below
-                // starts with the full name (D5.5).
-                let tag = if preset.settings.stencil.is_some() && pencil {
-                    56.0
-                } else {
-                    0.0
-                };
-                let left = sample.right() + 8.0;
-                widgets::fit_text(
-                    ui,
-                    p,
-                    egui::pos2(left, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    &preset.name,
-                    theme::body(),
-                    if selected {
+                        let width = ui.available_width();
+                        ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click())
+                    };
+                    let fill = if selected {
+                        theme::ACCENT_SELECT_FILL
+                    } else if row.hovered() {
+                        theme::BG_HOVER
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let p = ui.painter();
+                    p.rect_filled(rect, theme::RADIUS_CONTROL as f32, fill);
+                    let sample = if grid {
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(4.0, 4.0),
+                            egui::vec2(rect.width() - 8.0, 42.0),
+                        )
+                    } else {
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(4.0, 3.0),
+                            egui::vec2(72.0, rect.height() - 6.0),
+                        )
+                    };
+                    p.rect_filled(
+                        sample,
+                        3.0,
+                        crate::session::CanvasColours::get(s.colours.stage),
+                    );
+                    paint_sample(p, sample, ink, &preset.settings, 1.0, pencil);
+                    let name_colour = if selected {
                         theme::ON_ACCENT
                     } else {
                         theme::TEXT_PRIMARY
-                    },
-                    rect.right() - 6.0 - tag - left,
-                );
-                if preset.settings.stencil.is_some() && pencil {
-                    p.text(
-                        egui::pos2(rect.right() - 6.0, rect.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        "Stencil",
-                        theme::dense(),
-                        if selected {
-                            theme::ON_ACCENT
-                        } else {
-                            theme::TEXT_SECONDARY
-                        },
-                    );
-                }
-                let mut tip = preset.name.clone();
-                if let Some(src) = &preset.source {
-                    tip.push_str(&format!("\nImported from {src}"));
-                }
-                tip.push_str(if pencil && preset.settings.stencil.is_some() {
-                    "\nThickness stencil: ignores pen pressure"
-                } else {
-                    "\nClick to use. Double-click to rename."
-                });
-                let row = row.on_hover_text(tip);
-                if row.clicked() {
-                    if pencil {
-                        s.pencil = preset.settings;
+                    };
+                    if grid {
+                        // Name under the stroke; the tooltip below has it in full.
+                        widgets::fit_text(
+                            ui,
+                            p,
+                            egui::pos2(rect.center().x, sample.bottom() + 11.0),
+                            egui::Align2::CENTER_CENTER,
+                            &preset.name,
+                            theme::dense(),
+                            name_colour,
+                            rect.width() - 8.0,
+                        );
                     } else {
-                        s.brush = preset.settings;
+                        // Long names end in an ellipsis; the row's tooltip below
+                        // starts with the full name (D5.5).
+                        let tag = if preset.settings.stencil.is_some() && pencil {
+                            56.0
+                        } else {
+                            0.0
+                        };
+                        let left = sample.right() + 8.0;
+                        widgets::fit_text(
+                            ui,
+                            p,
+                            egui::pos2(left, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &preset.name,
+                            theme::body(),
+                            name_colour,
+                            rect.right() - 6.0 - tag - left,
+                        );
+                        if preset.settings.stencil.is_some() && pencil {
+                            p.text(
+                                egui::pos2(rect.right() - 6.0, rect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                "Stencil",
+                                theme::dense(),
+                                if selected {
+                                    theme::ON_ACCENT
+                                } else {
+                                    theme::TEXT_SECONDARY
+                                },
+                            );
+                        }
                     }
-                    presets.set_current(tool, Some(preset.name.clone()));
-                }
-                if row.double_clicked() {
-                    ui.data_mut(|d| {
-                        d.insert_temp(rename, (preset.name.clone(), preset.name.clone()))
+                    let mut tip = preset.name.clone();
+                    if let Some(src) = &preset.source {
+                        tip.push_str(&format!("\nImported from {src}"));
+                    }
+                    tip.push_str(if pencil && preset.settings.stencil.is_some() {
+                        "\nThickness stencil: ignores pen pressure"
+                    } else {
+                        "\nClick to use. Double-click to rename."
                     });
+                    let row = row.on_hover_text(tip);
+                    if row.clicked() {
+                        if pencil {
+                            s.pencil = preset.settings;
+                        } else {
+                            s.brush = preset.settings;
+                        }
+                        presets.set_current(tool, Some(preset.name.clone()));
+                    }
+                    if row.double_clicked() {
+                        ui.data_mut(|d| {
+                            d.insert_temp(rename, (preset.name.clone(), preset.name.clone()))
+                        });
+                    }
                 }
+            };
+            if grid {
+                ui.horizontal_wrapped(|ui| body(ui));
+            } else {
+                body(ui);
             }
         });
     if let Some((index, gone)) = ui.data(|d| d.get_temp::<(usize, Preset)>(removed)) {
@@ -384,10 +423,8 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
     } else {
         PresetTool::Brush
     };
-    // As in Harmony: the preview, then the presets, then the settings.
-    let b = if pencil { s.pencil } else { s.brush };
-    preview(ui, s, &b, pencil);
-    ui.add_space(8.0);
+    // The preview is pinned above (tool_properties); then the presets,
+    // then the settings, as in Harmony.
     preset_list(ui, s, presets, tool);
     ui.add_space(8.0);
     let mut b = if pencil { s.pencil } else { s.brush };
@@ -489,6 +526,17 @@ pub fn tool_properties(
     presets: &mut Presets,
     device: Option<&DeviceInfo>,
 ) {
+    // Brush and Pencil: the name and stroke preview stay pinned at the top,
+    // so changing any setting below shows its effect right away.
+    if matches!(s.tool, Tool::Brush | Tool::Pencil) {
+        let pencil = s.tool == Tool::Pencil;
+        padded(ui, |ui| {
+            section(ui, if pencil { "Pencil" } else { "Brush" });
+            let b = if pencil { s.pencil } else { s.brush };
+            preview(ui, s, &b, pencil);
+        });
+        ui.separator();
+    }
     // Long tool settings scroll instead of being cut off.
     egui::ScrollArea::vertical()
         .id_salt("tool-properties")
@@ -504,14 +552,8 @@ fn tool_properties_body(
 ) {
     padded(ui, |ui| {
         match s.tool {
-            Tool::Brush => {
-                section(ui, "Brush");
-                brush_controls(ui, s, presets, false);
-            }
-            Tool::Pencil => {
-                section(ui, "Pencil");
-                brush_controls(ui, s, presets, true);
-            }
+            Tool::Brush => brush_controls(ui, s, presets, false),
+            Tool::Pencil => brush_controls(ui, s, presets, true),
             Tool::Eraser => {
                 section(ui, "Eraser");
                 let e = &mut s.eraser;

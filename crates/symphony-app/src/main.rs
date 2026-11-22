@@ -2167,6 +2167,10 @@ impl eframe::App for SymphonyApp {
         }
         // Design review only: show the shared loading screen (DESIGN D17.7).
         // Screenshot mode can import brushes as if dropped (SYMPHONY_SHOT_DROP).
+        // SYMPHONY_SHOT_GRID: show presets as a grid in screenshot runs.
+        if self.shot.is_some() && std::env::var_os("SYMPHONY_SHOT_GRID").is_some() {
+            self.presets.grid = true;
+        }
         if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_DROP")) {
             if self.brush_import.is_none() && !self.presets.brush.iter().any(|p| p.source.is_some())
             {

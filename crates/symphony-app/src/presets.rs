@@ -52,6 +52,9 @@ pub struct Presets {
     pub current_brush: Option<String>,
     #[serde(default)]
     pub current_pencil: Option<String>,
+    /// Show presets as a grid of tiles instead of a list.
+    #[serde(default)]
+    pub grid: bool,
 }
 
 /// The exchange file: our own documented format, JSON.
@@ -117,6 +120,7 @@ impl Default for Presets {
             ],
             current_brush: None,
             current_pencil: None,
+            grid: false,
         }
     }
 }
@@ -334,6 +338,7 @@ mod tests {
             pencil: Vec::new(),
             current_brush: None,
             current_pencil: None,
+            grid: false,
         };
         assert_eq!(other.import(&file).unwrap(), 8);
         assert_eq!(other.brush, ours.brush);
