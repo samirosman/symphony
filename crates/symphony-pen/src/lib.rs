@@ -143,6 +143,15 @@ impl PenInput {
         let _ = wake;
     }
 
+    /// Whether the window toolkit also receives the pen as a mouse. True on
+    /// macOS, where AppKit sends mouse events for tablet input. False on
+    /// Wayland: once the app reads tablet-v2, the compositor stops sending
+    /// pointer events for the pen, so the UI only sees it if the app passes
+    /// pen samples on as pointer events.
+    pub fn toolkit_sees_pen(&self) -> bool {
+        !cfg!(target_os = "linux")
+    }
+
     /// Take every sample received since the last call, oldest first.
     pub fn drain(&self) -> Vec<PenSample> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]

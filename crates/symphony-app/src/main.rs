@@ -240,6 +240,8 @@ struct SymphonyApp {
     profile: Profile,
     use_no_ai: bool,
     pen: Option<PenInput>,
+    /// Pen samples taken early by `raw_input_hook`, for this frame's canvas.
+    pen_backlog: Vec<PenSample>,
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
     function: function::FunctionState,
@@ -713,6 +715,7 @@ impl SymphonyApp {
             profile,
             use_no_ai,
             pen,
+            pen_backlog: Vec::new(),
             camera: Default::default(),
             drawing: Default::default(),
             function: Default::default(),
@@ -3100,6 +3103,42 @@ impl eframe::App for SymphonyApp {
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }
 
+    /// Where the toolkit doesn't see the pen (Wayland), pass pen samples on
+    /// to egui as pointer events, so the pen hovers, clicks and drags in the
+    /// UI like a mouse. The samples themselves still go to the canvas.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        let Some(pen) = &self.pen else {
+            return;
+        };
+        if pen.toolkit_sees_pen() {
+            return;
+        }
+        let samples = pen.drain();
+        let zoom = ctx.zoom_factor();
+        // The keys held last frame; RawInput doesn't carry them itself.
+        let modifiers = ctx.input(|i| i.modifiers);
+        for s in &samples {
+            // The mouse reaches egui through the toolkit already.
+            if s.tool == symphony_pen::Tool::Mouse {
+                continue;
+            }
+            let pos = egui::pos2(s.x as f32 / zoom, s.y as f32 / zoom);
+            raw.events.push(egui::Event::PointerMoved(pos));
+            let pressed = match s.phase {
+                symphony_pen::Phase::Down => true,
+                symphony_pen::Phase::Up => false,
+                _ => continue,
+            };
+            raw.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            });
+        }
+        self.pen_backlog.extend(samples);
+    }
+
     fn on_exit(&mut self) {
         // Stop pen input while the window's display connection is still
         // open; the Wayland backend reads it from its own thread.
@@ -3187,7 +3226,11 @@ impl SymphonyApp {
         }
 
         let samples = match &self.pen {
-            Some(p) => p.drain(),
+            Some(p) => {
+                let mut s = std::mem::take(&mut self.pen_backlog);
+                s.extend(p.drain());
+                s
+            }
             None => camera::pointer_samples(&ctx),
         };
         let device = self.pen.as_ref().map(|p| p.device());
