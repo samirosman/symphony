@@ -130,6 +130,33 @@ pub fn natural(a: &str, b: &str) -> std::cmp::Ordering {
     key(a).cmp(&key(b)).then_with(|| a.cmp(b))
 }
 
+/// Canvas colour preferences, as sRGB.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanvasColours {
+    pub stage: [u8; 3],
+    pub surround: [u8; 3],
+    pub onion_before: [u8; 3],
+    pub onion_after: [u8; 3],
+}
+
+impl Default for CanvasColours {
+    fn default() -> Self {
+        let rgb = |c: eframe::egui::Color32| [c.r(), c.g(), c.b()];
+        CanvasColours {
+            stage: rgb(symphony_ui::theme::CANVAS_STAGE),
+            surround: rgb(symphony_ui::theme::CANVAS_SURROUND),
+            onion_before: rgb(symphony_ui::theme::ONION_BEFORE),
+            onion_after: rgb(symphony_ui::theme::ONION_AFTER),
+        }
+    }
+}
+
+impl CanvasColours {
+    pub fn get(c: [u8; 3]) -> eframe::egui::Color32 {
+        eframe::egui::Color32::from_rgb(c[0], c[1], c[2])
+    }
+}
+
 /// Harmony's names for the art layers.
 pub fn art_name(art: ArtLayer) -> &'static str {
     match art {
@@ -284,6 +311,9 @@ pub struct Session {
     /// Lower keeps fewer points; lines are drawn as smooth curves through
     /// them either way. 1.0 keeps every pen sample.
     pub stroke_detail: f32,
+    /// Preference: canvas colours (stage, the area around it, and the
+    /// onion skin tints for previous and next drawings).
+    pub colours: CanvasColours,
     /// Select tool options, as in Harmony: Marquee instead of Lasso, and
     /// Easy Drag (drag from anywhere inside the box).
     pub marquee_mode: bool,
@@ -369,6 +399,7 @@ impl Session {
             overlay_underlay: false,
             size_follows_zoom: false,
             stroke_detail: 0.6,
+            colours: CanvasColours::default(),
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),

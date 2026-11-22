@@ -98,7 +98,11 @@ fn preview(ui: &mut egui::Ui, s: &Session, b: &BrushSettings, pencil: bool) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, theme::RADIUS_CONTROL as f32, theme::CANVAS_STAGE);
+    p.rect_filled(
+        rect,
+        theme::RADIUS_CONTROL as f32,
+        crate::session::CanvasColours::get(s.colours.stage),
+    );
     let [r, g, bl] = s.doc.swatch_rgb(s.swatch);
     paint_sample(
         p,
@@ -218,7 +222,11 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                     rect.min + egui::vec2(4.0, 3.0),
                     egui::vec2(72.0, rect.height() - 6.0),
                 );
-                p.rect_filled(sample, 3.0, theme::CANVAS_STAGE);
+                p.rect_filled(
+                    sample,
+                    3.0,
+                    crate::session::CanvasColours::get(s.colours.stage),
+                );
                 paint_sample(p, sample, ink, &preset.settings, 1.0, pencil);
                 // Long names end in an ellipsis; the row's tooltip below
                 // starts with the full name (D5.5).
@@ -791,68 +799,160 @@ pub fn layer_properties(ui: &mut egui::Ui, s: &mut Session) {
 }
 
 /// Preferences: Workflow (DESIGN §11) and AI (DESIGN §16).
-pub fn preferences(
-    ui: &mut egui::Ui,
-    profile: &mut Profile,
-    use_no_ai: &mut bool,
-    brush_size_cursor: &mut bool,
-    overlay_underlay: &mut bool,
-    size_follows_zoom: &mut bool,
-) {
-    ui.heading("Tools");
-    widgets::checkbox(ui, brush_size_cursor, "Brush size cursor");
+/// Preferences > Drawing.
+pub fn prefs_drawing(ui: &mut egui::Ui, s: &mut Session) {
+    section(ui, "Lines");
+    hint(ui, "Stroke detail");
+    ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
+    ui.add(
+        egui::Slider::new(&mut s.stroke_detail, 0.1..=1.0)
+            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+            .custom_parser(|t| {
+                t.trim_end_matches('%')
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .map(|v| v / 100.0)
+            }),
+    );
+    hint(
+        ui,
+        "How many of a line's pen points to keep. Lines are always drawn as smooth curves; lower detail makes them lighter and steadier, 100% keeps every point.",
+    );
+    slider(
+        ui,
+        "Pen pressure response",
+        &mut s.pressure_gamma,
+        0.3..=3.0,
+    );
+    hint(ui, "Lower makes light strokes heavier. 1.0 is linear.");
+    ui.add_space(8.0);
+    section(ui, "Tools");
+    widgets::checkbox(ui, &mut s.brush_size_cursor, "Brush size cursor");
     hint(
         ui,
         "Shows the brush size as a circle around the cursor, as in Harmony.",
     );
-    widgets::checkbox(ui, size_follows_zoom, "Brush size follows zoom");
+    widgets::checkbox(ui, &mut s.size_follows_zoom, "Brush size follows zoom");
     hint(
         ui,
         "On: a brush is the same size on screen at any zoom, so zoomed-in lines are finer. Off (default): sizes belong to the drawing, so zooming in makes the brush look bigger.",
     );
-    widgets::checkbox(ui, overlay_underlay, "Support Overlay and Underlay Arts");
+    widgets::checkbox(ui, &mut s.respect_protected, "Respect protected colours");
+    hint(ui, "Painting leaves protected colours alone (Shift+S).");
+    ui.add_space(8.0);
+    section(ui, "Art layers");
+    widgets::checkbox(
+        ui,
+        &mut s.overlay_underlay,
+        "Support Overlay and Underlay Arts",
+    );
     hint(
         ui,
         "Adds the Overlay and Underlay art layers to Line Art and Colour Art, as in Harmony's Advanced preferences.",
     );
-    ui.separator();
-    ui.heading("AI");
-    widgets::checkbox(ui, use_no_ai, "Use no AI");
-    hint(ui, "Symphony has no generative AI. It has no assisted tools yet either, so nothing in it uses AI.");
-    ui.hyperlink_to(
-        "How Symphony uses AI",
-        "https://github.com/tdemers218/symphony/blob/main/docs/AI-POLICY.md",
+}
+
+/// Preferences > Canvas.
+pub fn prefs_canvas(ui: &mut egui::Ui, s: &mut Session) {
+    section(ui, "Colours");
+    let defaults = crate::session::CanvasColours::default();
+    let c = &mut s.colours;
+    for (label, value, default, tip) in [
+        (
+            "Stage",
+            &mut c.stage,
+            defaults.stage,
+            "The empty stage behind your drawing. Exports still render on white.",
+        ),
+        (
+            "Around the stage",
+            &mut c.surround,
+            defaults.surround,
+            "The area outside the stage.",
+        ),
+        (
+            "Onion skin: previous",
+            &mut c.onion_before,
+            defaults.onion_before,
+            "Tint of earlier drawings.",
+        ),
+        (
+            "Onion skin: next",
+            &mut c.onion_after,
+            defaults.onion_after,
+            "Tint of later drawings.",
+        ),
+    ] {
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(value).on_hover_text(tip);
+            ui.label(label);
+            if *value != default && ui.small_button("Reset").clicked() {
+                *value = default;
+            }
+        });
+    }
+    ui.add_space(8.0);
+    section(ui, "Display");
+    widgets::checkbox(ui, &mut s.show_strokes, "Show strokes");
+    hint(ui, "Shows the invisible lines that close paint areas (K).");
+    widgets::checkbox(ui, &mut s.art_preview, "Preview all art layers");
+    hint(
+        ui,
+        "The Drawing view shows the other art layers as reference (P).",
     );
-    ui.separator();
-    ui.heading("Workflow");
+}
+
+/// Preferences > Workflow and shortcuts. The list can be filtered.
+pub fn prefs_workflow(ui: &mut egui::Ui, profile: &mut Profile) {
+    section(ui, "Shortcut profile");
     for p in [Profile::Harmony, Profile::Symphony] {
         widgets::radio_value(ui, profile, p, p.title());
         hint(ui, p.blurb());
         ui.add_space(4.0);
     }
-    ui.separator();
-    ui.heading("Shortcuts");
-    egui::ScrollArea::vertical()
-        .max_height(320.0)
+    ui.add_space(8.0);
+    section(ui, "Shortcuts");
+    let id = ui.scope_id().with("shortcut-filter");
+    let mut filter = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
+    ui.add(
+        egui::TextEdit::singleline(&mut filter)
+            .hint_text("Filter, e.g. onion or Alt")
+            .desired_width(f32::INFINITY),
+    );
+    ui.data_mut(|d| d.insert_temp(id, filter.clone()));
+    let needle = filter.to_lowercase();
+    egui::Grid::new("shortcuts")
+        .num_columns(2)
+        .striped(true)
         .show(ui, |ui| {
-            egui::Grid::new("shortcuts")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    for a in Action::ALL {
-                        ui.label(a.name()).on_hover_text(a.id());
-                        let l = crate::keymap::label(*profile, a);
-                        ui.colored_label(
-                            theme::TEXT_SECONDARY,
-                            if l.is_empty() { "None".to_owned() } else { l },
-                        );
-                        ui.end_row();
-                    }
-                });
+            for a in Action::ALL {
+                let l = crate::keymap::label(*profile, a);
+                let hay = format!("{} {} {}", a.name(), a.id(), l).to_lowercase();
+                if !needle.is_empty() && !hay.contains(&needle) {
+                    continue;
+                }
+                ui.label(a.name()).on_hover_text(a.id());
+                ui.colored_label(
+                    theme::TEXT_SECONDARY,
+                    if l.is_empty() { "None".to_owned() } else { l },
+                );
+                ui.end_row();
+            }
         });
     hint(
         ui,
         "Harmony shortcuts follow Harmony 27's published defaults.",
+    );
+}
+
+/// Preferences > AI.
+pub fn prefs_ai(ui: &mut egui::Ui, use_no_ai: &mut bool) {
+    widgets::checkbox(ui, use_no_ai, "Use no AI");
+    hint(ui, "Symphony has no generative AI. It has no assisted tools yet either, so nothing in it uses AI. Search understands plain words with a hand-written word list, not AI.");
+    ui.hyperlink_to(
+        "How Symphony uses AI",
+        "https://github.com/tdemers218/symphony/blob/main/docs/AI-POLICY.md",
     );
 }
 

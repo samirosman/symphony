@@ -40,6 +40,39 @@ use session::{Session, Tool};
 use views::{camera, export, function, node, panels, timing};
 use workspace::{View, Workspace};
 
+/// Pages of the Preferences window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PrefsPage {
+    Interface,
+    Drawing,
+    Canvas,
+    Workflow,
+    Video,
+    Ai,
+}
+
+impl PrefsPage {
+    const ALL: [PrefsPage; 6] = [
+        PrefsPage::Interface,
+        PrefsPage::Drawing,
+        PrefsPage::Canvas,
+        PrefsPage::Workflow,
+        PrefsPage::Video,
+        PrefsPage::Ai,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            PrefsPage::Interface => "Interface",
+            PrefsPage::Drawing => "Drawing",
+            PrefsPage::Canvas => "Canvas",
+            PrefsPage::Workflow => "Workflow and shortcuts",
+            PrefsPage::Video => "Video",
+            PrefsPage::Ai => "AI",
+        }
+    }
+}
+
 /// Autosave interval, seconds (E7.5).
 const AUTOSAVE_EVERY: f64 = 120.0;
 
@@ -69,6 +102,8 @@ struct Saved {
     size_follows_zoom: bool,
     #[serde(default)]
     stroke_detail: Option<f32>,
+    #[serde(default)]
+    colours: Option<session::CanvasColours>,
     /// Use Cisco's OpenH264 for movies (Cisco requires the user can turn it off).
     #[serde(default = "yes")]
     use_openh264: bool,
@@ -152,6 +187,7 @@ struct SymphonyApp {
     export: export::ExportDialog,
     maximised: Option<View>,
     show_preferences: bool,
+    prefs_page: PrefsPage,
     show_icon_sheet: bool,
     last_time: Option<f64>,
     frame_clock: f64,
@@ -263,6 +299,7 @@ impl SymphonyApp {
         let overlay_underlay = saved.as_ref().is_some_and(|s| s.overlay_underlay);
         let size_follows_zoom = saved.as_ref().is_some_and(|s| s.size_follows_zoom);
         let stroke_detail = saved.as_ref().and_then(|s| s.stroke_detail);
+        let colours = saved.as_ref().and_then(|s| s.colours);
         let use_openh264 = saved.as_ref().is_none_or(|s| s.use_openh264);
         let presets = saved
             .as_ref()
@@ -301,6 +338,9 @@ impl SymphonyApp {
         s.size_follows_zoom = size_follows_zoom;
         if let Some(d) = stroke_detail {
             s.stroke_detail = d.clamp(0.1, 1.0);
+        }
+        if let Some(c) = colours {
+            s.colours = c;
         }
         // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
@@ -382,6 +422,11 @@ impl SymphonyApp {
             export: Default::default(),
             maximised: None,
             show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
+            // SYMPHONY_SHOT_PREFS=Canvas opens that page in screenshot runs.
+            prefs_page: std::env::var("SYMPHONY_SHOT_PREFS")
+                .ok()
+                .and_then(|v| PrefsPage::ALL.into_iter().find(|p| format!("{p:?}") == v))
+                .unwrap_or(PrefsPage::Interface),
             show_icon_sheet: std::env::var_os("SYMPHONY_SHOT_ICONS").is_some(),
             last_time: None,
             frame_clock: 0.0,
@@ -464,6 +509,7 @@ impl SymphonyApp {
         let layers = self.s.overlay_underlay;
         let follows = self.s.size_follows_zoom;
         let detail = self.s.stroke_detail;
+        let colours = self.s.colours;
         let (brush, pencil, eraser) = (self.s.brush, self.s.pencil, self.s.eraser);
         let eraser_tip = self.s.eraser_tip;
         self.s = next;
@@ -472,6 +518,7 @@ impl SymphonyApp {
         self.s.overlay_underlay = layers;
         self.s.size_follows_zoom = follows;
         self.s.stroke_detail = detail;
+        self.s.colours = colours;
         // Tool settings belong to the artist, not the scene.
         self.s.brush = brush;
         self.s.pencil = pencil;
@@ -1710,7 +1757,14 @@ impl SymphonyApp {
                     Setting::UseNoAi => self.use_no_ai = !self.use_no_ai,
                     Setting::ProfileHarmony => self.profile = Profile::Harmony,
                     Setting::ProfileSymphony => self.profile = Profile::Symphony,
-                    Setting::StrokeDetail | Setting::StageColour => self.show_preferences = true,
+                    Setting::StrokeDetail => {
+                        self.prefs_page = PrefsPage::Drawing;
+                        self.show_preferences = true;
+                    }
+                    Setting::StageColour => {
+                        self.prefs_page = PrefsPage::Canvas;
+                        self.show_preferences = true;
+                    }
                 }
             }
             Command::GoToFrame(f) => self.s.frame = f.clamp(1, self.s.length()),
@@ -2233,31 +2287,68 @@ impl eframe::App for SymphonyApp {
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(&ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(560.0)
-                    .show(ui, |ui| {
-                        ui.heading("Interface");
-                        self.wallpaper.preferences(ui);
-                        if symphony_ui::widgets::checkbox(
-                            ui,
-                            &mut self.interface_animations,
-                            "Animate interface transitions",
-                        )
-                        .changed()
-                        {
-                            theme::set_motion(&ctx, self.interface_animations);
+                ui.horizontal_top(|ui| {
+                    // Pages, like Harmony's Preferences tabs.
+                    ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        for page in PrefsPage::ALL {
+                            if ui
+                                .selectable_label(self.prefs_page == page, page.title())
+                                .clicked()
+                            {
+                                self.prefs_page = page;
+                            }
                         }
-                        ui.separator();
-                        panels::preferences(
-                            ui,
-                            &mut self.profile,
-                            &mut self.use_no_ai,
-                            &mut self.s.brush_size_cursor,
-                            &mut self.s.overlay_underlay,
-                            &mut self.s.size_follows_zoom,
-                        );
-                        self.video_preferences(ui);
-                    })
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt(("prefs", self.prefs_page.title()))
+                        .max_height(560.0)
+                        .min_scrolled_width(420.0)
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(420.0);
+                                match self.prefs_page {
+                                    PrefsPage::Interface => {
+                                        self.wallpaper.preferences(ui);
+                                        if symphony_ui::widgets::checkbox(
+                                            ui,
+                                            &mut self.interface_animations,
+                                            "Animate interface transitions",
+                                        )
+                                        .changed()
+                                        {
+                                            theme::set_motion(&ctx, self.interface_animations);
+                                        }
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Search (Tab) ranks what you choose often first.",
+                                            )
+                                            .font(theme::dense())
+                                            .color(theme::TEXT_SECONDARY),
+                                        );
+                                        if ui
+                                            .add_enabled(
+                                                !self.search_uses.is_empty(),
+                                                egui::Button::new("Forget search history"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.search_uses.clear();
+                                        }
+                                    }
+                                    PrefsPage::Drawing => panels::prefs_drawing(ui, &mut self.s),
+                                    PrefsPage::Canvas => panels::prefs_canvas(ui, &mut self.s),
+                                    PrefsPage::Workflow => {
+                                        panels::prefs_workflow(ui, &mut self.profile)
+                                    }
+                                    PrefsPage::Video => self.video_preferences(ui),
+                                    PrefsPage::Ai => panels::prefs_ai(ui, &mut self.use_no_ai),
+                                }
+                            })
+                        });
+                });
             });
         self.show_preferences = open;
         let mut open = self.show_icon_sheet;
@@ -2408,6 +2499,7 @@ impl eframe::App for SymphonyApp {
             overlay_underlay: self.s.overlay_underlay,
             size_follows_zoom: self.s.size_follows_zoom,
             stroke_detail: Some(self.s.stroke_detail),
+            colours: Some(self.s.colours),
             use_openh264: self.use_openh264,
             presets: Some(self.presets.clone()),
             search_uses: self.search_uses.clone(),

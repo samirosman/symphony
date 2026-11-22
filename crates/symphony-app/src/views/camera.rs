@@ -16,7 +16,7 @@ use symphony_ui::theme;
 use symphony_vector::{pressure_curve, scale_of, tessellate, Smoother};
 
 use crate::keymap::{self, Action, Profile};
-use crate::session::{apply_stencil, Session, Stencil, Tool};
+use crate::session::{apply_stencil, CanvasColours, Session, Stencil, Tool};
 use crate::views::select::{self, SelectState};
 
 /// Eraser radius, in screen points.
@@ -469,7 +469,8 @@ pub fn ui(
     let px = 1.0 / scale_of(view).max(1e-6);
 
     // D4.2: neutral surround. D3.10: the stage is paper with a soft shadow.
-    painter.rect_filled(rect, 0.0, theme::CANVAS_SURROUND);
+    let colours = s.colours;
+    painter.rect_filled(rect, 0.0, CanvasColours::get(colours.surround));
     let corners = [
         (-w / 2.0, -h / 2.0),
         (w / 2.0, -h / 2.0),
@@ -489,7 +490,7 @@ pub fn ui(
     }
     painter.add(egui::Shape::convex_polygon(
         corners.to_vec(),
-        theme::CANVAS_STAGE,
+        CanvasColours::get(colours.stage),
         EStroke::NONE,
     ));
 
@@ -512,7 +513,11 @@ pub fn ui(
     // Onion skin: neighbouring drawings of the selected layer, tinted.
     if s.onion.on {
         let (before, after) = s.onion_drawings();
-        for (list, tint) in [(before, theme::ONION_BEFORE), (after, theme::ONION_AFTER)] {
+        let tints = [
+            CanvasColours::get(colours.onion_before),
+            CanvasColours::get(colours.onion_after),
+        ];
+        for (list, tint) in [(before, tints[0]), (after, tints[1])] {
             for (k, d) in list.iter().enumerate().rev() {
                 let alpha = 0.45 / (k as f32 + 1.0);
                 if let Some(dr) = s.doc.drawings.get(d) {
