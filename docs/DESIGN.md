@@ -233,6 +233,13 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
 - **D6.6 UI scale** is a preference from 75% to 200%, and everything
   scales together.
 
+- **D6.7 Shared controls.** Use `widgets::primary_button` for the main
+  action in a dialog, such as Export. Use the standard button for secondary
+  actions. Use `widgets::checkbox`, `widgets::radio_value` and
+  `icons::button` for their respective controls so keyboard focus, disabled
+  states and accessibility labels are consistent. Review new controls in the
+  running app at 1280×800 and 1024×640, including a keyboard pass.
+
 ---
 
 ## 7. Icons

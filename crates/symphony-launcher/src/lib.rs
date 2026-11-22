@@ -14,9 +14,9 @@ use std::process::Child;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use semver::Version;
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 
 use install::{Paths, Progress, State};
 use release::{Channel, Release};
@@ -147,14 +147,6 @@ impl Launcher {
     }
 }
 
-/// Primary action button: white on cel-blue fill (DESIGN §4.1).
-fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> bool {
-    let b = egui::Button::new(RichText::new(text).color(theme::ON_ACCENT))
-        .fill(theme::ACCENT_SELECT_FILL);
-    ui.add_enabled(enabled, b.min_size(egui::vec2(0.0, 28.0)))
-        .clicked()
-}
-
 /// Errors: a red marker plus plain text (D4.1 red only as a marker, D10.3).
 fn error_line(ui: &mut egui::Ui, text: &str) {
     ui.horizontal_wrapped(|ui| {
@@ -218,7 +210,7 @@ impl eframe::App for Launcher {
                 } else {
                     format!("Launch Symphony {v}")
                 };
-                if primary(ui, &label, !is_running) {
+                if widgets::primary_button(ui, &label, !is_running).clicked() {
                     match install::launch(&self.paths, v) {
                         Ok(child) => self.running.push((v.clone(), child)),
                         Err(e) => self.error = Some(e),
@@ -300,7 +292,7 @@ impl eframe::App for Launcher {
                         } else {
                             format!("Update to {v}")
                         };
-                        if primary(ui, &text, true) {
+                        if widgets::primary_button(ui, &text, true).clicked() {
                             self.start_install(&ctx, rel.clone());
                         }
                     }
@@ -317,7 +309,9 @@ impl eframe::App for Launcher {
                             theme::TEXT_SECONDARY,
                             "There's no stable release yet. Testers can install the preview.",
                         );
-                        if primary(ui, "Switch to Preview (for testers)", true) {
+                        if widgets::primary_button(ui, "Switch to Preview (for testers)", true)
+                            .clicked()
+                        {
                             self.state.channel = Channel::Preview;
                             self.save();
                         }

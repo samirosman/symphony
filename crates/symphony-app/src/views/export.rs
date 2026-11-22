@@ -276,8 +276,7 @@ impl ExportDialog {
                         }
                     }
                     let ready = self.path.is_some() && !needs_codec;
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Export"))
+                    if symphony_ui::widgets::primary_button(ui, "Export", ready)
                         .on_disabled_hover_text(if needs_codec { "Download the codec first" } else { "Choose where to save first" })
                         .clicked()
                     {

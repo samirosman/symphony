@@ -8,27 +8,46 @@ use crate::theme;
 
 const BOX: f32 = 14.0;
 
+/// The commit action in a dialog or workflow.
+pub fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response {
+    let enabled = enabled && ui.is_enabled();
+    let colour = if enabled {
+        theme::ON_ACCENT
+    } else {
+        theme::TEXT_DISABLED
+    };
+    let button = egui::Button::new(egui::RichText::new(label).color(colour))
+        .min_size(Vec2::new(0.0, theme::ROW))
+        .fill(if enabled {
+            theme::ACCENT_SELECT_FILL
+        } else {
+            theme::BG_RAISED
+        });
+    let response = ui.add_enabled(enabled, button);
+    theme::focus_ring(ui, &response);
+    response
+}
+
 fn row(ui: &mut egui::Ui, label: &str) -> (Response, Rect) {
-    let font = theme::body();
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font, theme::TEXT_PRIMARY);
-    let size = Vec2::new(
-        BOX + 8.0 + galley.size().x,
-        BOX.max(galley.size().y).max(20.0),
-    );
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let mark = Rect::from_center_size(
-        Pos2::new(rect.left() + BOX / 2.0, rect.center().y),
-        Vec2::splat(BOX),
-    );
-    let text_pos = Pos2::new(mark.right() + 8.0, rect.center().y - galley.size().y / 2.0);
     let colour = if ui.is_enabled() {
         theme::TEXT_PRIMARY
     } else {
         theme::TEXT_DISABLED
     };
+    let font = theme::body();
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, colour);
+    let size = Vec2::new(
+        BOX + 14.0 + galley.size().x,
+        BOX.max(galley.size().y).max(theme::TOOLBAR_BUTTON),
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let mark = Rect::from_center_size(
+        Pos2::new(rect.left() + 3.0 + BOX / 2.0, rect.center().y),
+        Vec2::splat(BOX),
+    );
+    let text_pos = Pos2::new(mark.right() + 8.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_pos, galley, colour);
+    theme::focus_ring(ui, &response);
     (response, mark)
 }
 
@@ -44,7 +63,11 @@ pub fn checkbox(ui: &mut egui::Ui, value: &mut bool, label: &str) -> Response {
         p.rect_filled(
             mark,
             theme::RADIUS_CONTROL as f32,
-            theme::ACCENT_SELECT_FILL,
+            if response.enabled() {
+                theme::ACCENT_SELECT_FILL
+            } else {
+                theme::BG_RAISED
+            },
         );
         let pts = [
             Pos2::new(mark.left() + 3.5, mark.center().y),
@@ -53,11 +76,20 @@ pub fn checkbox(ui: &mut egui::Ui, value: &mut bool, label: &str) -> Response {
         ];
         p.add(egui::Shape::line(
             pts.to_vec(),
-            Stroke::new(1.8, theme::ON_ACCENT),
+            Stroke::new(
+                1.8,
+                if response.enabled() {
+                    theme::ON_ACCENT
+                } else {
+                    theme::TEXT_DISABLED
+                },
+            ),
         ));
     } else {
         p.rect_filled(mark, theme::RADIUS_CONTROL as f32, theme::BG_INPUT);
-        let edge = if response.hovered() {
+        let edge = if !response.enabled() {
+            theme::TEXT_DISABLED
+        } else if response.hovered() {
             theme::TEXT_SECONDARY
         } else {
             theme::LINE_CONTROL
@@ -69,6 +101,9 @@ pub fn checkbox(ui: &mut egui::Ui, value: &mut bool, label: &str) -> Response {
             egui::StrokeKind::Inside,
         );
     }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, response.enabled(), *value, label)
+    });
     response
 }
 
@@ -79,17 +114,27 @@ pub fn choice(ui: &mut egui::Ui, selected: bool, label: &str) -> Response {
     let p = ui.painter();
     let r = BOX / 2.0;
     if selected {
-        p.circle_filled(mark.center(), r, theme::ACCENT_SELECT_FILL);
-        p.circle_filled(mark.center(), r * 0.4, theme::ON_ACCENT);
+        let (fill, dot) = if response.enabled() {
+            (theme::ACCENT_SELECT_FILL, theme::ON_ACCENT)
+        } else {
+            (theme::BG_RAISED, theme::TEXT_DISABLED)
+        };
+        p.circle_filled(mark.center(), r, fill);
+        p.circle_filled(mark.center(), r * 0.4, dot);
     } else {
         p.circle_filled(mark.center(), r, theme::BG_INPUT);
-        let edge = if response.hovered() {
+        let edge = if !response.enabled() {
+            theme::TEXT_DISABLED
+        } else if response.hovered() {
             theme::TEXT_SECONDARY
         } else {
             theme::LINE_CONTROL
         };
         p.circle_stroke(mark.center(), r - 0.5, Stroke::new(1.0, edge));
     }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::RadioButton, response.enabled(), selected, label)
+    });
     response
 }
 

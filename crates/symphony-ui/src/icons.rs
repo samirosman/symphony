@@ -467,6 +467,7 @@ fn sized_button(
     enabled: bool,
     tooltip: &str,
 ) -> Response {
+    let enabled = enabled && ui.is_enabled();
     let sense = if enabled {
         Sense::click()
     } else {
@@ -498,5 +499,8 @@ fn sized_button(
         icon,
         fg,
     );
+    theme::focus_ring(ui, &response);
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, active, tooltip));
     response.on_hover_text(tooltip)
 }

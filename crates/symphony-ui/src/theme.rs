@@ -127,6 +127,18 @@ pub fn set_motion(ctx: &egui::Context, enabled: bool) {
     ctx.all_styles_mut(|style| style.animation_time = if enabled { 0.12 } else { 0.0 });
 }
 
+/// Paint a keyboard focus ring inside a custom control's target.
+pub(crate) fn focus_ring(ui: &egui::Ui, response: &egui::Response) {
+    if response.enabled() && response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect,
+            RADIUS_CONTROL,
+            Stroke::new(1.0, ACCENT_SELECT),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
     ctx.all_styles_mut(|style| {
@@ -143,14 +155,26 @@ pub fn apply(ctx: &egui::Context) {
         s.item_spacing = Vec2::new(8.0, 4.0);
         s.button_padding = Vec2::new(8.0, 4.0);
         s.interact_size = Vec2::new(24.0, 20.0);
-        s.window_margin = Margin::same(8);
+        s.window_margin = Margin::same(CARD_PAD);
         s.menu_margin = Margin::same(4);
 
         let v = &mut style.visuals;
         v.dark_mode = true;
         v.override_text_color = None;
         v.panel_fill = BG_PANEL;
-        v.window_fill = BG_RAISED;
+        v.window_fill = BG_PANEL;
+        v.window_shadow = egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: hex(0).gamma_multiply(0.40),
+        };
+        v.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 4],
+            blur: 12,
+            spread: 0,
+            color: hex(0).gamma_multiply(0.32),
+        };
         v.window_stroke = Stroke::new(1.0, LINE_STRONG);
         v.window_corner_radius = CornerRadius::same(RADIUS_FLOATING);
         v.menu_corner_radius = CornerRadius::same(RADIUS_FLOATING);
@@ -170,7 +194,7 @@ pub fn apply(ctx: &egui::Context) {
             ON_ACCENT,
             Stroke::new(1.0, ACCENT_SELECT),
         );
-        v.widgets.open = widget(BG_RAISED, TEXT_PRIMARY, Stroke::new(1.0, LINE_STRONG));
+        v.widgets.open = widget(BG_HOVER, TEXT_PRIMARY, Stroke::new(1.0, LINE_STRONG));
         // Sliders: the filled part shows the value at a glance, and the handle is a round knob.
         v.slider_trailing_fill = true;
         v.handle_shape = egui::style::HandleShape::Circle;
@@ -226,7 +250,7 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     };
     d.tab.active = tab(BG_RAISED, TEXT_PRIMARY, Color32::TRANSPARENT);
     d.tab.inactive = tab(BG_PANEL, TEXT_SECONDARY, Color32::TRANSPARENT);
-    d.tab.hovered = tab(BG_RAISED, TEXT_PRIMARY, Color32::TRANSPARENT);
+    d.tab.hovered = tab(BG_HOVER, TEXT_PRIMARY, Color32::TRANSPARENT);
     d.tab.focused = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
     d.tab.active_with_kb_focus = tab(BG_RAISED, TEXT_PRIMARY, ACCENT_SELECT);
     d.tab.inactive_with_kb_focus = tab(BG_PANEL, TEXT_PRIMARY, ACCENT_SELECT);
