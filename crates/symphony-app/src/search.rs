@@ -19,6 +19,7 @@ pub enum Command {
     ShowView(View),
     OpenPreferences,
     OpenExport(symphony_render::Format),
+    OpenSoundtrackExport,
     Setting(Setting),
     GoToFrame(u32),
     SetZoom(f32),

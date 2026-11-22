@@ -38,7 +38,7 @@ use symphony_ui::theme;
 
 use keymap::{Action, Profile};
 use session::{Session, Tool};
-use views::{camera, export, function, node, panels, timing};
+use views::{camera, export, function, node, panels, soundtrack, timing};
 use workspace::{View, Workspace};
 
 /// Pages of the Preferences window.
@@ -254,6 +254,7 @@ struct SymphonyApp {
     node_view: node::NodeViewState,
     timing: timing::TimingState,
     export: export::ExportDialog,
+    soundtrack: soundtrack::SoundtrackDialog,
     sound: sound::SoundState,
     maximised: Option<View>,
     show_preferences: bool,
@@ -721,6 +722,7 @@ impl SymphonyApp {
             node_view: Default::default(),
             timing: Default::default(),
             export: Default::default(),
+            soundtrack: Default::default(),
             sound: Default::default(),
             maximised: None,
             show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
@@ -1398,6 +1400,10 @@ impl SymphonyApp {
                     self.export.open(symphony_render::Format::Mp4Movie, &self.s);
                     ui.close();
                 }
+                if ui.button("Soundtrack...").clicked() {
+                    self.soundtrack.open(&self.s);
+                    ui.close();
+                }
             });
             ui.separator();
             if ui.button("Quit Symphony").clicked() {
@@ -1875,6 +1881,15 @@ impl SymphonyApp {
                         Some(done as f32 / total.max(1) as f32),
                     ));
                 }
+                if let Some((done, total)) = self.soundtrack.progress() {
+                    jobs.push((
+                        format!(
+                            "Exporting soundtrack, track {} of {total}",
+                            (done + 1).min(total)
+                        ),
+                        Some(done as f32 / total.max(1) as f32),
+                    ));
+                }
                 if let Some(d) = &self.codec_download {
                     jobs.push((
                         "Downloading OpenH264".into(),
@@ -2212,6 +2227,15 @@ impl SymphonyApp {
                 .words(w),
             );
         }
+        out.push(
+            Entry::new(
+                "Export soundtrack (WAV)",
+                Kind::Action,
+                Command::OpenSoundtrackExport,
+                "export.soundtrack",
+            )
+            .words("sound audio wav music dialogue"),
+        );
         // Settings.
         let settings: [(&str, Setting, &str); 9] = [
             (
@@ -2408,6 +2432,7 @@ impl SymphonyApp {
             }
             Command::OpenPreferences => self.show_preferences = true,
             Command::OpenExport(f) => self.export.open(f, &self.s),
+            Command::OpenSoundtrackExport => self.soundtrack.open(&self.s),
             Command::Setting(s) => {
                 let flip = |b: &mut bool, name: &str, notice: &mut Option<String>| {
                     *b = !*b;
@@ -3540,6 +3565,7 @@ impl SymphonyApp {
         {
             self.start_codec_download(&ctx);
         }
+        self.soundtrack.ui(&ctx, &self.s);
         let mut open = self.show_licences;
         egui::Window::new("Licences")
             .open(&mut open)
@@ -3593,7 +3619,7 @@ impl SymphonyApp {
         if pending || self.camera.busy() || self.drawing.busy() {
             ctx.request_repaint();
         }
-        if self.export.busy() {
+        if self.export.busy() || self.soundtrack.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Keep autosave ticking even when idle.

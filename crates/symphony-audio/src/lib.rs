@@ -5,10 +5,12 @@
 //! - [`decode`]: WAV, AIFF and MP3 to float samples; the import check.
 //! - [`peaks`]: waveform peaks, computed once per file.
 //! - [`play`]: the mixer in the device callback, and the app's handle.
+//! - [`soundtrack`]: File > Export > Soundtrack, the tracks as WAV files.
 
 pub mod decode;
 pub mod peaks;
 pub mod play;
+pub mod soundtrack;
 
 pub use decode::{decode, import, import_bytes, Samples};
 pub use peaks::Peaks;
