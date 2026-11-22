@@ -59,6 +59,20 @@ checks your selected release channel and installs an available update.
 Click **Launch** when it finishes. Symphony Dev instead rebuilds the
 current source checkout and opens the resulting app, including local edits.
 
+## Edit the Node view
+
+Use **Add node** to create a Drawing, Peg, or Composite. Drag a node card
+to place it or drag blank space to pan. Drag from a bottom output to a
+compatible top input to connect them.
+
+Drag from a connected input to another input to move the cable, or drop
+it on blank space to disconnect it. You can also right-click a connected
+input and choose **Disconnect input**. Press Escape to cancel an active
+drag. Undo and redo cover placement, node creation, and cable edits.
+
+Node positions and cables are saved with the project. After a manual
+cable edit, composite input order controls stacking in the graph.
+
 ## Harmony scene structure
 
 Choose **File → Import Harmony scene structure** and select a standalone

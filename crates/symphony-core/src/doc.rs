@@ -73,6 +73,10 @@ pub struct Scene {
     pub settings: Settings,
     pub xsheet: Xsheet,
     pub graph: Graph,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_positions: BTreeMap<NodeId, [f32; 2]>,
+    #[serde(default)]
+    pub custom_wiring: bool,
     /// Front to back: index 0 is the top of the Timeline and composite port 0.
     pub layers: Vec<Layer>,
     pub drawings: BTreeMap<Id, Drawing>,
@@ -120,6 +124,8 @@ impl Scene {
             settings,
             xsheet: Xsheet::default(),
             graph,
+            node_positions: BTreeMap::new(),
+            custom_wiring: false,
             layers: Vec::new(),
             drawings: BTreeMap::new(),
             palette,
@@ -150,6 +156,21 @@ impl Scene {
         let node_id = self.graph.add("", NodeKind::Display);
         self.graph.remove(peg_id);
         self.graph.remove(node_id);
+        let mut links = vec![Link {
+            from: peg_id,
+            to: node_id,
+            port: 0,
+        }];
+        if self.custom_wiring {
+            let port = (0..)
+                .find(|&port| self.graph.input(self.composite, port).is_none())
+                .unwrap_or(0);
+            links.push(Link {
+                from: node_id,
+                to: self.composite,
+                port,
+            });
+        }
         LayerSnapshot {
             index,
             layer: Layer {
@@ -160,11 +181,7 @@ impl Scene {
             column,
             node,
             peg,
-            links: vec![Link {
-                from: peg_id,
-                to: node_id,
-                port: 0,
-            }],
+            links,
         }
     }
 
@@ -177,11 +194,16 @@ impl Scene {
             column: self.xsheet.column(layer.column)?.clone(),
             node: self.graph.node(layer.node)?.clone(),
             peg: self.graph.node(layer.peg)?.clone(),
-            links: vec![Link {
-                from: layer.peg,
-                to: layer.node,
-                port: 0,
-            }],
+            links: self
+                .graph
+                .links()
+                .iter()
+                .copied()
+                .filter(|link| {
+                    [layer.peg, layer.node].contains(&link.from)
+                        || [layer.peg, layer.node].contains(&link.to)
+                })
+                .collect(),
         })
     }
 
@@ -207,7 +229,9 @@ impl Scene {
         let (node, mut links) = self.graph.remove(layer.node)?;
         let (peg, peg_links) = self.graph.remove(layer.peg)?;
         links.extend(peg_links);
-        links.retain(|l| l.to != self.composite);
+        if !self.custom_wiring {
+            links.retain(|l| l.to != self.composite);
+        }
         links.dedup();
         self.layers.remove(index);
         self.rewire();
@@ -223,6 +247,9 @@ impl Scene {
 
     /// Composite inputs follow layer order (port 0 = front).
     pub fn rewire(&mut self) {
+        if self.custom_wiring {
+            return;
+        }
         self.graph.disconnect_inputs(self.composite);
         for (port, l) in self.layers.iter().enumerate() {
             self.graph.connect(l.node, self.composite, port);

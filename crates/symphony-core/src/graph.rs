@@ -145,6 +145,44 @@ impl Graph {
         }
     }
 
+    pub fn next_id(&self) -> NodeId {
+        NodeId(self.nodes.len())
+    }
+
+    pub(crate) fn replace_links(&mut self, links: Vec<Link>) {
+        self.links = links;
+    }
+
+    /// Image and transform ports carry different data. Reject incompatible
+    /// endpoints and cycles before committing an interactive connection.
+    pub fn can_connect(&self, from: NodeId, to: NodeId) -> bool {
+        let (Some(source), Some(target)) = (self.node(from), self.node(to)) else {
+            return false;
+        };
+        let valid = match source.kind {
+            NodeKind::Peg(_) => matches!(target.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }),
+            NodeKind::Composite | NodeKind::Drawing { .. } => matches!(
+                target.kind,
+                NodeKind::Composite | NodeKind::Display | NodeKind::Write
+            ),
+            NodeKind::Display | NodeKind::Write => false,
+        };
+        if !valid {
+            return false;
+        }
+        let mut pending = vec![to];
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if node == from {
+                return false;
+            }
+            if visited.insert(node) {
+                pending.extend(self.links.iter().filter(|l| l.from == node).map(|l| l.to));
+            }
+        }
+        true
+    }
+
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &Node)> {
         self.nodes
             .iter()

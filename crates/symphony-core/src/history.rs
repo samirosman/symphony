@@ -3,12 +3,27 @@
 //! gesture is one step (E3.2), so a whole stroke, drag or erase undoes at once.
 
 use crate::doc::{LayerSnapshot, Scene};
-use crate::graph::{NodeId, NodeKind, PegParams};
+use crate::graph::{Link, Node, NodeId, NodeKind, PegParams};
 use crate::id::Id;
 use crate::stroke::{Drawing, Fill, Stroke};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
+    AddNode {
+        id: NodeId,
+        node: Node,
+        position: [f32; 2],
+    },
+    MoveNode {
+        id: NodeId,
+        before: Option<[f32; 2]>,
+        after: [f32; 2],
+    },
+    RewireNodes {
+        before: Vec<Link>,
+        after: Vec<Link>,
+        was_custom: bool,
+    },
     SetPalette {
         before: crate::palette::Palette,
         after: crate::palette::Palette,
@@ -136,6 +151,31 @@ impl Edit {
 
     fn apply(&self, s: &mut Scene, forward: bool) {
         match self {
+            Edit::AddNode { id, node, position } => {
+                if forward {
+                    s.graph.restore(*id, node.clone(), &[]);
+                    s.node_positions.insert(*id, *position);
+                } else {
+                    s.graph.remove(*id);
+                    s.node_positions.remove(id);
+                }
+            }
+            Edit::MoveNode { id, before, after } => {
+                if let Some(position) = if forward { Some(*after) } else { *before } {
+                    s.node_positions.insert(*id, position);
+                } else {
+                    s.node_positions.remove(id);
+                }
+            }
+            Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            } => {
+                s.graph
+                    .replace_links(if forward { after } else { before }.clone());
+                s.custom_wiring = forward || *was_custom;
+            }
             Edit::AddStroke { drawing, stroke } => {
                 if let Some(d) = s.drawings.get_mut(drawing) {
                     if forward {
