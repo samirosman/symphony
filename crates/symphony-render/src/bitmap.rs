@@ -8,6 +8,7 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use rayon::prelude::*;
 use symphony_core::bitmap::{self, Alpha, ImageFile, ImageFormat, ImageRef};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
@@ -100,13 +101,17 @@ fn linear_to_pixmap(
     channels: usize,
     alpha: Alpha,
 ) -> Option<Pixmap> {
-    let mut out = vec![0; w as usize * h as usize * 4];
-    for (p, o) in samples
-        .chunks_exact(channels)
-        .zip(out.as_chunks_mut::<4>().0)
-    {
-        linear_pixel(p, o, alpha);
-    }
+    let row = w as usize;
+    let mut out = vec![0; row * h as usize * 4];
+    // Rows in parallel: a 64-megapixel image has 200 million samples.
+    samples
+        .par_chunks(row * channels)
+        .zip(out.par_chunks_mut(row * 4))
+        .for_each(|(src, dst)| {
+            for (p, o) in src.chunks_exact(channels).zip(dst.as_chunks_mut::<4>().0) {
+                linear_pixel(p, o, alpha);
+            }
+        });
     Pixmap::from_vec(out, IntSize::from_wh(w, h)?)
 }
 
