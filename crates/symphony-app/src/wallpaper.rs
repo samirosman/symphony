@@ -263,8 +263,8 @@ impl Wallpaper {
     pub fn chrome(&self, rect: Rect, side: ChromeSide) -> egui::Shape {
         let mut layers = Vec::new();
         if !self.textures.is_empty() && self.backdrop.is_positive() {
-            let (lower, upper, blend) = blur_mix(self.blur.max(GLASS_BLUR));
-            let level = if blend < 0.5 { lower } else { upper };
+            // The bars use the strongest cached blur, so their edge reads soft.
+            let level = self.textures.len() - 1;
             layers.push(egui::Shape::mesh(chrome_mesh(
                 rect,
                 side,
@@ -360,6 +360,9 @@ impl Wallpaper {
     }
 }
 
+/// How far the bars' soft edge reaches into the workspace, in points.
+const CHROME_FEATHER: f32 = 22.0;
+
 fn chrome_mesh(
     rect: Rect,
     side: ChromeSide,
@@ -376,20 +379,19 @@ fn chrome_mesh(
         ChromeSide::Bottom => rect.top(),
     };
     let direction = (edge - inside).signum();
-    let transition = rect.height().min(4.0);
+    // A long, soft edge (Tristan: "more blurry"): it starts fading well
+    // inside the bar and dies out CHROME_FEATHER points into the workspace,
+    // with a smoothstep so neither end shows a line.
+    let transition = (rect.height() * 0.45).min(12.0);
     let start = edge - direction * transition;
-    let end = edge + direction * 6.0;
-    for (row, (y, alpha)) in [
-        (inside, 1.0),
-        (start, 1.0),
-        (egui::lerp(start..=end, 0.25), 0.84),
-        (egui::lerp(start..=end, 0.5), 0.5),
-        (egui::lerp(start..=end, 0.75), 0.16),
-        (end, 0.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let end = edge + direction * CHROME_FEATHER;
+    const STEPS: usize = 10;
+    let rows = [(inside, 1.0f32)].into_iter().chain((0..=STEPS).map(|i| {
+        let s = i as f32 / STEPS as f32;
+        let smooth = s * s * (3.0 - 2.0 * s);
+        (egui::lerp(start..=end, s), 1.0 - smooth)
+    }));
+    for (row, (y, alpha)) in rows.enumerate() {
         for x in [rect.left(), rect.right()] {
             let pos = Pos2::new(x, y);
             let uv = texture.map_or(egui::epaint::WHITE_UV, |(_, backdrop)| {
@@ -562,8 +564,14 @@ mod tests {
         let bottom = chrome_mesh(rect, ChromeSide::Bottom, None, Color32::WHITE);
         assert_eq!(top.vertices[0].pos.y, rect.top());
         assert_eq!(bottom.vertices[0].pos.y, rect.bottom());
-        assert_eq!(top.vertices.last().unwrap().pos.y, rect.bottom() + 6.0);
-        assert_eq!(bottom.vertices.last().unwrap().pos.y, rect.top() - 6.0);
+        assert_eq!(
+            top.vertices.last().unwrap().pos.y,
+            rect.bottom() + CHROME_FEATHER
+        );
+        assert_eq!(
+            bottom.vertices.last().unwrap().pos.y,
+            rect.top() - CHROME_FEATHER
+        );
         for mesh in [top, bottom] {
             assert_eq!(mesh.vertices[0].color.a(), 255);
             assert_eq!(mesh.vertices.last().unwrap().color.a(), 0);

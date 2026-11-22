@@ -3,7 +3,7 @@
 //!
 //! | Motion    | For                                            | Time   | Curve          |
 //! |-----------|------------------------------------------------|--------|----------------|
-//! | `Appear`  | something opening: popups, panels, hints       | 140 ms | ease-out cubic |
+//! | `Appear`  | something opening (a fade): popups, hints      | 140 ms | ease-out cubic |
 //! | `Dismiss` | something closing                              | 110 ms | ease-in quad   |
 //! | `Expand`  | something growing or shrinking: lists, sizes   | 180 ms | ease-out quart |
 //! | `Select`  | a selection or state changing: tabs, toggles   | 150 ms | ease-in-out    |
@@ -140,8 +140,8 @@ pub fn presence(ctx: &egui::Context, id: Id, shown: bool) -> f32 {
     value(ctx, id, target, motion)
 }
 
-/// How a present thing looks at presence `p`: its opacity, its scale (it
-/// grows from 96%) and how far below its place it sits (rises 6 points).
+/// How a present thing looks at presence `p`. Things that open and close
+/// only fade (Tristan's call): full size, in place, at every moment.
 pub struct Look {
     pub opacity: f32,
     pub scale: f32,
@@ -149,11 +149,10 @@ pub struct Look {
 }
 
 pub fn look(p: f32) -> Look {
-    let p = p.clamp(0.0, 1.0);
     Look {
-        opacity: p,
-        scale: 0.96 + 0.04 * p,
-        drop: (1.0 - p) * 6.0,
+        opacity: p.clamp(0.0, 1.0),
+        scale: 1.0,
+        drop: 0.0,
     }
 }
 

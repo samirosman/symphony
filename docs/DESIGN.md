@@ -349,8 +349,8 @@ and animation state.
   a panel opening or a drop target appearing, and lasts 240 ms or less.
 - **D9.4 One motion per kind of action** (`symphony_ui::motion`), never
   written ad hoc, so the same action always moves the same way:
-  - **Appear** (140 ms, ease-out): something opening. Fades in, grows from
-    96% and rises 6 points.
+  - **Appear** (140 ms, ease-out): something opening. A plain fade: it
+    doesn't grow, rise or slide.
   - **Dismiss** (110 ms, ease-in): something closing, the reverse of Appear,
     and quicker.
   - **Expand** (180 ms, ease-out): something changing size, like a list
