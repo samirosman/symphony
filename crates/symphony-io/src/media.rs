@@ -80,8 +80,39 @@ fn sniff_image(bytes: &[u8]) -> Option<ImageFormat> {
         Some(ImageFormat::Png)
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(ImageFormat::Jpeg)
+    } else if bytes.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
+        Some(ImageFormat::Exr)
     } else {
         None
+    }
+}
+
+/// Refuse an OpenEXR file the decoder can't read, from its header alone,
+/// so it fails on import instead of drawing nothing later. The `image`
+/// crate (0.25) shows the first part that is flat (not deep) and has R, G
+/// and B channels; the `exr` crate (1.74.3) under it decodes every
+/// compression but HTJ2K.
+fn exr_readable(bytes: &[u8]) -> Result<(), String> {
+    use exr::compression::Compression;
+    use exr::meta::attribute::Text;
+    let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(bytes), false)
+        .map_err(|e| format!("it couldn't be read ({e})"))?;
+    let shown = meta.headers.iter().find(|h| {
+        !h.deep
+            && ["R", "G", "B"]
+                .iter()
+                .all(|c| h.channels.find_index_of_channel(&Text::from(*c)).is_some())
+    });
+    let Some(part) = shown else {
+        return Err("it has no flat R, G and B channels to show".into());
+    };
+    match part.compression {
+        Compression::HTJ2K32 | Compression::HTJ2K256 => Err(format!(
+            "it uses {}, which Symphony can't read yet; \
+             save it again with ZIP, PIZ or DWAA compression",
+            part.compression
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -91,12 +122,16 @@ pub fn image_from_bytes(bytes: Vec<u8>) -> Result<(u64, ImageFile), String> {
     if bytes.len() as u64 > bitmap::MAX_FILE_BYTES {
         return Err("the file is larger than 256 MB".into());
     }
-    let format = sniff_image(&bytes).ok_or("it isn't a PNG or JPEG image")?;
+    let format = sniff_image(&bytes).ok_or("it isn't a PNG, JPEG or OpenEXR image")?;
+    if format == ImageFormat::Exr {
+        exr_readable(&bytes)?;
+    }
     let reader = image::ImageReader::with_format(
         Cursor::new(&bytes[..]),
         match format {
             ImageFormat::Png => image::ImageFormat::Png,
             ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+            ImageFormat::Exr => image::ImageFormat::OpenExr,
         },
     );
     let (width, height) = reader
@@ -237,9 +272,43 @@ pub(crate) fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
     b
 }
 
+/// A half-float RGBA OpenEXR file with the default (lossless) encoding.
+#[cfg(test)]
+pub(crate) fn exr_half(width: usize, height: usize) -> Vec<u8> {
+    use exr::prelude::*;
+    let px = SpecificChannels::rgba(|Vec2(x, _y)| {
+        (f16::from_f32(x as f32), f16::ZERO, f16::ONE, f16::ONE)
+    });
+    let mut out = Vec::new();
+    Image::from_channels((width, height), px)
+        .write()
+        .to_buffered(Cursor::new(&mut out))
+        .unwrap();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_half_float_exr_size() {
+        let (key, f) = image_from_bytes(exr_half(5, 3)).unwrap();
+        assert_eq!((f.width, f.height, f.format), (5, 3, ImageFormat::Exr));
+        assert_eq!(f.file_name(key), format!("{key:016x}.exr"));
+    }
+
+    #[test]
+    fn refuses_exr_compression_the_decoder_lacks() {
+        // The exr crate can't write HTJ2K, so set the compression byte of
+        // a lossless file to HTJ2K256 (10 in the OpenEXR header).
+        let mut bytes = exr_half(2, 2);
+        let name = b"compression\0compression\0";
+        let at = bytes.windows(name.len()).position(|w| w == name).unwrap();
+        bytes[at + name.len() + 4] = 10;
+        let why = image_from_bytes(bytes).unwrap_err();
+        assert!(why.contains("j2k"), "{why}");
+    }
 
     #[test]
     fn reads_png_size_and_refuses_other_files() {

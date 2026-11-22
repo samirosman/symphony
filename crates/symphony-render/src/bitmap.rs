@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use symphony_core::bitmap::{self, Alpha, ImageFile, ImageFormat, ImageRef};
 use symphony_core::doc::Scene;
@@ -28,14 +28,25 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
     let format = match file.format {
         ImageFormat::Png => image::ImageFormat::Png,
         ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Exr => image::ImageFormat::OpenExr,
     };
     let mut reader = image::ImageReader::with_format(Cursor::new(&file.bytes[..]), format);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(bitmap::MAX_SIDE);
     limits.max_image_height = Some(bitmap::MAX_SIDE);
-    limits.max_alloc = Some(bitmap::MAX_PIXELS * 4 * 2);
+    // EXR decodes to four f32 channels: 16 bytes a pixel.
+    let per_pixel = if file.format == ImageFormat::Exr {
+        16
+    } else {
+        8
+    };
+    limits.max_alloc = Some(bitmap::MAX_PIXELS * per_pixel);
     reader.limits(limits);
-    let rgba = reader.decode().ok()?.into_rgba8();
+    let decoded = reader.decode().ok()?;
+    if file.format == ImageFormat::Exr {
+        return linear_to_pixmap(decoded.into_rgba32f(), alpha);
+    }
+    let rgba = decoded.into_rgba8();
     let (w, h) = rgba.dimensions();
     let mut px = rgba.into_raw();
     for p in px.as_chunks_mut::<4>().0 {
@@ -53,6 +64,53 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
         }
     }
     Pixmap::from_vec(px, IntSize::from_wh(w, h)?)
+}
+
+/// Linear-light float pixels (OpenEXR) to premultiplied sRGB bytes, the
+/// same form [`decode`] gives for PNG and JPEG. The premultiplication is
+/// undone in linear light, where it was made. Values above 1.0 are
+/// clipped (no tone mapping); NaN reads as 0.
+fn linear_to_pixmap(img: image::Rgba32FImage, alpha: Alpha) -> Option<Pixmap> {
+    let (w, h) = img.dimensions();
+    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    for p in img.pixels() {
+        // Not `clamp`, which keeps NaN; a NaN alpha reads as 0.
+        let a = if p[3] > 0.0 { p[3].min(1.0) } else { 0.0 };
+        let a8 = (a * 255.0).round() as u8;
+        for &c in &p.0[..3] {
+            // Colour premultiplied with black, in linear light.
+            let black = match alpha {
+                Alpha::Straight => c * a,
+                Alpha::PremultipliedBlack => c,
+                Alpha::PremultipliedWhite => c - (1.0 - a),
+            };
+            let straight = if a > 0.0 { black / a } else { 0.0 };
+            let s = srgb8(straight) as u16;
+            out.push(((s * a8 as u16 + 127) / 255) as u8);
+        }
+        out.push(a8);
+    }
+    Pixmap::from_vec(out, IntSize::from_wh(w, h)?)
+}
+
+/// The sRGB code for a linear value: the first code whose upper threshold
+/// is above it. The thresholds sit halfway between codes in sRGB, so this
+/// matches rounding the exact curve (IEC 61966-2-1).
+fn srgb8(linear: f32) -> u8 {
+    static UPPER: OnceLock<[f32; 255]> = OnceLock::new();
+    let upper = UPPER.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let s = (i as f32 + 0.5) / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    });
+    // `max` maps NaN to 0.
+    let x = linear.max(0.0);
+    upper.partition_point(|&t| t <= x) as u8
 }
 
 fn cached(scene: &Scene, r: ImageRef) -> Option<Arc<Pixmap>> {
@@ -127,6 +185,83 @@ mod tests {
             one([255, 127, 127, 128], Alpha::PremultipliedWhite),
             [128, 0, 0, 128]
         );
+    }
+
+    /// One pixel of a half-float OpenEXR file.
+    fn exr(px: [f32; 4]) -> ImageFile {
+        use exr::prelude::*;
+        let h = px.map(f16::from_f32);
+        let ch = SpecificChannels::rgba(move |_: Vec2<usize>| (h[0], h[1], h[2], h[3]));
+        let mut bytes = Vec::new();
+        Image::from_channels((1, 1), ch)
+            .write()
+            .to_buffered(Cursor::new(&mut bytes))
+            .unwrap();
+        ImageFile {
+            format: ImageFormat::Exr,
+            width: 1,
+            height: 1,
+            bytes: Arc::new(bytes),
+        }
+    }
+
+    fn one_exr(px: [f32; 4], alpha: Alpha) -> [u8; 4] {
+        let p = decode(&exr(px), alpha).unwrap();
+        p.data().try_into().unwrap()
+    }
+
+    #[test]
+    fn exr_linear_light_becomes_srgb() {
+        // Linear 0.2158 is sRGB 128 (0.502).
+        assert_eq!(
+            one_exr([0.2158, 0.0, 1.0, 1.0], Alpha::PremultipliedBlack),
+            [128, 0, 255, 255]
+        );
+        // Half alpha, premultiplied in linear light: unpremultiplied there
+        // to 0.2158 (sRGB 128), then premultiplied again in sRGB.
+        assert_eq!(
+            one_exr([0.1079, 0.0, 0.5, 0.5], Alpha::PremultipliedBlack),
+            [64, 0, 128, 128]
+        );
+        assert_eq!(
+            one_exr([0.2158, 0.0, 1.0, 0.5], Alpha::Straight),
+            [64, 0, 128, 128]
+        );
+        // Over white in linear light: stored = colour * a + (1 - a).
+        assert_eq!(
+            one_exr([0.6079, 0.5, 1.0, 0.5], Alpha::PremultipliedWhite),
+            [64, 0, 128, 128]
+        );
+    }
+
+    #[test]
+    fn exr_clips_bright_and_bad_values() {
+        assert_eq!(
+            one_exr([4.0, f32::NAN, -1.0, 1.0], Alpha::PremultipliedBlack),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            one_exr([1.0, 1.0, 1.0, 0.0], Alpha::PremultipliedBlack),
+            [0, 0, 0, 0]
+        );
+        assert_eq!(
+            one_exr([1.0, 1.0, 1.0, f32::NAN], Alpha::PremultipliedBlack),
+            [0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn srgb_codes_match_the_exact_curve() {
+        for code in 0..=255u8 {
+            let s = code as f32 / 255.0;
+            let lin = if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            };
+            assert_eq!(srgb8(lin), code);
+        }
+        assert_eq!(srgb8(f32::INFINITY), 255);
     }
 
     #[test]

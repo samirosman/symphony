@@ -25,6 +25,9 @@ pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub enum ImageFormat {
     Png,
     Jpeg,
+    /// OpenEXR, half or full float, one RGB layer. Its values are linear
+    /// light; renderers convert them to sRGB.
+    Exr,
 }
 
 impl ImageFormat {
@@ -33,6 +36,17 @@ impl ImageFormat {
         match self {
             ImageFormat::Png => "png",
             ImageFormat::Jpeg => "jpg",
+            ImageFormat::Exr => "exr",
+        }
+    }
+
+    /// The alpha encoding files of this format use by convention, for the
+    /// import default. OpenEXR stores colour premultiplied by alpha
+    /// (openexr.com, Technical Introduction).
+    pub fn usual_alpha(self) -> Alpha {
+        match self {
+            ImageFormat::Png | ImageFormat::Jpeg => Alpha::Straight,
+            ImageFormat::Exr => Alpha::PremultipliedBlack,
         }
     }
 }
@@ -58,7 +72,8 @@ pub enum Alpha {
     /// Colour is independent of alpha (PNG, TGA).
     #[default]
     Straight,
-    /// Colour fades to black as alpha falls (typical for TIFF).
+    /// Colour fades to black as alpha falls (typical for TIFF, the
+    /// OpenEXR convention).
     PremultipliedBlack,
     /// Colour fades to white as alpha falls (typical for a flat PSD).
     PremultipliedWhite,
@@ -243,6 +258,13 @@ mod tests {
         assert!(!size_ok(0, 10));
         assert!(!size_ok(MAX_SIDE + 1, 10));
         assert!(!size_ok(MAX_SIDE, MAX_SIDE));
+    }
+
+    #[test]
+    fn exr_is_stored_as_exr_and_premultiplied() {
+        assert_eq!(ImageFormat::Exr.extension(), "exr");
+        assert_eq!(ImageFormat::Exr.usual_alpha(), Alpha::PremultipliedBlack);
+        assert_eq!(ImageFormat::Png.usual_alpha(), Alpha::Straight);
     }
 
     #[test]
