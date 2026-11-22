@@ -3,5 +3,6 @@
 
 pub mod feedback;
 pub mod icons;
+pub mod motion;
 pub mod theme;
 pub mod widgets;

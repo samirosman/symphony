@@ -493,12 +493,14 @@ fn sized_button(
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
     let painter = ui.painter();
-    let transition = |key, on| {
-        if ui.style().animation_time > 0.0 {
-            ui.ctx().animate_bool_responsive(response.id.with(key), on)
-        } else {
-            f32::from(on)
-        }
+    // Hover and selection blend with the shared Select motion (D9.4).
+    let transition = |key, on: bool| {
+        crate::motion::value(
+            ui.ctx(),
+            response.id.with(key),
+            f32::from(on),
+            crate::motion::Motion::Select,
+        )
     };
     let hover = transition("hover", enabled && response.hovered());
     let selected = transition("selected", enabled && active);

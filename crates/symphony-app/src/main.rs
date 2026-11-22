@@ -1765,7 +1765,7 @@ impl SymphonyApp {
                 *self.search_uses.entry(key).or_insert(0) += 1;
                 self.run_command(ctx, cmd);
                 // Fade out after running it.
-                st.closing_at = Some(ctx.input(|i| i.time));
+                st.closing = true;
                 self.palette = Some(st);
             }
         }
@@ -1919,10 +1919,10 @@ impl SymphonyApp {
             ctx.input(|i| (i.raw.hovered_files.len(), i.raw.dropped_files.clone()));
         // While files hover: a glass panel that fades and grows in, a soft
         // blue glow around the window, and both fade out again.
-        let shown = ctx.animate_bool_with_time(
+        let shown = symphony_ui::motion::presence(
+            ctx,
             egui::Id::unique("symphony-drop-hint-shown"),
             hovered > 0,
-            0.16,
         );
         if shown > 0.0 {
             let screen = ctx.content_rect();
@@ -1936,7 +1936,7 @@ impl SymphonyApp {
                 egui::Stroke::new(2.0, theme::ACCENT_SELECT.gamma_multiply(0.6 * shown)),
                 egui::StrokeKind::Inside,
             );
-            let lift = (1.0 - shown) * 8.0;
+            let lift = symphony_ui::motion::look(shown).drop;
             egui::Area::new(egui::Id::unique("symphony-drop-hint"))
                 .order(egui::Order::Foreground)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, lift))
@@ -2179,26 +2179,26 @@ impl Viewer<'_> {
         if ui.ui_contains_pointer() {
             *self.hovered = Some(v);
         }
-        // Fade the incoming content in place. Pen coordinates and hit targets stay fixed.
-        let duration = ui.style().animation_time as f64;
-        if duration > 0.0 && !matches!(v, View::Camera | View::Drawing) {
+        // A view coming into sight (tab switch, workspace change) appears with
+        // the shared Appear motion, fading in place: pen coordinates and hit
+        // targets never move.
+        if !matches!(v, View::Camera | View::Drawing) {
             let key = egui::Id::unique(("view-appearance", self.workspace, v));
             let frame = ui.ctx().cumulative_frame_nr();
-            let now = ui.input(|i| i.time);
-            let start = ui.data_mut(|data| {
-                let (last, since) = data.get_temp::<(u64, f64)>(key).unwrap_or((frame, now));
-                let start = if frame > last.saturating_add(1) {
-                    now
-                } else {
-                    since
-                };
-                data.insert_temp(key, (frame, start));
-                start
-            });
-            let progress = ((now - start) / duration).clamp(0.0, 1.0) as f32;
-            if progress < 1.0 {
-                ui.multiply_opacity(1.0 - 0.5 * (1.0 - progress).powi(3));
-                ui.ctx().request_repaint();
+            // Not drawn last frame: it's just appearing.
+            let last = ui.data(|d| d.get_temp::<u64>(key));
+            if last.is_none_or(|l| frame > l.saturating_add(1)) {
+                symphony_ui::motion::start(ui.ctx(), key.with("p"), 0.5);
+            }
+            ui.data_mut(|d| d.insert_temp(key, frame));
+            let p = symphony_ui::motion::value(
+                ui.ctx(),
+                key.with("p"),
+                1.0,
+                symphony_ui::motion::Motion::Appear,
+            );
+            if p < 1.0 {
+                ui.multiply_opacity(p);
             }
         }
         match v {
@@ -2241,16 +2241,13 @@ impl egui_dock::TabViewer for Viewer<'_> {
         global: &egui_dock::TabStyle,
     ) -> Option<egui_dock::TabStyle> {
         let open = self.active.contains(tab);
-        let t = self.ctx.animate_bool_with_time(
+        let t = symphony_ui::motion::value(
+            &self.ctx,
             egui::Id::unique(("symphony-tab-open", *tab)),
-            open,
-            0.16,
+            if open { 1.0 } else { 0.0 },
+            symphony_ui::motion::Motion::Select,
         );
-        let mix = |a: egui::Color32, b: egui::Color32| {
-            let (a, b) = (a.to_srgba_unmultiplied(), b.to_srgba_unmultiplied());
-            let c = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
-            egui::Color32::from_rgba_unmultiplied(c(0), c(1), c(2), c(3))
-        };
+        let mix = |a: egui::Color32, b: egui::Color32| symphony_ui::motion::mix(a, b, t);
         let bg = mix(global.inactive.bg_fill, global.active.bg_fill);
         let text = mix(global.inactive.text_color, global.active.text_color);
         let mut s = global.clone();

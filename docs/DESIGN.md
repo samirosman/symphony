@@ -346,7 +346,19 @@ and animation state.
 ## 9. Motion
 
 - **D9.1 No decorative animation.** Motion only answers an action, such as
-  a panel opening or a drop target appearing, and lasts 120 ms or less.
+  a panel opening or a drop target appearing, and lasts 240 ms or less.
+- **D9.4 One motion per kind of action** (`symphony_ui::motion`), never
+  written ad hoc, so the same action always moves the same way:
+  - **Appear** (140 ms, ease-out): something opening. Fades in, grows from
+    96% and rises 6 points.
+  - **Dismiss** (110 ms, ease-in): something closing, the reverse of Appear,
+    and quicker.
+  - **Expand** (180 ms, ease-out): something changing size, like a list
+    gaining results or a panel growing.
+  - **Select** (150 ms, ease-in-out): a selection or state changing, like
+    tabs and toggles. Colours blend.
+  - **Settle** (220 ms, ease-out with a slight overshoot): something landing
+    in place, like a docked view, a snapped divider or a dropped item.
 - **D9.2 Motion never delays input.** An animation in progress never
   holds back a click or a stroke.
 - **D9.3** Respect the OS "reduce motion" setting, which turns all UI

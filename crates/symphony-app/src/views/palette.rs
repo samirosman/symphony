@@ -1,7 +1,11 @@
-//! The search box (Tab): opens next to the mouse and finds anything in the
-//! app. Ranking and the plain-language rules live in `search.rs`.
+//! The search box (Tab): pops up as just a field centred on the mouse, then
+//! grows to show results as you type. Ranking and the plain-language rules
+//! live in `search.rs`; its motion is the app's shared vocabulary
+//! (`symphony_ui::motion`): Appear and Dismiss for opening and closing,
+//! Expand for the results growing.
 
-use eframe::egui::{self, Align2, Pos2, Vec2};
+use eframe::egui::{self, Align2, Id, Pos2, Rect, Vec2};
+use symphony_ui::motion::{self, Motion};
 use symphony_ui::{theme, widgets};
 
 use crate::search::{self, Command, Entry};
@@ -15,9 +19,8 @@ pub struct PaletteState {
     pub here: Option<View>,
     selected: usize,
     first_frame: bool,
-    /// When it opened, and when it started closing (for the animation).
-    opened_at: Option<f64>,
-    pub closing_at: Option<f64>,
+    /// Closing: fading out, no longer taking input.
+    pub closing: bool,
 }
 
 impl PaletteState {
@@ -28,14 +31,15 @@ impl PaletteState {
             here,
             selected: 0,
             first_frame: true,
-            opened_at: None,
-            closing_at: None,
+            closing: false,
         }
     }
 }
 
 const WIDTH: f32 = 420.0;
 const ROWS: usize = 9;
+const ROW_H: f32 = 34.0;
+const FIELD_H: f32 = 30.0;
 
 pub enum Outcome {
     Open,
@@ -45,8 +49,12 @@ pub enum Outcome {
     Chosen(Command, String),
 }
 
-/// Open and close animation length, seconds.
-const ANIMATE: f64 = 0.14;
+fn ids() -> (Id, Id) {
+    (
+        Id::unique("symphony-search-presence"),
+        Id::unique("symphony-search-height"),
+    )
+}
 
 /// Draw the palette. `entries` is everything searchable; `uses` how often
 /// each key was chosen.
@@ -56,37 +64,29 @@ pub fn ui(
     entries: &[Entry],
     uses: &dyn Fn(&str) -> u32,
 ) -> Outcome {
-    // Phrase commands ("go to frame 12") first, then ranked entries.
-    let phrases = search::phrase(&st.query);
-    let hits = search::rank(entries, &st.query, st.here, uses);
-    let mut results: Vec<&Entry> = phrases.iter().collect();
-    results.extend(hits.iter().map(|h| &entries[h.index]));
-    results.truncate(ROWS);
-    st.selected = st.selected.min(results.len().saturating_sub(1));
-
-    let now = ctx.input(|i| i.time);
-    let opened = *st.opened_at.get_or_insert(now);
-    let animated = ctx.global_style().animation_time > 0.0;
-    // Fade and grow in; fade and shrink out (instant when animations are off).
-    let progress = |since: f64| {
-        if animated {
-            ((now - since) / ANIMATE).clamp(0.0, 1.0) as f32
-        } else {
-            1.0
-        }
-    };
-    let ease = |t: f32| 1.0 - (1.0 - t).powi(3);
-    let shown = match st.closing_at {
-        Some(c) => 1.0 - ease(progress(c)),
-        None => ease(progress(opened)),
-    };
-    if st.closing_at.is_some() && shown <= 0.0 {
+    let (presence_id, height_id) = ids();
+    if st.first_frame {
+        // Every opening starts from nothing, with no results showing.
+        motion::start(ctx, presence_id, 0.0);
+        motion::start(ctx, height_id, 0.0);
+    }
+    let shown = motion::presence(ctx, presence_id, !st.closing);
+    if st.closing && shown <= 0.0 {
         return Outcome::Closed;
     }
-    if shown < 1.0 {
-        ctx.request_repaint();
+
+    // Results only once something is typed: phrase commands ("go to
+    // frame 12") first, then ranked entries.
+    let typed = !st.query.trim().is_empty();
+    let mut results: Vec<Entry> = Vec::new();
+    if typed {
+        results.extend(search::phrase(&st.query));
+        let hits = search::rank(entries, &st.query, st.here, uses);
+        results.extend(hits.iter().map(|h| entries[h.index].clone()));
+        results.truncate(ROWS);
     }
-    let closing = st.closing_at.is_some();
+    st.selected = st.selected.min(results.len().saturating_sub(1));
+
     // Tab toggles it closed again; Esc closes it too.
     let (up, down, enter, esc, tab) = ctx.input_mut(|i| {
         (
@@ -97,8 +97,8 @@ pub fn ui(
             !st.first_frame && i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
         )
     });
-    if !closing && (esc || tab) {
-        st.closing_at = Some(now);
+    if !st.closing && (esc || tab) {
+        st.closing = true;
         return Outcome::Closing;
     }
     if up {
@@ -108,31 +108,33 @@ pub fn ui(
         st.selected += 1;
     }
 
-    // Centred on the mouse horizontally, just below it, kept in the window.
+    // The results area grows to fit (Expand), from nothing while empty.
+    let rows = if typed { results.len().max(1) } else { 0 };
+    let list_h = motion::value(ctx, height_id, rows as f32 * ROW_H, Motion::Expand);
+
+    // Centred on the mouse horizontally, just below it, kept in the window;
+    // it appears with the shared Appear look (fade, grow, rise).
+    let look = motion::look(shown);
     let screen = ctx.content_rect();
-    let height = 52.0 + results.len().max(1) as f32 * 34.0;
     let box_w = WIDTH + 16.0;
-    let pos = Pos2::new(
-        (st.at.x - box_w / 2.0).clamp(screen.left() + 8.0, (screen.right() - box_w - 8.0).max(8.0)),
-        (st.at.y + 12.0).clamp(
-            screen.top() + 8.0,
-            (screen.bottom() - height - 8.0).max(8.0),
-        ),
+    let full_h = FIELD_H + 16.0 + rows as f32 * ROW_H;
+    let x =
+        (st.at.x - box_w / 2.0).clamp(screen.left() + 8.0, (screen.right() - box_w - 8.0).max(8.0));
+    let y = (st.at.y + 12.0).clamp(
+        screen.top() + 8.0,
+        (screen.bottom() - full_h - 8.0).max(8.0),
     );
-    // Grow from slightly smaller towards the mouse, and fade.
-    let scale = 0.96 + 0.04 * shown;
-    let pos = Pos2::new(
-        st.at.x + (pos.x - st.at.x) * scale,
-        st.at.y + (pos.y - st.at.y) * scale,
-    );
+    let pos = Pos2::new(st.at.x + (x - st.at.x) * look.scale, y + look.drop);
+
     let mut chosen: Option<usize> = None;
-    let area = egui::Area::new(egui::Id::unique("symphony-search"))
-        .order(egui::Order::Foreground)
+    let area = egui::Area::new(Id::unique("symphony-search"))
+        // Above everything else, floating windows and overlays included.
+        .order(egui::Order::Tooltip)
         .fixed_pos(pos)
         .fade_in(false)
-        .interactable(!closing)
+        .interactable(!st.closing)
         .show(ctx, |ui| {
-            ui.multiply_opacity(shown);
+            ui.multiply_opacity(look.opacity);
             egui::Frame::new()
                 .fill(theme::BG_RAISED)
                 .stroke(egui::Stroke::new(1.0, theme::LINE_STRONG))
@@ -154,7 +156,25 @@ pub fn ui(
                     if edit.changed() {
                         st.selected = 0;
                     }
+                    if list_h < 0.5 {
+                        return;
+                    }
+                    // The list, clipped to its animated height.
                     ui.add_space(4.0);
+                    let (area_rect, _) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), list_h),
+                        egui::Sense::hover(),
+                    );
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(Rect::from_min_size(
+                                area_rect.min,
+                                Vec2::new(area_rect.width(), rows as f32 * ROW_H),
+                            ))
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    child.set_clip_rect(area_rect.intersect(child.clip_rect()));
+                    let ui = &mut child;
                     if results.is_empty() {
                         ui.label(
                             egui::RichText::new(
@@ -167,7 +187,7 @@ pub fn ui(
                     for (i, e) in results.iter().enumerate() {
                         let sel = i == st.selected;
                         let (rect, row) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 32.0),
+                            Vec2::new(ui.available_width(), ROW_H - 2.0),
                             egui::Sense::click(),
                         );
                         let fill = if sel {
@@ -226,14 +246,14 @@ pub fn ui(
                     }
                 });
         });
-    if closing {
+    if st.closing {
         return Outcome::Closing;
     }
     if enter && !results.is_empty() {
         chosen = Some(st.selected);
     }
     if let Some(i) = chosen {
-        let e = results[i];
+        let e = &results[i];
         return Outcome::Chosen(e.command.clone(), e.key.clone());
     }
     // A click anywhere else closes it.
@@ -242,7 +262,7 @@ pub fn ui(
             .input(|i| i.pointer.interact_pos())
             .is_some_and(|p| !area.response.rect.contains(p));
     if clicked_outside {
-        st.closing_at = Some(now);
+        st.closing = true;
         return Outcome::Closing;
     }
     Outcome::Open
