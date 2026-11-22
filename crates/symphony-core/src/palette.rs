@@ -11,10 +11,23 @@ pub struct Swatch {
     pub name: String,
     /// sRGB (E10.4).
     pub rgb: [u8; 3],
+    #[serde(default = "opaque")]
+    pub opacity: u8,
     /// Harmony's Protect Colour: while Respect Protected Colours is on,
     /// painting never repaints or unpaints what uses this swatch.
     #[serde(default)]
     pub protected: bool,
+}
+
+fn opaque() -> u8 {
+    255
+}
+
+impl Swatch {
+    pub fn rgba(&self) -> [u8; 4] {
+        let [r, g, b] = self.rgb;
+        [r, g, b, self.opacity]
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -42,5 +55,6 @@ mod tests {
         let old = r#"{"id":7,"name":"Ink","rgb":[0,0,0]}"#;
         let sw: Swatch = serde_json::from_str(old).unwrap();
         assert!(!sw.protected);
+        assert_eq!(sw.opacity, 255);
     }
 }

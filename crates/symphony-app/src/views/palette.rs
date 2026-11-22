@@ -36,6 +36,22 @@ impl PaletteState {
     }
 }
 
+fn placeholder(here: Option<View>) -> &'static str {
+    match here {
+        Some(View::Node | View::NodeLibrary) => "Search nodes and effects…",
+        Some(View::Drawing) => "Search drawing tools and actions…",
+        Some(View::Camera) => "Search camera, playback, and views…",
+        Some(View::Timeline | View::Xsheet) => "Search frames, layers, and timing…",
+        Some(View::Colour) => "Search colours and palettes…",
+        Some(View::Function) => "Search keyframes and timing…",
+        Some(View::ToolProperties | View::LayerProperties) => {
+            "Search tools, properties, and settings…"
+        }
+        Some(View::Library) => "Search the library and views…",
+        None => "Search tools, actions, and settings…",
+    }
+}
+
 const WIDTH: f32 = 420.0;
 const ROWS: usize = 9;
 const ROW_H: f32 = 34.0;
@@ -145,7 +161,7 @@ pub fn ui(
                     ui.set_width(WIDTH);
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut st.query)
-                            .hint_text("Search tools, actions, settings… or try \"go to frame 12\"")
+                            .hint_text(placeholder(st.here))
                             .desired_width(f32::INFINITY)
                             .font(theme::body()),
                     );

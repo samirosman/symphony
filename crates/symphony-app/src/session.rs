@@ -1155,6 +1155,67 @@ impl Session {
         );
     }
 
+    /// Apply the active swatch to selected lines and closed regions they enclose.
+    pub fn fill_selection(&mut self) {
+        let Some(drawing) = self.selection.drawing else {
+            return;
+        };
+        let Some(exposure) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let selected = self.selected_strokes();
+        let mut edits = Vec::new();
+        for stroke in &selected {
+            if stroke.kind != StrokeKind::Invisible
+                && stroke.swatch != self.swatch
+                && !self.is_locked(stroke.swatch)
+            {
+                edits.push(Edit::SetStrokeSwatch {
+                    drawing,
+                    stroke: stroke.id,
+                    before: stroke.swatch,
+                    after: self.swatch,
+                });
+            }
+        }
+        let mut new_fills = Vec::new();
+        for art in ArtLayer::STACK {
+            let boundary: Vec<_> = selected
+                .iter()
+                .copied()
+                .filter(|stroke| stroke.art == art)
+                .collect();
+            for zone in symphony_vector::fill::enclosed_zones(&boundary, 1.0) {
+                let [x, y] = zone.sample;
+                if let Some(fill) = exposure
+                    .fills
+                    .iter()
+                    .rev()
+                    .find(|fill| fill.art == art && fill.contains(x, y))
+                {
+                    if fill.swatch != self.swatch && !self.is_locked(fill.swatch)
+                        && !edits.iter().any(|edit| matches!(edit, Edit::SetFillSwatch { fill: id, .. } if *id == fill.id)) {
+                        edits.push(Edit::SetFillSwatch { drawing, fill: fill.id, before: fill.swatch, after: self.swatch });
+                    }
+                } else if !new_fills.iter().any(|fill: &symphony_core::stroke::Fill| {
+                    fill.art == art && fill.contains(x, y)
+                }) {
+                    new_fills.push(symphony_core::stroke::Fill {
+                        id: Id(0),
+                        swatch: self.swatch,
+                        art,
+                        contours: zone.contours,
+                    });
+                }
+            }
+        }
+        for mut fill in new_fills {
+            fill.id = self.doc.ids.fresh();
+            edits.push(Edit::AddFill { drawing, fill });
+        }
+        self.history.apply(&mut self.doc, "Fill selection", edits);
+    }
+
     pub fn delete_selection(&mut self) {
         let Some(drawing) = self.selection.drawing else {
             return;
@@ -1692,13 +1753,14 @@ impl Session {
     }
 
     pub fn add_swatch(&mut self) {
-        let rgb = self.doc.palette.get(self.swatch).map_or([0; 3], |s| s.rgb);
+        let [r, g, b, opacity] = self.doc.swatch_rgba(self.swatch);
         let id = self.doc.ids.fresh();
         let mut palette = self.doc.palette.clone();
         palette.swatches.push(symphony_core::palette::Swatch {
             id,
             name: "New colour".into(),
-            rgb,
+            rgb: [r, g, b],
+            opacity,
             protected: false,
         });
         self.apply_palette("Add colour", palette, Vec::new());
@@ -2062,9 +2124,9 @@ impl Session {
     }
 
     /// Recolour a swatch. Every stroke using it changes (E2.3).
-    pub fn set_swatch(&mut self, swatch: Id, rgb: [u8; 3]) {
-        let before = self.doc.swatch_rgb(swatch);
-        if before != rgb {
+    pub fn set_swatch(&mut self, swatch: Id, rgba: [u8; 4]) {
+        let before = self.doc.swatch_rgba(swatch);
+        if before != rgba {
             self.history.apply_merged(
                 &mut self.doc,
                 "Edit swatch",
@@ -2072,7 +2134,7 @@ impl Session {
                 Edit::SetSwatch {
                     swatch,
                     before,
-                    after: rgb,
+                    after: rgba,
                 },
             );
         }

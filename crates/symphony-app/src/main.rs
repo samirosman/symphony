@@ -929,7 +929,12 @@ impl SymphonyApp {
                     let at = ctx
                         .pointer_hover_pos()
                         .unwrap_or_else(|| ctx.content_rect().center());
-                    self.palette = Some(views::palette::PaletteState::new(at, self.hovered_view));
+                    let here = self.hovered_view.or_else(|| {
+                        self.layout_mut()
+                            .find_active_focused()
+                            .map(|(_, view)| *view)
+                    });
+                    self.palette = Some(views::palette::PaletteState::new(at, here));
                 }
             }
             Action::MaximiseView => {
@@ -1034,6 +1039,20 @@ impl SymphonyApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        if self.palette.is_none() && self.s.tool == Tool::Select {
+            self.s.validate_selection();
+            if !self.s.selection.strokes.is_empty() {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F)) {
+                    self.s.fill_selection();
+                }
+                if ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+                        || i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                }) {
+                    self.s.delete_selection();
+                }
+            }
         }
         for a in Action::ALL {
             if keymap::pressed(ctx, self.profile, a) {
@@ -1523,6 +1542,28 @@ impl SymphonyApp {
         use symphony_core::stroke::ArtLayer;
         let canvas = [View::Camera, View::Drawing];
         let mut out: Vec<Entry> = Vec::new();
+        let node_views = vec![View::Node, View::NodeLibrary];
+        for kind in views::node::addable_nodes() {
+            let name = views::node::kind_label(&kind);
+            let mut entry = Entry::new(
+                &format!("Add {name}"),
+                Kind::Node,
+                Command::AddNode(kind),
+                &format!("node.add.{name}"),
+            )
+            .words("node create insert effect");
+            entry.context.clone_from(&node_views);
+            out.push(entry);
+        }
+        let mut drawing = Entry::new(
+            "Add Drawing node",
+            Kind::Node,
+            Command::AddDrawingNode,
+            "node.add.drawing",
+        )
+        .words("create insert drawing layer");
+        drawing.context = node_views;
+        out.push(drawing);
         for a in Action::ALL {
             if a == Action::Search {
                 continue;
@@ -1865,6 +1906,10 @@ impl SymphonyApp {
                 }
             }
             Command::SetArt(a) => self.s.set_art(a),
+            Command::AddDrawingNode => self.s.add_layer(),
+            Command::AddNode(kind) => {
+                views::node::add_from_search(&mut self.s, &mut self.node_view, kind)
+            }
         }
     }
 

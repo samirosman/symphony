@@ -103,6 +103,36 @@ impl Cache {
     }
 }
 
+/// Cut a stage-shaped opening in an opaque black surround, including after rotation.
+pub(super) fn mask_outside_stage(
+    painter: &egui::Painter,
+    viewport: egui::Rect,
+    corners: [Pos2; 4],
+) {
+    let center = corners[0].lerp(corners[2], 0.5);
+    let half_side = corners[0]
+        .distance(corners[1])
+        .min(corners[1].distance(corners[2]))
+        * 0.5;
+    if half_side <= f32::EPSILON {
+        painter.rect_filled(viewport, 0.0, Color32::BLACK);
+        return;
+    }
+    let reach = viewport.center().distance(center) + viewport.size().length();
+    let scale = (reach / half_side).max(1.0);
+    let outside = corners.map(|corner| center + (corner - center) * scale);
+    let mut border = egui::Mesh::default();
+    for point in corners.into_iter().chain(outside) {
+        border.colored_vertex(point, Color32::BLACK);
+    }
+    for a in 0..4 {
+        let b = (a + 1) % 4;
+        border.add_triangle(a, b, a + 4);
+        border.add_triangle(a + 4, b, b + 4);
+    }
+    painter.add(egui::Shape::mesh(border));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,9 +188,17 @@ mod tests {
             })
         };
         assert!(draws_camera_texture(harness.output()));
+        let draws_stage_mask = |output: &egui::FullOutput| {
+            output.shapes.iter().any(|shape| matches!(
+                &shape.shape, egui::Shape::Mesh(mesh) if mesh.vertices.len() == 8
+                    && mesh.indices.len() == 24 && mesh.vertices.iter().all(|v| v.color == Color32::BLACK)
+            ))
+        };
+        assert!(draws_stage_mask(harness.output()));
         harness.state_mut().3 = true;
         harness.run_steps(1);
         assert!(!draws_camera_texture(harness.output()));
+        assert!(!draws_stage_mask(harness.output()));
         assert!(harness.state().2.display.texture.is_none());
     }
 }

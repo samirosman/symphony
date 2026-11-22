@@ -1,4 +1,5 @@
 pub mod camera;
+mod colour_picker;
 pub mod export;
 pub mod function;
 pub mod node;

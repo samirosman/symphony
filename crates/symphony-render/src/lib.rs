@@ -124,9 +124,9 @@ fn paint_drawing(
                 pb.close();
             }
             let Some(path) = pb.finish() else { continue };
-            let [r, g, b] = scene.swatch_rgb(fill.swatch);
+            let [r, g, b, alpha] = scene.swatch_rgba(fill.swatch);
             let mut paint = Paint::default();
-            paint.set_color_rgba8(r, g, b, 255);
+            paint.set_color_rgba8(r, g, b, alpha);
             paint.anti_alias = true;
             pix.fill_path(
                 &path,
@@ -192,9 +192,9 @@ fn paint_strokes(
                 pb.close();
             }
             let Some(path) = pb.finish() else { continue };
-            let [r, g, b] = scene.swatch_rgb(st.swatch);
+            let [r, g, b, alpha] = scene.swatch_rgba(st.swatch);
             let mut paint = Paint::default();
-            paint.set_color_rgba8(r, g, b, 255);
+            paint.set_color_rgba8(r, g, b, alpha);
             paint.anti_alias = true;
             pix.fill_path(
                 &path,
@@ -222,12 +222,13 @@ fn paint_textured(
     let Some(c) = symphony_vector::stamp::rasterize(st, tex, tip, grain, m, clip) else {
         return;
     };
-    let [r, g, b] = scene.swatch_rgb(st.swatch);
+    let [r, g, b, alpha] = scene.swatch_rgba(st.swatch);
     let width = pix.width() as i32;
     let data = pix.data_mut();
     for row in 0..c.height as i32 {
         for col in 0..c.width as i32 {
-            let a = c.data[(row * c.width as i32 + col) as usize] as u32;
+            let coverage = c.data[(row * c.width as i32 + col) as usize] as u32;
+            let a = (coverage * u32::from(alpha) + 127) / 255;
             if a == 0 {
                 continue;
             }
@@ -440,6 +441,32 @@ mod tests {
         let ink = s.palette.swatches[0].rgb[0];
         assert!(row.contains(&255), "paper shows through the grain: {row:?}");
         assert!(row.contains(&ink), "ink where the grain is white: {row:?}");
+    }
+
+    #[test]
+    fn swatch_opacity_limits_textured_brush_coverage() {
+        let mut scene = scene_with_line();
+        let drawing = scene.drawings.values_mut().next().unwrap();
+        let stroke = &mut drawing.strokes[0];
+        stroke.texture = Some(symphony_core::stroke::StrokeTexture {
+            tip: None,
+            grain: None,
+            spacing: 0.1,
+            opacity: 1.0,
+            angle: 0.0,
+            follow: false,
+            grain_scale: 1.0,
+            flow: 1.0,
+            hardness: 1.0,
+            opacity_by_pressure: [0.0, 0.33, 0.66, 1.0],
+        });
+        let brush_swatch = scene.palette.get_mut(stroke.swatch).unwrap();
+        brush_swatch.opacity = 128;
+        let image = render_camera(&scene, 1, 200, 100, None).unwrap();
+        assert_eq!(
+            image.pixels().iter().map(|pixel| pixel.alpha()).max(),
+            Some(128)
+        );
     }
 
     #[test]

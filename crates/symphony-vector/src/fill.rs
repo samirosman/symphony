@@ -43,17 +43,13 @@ pub fn find_zone(
     if x <= lo[0] || y <= lo[1] || x >= hi[0] || y >= hi[1] {
         return Err(ZoneError::Open);
     }
-    let span = (hi[0] - lo[0]).max(hi[1] - lo[1]);
-    let cell = cell.max(span / MAX_GRID).max(1e-4);
-    // A one-cell margin of empty space all round: reaching it means "open".
-    let origin = [lo[0] - cell, lo[1] - cell];
-    let w = ((hi[0] - lo[0]) / cell).ceil() as usize + 3;
-    let h = ((hi[1] - lo[1]) / cell).ceil() as usize + 3;
-
-    let mut ink = vec![false; w * h];
-    for st in strokes {
-        rasterize(st, &mut ink, w, h, origin, cell);
-    }
+    let PaintGrid {
+        ink,
+        width: w,
+        height: h,
+        origin,
+        cell,
+    } = paint_grid(strokes, lo, hi, cell);
     let seed = (
         ((x - origin[0]) / cell) as usize,
         ((y - origin[1]) / cell) as usize,
@@ -79,6 +75,129 @@ pub fn find_zone(
         }
     }
 
+    Ok(trace_paint_zone(zone, &ink, w, h, origin, cell))
+}
+
+struct PaintGrid {
+    ink: Vec<bool>,
+    width: usize,
+    height: usize,
+    origin: [f32; 2],
+    cell: f32,
+}
+
+fn paint_grid(strokes: &[&Stroke], lo: [f32; 2], hi: [f32; 2], cell: f32) -> PaintGrid {
+    let span = (hi[0] - lo[0]).max(hi[1] - lo[1]);
+    let cell = cell.max(span / MAX_GRID).max(1e-4);
+    // A one-cell margin of empty space all round: reaching it means "open".
+    let origin = [lo[0] - cell, lo[1] - cell];
+    let w = ((hi[0] - lo[0]) / cell).ceil() as usize + 3;
+    let h = ((hi[1] - lo[1]) / cell).ceil() as usize + 3;
+
+    let mut ink = vec![false; w * h];
+    for st in strokes {
+        rasterize(st, &mut ink, w, h, origin, cell);
+    }
+    PaintGrid {
+        ink,
+        width: w,
+        height: h,
+        origin,
+        cell,
+    }
+}
+
+pub struct PaintZone {
+    pub sample: [f32; 2],
+    pub contours: Vec<Vec<[f32; 2]>>,
+}
+
+/// Every region enclosed by these strokes, with an interior sample for
+/// matching existing paint. Rasterize once even when the selection contains
+/// multiple disconnected or concave regions.
+pub fn enclosed_zones(strokes: &[&Stroke], cell: f32) -> Vec<PaintZone> {
+    let Some((lo, hi)) = crate::bounds_of(strokes.iter().copied()) else {
+        return Vec::new();
+    };
+    let PaintGrid {
+        ink,
+        width: w,
+        height: h,
+        origin,
+        cell,
+    } = paint_grid(strokes, lo, hi, cell);
+    let mut visited = ink.clone();
+    let mut zones = Vec::new();
+    let mut region = Vec::new();
+    for seed in 0..visited.len() {
+        if visited[seed] {
+            continue;
+        }
+        let (x, y) = (seed % w, seed / w);
+        let (mut left, mut top, mut right, mut bottom) = (x, y, x, y);
+        let mut open = false;
+        visited[seed] = true;
+        region.clear();
+        region.push((x, y));
+        let mut i = 0;
+        while let Some(&(x, y)) = region.get(i) {
+            i += 1;
+            left = left.min(x);
+            right = right.max(x);
+            top = top.min(y);
+            bottom = bottom.max(y);
+            open |= x == 0 || y == 0 || x == w - 1 || y == h - 1;
+            for (nx, ny) in [
+                (x.saturating_sub(1), y),
+                ((x + 1).min(w - 1), y),
+                (x, y.saturating_sub(1)),
+                (x, (y + 1).min(h - 1)),
+            ] {
+                let index = ny * w + nx;
+                if !visited[index] {
+                    visited[index] = true;
+                    region.push((nx, ny));
+                }
+            }
+        }
+        if open {
+            continue;
+        }
+        left = left.saturating_sub(TUCK + 1);
+        top = top.saturating_sub(TUCK + 1);
+        right = (right + TUCK + 1).min(w - 1);
+        bottom = (bottom + TUCK + 1).min(h - 1);
+        let width = right - left + 1;
+        let height = bottom - top + 1;
+        let local_ink: Vec<_> = (top..=bottom)
+            .flat_map(|row| ink[row * w + left..=row * w + right].iter().copied())
+            .collect();
+        let mut mask = vec![false; width * height];
+        for &(x, y) in &region {
+            mask[(y - top) * width + x - left] = true;
+        }
+        let local_origin = [
+            origin[0] + left as f32 * cell,
+            origin[1] + top as f32 * cell,
+        ];
+        let sample = [
+            origin[0] + (x as f32 + 0.5) * cell,
+            origin[1] + (y as f32 + 0.5) * cell,
+        ];
+        let contours = trace_paint_zone(mask, &local_ink, width, height, local_origin, cell);
+        zones.push(PaintZone { sample, contours });
+    }
+    zones
+}
+
+fn trace_paint_zone(
+    mut zone: Vec<bool>,
+    ink: &[bool],
+    w: usize,
+    h: usize,
+    origin: [f32; 2],
+    cell: f32,
+) -> Vec<Vec<[f32; 2]>> {
     // Tuck the zone under the surrounding ink.
     for _ in 0..TUCK {
         let prev = zone.clone();
@@ -99,14 +218,14 @@ pub fn find_zone(
     }
     loops.retain(|l| l.len() >= 3);
     loops.sort_by(|a, b| area(b).abs().total_cmp(&area(a).abs()));
-    Ok(loops
+    loops
         .into_iter()
         .map(|l| {
             l.into_iter()
                 .map(|(gx, gy)| [origin[0] + gx * cell, origin[1] + gy * cell])
                 .collect()
         })
-        .collect())
+        .collect()
 }
 
 /// Mark grid cells covered by the stroke (its width, or at least a cell).
@@ -369,6 +488,25 @@ mod tests {
             art: ArtLayer::LineArt,
             contours,
         }
+    }
+
+    #[test]
+    fn finds_each_separate_closed_region_in_a_selection() {
+        let left = square(-30.0, 8.0);
+        let right = square(30.0, 8.0);
+        let open = line(&[(-10.0, 1.0), (10.0, 1.0)]);
+        let zones = enclosed_zones(&[&left, &right, &open], 1.0);
+        assert_eq!(zones.len(), 2);
+        let fills: Vec<_> = zones
+            .into_iter()
+            .map(|zone| {
+                let fill = as_fill(zone.contours);
+                assert!(fill.contains(zone.sample[0], zone.sample[1]));
+                fill
+            })
+            .collect();
+        assert!(fills.iter().any(|fill| fill.contains(-30.0, -30.0)));
+        assert!(fills.iter().any(|fill| fill.contains(30.0, 30.0)));
     }
 
     #[test]

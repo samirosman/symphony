@@ -1,7 +1,7 @@
 //! Select and Transform tools on the canvas, following Harmony 27:
 //! - Select works on whole strokes of the current drawing. Click to pick,
-//!   Shift to add, drag empty space for a Lasso (or Marquee) selection;
-//!   Option/Alt swaps the mode while held, Shift+Option/Alt removes.
+//!   Shift adds and Control subtracts. Click empty space to place polygon
+//!   anchors, drag an anchor to curve it, or drag on empty space to lasso.
 //! - Transform works on layers through their pegs (cut-out animation):
 //!   click artwork to pick its layer, then move, rotate or scale it. In
 //!   Animate mode this sets keyframes.
@@ -23,6 +23,50 @@ const HANDLE: f32 = 7.0;
 const ROTATE_ZONE: f32 = 24.0;
 /// Pick tolerance in screen points.
 const PICK: f32 = 5.0;
+const LASSO_THRESHOLD: f32 = 8.0;
+const CLOSE_RADIUS: f32 = 9.0;
+
+#[derive(Clone, Copy)]
+struct Anchor {
+    at: Pos2,
+    handle: Vec2,
+}
+
+fn outline(anchors: &[Anchor], closed: bool) -> Vec<Pos2> {
+    let Some(first) = anchors.first() else {
+        return Vec::new();
+    };
+    let mut points = vec![first.at];
+    for (i, pair) in anchors
+        .iter()
+        .enumerate()
+        .take(anchors.len() - usize::from(!closed))
+    {
+        let next = anchors[(i + 1) % anchors.len()];
+        if pair.handle == Vec2::ZERO && next.handle == Vec2::ZERO {
+            points.push(next.at);
+            continue;
+        }
+        let a = pair.at;
+        let b = a + pair.handle;
+        let d = next.at;
+        let c = d - next.handle;
+        let length = a.distance(b) + b.distance(c) + c.distance(d);
+        let steps = (length / 4.0).ceil().clamp(4.0, 96.0) as usize;
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            let u = 1.0 - t;
+            points.push(
+                Pos2::ZERO
+                    + a.to_vec2() * (u * u * u)
+                    + b.to_vec2() * (3.0 * u * u * t)
+                    + c.to_vec2() * (3.0 * u * t * t)
+                    + d.to_vec2() * (t * t * t),
+            );
+        }
+    }
+    points
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
@@ -49,6 +93,10 @@ struct Drag {
 pub struct SelectState {
     drag: Option<Drag>,
     lasso: Vec<Pos2>,
+    polygon: Vec<Anchor>,
+    polygon_drag: Option<Pos2>,
+    lasso_active: bool,
+    polygon_owner: Option<(String, Option<Id>, symphony_core::stroke::ArtLayer)>,
     marquee: Option<Pos2>,
     /// Drawing-local transform being previewed while dragging (Select tool).
     pub preview: Option<Affine>,
@@ -182,7 +230,16 @@ pub fn ui(
     view: Affine,
     items: &[Item],
 ) {
-    let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+    let (shift, alt, ctrl, enter, escape, view_pointer) = ui.input(|i| {
+        (
+            i.modifiers.shift,
+            i.modifiers.alt,
+            i.modifiers.ctrl,
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+            i.pointer.press_origin(),
+        )
+    });
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
     let transform_tool = s.tool == Tool::Transform;
 
@@ -217,9 +274,24 @@ pub fn ui(
         _ => None,
     };
 
+    let drawing = s.selection.drawing;
+    let has_polygon = |st: &SelectState| !st.polygon.is_empty() || st.polygon_drag.is_some();
+    if has_polygon(st)
+        && (transform_tool
+            || escape
+            || !st
+                .polygon_owner
+                .as_ref()
+                .is_some_and(|(key, d, art)| key == &s.key && *d == drawing && *art == s.art))
+    {
+        st.polygon.clear();
+        st.polygon_drag = None;
+    }
+    let mut finish_polygon = enter && !st.polygon.is_empty() && response.hovered();
+
     // Start a gesture.
     if response.drag_started() {
-        if let Some(p) = response.interact_pointer_pos() {
+        if let Some(p) = view_pointer.or(response.interact_pointer_pos()) {
             let on_box = target.and_then(|(lo, hi, m)| grab(p, lo, hi, m).map(|k| (k, lo, hi, m)));
             let start_drag =
                 |kind: Kind, lo: [f32; 2], hi: [f32; 2], m: Affine, s: &mut Session| {
@@ -243,11 +315,18 @@ pub fn ui(
                         peg,
                     }
                 };
-            if let Some((kind, lo, hi, m)) = on_box.filter(|(k, ..)| {
-                *k != Kind::Move || s.easy_drag || hit_selection(s, p, view, items, transform_tool)
+            if !st.polygon.is_empty() {
+                st.polygon_drag = Some(p);
+            } else if let Some((kind, lo, hi, m)) = on_box.filter(|(k, ..)| {
+                (transform_tool || !shift && !ctrl)
+                    && (*k != Kind::Move
+                        || s.easy_drag
+                        || hit_selection(s, p, view, items, transform_tool))
             }) {
                 st.drag = Some(start_drag(kind, lo, hi, m, s));
-            } else if pick(s, p, view, items, transform_tool, shift).is_some() {
+            } else if (transform_tool || !shift && !ctrl)
+                && pick(s, p, view, items, transform_tool, false, false).is_some()
+            {
                 // Dragging unselected artwork selects it and moves it at once.
                 let fresh = if transform_tool {
                     items
@@ -265,11 +344,12 @@ pub fn ui(
                     st.drag = Some(start_drag(Kind::Move, lo, hi, m, s));
                 }
             } else if !transform_tool {
-                let marquee = s.marquee_mode != alt || (shift && alt && s.marquee_mode);
+                let marquee = s.marquee_mode != alt;
                 if marquee {
                     st.marquee = Some(p);
                 } else {
                     st.lasso = vec![p];
+                    st.lasso_active = false;
                 }
             }
         }
@@ -286,8 +366,11 @@ pub fn ui(
                         st.preview = Some(l);
                     }
                 }
-            } else if !st.lasso.is_empty() && st.lasso.last().is_none_or(|q| q.distance(p) > 2.0) {
-                st.lasso.push(p);
+            } else if let Some(start) = st.lasso.first() {
+                st.lasso_active |= start.distance(p) >= LASSO_THRESHOLD;
+                if st.lasso_active && st.lasso.last().is_some_and(|q| q.distance(p) > 2.0) {
+                    st.lasso.push(p);
+                }
             }
         }
     }
@@ -307,6 +390,24 @@ pub fn ui(
             }
         }
         st.preview = None;
+        if let Some(at) = st.polygon_drag.take() {
+            let end = response.interact_pointer_pos().unwrap_or(at);
+            if st.polygon.len() >= 3
+                && at.distance(st.polygon[0].at) <= CLOSE_RADIUS
+                && at.distance(end) < LASSO_THRESHOLD
+            {
+                finish_polygon = true;
+            } else {
+                st.polygon.push(Anchor {
+                    at,
+                    handle: if at.distance(end) >= LASSO_THRESHOLD {
+                        end - at
+                    } else {
+                        Vec2::ZERO
+                    },
+                });
+            }
+        }
         let area: Option<Vec<[f32; 2]>> = if let Some(a) = st.marquee.take() {
             let b = response.interact_pointer_pos().unwrap_or(a);
             let r = Rect::from_two_pos(a, b);
@@ -316,29 +417,83 @@ pub fn ui(
                 [r.max.x, r.max.y],
                 [r.min.x, r.max.y],
             ])
-        } else if st.lasso.len() > 2 {
-            Some(
-                std::mem::take(&mut st.lasso)
-                    .into_iter()
-                    .map(|q| [q.x, q.y])
-                    .collect(),
-            )
+        } else if std::mem::take(&mut st.lasso_active) {
+            let mut points = std::mem::take(&mut st.lasso);
+            if let Some(end) = response.interact_pointer_pos() {
+                points.push(end);
+            }
+            (points.len() >= 3).then(|| points.into_iter().map(|p| [p.x, p.y]).collect())
         } else {
+            if let Some(at) = st.lasso.first().copied() {
+                if pick(s, at, view, items, false, shift, ctrl).is_none() {
+                    st.polygon.push(Anchor {
+                        at,
+                        handle: Vec2::ZERO,
+                    });
+                }
+            }
             st.lasso.clear();
             None
         };
         if let Some(poly) = area {
-            select_area(s, &poly, view, items, shift, shift && alt);
+            select_area(s, &poly, view, items, shift, ctrl);
         }
     }
 
-    // Plain click: pick, or clear when clicking empty space.
     if response.clicked() {
         if let Some(p) = response.interact_pointer_pos() {
-            if pick(s, p, view, items, transform_tool, shift).is_none() && !shift && !transform_tool
+            if st.polygon.len() >= 3 && p.distance(st.polygon[0].at) <= CLOSE_RADIUS {
+                finish_polygon = true;
+            } else if !st.polygon.is_empty()
+                || (pick(s, p, view, items, transform_tool, shift, ctrl).is_none()
+                    && !transform_tool)
             {
-                s.deselect();
+                st.polygon.push(Anchor {
+                    at: p,
+                    handle: Vec2::ZERO,
+                });
             }
+        }
+    }
+    if !st.polygon.is_empty() {
+        st.polygon_owner = Some((s.key.clone(), drawing, s.art));
+    }
+    if finish_polygon && st.polygon.len() >= 3 {
+        let anchors = std::mem::take(&mut st.polygon);
+        let points: Vec<_> = outline(&anchors, true)
+            .into_iter()
+            .map(|p| [p.x, p.y])
+            .collect();
+        select_area(s, &points, view, items, shift, ctrl);
+    }
+    if !st.polygon.is_empty() {
+        let mut anchors = st.polygon.clone();
+        if let Some(at) = st.polygon_drag {
+            anchors.push(Anchor {
+                at,
+                handle: pointer.unwrap_or(at) - at,
+            });
+        } else if let Some(at) = response.hover_pos() {
+            anchors.push(Anchor {
+                at,
+                handle: Vec2::ZERO,
+            });
+        }
+        let line = outline(&anchors, false);
+        if line.len() > 1 {
+            painter.add(egui::Shape::line(
+                line,
+                EStroke::new(1.2, theme::ACCENT_SELECT),
+            ));
+        }
+        for anchor in &st.polygon {
+            painter.circle_filled(anchor.at, 3.5, theme::ACCENT_SELECT);
+        }
+        if let (Some(at), Some(end)) = (st.polygon_drag, pointer) {
+            painter.line_segment(
+                [at - (end - at), end],
+                EStroke::new(1.0, theme::ACCENT_SELECT),
+            );
         }
     }
 
@@ -467,14 +622,15 @@ fn layer_at(s: &Session, p: Pos2, view: Affine, items: &[Item]) -> Option<usize>
 }
 
 /// Click picking. Transform picks a layer; Select picks a stroke in the
-/// current drawing (Shift adds or toggles).
+/// current drawing (Shift adds, Control subtracts).
 fn pick(
     s: &mut Session,
     p: Pos2,
     view: Affine,
     items: &[Item],
     transform_tool: bool,
-    shift: bool,
+    add: bool,
+    remove: bool,
 ) -> Option<usize> {
     if transform_tool {
         let layer = layer_at(s, p, view, items)?;
@@ -497,10 +653,10 @@ fn pick(
         .rev()
         .find(|st| st.art == s.art && hits(st, x, y, r))?
         .id;
-    if shift {
-        if let Some(i) = s.selection.strokes.iter().position(|id| *id == hit) {
-            s.selection.strokes.remove(i);
-        } else {
+    if remove {
+        s.selection.strokes.retain(|id| *id != hit);
+    } else if add {
+        if !s.selection.strokes.contains(&hit) {
             s.selection.strokes.push(hit);
         }
     } else if !s.selection.strokes.contains(&hit) {
@@ -547,5 +703,65 @@ fn select_area(
         }
     } else {
         s.selection.strokes = inside;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    #[test]
+    fn short_gesture_places_an_anchor_and_next_drag_bends_the_outline() {
+        let mut session = Session::new_scene();
+        session.tool = Tool::Select;
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(500.0, 400.0))
+            .build_ui_state(
+                |ui, (session, state)| {
+                    let (response, painter) =
+                        ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+                    super::ui(
+                        ui,
+                        &response,
+                        &painter,
+                        session,
+                        state,
+                        Affine::IDENTITY,
+                        &[],
+                    );
+                },
+                (session, SelectState::default()),
+            );
+        let first = Pos2::new(100.0, 100.0);
+        let next = Pos2::new(180.0, 100.0);
+        let handle = Vec2::new(30.0, 35.0);
+        let mut pointer = |pos, pressed| {
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run_steps(1);
+        };
+        pointer(first, Some(true));
+        pointer(first + Vec2::new(4.0, 1.0), None);
+        pointer(first + Vec2::new(4.0, 1.0), Some(false));
+        pointer(next, Some(true));
+        pointer(next + handle, None);
+        pointer(next + handle, Some(false));
+        let anchors = &harness.state().1.polygon;
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0].handle, Vec2::ZERO);
+        assert_eq!(anchors[1].at, next);
+        assert_eq!(anchors[1].handle, handle);
+        assert!(outline(anchors, false).iter().any(|point| point.y < 95.0));
     }
 }

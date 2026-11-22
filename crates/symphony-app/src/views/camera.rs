@@ -523,7 +523,11 @@ pub fn ui(
     painter.rect_filled(
         rect,
         f32::from(theme::GLASS_RADIUS) - 4.0,
-        CanvasColours::get(colours.surround),
+        if drawing_only {
+            CanvasColours::get(colours.surround)
+        } else {
+            Color32::BLACK
+        },
     );
     let corners = [
         (-w / 2.0, -h / 2.0),
@@ -532,7 +536,7 @@ pub fn ui(
         (-w / 2.0, h / 2.0),
     ]
     .map(|(x, y)| to_pos(view.apply(x, y)));
-    if state.rotation == 0.0 {
+    if drawing_only && state.rotation == 0.0 {
         let stage = Rect::from_two_pos(corners[0], corners[2]);
         let shadow = egui::Shadow {
             offset: [0, 10],
@@ -549,8 +553,8 @@ pub fn ui(
     ));
 
     let colour = |s: &Session, swatch: Id| {
-        let [r, g, b] = s.doc.swatch_rgb(swatch);
-        Color32::from_rgb(r, g, b)
+        let [r, g, b, a] = s.doc.swatch_rgba(swatch);
+        Color32::from_rgba_unmultiplied(r, g, b, a)
     };
 
     // The selected layer's transform, for onion skin and new strokes.
@@ -994,7 +998,7 @@ pub fn ui(
     } else {
         None
     };
-    if let Some(hint) = hint {
+    if let Some(hint) = hint.filter(|_| drawing_only) {
         painter.text(
             rect.left_top() + Vec2::new(10.0, 8.0),
             Align2::LEFT_TOP,
@@ -1020,6 +1024,9 @@ pub fn ui(
             screen_per_size: size_unit(s, px) / px,
         },
     );
+    if !drawing_only {
+        camera_render::mask_outside_stage(&painter, rect, corners);
+    }
     bottom_toolbar(ui, state, profile);
 }
 

@@ -30,6 +30,8 @@ pub enum Command {
     SelectSwatch(symphony_core::id::Id),
     UsePreset { pencil: bool, name: String },
     SetArt(symphony_core::stroke::ArtLayer),
+    AddDrawingNode,
+    AddNode(symphony_core::graph::NodeKind),
 }
 
 /// Settings that search can flip directly.
@@ -55,6 +57,7 @@ pub enum Kind {
     Layer,
     Colour,
     Preset,
+    Node,
     Go,
 }
 
@@ -68,6 +71,7 @@ impl Kind {
             Kind::Layer => "Layer",
             Kind::Colour => "Colour",
             Kind::Preset => "Preset",
+            Kind::Node => "Node",
             Kind::Go => "Go",
         }
     }

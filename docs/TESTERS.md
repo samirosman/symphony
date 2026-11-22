@@ -61,7 +61,9 @@ current source checkout and opens the resulting app, including local edits.
 
 ## Edit the Node view
 
-Use **Add node** to create a Drawing, Peg, or Composite. Drag a node card
+Use **Add node** or press **Tab** and search for a node by name, such as
+**Add Peg** or **Add Box Blur**. Search still includes actions from other
+views. Double-click a node to open its properties. Drag a node card
 to place it or drag blank space to pan. Drag from a bottom output to a
 compatible top input to connect them.
 
@@ -72,6 +74,22 @@ drag. Undo and redo cover placement, node creation, and cable edits.
 
 Node positions and cables are saved with the project. After a manual
 cable edit, composite input order controls stacking in the graph.
+
+## Select and colour drawings
+
+With **Select**, click an existing stroke to select it. On empty space,
+click to place straight anchors, then click and drag an anchor to make a
+curve. Click the first anchor or press Enter to finish. Drag from empty
+space before placing any anchors to draw a freehand lasso.
+
+Shift adds to the current selection and Control subtracts. Use the
+selection handles to move, scale, or rotate it. Backspace deletes selected
+strokes. **F** applies the active swatch to selected lines and the closed
+regions they enclose.
+
+Click a swatch to open the **Square** or **Triangle** colour picker. The
+swatch's **Opacity** sets its maximum coverage. A pressure-sensitive
+brush's opacity multiplies that coverage.
 
 ## Render simple effects
 
@@ -84,8 +102,8 @@ Select a node and click **Properties**. Set blur radius, grain amount
 and seed, gradient colors and angle, or opacity. Click **Apply** to
 commit the change as one undo step.
 
-**Camera** renders the current frame from the Display node, including
-compositing and effects. **Drawing** shows the current exposure of the
+**Camera** renders the current frame from the Camera node, including
+compositing and effects. The black area outside the stage masks artwork. **Drawing** shows the current exposure of the
 selected drawing node in its own coordinates. Use **Preview All Art
 Layers** to see the entire drawing while you edit.
 

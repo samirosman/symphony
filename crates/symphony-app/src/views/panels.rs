@@ -122,11 +122,11 @@ fn preview(ui: &mut egui::Ui, s: &Session, b: &BrushSettings, pencil: bool) {
         theme::RADIUS_CONTROL as f32,
         crate::session::CanvasColours::get(s.colours.stage),
     );
-    let [r, g, bl] = s.doc.swatch_rgb(s.swatch);
+    let [r, g, bl, a] = s.doc.swatch_rgba(s.swatch);
     paint_sample(
         p,
         rect,
-        egui::Color32::from_rgb(r, g, bl),
+        egui::Color32::from_rgba_unmultiplied(r, g, bl, a),
         b,
         s.pressure_gamma,
         pencil,
@@ -207,8 +207,8 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
         ui.selectable_value(&mut presets.grid, true, "Grid");
     });
     let list = presets.list(tool).clone();
-    let [r, g, b] = s.doc.swatch_rgb(s.swatch);
-    let ink = egui::Color32::from_rgb(r, g, b);
+    let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
+    let ink = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
     egui::ScrollArea::vertical()
         .id_salt(("preset-scroll", pencil))
         .max_height(if presets.grid { 240.0 } else { 168.0 })
@@ -756,15 +756,13 @@ pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
                             ui.interact(bar, ui.scope_id().with("protected"), egui::Sense::hover())
                                 .on_hover_text("Protected colour");
                         }
-                        let mut rgb = sw.rgb;
-                        let chip = ui
-                            .color_edit_button_srgb(&mut rgb)
-                            .on_hover_text("Edit colour");
+                        let mut rgba = sw.rgba();
+                        let chip = super::colour_picker::swatch(ui, &mut rgba);
                         if chip.clicked() || chip.changed() {
                             s.swatch = sw.id;
                         }
                         if chip.changed() {
-                            s.set_swatch(sw.id, rgb);
+                            s.set_swatch(sw.id, rgba);
                         }
                         let draft = ui.data(|d| d.get_temp::<(Id, String)>(rename));
                         if let Some((id, mut text)) = draft.filter(|(id, _)| *id == sw.id) {
@@ -986,7 +984,7 @@ pub fn prefs_canvas(ui: &mut egui::Ui, s: &mut Session) {
         ),
     ] {
         ui.horizontal(|ui| {
-            ui.color_edit_button_srgb(value).on_hover_text(tip);
+            super::colour_picker::rgb(ui, value).on_hover_text(tip);
             ui.label(label);
             if *value != default && ui.small_button("Reset").clicked() {
                 *value = default;

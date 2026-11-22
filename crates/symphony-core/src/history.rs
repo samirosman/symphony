@@ -14,10 +14,10 @@ pub enum Edit {
         node: Node,
         position: [f32; 2],
     },
-    SetNodeKind {
+    SetNodeProperties {
         id: NodeId,
-        before: NodeKind,
-        after: NodeKind,
+        before: Node,
+        after: Node,
     },
     MoveNode {
         id: NodeId,
@@ -107,8 +107,8 @@ pub enum Edit {
     },
     SetSwatch {
         swatch: Id,
-        before: [u8; 3],
-        after: [u8; 3],
+        before: [u8; 4],
+        after: [u8; 4],
     },
     SetVisible {
         column: Id,
@@ -165,9 +165,15 @@ impl Edit {
                     s.node_positions.remove(id);
                 }
             }
-            Edit::SetNodeKind { id, before, after } => {
+            Edit::SetNodeProperties { id, before, after } => {
+                let properties = if forward { after } else { before };
                 if let Some(node) = s.graph.node_mut(*id) {
-                    node.kind = if forward { after } else { before }.clone();
+                    *node = properties.clone();
+                    if let NodeKind::Drawing { column } = node.kind {
+                        if let Some(column) = s.xsheet.column_mut(column) {
+                            column.name.clone_from(&properties.name);
+                        }
+                    }
                 }
             }
             Edit::MoveNode { id, before, after } => {
@@ -350,7 +356,9 @@ impl Edit {
                 after,
             } => {
                 if let Some(sw) = s.palette.get_mut(*swatch) {
-                    sw.rgb = if forward { *after } else { *before };
+                    let [r, g, b, a] = if forward { *after } else { *before };
+                    sw.rgb = [r, g, b];
+                    sw.opacity = a;
                 }
             }
             Edit::SetVisible {

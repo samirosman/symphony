@@ -97,13 +97,14 @@ impl Scene {
     pub fn new(settings: Settings) -> Self {
         let mut graph = Graph::default();
         let composite = graph.add("Composite", NodeKind::Composite);
-        let display = graph.add("Display", NodeKind::Display);
+        let display = graph.add("Camera", NodeKind::Display);
         graph.connect(composite, display, 0);
         let mut ids = IdGen::default();
         let swatch = |ids: &mut IdGen, name: &str, rgb| Swatch {
             id: ids.fresh(),
             name: name.into(),
             rgb,
+            opacity: 255,
             protected: false,
         };
         let palette = Palette {
@@ -297,6 +298,13 @@ impl Scene {
             strokes: Vec::new(),
             fills: Vec::new(),
         }
+    }
+
+    pub fn swatch_rgba(&self, swatch: Id) -> [u8; 4] {
+        self.palette
+            .get(swatch)
+            .map(Swatch::rgba)
+            .unwrap_or([0, 0, 0, 255])
     }
 
     pub fn swatch_rgb(&self, swatch: Id) -> [u8; 3] {
