@@ -30,6 +30,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # cpal (symphony-audio) links ALSA on Linux.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --workspace
         if: matrix.target != 'x86_64-apple-darwin'
       - run: cargo build --release --locked --target ${{ matrix.target }} -p symphony-app -p symphony-launcher
