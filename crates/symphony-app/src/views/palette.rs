@@ -18,6 +18,7 @@ pub struct PaletteState {
     /// The view the mouse was over, for ranking.
     pub here: Option<View>,
     selected: usize,
+    scroll_offset: f32,
     first_frame: bool,
     /// Closing: fading out, no longer taking input.
     pub closing: bool,
@@ -30,6 +31,7 @@ impl PaletteState {
             at,
             here,
             selected: 0,
+            scroll_offset: 0.0,
             first_frame: true,
             closing: false,
         }
@@ -73,6 +75,18 @@ fn ids() -> (Id, Id) {
     )
 }
 
+fn reveal_offset(selected: usize, offset: f32, height: f32) -> f32 {
+    let row_top = selected as f32 * ROW_H;
+    let row_bottom = row_top + ROW_H;
+    if row_top < offset {
+        row_top
+    } else if row_bottom > offset + height {
+        (row_bottom - height).max(0.0)
+    } else {
+        offset
+    }
+}
+
 /// Draw the palette. `entries` is everything searchable; `uses` how often
 /// each key was chosen.
 pub fn ui(
@@ -100,7 +114,6 @@ pub fn ui(
         results.extend(search::phrase(&st.query));
         let hits = search::rank(entries, &st.query, st.here, uses);
         results.extend(hits.iter().map(|h| entries[h.index].clone()));
-        results.truncate(ROWS);
     }
     st.selected = st.selected.min(results.len().saturating_sub(1));
 
@@ -126,15 +139,21 @@ pub fn ui(
     }
 
     // The results area grows to fit (Expand), from nothing while empty.
-    let rows = if typed { results.len().max(1) } else { 0 };
-    let list_h = motion::value(ctx, height_id, rows as f32 * ROW_H, Motion::Expand);
+    let screen = ctx.content_rect();
+    let max_list_h = (screen.height() - FIELD_H - 36.0).max(ROW_H);
+    let rows = if typed {
+        results.len().clamp(1, ROWS)
+    } else {
+        0
+    };
+    let target_h = (rows as f32 * ROW_H).min(max_list_h);
+    let list_h = motion::value(ctx, height_id, target_h, Motion::Expand).min(max_list_h);
 
     // Centred on the mouse horizontally, just below it, kept in the window;
     // it appears with the shared Appear look (fade, grow, rise).
     let look = motion::look(shown);
-    let screen = ctx.content_rect();
     let box_w = WIDTH + 16.0;
-    let full_h = FIELD_H + 16.0 + rows as f32 * ROW_H;
+    let full_h = FIELD_H + 20.0 + target_h;
     let x =
         (st.at.x - box_w / 2.0).clamp(screen.left() + 8.0, (screen.right() - box_w - 8.0).max(8.0));
     let y = (st.at.y + 12.0).clamp(
@@ -176,22 +195,11 @@ pub fn ui(
                     if list_h < 0.5 {
                         return;
                     }
-                    // The list, clipped to its animated height.
                     ui.add_space(4.0);
-                    let (area_rect, _) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), list_h),
-                        egui::Sense::hover(),
-                    );
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_size(
-                                area_rect.min,
-                                Vec2::new(area_rect.width(), rows as f32 * ROW_H),
-                            ))
-                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                    );
-                    child.set_clip_rect(area_rect.intersect(child.clip_rect()));
-                    let ui = &mut child;
+                    if !typed {
+                        ui.add_space(list_h);
+                        return;
+                    }
                     if results.is_empty() {
                         ui.label(
                             egui::RichText::new(
@@ -200,66 +208,96 @@ pub fn ui(
                             .font(theme::dense())
                             .color(theme::TEXT_SECONDARY),
                         );
+                        return;
                     }
-                    for (i, e) in results.iter().enumerate() {
-                        let sel = i == st.selected;
-                        let (rect, row) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), ROW_H - 2.0),
-                            egui::Sense::click(),
-                        );
-                        let fill = if sel {
-                            theme::ACCENT_SELECT_FILL
-                        } else if row.hovered() {
-                            theme::BG_HOVER
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-                        let p = ui.painter();
-                        p.rect_filled(rect, theme::RADIUS_CONTROL as f32, fill);
-                        let fg = if sel {
-                            theme::ON_ACCENT
-                        } else {
-                            theme::TEXT_PRIMARY
-                        };
-                        let fg2 = if sel {
-                            theme::ON_ACCENT
-                        } else {
-                            theme::TEXT_SECONDARY
-                        };
-                        let right = rect.right() - 8.0;
-                        let shortcut_w = if e.shortcut.is_empty() { 0.0 } else { 90.0 };
-                        widgets::fitted_text(
-                            ui,
-                            p,
-                            Pos2::new(rect.left() + 10.0, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &e.title,
-                            theme::body(),
-                            fg,
-                            rect.width() - 90.0 - shortcut_w,
-                        );
-                        p.text(
-                            Pos2::new(right - shortcut_w, rect.center().y),
-                            Align2::RIGHT_CENTER,
-                            e.kind.label(),
-                            theme::dense(),
-                            fg2,
-                        );
-                        if !e.shortcut.is_empty() {
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .id_salt("search-results")
+                        .max_height(list_h)
+                        .auto_shrink([false, false]);
+                    if edit.changed() {
+                        scroll = scroll.vertical_scroll_offset(0.0);
+                    } else if up || down {
+                        scroll = scroll.vertical_scroll_offset(reveal_offset(
+                            st.selected,
+                            st.scroll_offset,
+                            list_h,
+                        ));
+                    }
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let output = scroll.show_rows(ui, ROW_H - 2.0, results.len(), |ui, range| {
+                        for i in range {
+                            let e = &results[i];
+                            let sel = i == st.selected;
+                            let (rect, row) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), ROW_H - 2.0),
+                                egui::Sense::click(),
+                            );
+                            let fill = if sel {
+                                theme::ACCENT_SELECT_FILL
+                            } else if row.hovered() {
+                                theme::BG_HOVER
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            };
+                            let p = ui.painter();
+                            p.rect_filled(rect, theme::RADIUS_CONTROL as f32, fill);
+                            let fg = if sel {
+                                theme::ON_ACCENT
+                            } else {
+                                theme::TEXT_PRIMARY
+                            };
+                            let fg2 = if sel {
+                                theme::ON_ACCENT
+                            } else {
+                                theme::TEXT_SECONDARY
+                            };
+                            let right = rect.right() - 8.0;
+                            let shortcut_w = if e.shortcut.is_empty() { 0.0 } else { 90.0 };
+                            widgets::fitted_text(
+                                ui,
+                                p,
+                                Pos2::new(rect.left() + 10.0, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                &e.title,
+                                theme::body(),
+                                fg,
+                                rect.width() - 90.0 - shortcut_w,
+                            );
                             p.text(
-                                Pos2::new(right, rect.center().y),
+                                Pos2::new(right - shortcut_w, rect.center().y),
                                 Align2::RIGHT_CENTER,
-                                &e.shortcut,
+                                e.kind.label(),
                                 theme::dense(),
                                 fg2,
                             );
+                            if !e.shortcut.is_empty() {
+                                p.text(
+                                    Pos2::new(right, rect.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    &e.shortcut,
+                                    theme::dense(),
+                                    fg2,
+                                );
+                            }
+                            if row.clicked() {
+                                chosen = Some(i);
+                            }
+                            if row.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+                                st.selected = i;
+                            }
                         }
-                        if row.clicked() {
-                            chosen = Some(i);
-                        }
-                        if row.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
-                            st.selected = i;
-                        }
+                    });
+                    st.scroll_offset = output.state.clamped_offset().y;
+                    let view = output.inner_rect;
+                    let fade = 9.0_f32.min(view.height() * 0.5);
+                    if st.scroll_offset > 0.5 {
+                        let strip = Rect::from_min_size(view.min, Vec2::new(view.width(), fade));
+                        theme::fade_strip(ui.painter(), strip, theme::BG_RAISED, true);
+                    }
+                    if st.scroll_offset + view.height() + 0.5 < output.content_size.y {
+                        let min = Pos2::new(view.left(), view.bottom() - fade);
+                        let strip = Rect::from_min_max(min, view.max);
+                        theme::fade_strip(ui.painter(), strip, theme::BG_RAISED, false);
                     }
                 });
         });
@@ -283,4 +321,72 @@ pub fn ui(
         return Outcome::Closing;
     }
     Outcome::Open
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    #[test]
+    fn search_scrolls_and_reaches_results_beyond_the_first_page() {
+        let mut state = PaletteState::new(Pos2::new(390.0, 54.0), Some(View::Timeline));
+        state.query = "Drawing".into();
+        let entries: Vec<_> = (1..=32)
+            .map(|index| {
+                Entry::new(
+                    &format!("Drawing entry {index:02}"),
+                    search::Kind::Action,
+                    Command::GoToFrame(index),
+                    &format!("drawing.{index}"),
+                )
+            })
+            .collect();
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(800.0, 620.0))
+            .with_context_setup(|ctx| {
+                theme::apply(ctx);
+                theme::set_motion(ctx, false);
+            })
+            .build_ui_state(
+                |ui, (state, entries)| {
+                    super::ui(ui.ctx(), state, entries, &|_| 0);
+                },
+                (state, entries),
+            );
+        harness.run_steps(3);
+        for _ in 0..13 {
+            harness.input_mut().events.push(egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_steps(1);
+            harness.input_mut().events.push(egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().0.selected, 13);
+        let before = harness.state().0.scroll_offset;
+        assert!(before > 0.0);
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(Pos2::new(380.0, 205.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -120.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        harness.run_steps(5);
+        assert!(harness.state().0.scroll_offset > before);
+    }
 }

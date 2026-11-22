@@ -311,7 +311,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
     let size = ui.available_size().max(Vec2::new(120.0, 80.0));
     let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
     let full = resp.rect;
-    painter.rect_filled(full, 0.0, theme::BG_INPUT);
+    theme::feather_panel(&painter, full, theme::BG_INPUT, 5.0);
     let rect = full
         .shrink2(Vec2::new(36.0, 14.0))
         .translate(Vec2::new(14.0, 0.0));

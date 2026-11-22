@@ -172,6 +172,54 @@ pub fn glass_rim(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
+/// Fade clipped content into the panel at a flat horizontal edge.
+pub fn fade_strip(painter: &egui::Painter, rect: egui::Rect, colour: Color32, full_at_top: bool) {
+    let (top, bottom) = if full_at_top {
+        (colour, Color32::TRANSPARENT)
+    } else {
+        (Color32::TRANSPARENT, colour)
+    };
+    let mut mesh = egui::Mesh::default();
+    for (point, ink) in [
+        (rect.left_top(), top),
+        (rect.right_top(), top),
+        (rect.right_bottom(), bottom),
+        (rect.left_bottom(), bottom),
+    ] {
+        mesh.colored_vertex(point, ink);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// A flat inset surface with a short soft transition on all four sides.
+pub fn feather_panel(painter: &egui::Painter, rect: egui::Rect, colour: Color32, width: f32) {
+    if !rect.is_positive() {
+        return;
+    }
+    let inner = rect.shrink(width.min(rect.width() * 0.25).min(rect.height() * 0.25));
+    let mut mesh = egui::Mesh::default();
+    for (bounds, ink) in [(rect, Color32::TRANSPARENT), (inner, colour)] {
+        for point in [
+            bounds.left_top(),
+            bounds.right_top(),
+            bounds.right_bottom(),
+            bounds.left_bottom(),
+        ] {
+            mesh.colored_vertex(point, ink);
+        }
+    }
+    for i in 0..4 {
+        let next = (i + 1) % 4;
+        mesh.add_triangle(i, next, i + 4);
+        mesh.add_triangle(next, next + 4, i + 4);
+    }
+    mesh.add_triangle(4, 5, 6);
+    mesh.add_triangle(4, 6, 7);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// Project dialogs use a denser glass surface over the artwork.
 pub fn glass_modal(ctx: &egui::Context, id: &'static str) -> egui::Modal {
     let frame = egui::Frame::popup(&ctx.global_style())
