@@ -288,6 +288,13 @@ fn resize_grip(ui: &egui::Ui, leaves: &[egui::Rect]) {
     let Some(p) = ui.ctx().pointer_hover_pos() else {
         return;
     };
+    if ui
+        .ctx()
+        .layer_id_at(p)
+        .is_some_and(|layer| layer != ui.layer_id())
+    {
+        return;
+    }
     let gap = theme::GUTTER * 2.0 + 2.0;
     let mut bar: Option<egui::Rect> = None;
     for a in leaves {
@@ -325,10 +332,7 @@ fn resize_grip(ui: &egui::Ui, leaves: &[egui::Rect]) {
     } else {
         theme::TEXT_SECONDARY.gamma_multiply(0.7)
     };
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::unique("symphony-resize-grip"),
-    ));
+    let painter = ui.painter();
     painter.rect_filled(bar, 1.5, colour);
 }
 
@@ -404,6 +408,7 @@ impl SymphonyApp {
                 Ok("Plain") => wallpaper::Choice::Plain,
                 Ok("Studio") => wallpaper::Choice::Studio,
                 Ok("Dusk") => wallpaper::Choice::Dusk,
+                Ok("Camera") => wallpaper::Choice::Camera,
                 Ok("Custom") => std::env::var_os("SYMPHONY_SHOT_WALLPAPER_FILE")
                     .map_or(wallpaper::Choice::Plain, |path| {
                         wallpaper::Choice::Custom(path.into())
@@ -2832,6 +2837,8 @@ impl eframe::App for SymphonyApp {
             self.title = title;
         }
 
+        self.wallpaper.sync_camera_session(&self.s.key);
+        self.camera.capture_wallpaper(self.wallpaper.uses_camera());
         self.wallpaper.paint(ui);
         let chrome = ui.painter().clone();
         let top_background = chrome.add(egui::Shape::Noop);
@@ -3117,6 +3124,9 @@ impl eframe::App for SymphonyApp {
                 self.shot_search_opened = true;
             }
         }
+        let wallpaper_pixels = self.camera.wallpaper_pixels(&self.s);
+        self.wallpaper
+            .update_camera(&ctx, &self.s, wallpaper_pixels);
         views::node::windows(&ctx, &mut self.s, &mut self.node_view);
         self.search_box(&ctx);
         self.dialogs(&ctx);

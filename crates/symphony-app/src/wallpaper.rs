@@ -1,7 +1,11 @@
 //! Wallpaper and glass masks share a small ladder of prefiltered textures.
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        mpsc::{self, Receiver, TryRecvError},
+        Arc,
+    },
+    time::Duration,
 };
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
@@ -9,8 +13,12 @@ use image::{imageops, ImageReader, RgbImage};
 use serde::{Deserialize, Serialize};
 use symphony_ui::theme;
 
+use crate::session::{CanvasColours, Session};
+
 const BLUR_LEVELS: [f32; 5] = [0.0, 3.0, 8.0, 15.0, 26.0];
 const GLASS_BLUR: u8 = 32;
+const CAMERA_REFRESH: f64 = 1.0 / 6.0;
+const CAMERA_PREVIEW_EDGE: u32 = 384;
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Choice {
@@ -20,6 +28,7 @@ pub enum Choice {
     Studio,
     Dusk,
     Custom(PathBuf),
+    Camera,
 }
 
 impl Choice {
@@ -30,6 +39,7 @@ impl Choice {
             Self::Studio => "Studio",
             Self::Dusk => "Dusk",
             Self::Custom(_) => "Custom picture…",
+            Self::Camera => "Current Camera View",
         }
     }
 }
@@ -40,6 +50,20 @@ pub enum ChromeSide {
     Bottom,
 }
 
+#[derive(Clone)]
+pub struct CameraPixels {
+    pub size: [u32; 2],
+    pub rgba: Arc<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct CameraRefresh {
+    session: String,
+    requested: Option<(u64, u32, [u8; 3])>,
+    last_started: Option<f64>,
+    source: Option<(u64, Arc<symphony_core::doc::Scene>)>,
+}
+
 pub struct Wallpaper {
     pub choice: Choice,
     pub blur: u8,
@@ -47,6 +71,7 @@ pub struct Wallpaper {
     textures: Vec<egui::TextureHandle>,
     backdrop: Rect,
     error: Option<String>,
+    camera: CameraRefresh,
 }
 
 impl Wallpaper {
@@ -58,6 +83,7 @@ impl Wallpaper {
             textures: Vec::new(),
             backdrop: Rect::NOTHING,
             error: None,
+            camera: CameraRefresh::default(),
         };
         wallpaper.select(ctx, choice);
         wallpaper
@@ -67,6 +93,7 @@ impl Wallpaper {
         self.textures.clear();
         self.pending = None;
         self.error = None;
+        self.camera = CameraRefresh::default();
         if let Choice::Custom(path) = &choice {
             let path = path.clone();
             let ctx = ctx.clone();
@@ -81,22 +108,93 @@ impl Wallpaper {
         self.choice = choice;
     }
 
+    pub fn uses_camera(&self) -> bool {
+        self.choice == Choice::Camera
+    }
+
+    pub fn sync_camera_session(&mut self, key: &str) {
+        if self.uses_camera() && self.camera.session != key {
+            self.camera = CameraRefresh {
+                session: key.to_owned(),
+                ..CameraRefresh::default()
+            };
+            self.textures.clear();
+            self.pending = None;
+        }
+    }
+
+    pub fn update_camera(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Session,
+        pixels: Option<CameraPixels>,
+    ) {
+        if !self.uses_camera() {
+            return;
+        }
+        self.sync_camera_session(&session.key);
+        let paper = CanvasColours::get(session.colours.stage);
+        let paper = [paper.r(), paper.g(), paper.b()];
+        let stamp = (session.doc.version, session.frame, paper);
+        if self.pending.is_some() || self.camera.requested == Some(stamp) {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        if let Some(last) = self.camera.last_started {
+            let remaining = CAMERA_REFRESH - (now - last);
+            if remaining > 0.0 {
+                ctx.request_repaint_after(Duration::from_secs_f64(remaining));
+                return;
+            }
+        }
+
+        // Reuse the Camera view's full render. With the tab hidden, render
+        // only a small preview and keep the same snapshot across playback frames.
+        let image = match pixels {
+            Some(pixels) => {
+                self.camera.source = None;
+                CameraSource::Rendered(pixels)
+            }
+            None => {
+                let source = self
+                    .camera
+                    .source
+                    .get_or_insert_with(|| (stamp.0, Arc::new(session.doc.clone())));
+                if source.0 != stamp.0 {
+                    *source = (stamp.0, Arc::new(session.doc.clone()));
+                }
+                CameraSource::Scene(source.1.clone(), session.frame)
+            }
+        };
+        self.camera.last_started = Some(now);
+        self.camera.requested = Some(stamp);
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = camera_levels(image, paper);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
     pub fn paint(&mut self, ui: &egui::Ui) {
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(Ok(images)) => {
-                    self.textures = images
-                        .into_iter()
-                        .enumerate()
-                        .map(|(level, image)| {
-                            let size = [image.width() as usize, image.height() as usize];
-                            ui.ctx().load_texture(
+                    for (level, image) in images.into_iter().enumerate() {
+                        let size = [image.width() as usize, image.height() as usize];
+                        let image = egui::ColorImage::from_rgb(size, image.as_raw());
+                        if let Some(texture) = self.textures.get_mut(level) {
+                            texture.set(image, egui::TextureOptions::LINEAR);
+                        } else {
+                            self.textures.push(ui.ctx().load_texture(
                                 format!("workspace-wallpaper-{level}"),
-                                egui::ColorImage::from_rgb(size, image.as_raw()),
+                                image,
                                 egui::TextureOptions::LINEAR,
-                            )
-                        })
-                        .collect();
+                            ));
+                        }
+                    }
                     self.pending = None;
                 }
                 Ok(Err(error)) => {
@@ -214,7 +312,13 @@ impl Wallpaper {
             egui::ComboBox::from_id_salt("wallpaper")
                 .selected_text(self.choice.label())
                 .show_ui(ui, |ui| {
-                    for choice in [Choice::Black, Choice::Plain, Choice::Studio, Choice::Dusk] {
+                    for choice in [
+                        Choice::Black,
+                        Choice::Plain,
+                        Choice::Studio,
+                        Choice::Dusk,
+                        Choice::Camera,
+                    ] {
                         if ui
                             .selectable_label(self.choice == choice, choice.label())
                             .clicked()
@@ -233,7 +337,7 @@ impl Wallpaper {
                     }
                 });
         });
-        if matches!(self.choice, Choice::Custom(_)) {
+        if matches!(self.choice, Choice::Custom(_) | Choice::Camera) {
             symphony_ui::widgets::precise_slider(
                 ui,
                 egui::Slider::new(&mut self.blur, 0..=100)
@@ -241,7 +345,7 @@ impl Wallpaper {
                     .suffix("%"),
             );
         }
-        if self.pending.is_some() {
+        if self.pending.is_some() && self.textures.is_empty() {
             ui.horizontal(|ui| {
                 symphony_ui::feedback::spinner(ui, 14.0);
                 ui.label("Preparing wallpaper");
@@ -362,6 +466,52 @@ fn mask_mesh(
     mesh
 }
 
+enum CameraSource {
+    Rendered(CameraPixels),
+    Scene(Arc<symphony_core::doc::Scene>, u32),
+}
+
+fn preview_size([width, height]: [u32; 2]) -> [u32; 2] {
+    let scale = (CAMERA_PREVIEW_EDGE as f32 / width.max(height).max(1) as f32).min(1.0);
+    [width, height].map(|side| (side as f32 * scale).round().max(1.0) as u32)
+}
+
+fn camera_levels(source: CameraSource, paper: [u8; 3]) -> Result<Vec<RgbImage>, String> {
+    let image = match source {
+        CameraSource::Rendered(pixels) => {
+            let [width, height] = preview_size(pixels.size);
+            let [source_width, source_height] = pixels.size;
+            let source = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+                source_width,
+                source_height,
+                pixels.rgba.as_slice(),
+            )
+            .ok_or("The Camera wallpaper couldn’t read the frame.")?;
+            imageops::resize(&source, width, height, imageops::FilterType::Triangle)
+        }
+        CameraSource::Scene(scene, frame) => {
+            let [width, height] = preview_size([scene.settings.width, scene.settings.height]);
+            let pixmap = symphony_render::render_camera(&scene, frame, width, height, None)
+                .ok_or("The Camera wallpaper couldn’t render this frame.")?;
+            image::RgbaImage::from_raw(width, height, pixmap.take())
+                .ok_or("The Camera wallpaper couldn’t read the frame.")?
+        }
+    };
+    let rgb = RgbImage::from_fn(image.width(), image.height(), |x, y| {
+        let pixel = image.get_pixel(x, y).0;
+        let paper_amount = 255 - u16::from(pixel[3]);
+        image::Rgb(std::array::from_fn(|channel| {
+            (u16::from(pixel[channel]) + (u16::from(paper[channel]) * paper_amount + 127) / 255)
+                .min(255) as u8
+        }))
+    });
+    let blurred: Vec<_> = BLUR_LEVELS[1..]
+        .iter()
+        .map(|&sigma| imageops::blur(&rgb, sigma * 0.5))
+        .collect();
+    Ok(std::iter::once(rgb).chain(blurred).collect())
+}
+
 fn load(path: &Path) -> Result<Vec<RgbImage>, String> {
     let result = (|| -> image::ImageResult<_> {
         let mut reader = ImageReader::open(path)?.with_guessed_format()?;
@@ -390,6 +540,20 @@ fn load(path: &Path) -> Result<Vec<RgbImage>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_preview_reuses_premultiplied_pixels_and_keeps_paper_colour() {
+        let pixels = CameraPixels {
+            size: [2, 1],
+            rgba: Arc::new(vec![0, 0, 0, 0, 64, 0, 0, 128]),
+        };
+        let levels = camera_levels(CameraSource::Rendered(pixels), [200, 100, 50]).unwrap();
+        assert_eq!(levels.len(), BLUR_LEVELS.len());
+        assert_eq!(levels[0][(0, 0)].0, [200, 100, 50]);
+        assert_eq!(levels[0][(1, 0)].0, [164, 50, 25]);
+        assert_eq!(preview_size([1920, 1080]), [384, 216]);
+        assert_eq!(preview_size([1080, 1920]), [216, 384]);
+    }
 
     #[test]
     fn chrome_feathers_toward_the_workspace_on_both_edges() {

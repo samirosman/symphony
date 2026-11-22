@@ -142,6 +142,14 @@ impl CanvasState {
         self.fit_pending = false;
     }
 
+    pub fn capture_wallpaper(&mut self, enabled: bool) {
+        self.display.capture_wallpaper(enabled);
+    }
+
+    pub fn wallpaper_pixels(&self, session: &Session) -> Option<crate::wallpaper::CameraPixels> {
+        self.display.wallpaper_pixels(session)
+    }
+
     pub fn busy(&self) -> bool {
         self.active.is_some()
             || self.erasing.is_some()

@@ -20,9 +20,25 @@ struct RenderKey {
 pub(super) struct Cache {
     key: Option<RenderKey>,
     texture: Option<egui::TextureHandle>,
+    capture_wallpaper: bool,
+    wallpaper_pixels: Option<crate::wallpaper::CameraPixels>,
 }
 
 impl Cache {
+    pub(super) fn capture_wallpaper(&mut self, capture: bool) {
+        self.capture_wallpaper = capture;
+        if !capture {
+            self.wallpaper_pixels = None;
+        }
+    }
+
+    pub(super) fn wallpaper_pixels(&self, s: &Session) -> Option<crate::wallpaper::CameraPixels> {
+        let key = self.key.as_ref()?;
+        (key.session == s.key && key.version == s.doc.version && key.frame == s.frame)
+            .then(|| self.wallpaper_pixels.clone())
+            .flatten()
+    }
+
     pub(super) fn paint(
         &mut self,
         painter: &egui::Painter,
@@ -58,21 +74,28 @@ impl Cache {
                         transform: *transform,
                     });
             if let Some(image) = render_camera(&s.doc, s.frame, width, height, preview) {
-                let image = egui::ColorImage::from_rgba_premultiplied(
+                let texture = egui::ColorImage::from_rgba_premultiplied(
                     [width as usize, height as usize],
                     image.data(),
                 );
-                if let Some(texture) = &mut self.texture {
-                    texture.set(image, egui::TextureOptions::LINEAR);
+                self.wallpaper_pixels =
+                    self.capture_wallpaper
+                        .then(|| crate::wallpaper::CameraPixels {
+                            size: [width, height],
+                            rgba: std::sync::Arc::new(image.take()),
+                        });
+                if let Some(handle) = &mut self.texture {
+                    handle.set(texture, egui::TextureOptions::LINEAR);
                 } else {
                     self.texture = Some(painter.ctx().load_texture(
                         "camera-display",
-                        image,
+                        texture,
                         egui::TextureOptions::LINEAR,
                     ));
                 }
             } else {
                 self.texture = None;
+                self.wallpaper_pixels = None;
             }
             self.key = Some(key);
         }
