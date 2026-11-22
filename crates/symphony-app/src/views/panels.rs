@@ -524,7 +524,21 @@ pub fn tool_properties(
     if matches!(s.tool, Tool::Brush | Tool::Pencil) {
         let pencil = s.tool == Tool::Pencil;
         padded(ui, |ui| {
-            section(ui, if pencil { "Pencil" } else { "Brush" });
+            if s.pen_modes {
+                // One Pen tool holding both: pick the mode here.
+                ui.horizontal(|ui| {
+                    section(ui, "Pen");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.selectable_value(&mut s.tool, Tool::Pencil, "Pencil")
+                            .on_hover_text("Even, editable centre lines with a thickness profile");
+                        ui.selectable_value(&mut s.tool, Tool::Brush, "Brush")
+                            .on_hover_text("Pressure-shaped lines, textured with imported brushes");
+                    });
+                });
+            } else {
+                section(ui, if pencil { "Pencil" } else { "Brush" });
+            }
+            let pencil = s.tool == Tool::Pencil;
             let b = if pencil { s.pencil } else { s.brush };
             preview(ui, s, &b, pencil);
         });

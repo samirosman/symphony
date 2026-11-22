@@ -611,3 +611,38 @@ fn line_edit_cost() {
     s.line_edit_finish(d, 0.5);
     println!("line_edit_cost: {:?} per push step", start.elapsed() / 60);
 }
+
+/// Symphony profile: Brush and Pencil are modes of one Pen tool, switched
+/// at the top of Tool Properties; each mode keeps its own settings.
+#[test]
+fn pen_tool_switches_between_brush_and_pencil_modes() {
+    use egui_kittest::kittest::Queryable;
+    let mut s = Session::new_scene();
+    s.pen_modes = true;
+    s.tool = Tool::Brush;
+    s.pencil.max_width = 7.0;
+    s.brush.max_width = 19.0;
+    // The size sliders' value boxes have no accessible name yet (a known
+    // gap, tracked separately), so this test skips that check.
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(360.0, 700.0))
+        .with_accessibility_check(false)
+        .build_ui_state(
+            |ui, st: &mut (Session, crate::presets::Presets)| {
+                crate::views::panels::tool_properties(ui, &mut st.0, &mut st.1, None);
+            },
+            (s, crate::presets::Presets::default()),
+        );
+    h.run_steps(2);
+    // One tool, named Pen, with both modes on offer.
+    h.get_by_label("Pen");
+    h.get_by_label("Pencil").click();
+    h.run_steps(2);
+    assert_eq!(h.state().0.tool, Tool::Pencil);
+    h.get_by_label("Brush").click();
+    h.run_steps(2);
+    assert_eq!(h.state().0.tool, Tool::Brush);
+    // Switching modes never mixes their settings.
+    assert_eq!(h.state().0.pencil.max_width, 7.0);
+    assert_eq!(h.state().0.brush.max_width, 19.0);
+}

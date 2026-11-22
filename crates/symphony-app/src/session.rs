@@ -347,6 +347,12 @@ pub struct Session {
     pub onion: Onion,
     /// Harmony's Brush Size Cursor preference (DESIGN D8.11).
     pub brush_size_cursor: bool,
+    /// Symphony profile: Brush and Pencil are two modes of one Pen tool
+    /// (one toolbar button, a mode switch in Tool Properties). Each mode
+    /// keeps its own settings and presets. Set from the profile each frame.
+    pub pen_modes: bool,
+    /// The Pen's mode the last time it was used (Brush or Pencil).
+    pub last_pen: Tool,
     pub animate: bool,
     pub selection: Selection,
     pub paint_mode: PaintMode,
@@ -453,6 +459,8 @@ impl Session {
                 after: 1,
             },
             brush_size_cursor: true,
+            pen_modes: false,
+            last_pen: Tool::Brush,
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,
             show_strokes: false,

@@ -552,6 +552,12 @@ impl SymphonyApp {
             ),
             None => (Workspace::Default, Vec::new(), Profile::Harmony, true, None),
         };
+        // Screenshot runs can pick a profile: SYMPHONY_SHOT_PROFILE=Symphony.
+        let profile = match std::env::var("SYMPHONY_SHOT_PROFILE").as_deref() {
+            Ok("Symphony") => Profile::Symphony,
+            Ok("Harmony") => Profile::Harmony,
+            _ => profile,
+        };
         for ws in Workspace::ALL {
             if !layouts.iter().any(|(w, _)| *w == ws) {
                 layouts.push((ws, ws.preset()));
@@ -1667,6 +1673,39 @@ impl SymphonyApp {
                 ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
             }
             for &tool in *tools {
+                // Symphony profile: Brush and Pencil share one Pen button,
+                // showing (and returning to) the mode last used.
+                let pen = self.s.pen_modes && matches!(tool, Tool::Brush | Tool::Pencil);
+                if pen && tool == Tool::Pencil {
+                    continue;
+                }
+                if pen {
+                    let mode = self.s.last_pen;
+                    let tip = format!(
+                        "Pen ({} mode)\nBrush: {}\nPencil: {}\nSwitch modes in Tool Properties",
+                        if mode == Tool::Pencil {
+                            "Pencil"
+                        } else {
+                            "Brush"
+                        },
+                        keymap::tooltip(self.profile, Action::ToolBrush),
+                        keymap::tooltip(self.profile, Action::ToolPencil),
+                    );
+                    let response = icons::tool_button(
+                        ui,
+                        tool_icon(mode),
+                        matches!(self.s.tool, Tool::Brush | Tool::Pencil),
+                        true,
+                        &tip,
+                    );
+                    if response.clicked() || response.double_clicked() {
+                        self.s.tool = mode;
+                    }
+                    if response.double_clicked() {
+                        self.open_tool_properties();
+                    }
+                    continue;
+                }
                 let mut tip = keymap::tooltip(self.profile, tool_action(tool));
                 if let Some(milestone) = tool.planned_for() {
                     tip.push_str(&format!("\nComing in {milestone}"));
@@ -1683,15 +1722,21 @@ impl SymphonyApp {
                 }
                 if response.double_clicked() {
                     self.s.tool = tool;
-                    if self.layout_mut().find_tab(&View::ToolProperties).is_some() {
-                        self.maximised = None;
-                        self.show_view(View::ToolProperties);
-                        self.tool_options_open = false;
-                    } else {
-                        self.tool_options_open = true;
-                    }
+                    self.open_tool_properties();
                 }
             }
+        }
+    }
+
+    /// Show Tool Properties: its docked tab if there is one, or the
+    /// floating window.
+    fn open_tool_properties(&mut self) {
+        if self.layout_mut().find_tab(&View::ToolProperties).is_some() {
+            self.maximised = None;
+            self.show_view(View::ToolProperties);
+            self.tool_options_open = false;
+        } else {
+            self.tool_options_open = true;
         }
     }
 
@@ -2945,6 +2990,11 @@ impl eframe::App for SymphonyApp {
         self.wallpaper.paint(ui);
         let chrome = ui.painter().clone();
         let top_background = chrome.add(egui::Shape::Noop);
+        // The Symphony profile merges Brush and Pencil into one Pen tool.
+        self.s.pen_modes = self.profile == keymap::Profile::Symphony;
+        if matches!(self.s.tool, Tool::Brush | Tool::Pencil) {
+            self.s.last_pen = self.s.tool;
+        }
         let top = egui::Panel::top("top-bar")
             .show_separator_line(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 0)))
