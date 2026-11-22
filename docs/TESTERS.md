@@ -73,6 +73,22 @@ drag. Undo and redo cover placement, node creation, and cable edits.
 Node positions and cables are saved with the project. After a manual
 cable edit, composite input order controls stacking in the graph.
 
+## Render simple effects
+
+In **Node view → Add node**, choose **Box Blur**, **Grain**, **Gradient**,
+or **Opacity**. Route an image through one or more effects before it
+reaches Display. Gradient generates a background on its own. Connect it
+to a Composite input behind your drawings.
+
+Select a node and click **Properties**. Set blur radius, grain amount
+and seed, gradient colors and angle, or opacity. Click **Apply** to
+commit the change as one undo step.
+
+Use **Render preview** to inspect the current frame. Click **Render
+current frame** after changing the wiring or playhead. These effects
+are also rendered in exports. The drawing canvas uses its interactive
+vector preview.
+
 ## Harmony scene structure
 
 Choose **File → Import Harmony scene structure** and select a standalone

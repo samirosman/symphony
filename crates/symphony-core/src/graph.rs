@@ -62,10 +62,43 @@ pub enum NodeKind {
     Peg(PegParams),
     /// Stacks its inputs. Port 0 (leftmost) is in front.
     Composite,
+    Effect(Effect),
+    Gradient(Gradient),
     /// What the Camera view shows.
     Display,
     /// Render output.
     Write,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Effect {
+    Blur { radius: f32 },
+    Grain { amount: f32, seed: u32 },
+    Opacity { amount: f32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Gradient {
+    pub start: [u8; 4],
+    pub end: [u8; 4],
+    pub angle: f32,
+}
+
+impl Default for Gradient {
+    fn default() -> Self {
+        Self {
+            start: [35, 48, 77, 255],
+            end: [173, 196, 211, 255],
+            angle: 90.0,
+        }
+    }
+}
+
+pub enum RenderCommand {
+    Drawing(RenderItem),
+    Gradient(Gradient),
+    BeginEffect,
+    EndEffect(Effect),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,9 +194,12 @@ impl Graph {
         };
         let valid = match source.kind {
             NodeKind::Peg(_) => matches!(target.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }),
-            NodeKind::Composite | NodeKind::Drawing { .. } => matches!(
+            NodeKind::Composite
+            | NodeKind::Drawing { .. }
+            | NodeKind::Effect(_)
+            | NodeKind::Gradient(_) => matches!(
                 target.kind,
-                NodeKind::Composite | NodeKind::Display | NodeKind::Write
+                NodeKind::Composite | NodeKind::Effect(_) | NodeKind::Display | NodeKind::Write
             ),
             NodeKind::Display | NodeKind::Write => false,
         };
@@ -230,9 +266,25 @@ impl Graph {
         xsheet: &Xsheet,
         frame: u32,
     ) -> Result<Vec<RenderItem>, EvalError> {
-        let mut items = Vec::new();
-        self.eval_image(out, xsheet, frame, 0, &mut items)?;
-        Ok(items)
+        Ok(self
+            .render_commands(out, xsheet, frame)?
+            .into_iter()
+            .filter_map(|command| match command {
+                RenderCommand::Drawing(item) => Some(item),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub fn render_commands(
+        &self,
+        out: NodeId,
+        xsheet: &Xsheet,
+        frame: u32,
+    ) -> Result<Vec<RenderCommand>, EvalError> {
+        let mut commands = Vec::new();
+        self.eval_image(out, xsheet, frame, 0, &mut commands)?;
+        Ok(commands)
     }
 
     /// The full transform a drawing node gets from its pegs on `frame`.
@@ -256,10 +308,10 @@ impl Graph {
         xs: &Xsheet,
         frame: u32,
         depth: usize,
-        out: &mut Vec<RenderItem>,
+        out: &mut Vec<RenderCommand>,
     ) -> Result<(), EvalError> {
         let node = self.get(id, depth)?;
-        if !node.enabled {
+        if !node.enabled && !matches!(node.kind, NodeKind::Effect(_)) {
             return Ok(());
         }
         match &node.kind {
@@ -274,6 +326,18 @@ impl Graph {
                     self.eval_image(src, xs, frame, depth + 1, out)?;
                 }
             }
+            NodeKind::Gradient(gradient) => out.push(RenderCommand::Gradient(*gradient)),
+            NodeKind::Effect(effect) => {
+                if let Some(src) = self.input(id, 0) {
+                    if node.enabled {
+                        out.push(RenderCommand::BeginEffect);
+                    }
+                    self.eval_image(src, xs, frame, depth + 1, out)?;
+                    if node.enabled {
+                        out.push(RenderCommand::EndEffect(*effect));
+                    }
+                }
+            }
             NodeKind::Drawing { column } => {
                 let col = xs.column(*column);
                 if let Some(drawing) = col.filter(|c| c.visible).and_then(|c| c.get(frame)) {
@@ -281,12 +345,12 @@ impl Graph {
                         Some(p) => self.eval_transform(p, frame, depth + 1)?,
                         None => Affine::IDENTITY,
                     };
-                    out.push(RenderItem {
+                    out.push(RenderCommand::Drawing(RenderItem {
                         node: id,
                         column: *column,
                         drawing,
                         transform,
-                    });
+                    }));
                 }
             }
             NodeKind::Peg(_) => {} // a peg carries no image

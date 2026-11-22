@@ -4,6 +4,7 @@
 //!
 //! Export runs on a background thread with progress and cancel (E5.2).
 
+mod effects;
 pub mod movie;
 
 use std::path::{Path, PathBuf};
@@ -11,61 +12,92 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use image::{Delay, Frame, RgbaImage};
 use symphony_core::doc::Scene;
+use symphony_core::graph::{RenderCommand, RenderItem};
 use symphony_core::math::Affine;
 use symphony_core::stroke::{ArtLayer, StrokeKind};
 use symphony_vector::tessellate;
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Transform};
 
 /// Render `frame` at `width` x `height` pixels (the scene's aspect is
 /// kept; the stage fills the image). Background is white paper.
 pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Option<RgbaImage> {
-    let mut pix = Pixmap::new(width.max(1), height.max(1))?;
-    pix.fill(tiny_skia::Color::WHITE);
+    let (width, height) = (width.max(1), height.max(1));
+    let mut paper = Pixmap::new(width, height)?;
+    paper.fill(tiny_skia::Color::WHITE);
     let k = width as f32 / scene.settings.width.max(1) as f32;
     // Scene units have their origin at the stage centre, y down.
     let view =
         Affine::translate(width as f32 / 2.0, height as f32 / 2.0).compose(Affine::scale(k, k));
-    let items = scene
+    let commands = scene
         .graph
-        .evaluate(scene.display, &scene.xsheet, frame)
+        .render_commands(scene.display, &scene.xsheet, frame)
         .unwrap_or_default();
-    for item in items {
-        let Some(d) = scene.drawings.get(&item.drawing) else {
-            continue;
-        };
-        let m = view.compose(item.transform);
-        // Art layers back to front; within each, paint under ink.
-        for art in ArtLayer::STACK {
-            for fill in d.fills.iter().filter(|f| f.art == art) {
-                let mut pb = PathBuilder::new();
-                for c in &fill.contours {
-                    for (k, p) in c.iter().enumerate() {
-                        let (x, y) = m.apply(p[0], p[1]);
-                        if k == 0 {
-                            pb.move_to(x, y);
-                        } else {
-                            pb.line_to(x, y);
-                        }
-                    }
-                    pb.close();
+    let mut layers = vec![paper];
+    for command in commands {
+        let current = layers.last_mut()?;
+        match command {
+            RenderCommand::Drawing(item) => paint_drawing(current, scene, view, item),
+            RenderCommand::Gradient(gradient) => effects::gradient(current, gradient),
+            RenderCommand::BeginEffect => {
+                // Bound temporary raster storage, including blur scratch space.
+                let bytes = current.data().len().checked_mul(layers.len() + 2)?;
+                if bytes > 512 * 1024 * 1024 {
+                    return None;
                 }
-                let Some(path) = pb.finish() else { continue };
-                let [r, g, b] = scene.swatch_rgb(fill.swatch);
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, 255);
-                paint.anti_alias = true;
-                pix.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::EvenOdd,
+                layers.push(Pixmap::new(width, height)?);
+            }
+            RenderCommand::EndEffect(effect) => {
+                let mut image = layers.pop()?;
+                effects::apply(&mut image, effect, k);
+                layers.last_mut()?.draw_pixmap(
+                    0,
+                    0,
+                    image.as_ref(),
+                    &PixmapPaint::default(),
                     Transform::identity(),
                     None,
                 );
             }
-            paint_strokes(&mut pix, scene, d, art, m);
         }
     }
-    RgbaImage::from_raw(pix.width(), pix.height(), pix.take())
+    RgbaImage::from_raw(width, height, layers.pop()?.take())
+}
+
+fn paint_drawing(pix: &mut Pixmap, scene: &Scene, view: Affine, item: RenderItem) {
+    let Some(d) = scene.drawings.get(&item.drawing) else {
+        return;
+    };
+    let m = view.compose(item.transform);
+    // Art layers back to front; within each, paint under ink.
+    for art in ArtLayer::STACK {
+        for fill in d.fills.iter().filter(|f| f.art == art) {
+            let mut pb = PathBuilder::new();
+            for c in &fill.contours {
+                for (k, p) in c.iter().enumerate() {
+                    let (x, y) = m.apply(p[0], p[1]);
+                    if k == 0 {
+                        pb.move_to(x, y);
+                    } else {
+                        pb.line_to(x, y);
+                    }
+                }
+                pb.close();
+            }
+            let Some(path) = pb.finish() else { continue };
+            let [r, g, b] = scene.swatch_rgb(fill.swatch);
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, b, 255);
+            paint.anti_alias = true;
+            pix.fill_path(
+                &path,
+                &paint,
+                FillRule::EvenOdd,
+                Transform::identity(),
+                None,
+            );
+        }
+        paint_strokes(pix, scene, d, art, m);
+    }
 }
 
 /// Ink for one art layer. Invisible strokes only bound paint zones.
@@ -373,6 +405,53 @@ mod tests {
             [255, 255, 255, 255],
             "above it is paper"
         );
+    }
+
+    #[test]
+    fn renders_effect_chain_with_gradient_behind_the_drawing() {
+        use symphony_core::graph::{Effect, Gradient, NodeKind};
+
+        let mut scene = scene_with_line();
+        let drawing = scene.layers[0].node;
+        let gradient = scene.graph.add(
+            "Gradient",
+            NodeKind::Gradient(Gradient {
+                start: [240, 20, 10, 255],
+                end: [10, 20, 240, 255],
+                angle: 0.0,
+            }),
+        );
+        let opacity = scene
+            .graph
+            .add("Opacity", NodeKind::Effect(Effect::Opacity { amount: 0.0 }));
+        let blur = scene
+            .graph
+            .add("Box Blur", NodeKind::Effect(Effect::Blur { radius: 16.0 }));
+        let grain = scene.graph.add(
+            "Grain",
+            NodeKind::Effect(Effect::Grain {
+                amount: 0.25,
+                seed: 42,
+            }),
+        );
+        scene.graph.connect(drawing, opacity, 0);
+        scene.graph.connect(opacity, blur, 0);
+        scene.graph.connect(blur, scene.composite, 0);
+        scene.graph.connect(gradient, scene.composite, 1);
+        let background = render_frame(&scene, 1, 200, 100).unwrap();
+        assert!(background[(5, 50)][0] > background[(5, 50)][2]);
+        assert!(background[(195, 50)][0] < background[(195, 50)][2]);
+
+        scene.graph.node_mut(opacity).unwrap().enabled = false;
+        let blurred = render_frame(&scene, 1, 200, 100).unwrap();
+        assert_ne!(blurred[(100, 45)], background[(100, 45)]);
+        assert_eq!(blurred[(100, 10)], background[(100, 10)]);
+
+        scene.graph.connect(scene.composite, grain, 0);
+        scene.graph.connect(grain, scene.display, 0);
+        let textured = render_frame(&scene, 1, 200, 100).unwrap();
+        assert_ne!(textured, blurred);
+        assert_eq!(textured, render_frame(&scene, 1, 200, 100).unwrap());
     }
 
     #[test]

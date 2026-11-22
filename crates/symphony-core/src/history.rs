@@ -14,6 +14,11 @@ pub enum Edit {
         node: Node,
         position: [f32; 2],
     },
+    SetNodeKind {
+        id: NodeId,
+        before: NodeKind,
+        after: NodeKind,
+    },
     MoveNode {
         id: NodeId,
         before: Option<[f32; 2]>,
@@ -158,6 +163,11 @@ impl Edit {
                 } else {
                     s.graph.remove(*id);
                     s.node_positions.remove(id);
+                }
+            }
+            Edit::SetNodeKind { id, before, after } => {
+                if let Some(node) = s.graph.node_mut(*id) {
+                    node.kind = if forward { after } else { before }.clone();
                 }
             }
             Edit::MoveNode { id, before, after } => {

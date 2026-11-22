@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::{
-    graph::{Link, Node, NodeId, NodeKind},
+    graph::{Effect, Link, Node, NodeId, NodeKind},
     history::Edit,
 };
 
@@ -26,6 +26,10 @@ pub struct NodeViewState {
     pan: Vec2,
     drag: Option<Drag>,
     library_search: String,
+    selected: Option<NodeId>,
+    properties: Option<(NodeId, NodeKind, NodeKind)>,
+    preview: Option<egui::TextureHandle>,
+    preview_open: bool,
 }
 
 const W: f32 = 136.0;
@@ -39,7 +43,23 @@ fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Display",
         NodeKind::Write => "Write",
+        NodeKind::Effect(Effect::Blur { .. }) => "Box Blur",
+        NodeKind::Effect(Effect::Grain { .. }) => "Grain",
+        NodeKind::Effect(Effect::Opacity { .. }) => "Opacity",
+        NodeKind::Gradient(_) => "Gradient",
     }
+}
+
+fn effect_nodes() -> [NodeKind; 4] {
+    [
+        NodeKind::Effect(Effect::Blur { radius: 12.0 }),
+        NodeKind::Effect(Effect::Grain {
+            amount: 0.16,
+            seed: 0,
+        }),
+        NodeKind::Gradient(Default::default()),
+        NodeKind::Effect(Effect::Opacity { amount: 0.5 }),
+    ]
 }
 
 fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: Option<Input>) {
@@ -106,12 +126,158 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                     ui.close();
                 }
             }
+            ui.separator();
+            for kind in effect_nodes() {
+                if ui.button(kind_label(&kind)).clicked() {
+                    add = Some(kind);
+                    ui.close();
+                }
+            }
         });
         if ui.button("Reset pan").clicked() {
             state.pan = Vec2::ZERO;
         }
+        let editable = state.selected.and_then(|id| {
+            let kind = &s.doc.graph.node(id)?.kind;
+            matches!(kind, NodeKind::Effect(_) | NodeKind::Gradient(_)).then_some((id, kind))
+        });
+        if ui
+            .add_enabled(editable.is_some(), egui::Button::new("Properties"))
+            .clicked()
+        {
+            if let Some((id, kind)) = editable {
+                state.properties = Some((id, kind.clone(), kind.clone()));
+            }
+        }
+        if ui.button("Render preview").clicked() {
+            state.preview_open = true;
+            state.preview = None;
+        }
     });
     canvas(ui, s, state, add);
+    properties(ui.ctx(), s, state);
+    preview(ui.ctx(), s, state);
+}
+
+fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
+    let Some((id, before, draft)) = &mut state.properties else {
+        return;
+    };
+    if !s
+        .doc
+        .graph
+        .node(*id)
+        .is_some_and(|node| node.kind == *before)
+    {
+        state.properties = None;
+        return;
+    }
+    let mut open = true;
+    let mut apply = false;
+    egui::Window::new(format!("{} properties", kind_label(draft)))
+        .id(egui::Id::unique("effect-node-properties"))
+        .collapsible(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            match draft {
+                NodeKind::Effect(Effect::Blur { radius }) => {
+                    ui.add(
+                        egui::Slider::new(radius, 0.0..=128.0)
+                            .text("Radius")
+                            .suffix(" px"),
+                    );
+                }
+                NodeKind::Effect(Effect::Grain { amount, seed }) => {
+                    ui.add(egui::Slider::new(amount, 0.0..=1.0).text("Amount"));
+                    ui.horizontal(|ui| {
+                        ui.label("Seed");
+                        ui.add(egui::DragValue::new(seed));
+                    });
+                }
+                NodeKind::Effect(Effect::Opacity { amount }) => {
+                    let mut percent = *amount * 100.0;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut percent, 0.0..=100.0)
+                                .text("Opacity")
+                                .suffix("%"),
+                        )
+                        .changed()
+                    {
+                        *amount = percent / 100.0;
+                    }
+                }
+                NodeKind::Gradient(gradient) => {
+                    ui.horizontal(|ui| {
+                        ui.color_edit_button_srgba_unmultiplied(&mut gradient.start);
+                        ui.label("Start");
+                        ui.color_edit_button_srgba_unmultiplied(&mut gradient.end);
+                        ui.label("End");
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut gradient.angle, 0.0..=360.0)
+                            .text("Angle")
+                            .suffix("°"),
+                    );
+                }
+                _ => {}
+            }
+            apply = ui
+                .add_enabled(before != draft, egui::Button::new("Apply"))
+                .clicked();
+        });
+    if apply {
+        s.history.apply(
+            &mut s.doc,
+            "Change node properties",
+            vec![Edit::SetNodeKind {
+                id: *id,
+                before: before.clone(),
+                after: draft.clone(),
+            }],
+        );
+        *before = draft.clone();
+        state.preview = None;
+    }
+    if !open {
+        state.properties = None;
+    }
+}
+
+fn preview(ctx: &egui::Context, s: &Session, state: &mut NodeViewState) {
+    if !state.preview_open {
+        return;
+    }
+    egui::Window::new("Display render")
+        .open(&mut state.preview_open)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            let refresh = ui.button("Render current frame").clicked();
+            if refresh || state.preview.is_none() {
+                let w = s.doc.settings.width.max(1);
+                let h = s.doc.settings.height.max(1);
+                let scale = (640.0 / w.max(h) as f32).min(1.0);
+                let (w, h) = (
+                    (w as f32 * scale).round().max(1.0) as u32,
+                    (h as f32 * scale).round().max(1.0) as u32,
+                );
+                if let Some(image) = symphony_render::render_frame(&s.doc, s.frame, w, h) {
+                    state.preview = Some(ctx.load_texture(
+                        "node-display-preview",
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            image.as_raw(),
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+            if let Some(texture) = &state.preview {
+                ui.image(texture);
+            } else {
+                ui.label("Couldn’t render the current frame.");
+            }
+        });
 }
 
 fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Option<NodeKind>) {
@@ -179,6 +345,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             used.push(free);
             used.sort_unstable();
             used
+        } else if matches!(node.kind, NodeKind::Gradient(_)) {
+            vec![]
         } else {
             vec![0]
         };
@@ -219,6 +387,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 position: [position.x, position.y],
             }],
         );
+        state.selected = Some(id);
         ui.ctx().request_repaint();
     }
 
@@ -313,7 +482,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
     if resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some(id) = node_at(pos) {
+            state.selected = node_at(pos);
+            if let Some(id) = state.selected {
                 if let Some(layer) = s
                     .doc
                     .layers
@@ -346,11 +516,11 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
-        let selected = s
-            .doc
-            .layers
-            .get(s.selected)
-            .is_some_and(|l| l.peg == *id || l.node == *id);
+        let selected = state.selected == Some(*id)
+            || s.doc
+                .layers
+                .get(s.selected)
+                .is_some_and(|l| l.peg == *id || l.node == *id);
         let edge = if selected {
             theme::ACCENT_SELECT
         } else {
@@ -472,6 +642,12 @@ pub fn library(ui: &mut egui::Ui, s: &Session, state: &mut NodeViewState) {
             for &(id, name) in symphony_io::harmony::NODE_LIBRARY {
                 if name.to_lowercase().contains(&query) || id.to_lowercase().contains(&query) {
                     ui.label(format!("{name} ({id})"));
+                }
+            }
+            for kind in effect_nodes() {
+                let name = kind_label(&kind);
+                if name.to_lowercase().contains(&query) {
+                    ui.label(name);
                 }
             }
             ui.heading("Harmony reference");
