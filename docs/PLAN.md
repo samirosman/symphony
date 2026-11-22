@@ -133,7 +133,7 @@ continues.
 - ⬜ Tool Properties view
 - 🟨 Colour view: scene palette and named solid swatches; multiple palettes pending
 - ⬜ Layer Properties view
-- ⬜ Function view (curve editor)
+- 🟡 Function view (curve editor): peg functions as curves, select/drag keys, Linear/Bezier/Stop-motion segments, Bézier handles with Smooth/Straight/Corner continuity, add/delete keys, double-click to add. Still to do: Ease functions, zoom/pan of the graph, multiple key selection, Timeline keyframe editing, other node parameters.
 - ⬜ Library view (templates and symbols)
 - ⬜ Top, Side and Perspective views (3D scene planning)
 - ⬜ Reference view (a second, frozen camera view), with Mirror mode (27)

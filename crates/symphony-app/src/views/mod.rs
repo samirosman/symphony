@@ -1,5 +1,6 @@
 pub mod camera;
 pub mod export;
+pub mod function;
 pub mod node;
 pub mod panels;
 pub mod select;

@@ -30,7 +30,7 @@ use symphony_ui::theme;
 
 use keymap::{Action, Profile};
 use session::{Session, Tool};
-use views::{camera, export, node, panels, timing};
+use views::{camera, export, function, node, panels, timing};
 use workspace::{View, Workspace};
 
 /// Autosave interval, seconds (E7.5).
@@ -113,6 +113,7 @@ struct SymphonyApp {
     pen: Option<PenInput>,
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
+    function: function::FunctionState,
     node_view: node::NodeViewState,
     timing: timing::TimingState,
     export: export::ExportDialog,
@@ -241,6 +242,14 @@ impl SymphonyApp {
             }
             // SYMPHONY_SHOT_PAINT: the Paint tool with a protected colour,
             // to review the paint options and the protection marker.
+            // SYMPHONY_SHOT_VIEW=Function: bring that tab to the front.
+            if std::env::var("SYMPHONY_SHOT_VIEW").as_deref() == Ok("Function") {
+                for (_, dock) in layouts.iter_mut() {
+                    if let Some(found) = dock.find_tab(&View::Function) {
+                        let _ = dock.set_active_tab(found);
+                    }
+                }
+            }
             // SYMPHONY_SHOT_TOOL=Brush|Pencil: review that tool's properties.
             match std::env::var("SYMPHONY_SHOT_TOOL").as_deref() {
                 Ok("Brush") => s.tool = Tool::Brush,
@@ -272,6 +281,7 @@ impl SymphonyApp {
             pen,
             camera: Default::default(),
             drawing: Default::default(),
+            function: Default::default(),
             node_view: Default::default(),
             timing: Default::default(),
             export: Default::default(),
@@ -1470,6 +1480,7 @@ struct Viewer<'a> {
     camera: &'a mut camera::CanvasState,
     drawing: &'a mut camera::CanvasState,
     node_view: &'a mut node::NodeViewState,
+    function: &'a mut function::FunctionState,
     timing: &'a mut timing::TimingState,
     samples: &'a [PenSample],
     device: Option<&'a DeviceInfo>,
@@ -1510,7 +1521,7 @@ impl Viewer<'_> {
             View::ToolProperties => panels::tool_properties(ui, self.s, self.presets, self.device),
             View::Colour => panels::colour(ui, self.s),
             View::LayerProperties => panels::layer_properties(ui, self.s),
-            View::Function => panels::planned(ui, "Function view (curve editor)", "M6"),
+            View::Function => function::ui(ui, self.s, self.function),
             View::NodeLibrary => node::library(ui, self.s, self.node_view),
             View::Library => panels::planned(ui, "Library (templates and symbols)", "M6"),
         }
@@ -1678,6 +1689,7 @@ impl eframe::App for SymphonyApp {
             camera: &mut self.camera,
             drawing: &mut self.drawing,
             node_view: &mut self.node_view,
+            function: &mut self.function,
             timing: &mut self.timing,
             samples: &samples,
             device: device.as_ref(),

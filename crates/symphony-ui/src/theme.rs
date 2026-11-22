@@ -37,6 +37,13 @@ pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
 /// follow the red-before, green-after convention; to verify against Harmony 27.
 pub const ONION_BEFORE: Color32 = hex(0xE0483E);
 pub const ONION_AFTER: Color32 = hex(0x2FA35A);
+
+// Function view curves: one hue per peg function, readable on BG_INPUT.
+pub const FUNCTION_X: Color32 = hex(0xEE7A6B);
+pub const FUNCTION_Y: Color32 = hex(0x6CCB8E);
+pub const FUNCTION_ANGLE: Color32 = hex(0x6FA8F5);
+pub const FUNCTION_SCALE_X: Color32 = hex(0xC99AF2);
+pub const FUNCTION_SCALE_Y: Color32 = hex(0x5CCFD0);
 /// Neutral shadow under the stage (D3.10) and floating windows (D6.4).
 pub const SHADOW: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
 
