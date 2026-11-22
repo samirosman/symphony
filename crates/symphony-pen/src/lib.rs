@@ -5,14 +5,21 @@
 //!   speaks the standard macOS tablet protocol: Wacom, Veikk, XP-Pen,
 //!   Huion, Apple Pencil via Sidecar…). Mouse coalescing is turned off so
 //!   every sample the tablet sends arrives.
-//! - Windows (Windows Ink + Wintab), Linux (Wayland tablet-v2, XInput2): planned.
+//! - Linux on Wayland: the `tablet-v2` protocol for pens and `wl_pointer`
+//!   for the mouse, on the toolkit's own connection (any tablet libinput
+//!   supports: Wacom, Huion, XP-Pen, Gaomon…).
+//! - Windows (Windows Ink + Wintab), Linux on X11 (XInput2): planned.
 
-use raw_window_handle::HasWindowHandle;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
+use raw_window_handle::RawDisplayHandle;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use raw_window_handle::RawWindowHandle;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+mod wayland;
 
 /// Where the pointer is in the stroke lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,12 +101,14 @@ impl std::error::Error for PenError {}
 pub struct PenInput {
     #[cfg(target_os = "macos")]
     backend: macos::Backend,
+    #[cfg(target_os = "linux")]
+    backend: wayland::Backend,
 }
 
 impl PenInput {
     /// Start listening to pen and mouse input on `window`.
     /// Must be called on the main thread.
-    pub fn attach(window: &impl HasWindowHandle) -> Result<Self, PenError> {
+    pub fn attach(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Self, PenError> {
         let handle = window.window_handle().map_err(|_| PenError::NoNativeView)?;
         #[cfg(target_os = "macos")]
         if let RawWindowHandle::AppKit(h) = handle.as_raw() {
@@ -107,29 +116,52 @@ impl PenInput {
                 backend: macos::Backend::attach(h.ns_view)?,
             });
         }
+        #[cfg(target_os = "linux")]
+        {
+            let display = window
+                .display_handle()
+                .map_err(|_| PenError::NoNativeView)?;
+            if let (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(w)) =
+                (display.as_raw(), handle.as_raw())
+            {
+                return Ok(PenInput {
+                    backend: wayland::Backend::attach(d.display, w.surface)?,
+                });
+            }
+        }
         let _ = handle;
         Err(PenError::Unsupported)
     }
 
+    /// Call `wake` from any thread whenever new samples arrive. Backends
+    /// whose events don't pass through the window toolkit need this, or
+    /// the app won't repaint until something else wakes it.
+    pub fn set_waker(&self, wake: impl Fn() + Send + Sync + 'static) {
+        #[cfg(target_os = "linux")]
+        self.backend.set_waker(Box::new(wake));
+        #[cfg(not(target_os = "linux"))]
+        let _ = wake;
+    }
+
     /// Take every sample received since the last call, oldest first.
     pub fn drain(&self) -> Vec<PenSample> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.backend.drain();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         Vec::new()
     }
 
     pub fn has_pending(&self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.backend.has_pending();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         false
     }
 
     pub fn device(&self) -> DeviceInfo {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.backend.device();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         DeviceInfo::default()
     }
 }

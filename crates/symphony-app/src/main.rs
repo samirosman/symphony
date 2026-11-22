@@ -545,7 +545,11 @@ impl SymphonyApp {
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         let pen = match PenInput::attach(cc) {
-            Ok(p) => Some(p),
+            Ok(p) => {
+                let ctx = cc.egui_ctx.clone();
+                p.set_waker(move || ctx.request_repaint());
+                Some(p)
+            }
             Err(e) => {
                 eprintln!("Pen input: {e}. Falling back to mouse.");
                 None
