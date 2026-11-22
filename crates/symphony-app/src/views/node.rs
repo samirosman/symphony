@@ -22,11 +22,11 @@ pub struct NodeViewState {
 }
 
 const W: f32 = 132.0;
-const H: f32 = 44.0;
+const H: f32 = 36.0;
 /// Dot grid spacing; dots use line.subtle so they stay in the background.
 const GRID: f32 = 24.0;
 
-/// Node type is shown as text, not colour (D4.1: colour only for meaning).
+/// Accessible names for the graph roles.
 fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::Drawing { .. } => "Drawing",
@@ -37,9 +37,18 @@ fn kind_label(kind: &NodeKind) -> &'static str {
     }
 }
 
+fn appearance(kind: &NodeKind) -> (Icon, egui::Color32) {
+    match kind {
+        NodeKind::Peg(_) => (Icon::Transform, theme::NODE_TRANSFORM),
+        NodeKind::Drawing { .. } => (Icon::Pencil, theme::NODE_DRAWING),
+        NodeKind::Composite => (Icon::Onion, theme::NODE_COMPOSITE),
+        NodeKind::Display | NodeKind::Write => (Icon::Fit, theme::NODE_OUTPUT),
+    }
+}
+
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
     let width = (s.doc.layers.len().max(1) - 1) as f32 * (W + 24.0) + W;
-    let height = 272.0 + H;
+    let height = 240.0 + H;
     let mut fit = false;
     let mut step = 1.0;
     ui.horizontal(|ui| {
@@ -72,7 +81,14 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         state.pan += resp.drag_delta();
     }
     let zoom = state.zoom.unwrap_or(fit_zoom);
-    let node_size = Vec2::new(W, H) * zoom;
+    let node_size = |id| {
+        let width = if id == s.doc.composite {
+            (W + 32.0).min(width)
+        } else {
+            W
+        };
+        Vec2::new(width, H) * zoom
+    };
     let grid = (GRID * zoom).max(12.0);
     let midpoint = r.center() + state.pan;
     let start = r.min
@@ -89,7 +105,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         }
         y += grid;
     }
-    let top = midpoint - Vec2::new(0.0, 136.0 * zoom);
+    let top = midpoint - Vec2::new(0.0, 120.0 * zoom);
     let col_x = |i: usize| top.x + (i as f32 * (W + 24.0) + (W - width) / 2.0) * zoom;
 
     // Layer i's peg and drawing sit in column i (front layer on the left,
@@ -97,10 +113,10 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
     let mut pos = BTreeMap::<NodeId, Pos2>::new();
     for (i, l) in s.doc.layers.iter().enumerate() {
         pos.insert(l.peg, Pos2::new(col_x(i), top.y));
-        pos.insert(l.node, Pos2::new(col_x(i), top.y + 88.0 * zoom));
+        pos.insert(l.node, Pos2::new(col_x(i), top.y + 76.0 * zoom));
     }
-    pos.insert(s.doc.composite, Pos2::new(top.x, top.y + 184.0 * zoom));
-    pos.insert(s.doc.display, Pos2::new(top.x, top.y + 272.0 * zoom));
+    pos.insert(s.doc.composite, Pos2::new(top.x, top.y + 160.0 * zoom));
+    pos.insert(s.doc.display, Pos2::new(top.x, top.y + 240.0 * zoom));
     let selected = s.doc.layers.get(s.selected);
     let is_selected = |id| selected.is_some_and(|layer| id == layer.peg || id == layer.node);
     let mut inputs = BTreeMap::<_, Vec<_>>::new();
@@ -115,17 +131,26 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         let b = pos[target];
         for (index, link) in links.iter().enumerate() {
             let a = pos[&link.from];
-            let port_x =
-                b.x + node_size.x * 0.72 * ((index as f32 + 0.5) / links.len() as f32 - 0.5);
-            let from = a + Vec2::new(0.0, node_size.y / 2.0);
-            let to = Pos2::new(port_x, b.y - node_size.y / 2.0);
+            let port_x = b.x
+                + node_size(*target).x * 0.72 * ((index as f32 + 0.5) / links.len() as f32 - 0.5);
+            let from = a + Vec2::new(0.0, node_size(link.from).y / 2.0);
+            let to = Pos2::new(port_x, b.y - node_size(*target).y / 2.0);
             let colour = if is_selected(link.from) {
                 theme::ACCENT_SELECT
             } else {
-                theme::LINE_CONTROL
+                let role = s
+                    .doc
+                    .graph
+                    .node(link.from)
+                    .map_or(theme::LINE_CONTROL, |node| appearance(&node.kind).1);
+                theme::BG_PANEL.lerp_to_gamma(role, 0.67)
             };
-            ports.push((from, colour));
-            ports.push((to, colour));
+            let transform = matches!(
+                s.doc.graph.node(link.from).map(|node| &node.kind),
+                Some(NodeKind::Peg(_))
+            );
+            ports.push((from, colour, transform));
+            ports.push((to, colour, transform));
             let mid = (to.y - from.y) / 2.0;
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                 [
@@ -146,55 +171,68 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
-        let r = Rect::from_center_size(*p, node_size);
+        let r = Rect::from_center_size(*p, node_size(*id));
         let sel = is_selected(*id);
         let hovered = resp.hovered() && resp.hover_pos().is_some_and(|point| r.contains(point));
+        let (glyph, role) = appearance(&node.kind);
+        let role = if node.enabled {
+            role
+        } else {
+            theme::TEXT_DISABLED
+        };
         let surface = if hovered {
             theme::BG_HOVER
         } else {
             theme::BG_PANEL
         };
-        painter.rect_filled(r, theme::RADIUS_CONTROL, surface);
-        let outline = if sel {
-            Stroke::new(1.0, theme::ACCENT_SELECT)
+        let fill = surface.lerp_to_gamma(role, if hovered { 0.19 } else { 0.13 });
+        let edge = if sel {
+            theme::ACCENT_SELECT
         } else {
-            Stroke::new(1.0, theme::LINE_SUBTLE)
+            fill.lerp_to_gamma(role, 0.28)
         };
-        painter.rect_stroke(r, theme::RADIUS_CONTROL as f32, outline, StrokeKind::Inside);
-        let name_col = if node.enabled {
-            theme::TEXT_PRIMARY
-        } else {
-            theme::TEXT_DISABLED
-        };
-        let kind = kind_label(&node.kind);
-        if zoom >= 0.48 {
-            let inset = 10.0 * zoom;
-            let x = r.left() + inset;
-            let show_kind = node.name != kind && zoom >= 0.7;
-            let y = r.center().y - if show_kind { 7.0 * zoom } else { 0.0 };
+        painter.rect(
+            r,
+            theme::RADIUS_CONTROL,
+            fill,
+            Stroke::new(1.0, edge),
+            StrokeKind::Inside,
+        );
+
+        if zoom >= 0.42 {
+            let glyph_size = (16.0 * zoom).clamp(10.0, 20.0);
+            let glyph_center = Pos2::new(r.left() + 9.0 * zoom + glyph_size / 2.0, r.center().y);
+            icons::paint(
+                &painter,
+                Rect::from_center_size(glyph_center, Vec2::splat(glyph_size)),
+                glyph,
+                role,
+            );
+            let x = glyph_center.x + glyph_size / 2.0 + 7.0 * zoom;
+            let name_col = if node.enabled {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_DISABLED
+            };
             let mut font = theme::body();
             font.size *= zoom.clamp(0.72, 1.25);
             widgets::fitted_text(
                 ui,
                 &painter,
-                Pos2::new(x, y),
+                Pos2::new(x, r.center().y),
                 Align2::LEFT_CENTER,
                 &node.name,
                 font,
                 name_col,
-                r.width() - inset * 2.0,
+                (r.right() - x - 9.0 * zoom).max(0.0),
             );
-            if show_kind {
-                let mut font = theme::dense();
-                font.size *= zoom.clamp(0.72, 1.25);
-                painter.text(
-                    Pos2::new(x, r.center().y + 8.0 * zoom),
-                    Align2::LEFT_CENTER,
-                    kind,
-                    font,
-                    theme::TEXT_SECONDARY,
-                );
-            }
+        }
+        if hovered {
+            resp.clone().on_hover_text_at_pointer(format!(
+                "{} · {}",
+                node.name,
+                kind_label(&node.kind)
+            ));
         }
         if resp.clicked() && resp.interact_pointer_pos().is_some_and(|q| r.contains(q)) {
             clicked_layer = s
@@ -204,8 +242,17 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                 .position(|l| l.peg == *id || l.node == *id);
         }
     }
-    for (point, colour) in ports {
-        painter.circle_filled(point, (2.5 * zoom).max(1.5), colour);
+    for (point, colour, transform) in ports {
+        let radius = (2.5 * zoom).max(1.5);
+        if transform {
+            painter.rect_filled(
+                Rect::from_center_size(point, Vec2::splat(radius * 2.0)),
+                0.5,
+                colour,
+            );
+        } else {
+            painter.circle_filled(point, radius, colour);
+        }
     }
     if let Some(i) = clicked_layer {
         s.selected = i;

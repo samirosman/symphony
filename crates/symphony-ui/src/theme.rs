@@ -31,6 +31,11 @@ pub const ACCENT_SELECT_FILL: Color32 = hex(0x3D63B8);
 pub const ACCENT_TIME: Color32 = hex(0xF0A63A);
 pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
+// Node data roles. Keep these distinct from selection and the playhead.
+pub const NODE_TRANSFORM: Color32 = hex(0x91BD9A);
+pub const NODE_DRAWING: Color32 = hex(0x8DBAD5);
+pub const NODE_COMPOSITE: Color32 = hex(0xB9A9D9);
+pub const NODE_OUTPUT: Color32 = hex(0xC2C5CB);
 pub const CANVAS_SURROUND: Color32 = hex(0x464749);
 pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
 /// Onion skin tints for previous and next drawings (DESIGN §4.3). Defaults
