@@ -657,6 +657,22 @@ impl Session {
         self.change_sound(id, name, |t| t.enabled = !on);
     }
 
+    /// Move or trim a sound track while it is dragged. The whole drag is
+    /// one undo step, until `end_gesture`.
+    pub fn drag_sound(&mut self, after: SoundTrack, name: &str) {
+        let Some(before) = self.doc.sounds.iter().find(|t| t.id == after.id).cloned() else {
+            return;
+        };
+        if before != after {
+            self.history.apply_merged(
+                &mut self.doc,
+                name,
+                "sound-drag",
+                Edit::SetSound { before, after },
+            );
+        }
+    }
+
     pub fn rename_sound(&mut self, id: Id, name: &str) {
         let name = name.trim();
         if name.is_empty() {

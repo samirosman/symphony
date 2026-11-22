@@ -482,6 +482,13 @@ impl Edit {
                 *after = a2.clone();
                 true
             }
+            // Dragging a sound track (move, trim) keeps one entry.
+            (Edit::SetSound { after, .. }, Edit::SetSound { after: a2, .. })
+                if after.id == a2.id =>
+            {
+                *after = a2.clone();
+                true
+            }
             (
                 Edit::SetSwatch { swatch, after, .. },
                 Edit::SetSwatch {

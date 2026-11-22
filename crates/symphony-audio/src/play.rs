@@ -32,6 +32,10 @@ pub struct Clip {
     /// Device frames from the start of the scene to the clip's start.
     pub start: u64,
     pub enabled: bool,
+    /// Device frames of `samples` skipped at the start (a trim).
+    pub offset: u64,
+    /// Device frames played from `offset` on.
+    pub frames: u64,
 }
 
 impl Clip {
@@ -41,6 +45,18 @@ impl Clip {
             samples,
             start: (start_seconds.max(0.0) * f64::from(rate)).round() as u64,
             enabled,
+            offset: 0,
+            frames: u64::MAX,
+        }
+    }
+
+    /// Play only `seconds` of the sound, from `offset` seconds into it.
+    pub fn trimmed(self, offset: f64, seconds: f64, rate: u32) -> Clip {
+        let at = |s: f64| (s.max(0.0) * f64::from(rate)).round() as u64;
+        Clip {
+            offset: at(offset),
+            frames: at(seconds),
+            ..self
         }
     }
 }
@@ -315,7 +331,10 @@ impl Mixer {
                     let Some(i) = self.position.checked_sub(clip.start) else {
                         continue;
                     };
-                    let at = i as usize * ch;
+                    if i >= clip.frames {
+                        continue;
+                    }
+                    let at = (clip.offset + i) as usize * ch;
                     if let Some(src) = clip.samples.get(at..at + ch) {
                         for (o, s) in frame.iter_mut().zip(src) {
                             *o += s;
@@ -483,7 +502,25 @@ mod tests {
             samples: Arc::new(samples),
             start,
             enabled: true,
+            offset: 0,
+            frames: u64::MAX,
         }
+    }
+
+    #[test]
+    fn a_trimmed_clip_plays_only_its_part() {
+        let (mut m, mut tx, _) = mixer();
+        // From 0.1 s into the sound, for 0.2 s, starting at 0.1 s in the scene.
+        let c = Clip::new(Arc::new(vec![0.1, 0.2, 0.3, 0.4]), 0.1, true, 10).trimmed(0.1, 0.2, 10);
+        tx.push(Command::SetClips(vec![c])).ok();
+        tx.push(Command::Play {
+            from: 0.0,
+            until: 1.0,
+            at: 0.0,
+            looping: false,
+        })
+        .ok();
+        assert_eq!(render(&mut m, 5), [0.0, 0.2, 0.3, 0.0, 0.0]);
     }
 
     /// A mono mixer at 10 Hz, so one sample is a tenth of a second.
@@ -634,11 +671,12 @@ mod tests {
     fn replaced_clips_go_back_to_the_app() {
         let (mut m, mut tx, mut garbage) = mixer();
         let first = Arc::new(vec![0.5; 4]);
-        tx.push(Command::SetClips(vec![Clip {
-            samples: Arc::clone(&first),
-            start: 0,
-            enabled: true,
-        }]))
+        tx.push(Command::SetClips(vec![Clip::new(
+            Arc::clone(&first),
+            0.0,
+            true,
+            10,
+        )]))
         .ok();
         render(&mut m, 1);
         tx.push(Command::SetClips(Vec::new())).ok();

@@ -42,7 +42,8 @@ enum Done {
 #[derive(PartialEq)]
 struct Sent {
     fps: u32,
-    tracks: Vec<(u64, bool, u32, bool)>,
+    /// Key, on, start frame, trims, decoded.
+    tracks: Vec<(u64, bool, u32, u64, u64, bool)>,
 }
 
 pub struct SoundState {
@@ -284,7 +285,16 @@ impl SoundState {
                 .doc
                 .sounds
                 .iter()
-                .map(|t| (t.key, t.enabled, t.start, self.ready.contains_key(&t.key)))
+                .map(|t| {
+                    (
+                        t.key,
+                        t.enabled,
+                        t.start,
+                        t.trim_start,
+                        t.trim_end,
+                        self.ready.contains_key(&t.key),
+                    )
+                })
                 .collect(),
         };
         if self.sent.as_ref() == Some(&sent) {
@@ -300,8 +310,10 @@ impl SoundState {
             .iter()
             .filter_map(|t| {
                 let r = self.ready.get(&t.key)?;
+                let file = s.doc.sound_files.get(&t.key)?;
                 let start = f64::from(t.start.saturating_sub(1)) / f64::from(fps);
-                Some(Clip::new(Arc::clone(&r.pcm), start, t.enabled, rate))
+                let clip = Clip::new(Arc::clone(&r.pcm), start, t.enabled, rate);
+                Some(clip.trimmed(t.offset(file), t.seconds(file), rate))
             })
             .collect();
         if player.send(Command::SetClips(clips)) {

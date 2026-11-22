@@ -8,7 +8,7 @@ use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
 use symphony_core::id::Id;
-use symphony_core::sound;
+use symphony_core::sound::{self, SoundTrack};
 
 use crate::keymap::{self, Action, Profile};
 use crate::session::{InsertExposure, Session};
@@ -27,7 +27,31 @@ pub struct TimingState {
     renaming_sound: Option<(Id, String)>,
     /// Sound track whose context menu is open.
     sound_menu: Option<Id>,
+    /// A sound track being moved or trimmed.
+    sound_drag: Option<SoundDrag>,
 }
+
+/// Which part of a sound block a drag holds.
+#[derive(Clone, Copy, PartialEq)]
+enum SoundPart {
+    /// The middle: moves the track.
+    Body,
+    /// The left edge: trims the start.
+    Start,
+    /// The right edge: trims the end.
+    End,
+}
+
+struct SoundDrag {
+    part: SoundPart,
+    /// Pointer x where the drag started.
+    x: f32,
+    /// The track as it was then; each step is worked out from it.
+    original: SoundTrack,
+}
+
+/// Pixels on each side of a sound block's edge that grab the edge.
+const SOUND_EDGE: f32 = 6.0;
 
 /// Width of the Timeline's Parameters field (the exposed drawing's name).
 const PARAM_W: f32 = 48.0;
@@ -391,6 +415,7 @@ fn waveform(
     painter: &egui::Painter,
     block: Rect,
     peaks: &symphony_audio::Peaks,
+    offset: f64,
     seconds_per_pixel: f64,
     colour: egui::Color32,
 ) {
@@ -398,7 +423,7 @@ fn waveform(
     let half = block.height() / 2.0 - 1.0;
     let mut x = block.left().ceil();
     while x < block.right() {
-        let from = f64::from(x - block.left()) * seconds_per_pixel;
+        let from = offset + f64::from(x - block.left()) * seconds_per_pixel;
         let (lo, hi) = peaks.range(from, from + seconds_per_pixel);
         if hi > lo {
             painter.line_segment(
@@ -823,6 +848,8 @@ pub fn timeline(
             }
 
             let fps = s.doc.settings.fps.max(1.0);
+            // Each sound block, for moving and trimming.
+            let mut blocks: Vec<(Id, Rect)> = Vec::new();
             for (j, track) in s.doc.sounds.iter().enumerate() {
                 let y = o.y + RULER + (layers + j) as f32 * rh;
                 let on = track.enabled;
@@ -864,12 +891,13 @@ pub fn timeline(
                     continue;
                 }
                 // A sound longer than the scene stops at the scene end.
-                let last = sound::last_frame(track.start, file, fps).min(len);
+                let last = sound::last_frame(track, file, fps).min(len);
                 let block = Rect::from_min_max(
                     Pos2::new(frame_x(first) + 1.0, y + 5.0),
                     Pos2::new(frame_x(last + 1) - 1.0, y + rh - 5.0),
                 );
                 painter.rect_filled(block, theme::RADIUS_CONTROL as f32, theme::BG_HOVER);
+                blocks.push((track.id, block));
                 if let Some(peaks) = sounds.peaks(track.key) {
                     let colour = if on {
                         theme::TEXT_SECONDARY
@@ -882,9 +910,89 @@ pub fn timeline(
                         &painter,
                         block.shrink2(Vec2::new(1.0, 2.0)),
                         peaks,
+                        track.offset(file),
                         seconds_per_pixel,
                         colour,
                     );
+                }
+            }
+
+            // Drag a sound block's middle to move it, an edge to trim it.
+            // With Shift, a drag anywhere trims the nearer edge.
+            let shift = ui.input(|i| i.modifiers.shift);
+            let hit = |p: Pos2| {
+                blocks.iter().find_map(|(id, r)| {
+                    r.expand2(Vec2::new(SOUND_EDGE / 2.0, 0.0))
+                        .contains(p)
+                        .then(|| {
+                            let part = if p.x - r.left() <= SOUND_EDGE {
+                                SoundPart::Start
+                            } else if r.right() - p.x <= SOUND_EDGE {
+                                SoundPart::End
+                            } else if shift && p.x < r.center().x {
+                                SoundPart::Start
+                            } else if shift {
+                                SoundPart::End
+                            } else {
+                                SoundPart::Body
+                            };
+                            (*id, part)
+                        })
+                })
+            };
+            // Where the press began, not where the pointer is when egui
+            // calls it a drag (a few pixels on, often past an edge's zone).
+            let pressed_on = ui
+                .input(|i| i.pointer.press_origin())
+                .filter(|_| resp.is_pointer_button_down_on() || resp.drag_stopped());
+            let on_block = pressed_on.and_then(hit).is_some();
+            if resp.drag_started() {
+                if let Some((p, (id, part))) = pressed_on.and_then(|p| hit(p).map(|h| (p, h))) {
+                    if let Some(original) = s.doc.sounds.iter().find(|t| t.id == id).cloned() {
+                        t.sound_drag = Some(SoundDrag {
+                            part,
+                            x: p.x,
+                            original,
+                        });
+                    }
+                }
+            }
+            let cursor = match &t.sound_drag {
+                Some(d) => Some(d.part),
+                None => resp.hover_pos().and_then(hit).map(|(_, part)| part),
+            };
+            match cursor {
+                Some(SoundPart::Body) if t.sound_drag.is_some() => {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing)
+                }
+                Some(SoundPart::Body) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+                Some(_) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal),
+                None => {}
+            }
+            let dragging_sound = t.sound_drag.is_some();
+            if let Some(d) = &t.sound_drag {
+                if let (Some(p), Some(file)) = (
+                    resp.interact_pointer_pos(),
+                    s.doc.sound_files.get(&d.original.key),
+                ) {
+                    let frames = ((p.x - d.x) / cw).round() as i64;
+                    let o = &d.original;
+                    let (after, name) = match d.part {
+                        SoundPart::Body => (
+                            // Never past the scene end, where the block would go away.
+                            o.moved_to(
+                                (i64::from(o.start) + frames).clamp(1, i64::from(len)) as u32
+                            ),
+                            "Move sound",
+                        ),
+                        SoundPart::Start => (o.trimmed_start(file, fps, frames), "Trim sound"),
+                        SoundPart::End => (o.trimmed_end(file, fps, frames), "Trim sound"),
+                    };
+                    s.drag_sound(after, name);
+                }
+                if resp.drag_stopped() {
+                    s.end_gesture();
+                    t.sound_drag = None;
                 }
             }
 
@@ -899,7 +1007,10 @@ pub fn timeline(
                 let r = ((p.y - o.y - RULER) / rh).floor();
                 (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
             };
-            if let Some(p) = resp.interact_pointer_pos() {
+            // A press on a sound block leaves the playhead alone until it
+            // turns out to be a click, so a drag never moves it.
+            let scrub = !dragging_sound && (!on_block || resp.clicked());
+            if let Some(p) = resp.interact_pointer_pos().filter(|_| scrub) {
                 let rel = p - o;
                 if rel.x >= HEAD {
                     s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);

@@ -121,6 +121,84 @@ pub struct SoundTrack {
     /// The scene frame (1-based, E2.4) where the sound starts.
     #[serde(default = "first_frame")]
     pub start: u32,
+    /// Samples (per channel, at the file's rate) left out at the start of
+    /// the file. The file itself is never changed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trim_start: u64,
+    /// Samples left out at the end of the file.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trim_end: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl SoundTrack {
+    /// Samples of `file` the track plays, after its trims.
+    pub fn played(&self, file: &SoundFile) -> u64 {
+        file.samples
+            .saturating_sub(self.trim_start)
+            .saturating_sub(self.trim_end)
+    }
+
+    /// Length the track plays, in seconds.
+    pub fn seconds(&self, file: &SoundFile) -> f64 {
+        self.played(file) as f64 / f64::from(file.rate.max(1))
+    }
+
+    /// Where in the file the track starts playing, in seconds.
+    pub fn offset(&self, file: &SoundFile) -> f64 {
+        self.trim_start as f64 / f64::from(file.rate.max(1))
+    }
+
+    /// The track moved to start at `start` (never before frame 1).
+    pub fn moved_to(&self, start: u32) -> SoundTrack {
+        SoundTrack {
+            start: start.max(1),
+            ..self.clone()
+        }
+    }
+
+    /// The track with its start trimmed by `frames` scene frames: positive
+    /// cuts sound away, negative brings it back. The sound that stays
+    /// keeps its place in the scene, so the start frame moves with the
+    /// trim. At least one frame of sound stays, and nothing starts before
+    /// frame 1.
+    pub fn trimmed_start(&self, file: &SoundFile, fps: f32, frames: i64) -> SoundTrack {
+        let per = samples_per_frame(file, fps);
+        // Frames the trim can take back (file start, scene start) and give.
+        let back = (self.trim_start as f64 / per).floor() as i64;
+        let back = back.min(i64::from(self.start) - 1);
+        let ahead = (self.played(file) as f64 / per).ceil() as i64 - 1;
+        let frames = frames.clamp(-back, ahead.max(0));
+        let trim = (self.trim_start as f64 + frames as f64 * per).round();
+        SoundTrack {
+            trim_start: (trim.max(0.0) as u64).min(file.samples.saturating_sub(self.trim_end)),
+            start: (i64::from(self.start) + frames).max(1) as u32,
+            ..self.clone()
+        }
+    }
+
+    /// The track with its end trimmed by `frames` scene frames: negative
+    /// cuts sound away, positive brings it back, up to the end of the
+    /// file. At least one frame of sound stays.
+    pub fn trimmed_end(&self, file: &SoundFile, fps: f32, frames: i64) -> SoundTrack {
+        let per = samples_per_frame(file, fps);
+        let back = (self.trim_end as f64 / per).ceil() as i64;
+        let cut = (self.played(file) as f64 / per).ceil() as i64 - 1;
+        let frames = frames.clamp(-cut.max(0), back);
+        let trim = (self.trim_end as f64 - frames as f64 * per).round();
+        SoundTrack {
+            trim_end: (trim.max(0.0) as u64).min(file.samples.saturating_sub(self.trim_start)),
+            ..self.clone()
+        }
+    }
+}
+
+/// Samples of `file` in one scene frame at `fps`.
+fn samples_per_frame(file: &SoundFile, fps: f32) -> f64 {
+    f64::from(file.rate.max(1)) / f64::from(fps.max(1.0))
 }
 
 fn on() -> bool {
@@ -137,12 +215,12 @@ pub fn seconds_at(start: u32, frame: u32, fps: f32) -> f64 {
     (f64::from(frame) - f64::from(start)) / f64::from(fps.max(1.0))
 }
 
-/// The last scene frame that a sound starting at `start` reaches. A sound
-/// longer than the scene doesn't make the scene longer; callers clip to
-/// the scene length themselves.
-pub fn last_frame(start: u32, file: &SoundFile, fps: f32) -> u32 {
-    let frames = (file.seconds() * f64::from(fps.max(1.0))).ceil() as u32;
-    start.saturating_add(frames.max(1) - 1)
+/// The last scene frame that `track` reaches. A sound longer than the
+/// scene doesn't make the scene longer; callers clip to the scene length
+/// themselves.
+pub fn last_frame(track: &SoundTrack, file: &SoundFile, fps: f32) -> u32 {
+    let frames = (track.seconds(file) * f64::from(fps.max(1.0))).ceil() as u32;
+    track.start.saturating_add(frames.max(1) - 1)
 }
 
 /// The edit that adds a track at the bottom of the list, playing the file
@@ -156,6 +234,8 @@ pub fn add_track(scene: &mut Scene, name: &str, key: u64) -> Edit {
             key,
             enabled: true,
             start: 1,
+            trim_start: 0,
+            trim_end: 0,
         },
     }
 }
@@ -194,16 +274,60 @@ mod tests {
         }
     }
 
+    fn track(start: u32) -> SoundTrack {
+        SoundTrack {
+            id: Id(1),
+            name: "A".into(),
+            key: 1,
+            enabled: true,
+            start,
+            trim_start: 0,
+            trim_end: 0,
+        }
+    }
+
+    #[test]
+    fn trims_snap_to_frames_and_keep_the_sound_in_place() {
+        // 2 s at 24 fps, 2000 samples a frame.
+        let f = file(48_000, 96_000);
+        let t = track(10);
+        let a = t.trimmed_start(&f, 24.0, 3);
+        assert_eq!((a.start, a.trim_start), (13, 6_000));
+        assert_eq!(last_frame(&a, &f, 24.0), last_frame(&t, &f, 24.0));
+        // Back, but not past the file's start.
+        let b = a.trimmed_start(&f, 24.0, -10);
+        assert_eq!((b.start, b.trim_start), (10, 0));
+        // Not before frame 1 either.
+        let late = SoundTrack {
+            trim_start: 20_000,
+            ..track(2)
+        };
+        let c = late.trimmed_start(&f, 24.0, -6);
+        assert_eq!((c.start, c.trim_start), (1, 18_000));
+        // At least one frame stays.
+        let d = t.trimmed_start(&f, 24.0, 1_000);
+        assert_eq!(d.played(&f), 2_000);
+
+        let e = t.trimmed_end(&f, 24.0, -4);
+        assert_eq!((e.start, e.trim_end), (10, 8_000));
+        assert_eq!(last_frame(&e, &f, 24.0), last_frame(&t, &f, 24.0) - 4);
+        // Back to the end of the file, no further.
+        assert_eq!(e.trimmed_end(&f, 24.0, 99).trim_end, 0);
+        assert_eq!(t.trimmed_end(&f, 24.0, -1_000).played(&f), 2_000);
+        assert_eq!(t.moved_to(0).start, 1);
+    }
+
     #[test]
     fn frames_and_seconds() {
         assert_eq!(seconds_at(1, 1, 24.0), 0.0);
         assert_eq!(seconds_at(1, 25, 24.0), 1.0);
         assert!(seconds_at(10, 1, 24.0) < 0.0);
+        let at = |start| track(start);
         // One second at 24 fps covers frames 1 to 24.
-        assert_eq!(last_frame(1, &file(48_000, 48_000), 24.0), 24);
+        assert_eq!(last_frame(&at(1), &file(48_000, 48_000), 24.0), 24);
         // A little more reaches into frame 25.
-        assert_eq!(last_frame(1, &file(48_000, 48_001), 24.0), 25);
-        assert_eq!(last_frame(5, &file(48_000, 0), 24.0), 5);
+        assert_eq!(last_frame(&at(1), &file(48_000, 48_001), 24.0), 25);
+        assert_eq!(last_frame(&at(5), &file(48_000, 0), 24.0), 5);
     }
 
     #[test]
@@ -287,5 +411,6 @@ mod tests {
         let t: SoundTrack = serde_json::from_str(r#"{"id":3,"name":"A","key":9}"#).unwrap();
         assert!(t.enabled);
         assert_eq!(t.start, 1);
+        assert_eq!((t.trim_start, t.trim_end), (0, 0));
     }
 }
