@@ -8,7 +8,6 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rayon::prelude::*;
 use symphony_core::bitmap::{self, Alpha, ImageFile, ImageFormat, ImageRef};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
@@ -45,30 +44,15 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
     let format = match file.format {
         ImageFormat::Png => image::ImageFormat::Png,
         ImageFormat::Jpeg => image::ImageFormat::Jpeg,
-        ImageFormat::Exr => image::ImageFormat::OpenExr,
+        ImageFormat::Exr => return decode_exr(&file.bytes, alpha),
     };
     let mut reader = image::ImageReader::with_format(Cursor::new(&file.bytes[..]), format);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(bitmap::MAX_SIDE);
     limits.max_image_height = Some(bitmap::MAX_SIDE);
-    // EXR decodes to four f32 channels: 16 bytes a pixel.
-    let per_pixel = if file.format == ImageFormat::Exr {
-        16
-    } else {
-        8
-    };
-    limits.max_alloc = Some(bitmap::MAX_PIXELS * per_pixel);
+    limits.max_alloc = Some(bitmap::MAX_PIXELS * 8);
     reader.limits(limits);
     let decoded = reader.decode().ok()?;
-    if file.format == ImageFormat::Exr {
-        let (w, h) = (decoded.width(), decoded.height());
-        return match decoded {
-            // No alpha channel: read the RGB samples as they are, rather
-            // than copy them into a second, four-channel buffer.
-            image::DynamicImage::ImageRgb32F(img) => linear_to_pixmap(w, h, &img, 3, alpha),
-            other => linear_to_pixmap(w, h, &other.into_rgba32f(), 4, alpha),
-        };
-    }
     let rgba = decoded.into_rgba8();
     let (w, h) = rgba.dimensions();
     let mut px = rgba.into_raw();
@@ -89,30 +73,60 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
     Pixmap::from_vec(px, IntSize::from_wh(w, h)?)
 }
 
-/// Linear-light float pixels (OpenEXR) to premultiplied sRGB bytes, the
-/// same form [`decode`] gives for PNG and JPEG. `samples` holds RGB (an
-/// opaque image) or RGBA, per `channels`. The premultiplication is undone
-/// in linear light, where it was made. Values above 1.0 are clipped (no
-/// tone mapping); NaN reads as 0.
-fn linear_to_pixmap(
-    w: u32,
-    h: u32,
-    samples: &[f32],
-    channels: usize,
-    alpha: Alpha,
-) -> Option<Pixmap> {
-    let row = w as usize;
-    let mut out = vec![0; row * h as usize * 4];
-    // Rows in parallel: a 64-megapixel image has 200 million samples.
-    samples
-        .par_chunks(row * channels)
-        .zip(out.par_chunks_mut(row * 4))
-        .for_each(|(src, dst)| {
-            for (p, o) in src.chunks_exact(channels).zip(dst.as_chunks_mut::<4>().0) {
-                linear_pixel(p, o, alpha);
-            }
-        });
-    Pixmap::from_vec(out, IntSize::from_wh(w, h)?)
+/// Decode OpenEXR (linear light, half or full float) straight to
+/// premultiplied sRGB bytes, the same form [`decode`] gives for PNG and
+/// JPEG. Each pixel is converted as the `exr` crate hands it over, so no
+/// float copy of the image is ever held: through the `image` crate a
+/// 64-megapixel RGBA file needed two 1 GiB float buffers. The
+/// premultiplication is undone in linear light, where it was made. Values
+/// above 1.0 are clipped (no tone mapping); NaN reads as 0.
+///
+/// It shows the same part and the same area as `image` 0.25 did: the
+/// first flat part with R, G and B channels, placed in the display window.
+/// Pixels outside the data window stay as `image` left them, zero: clear
+/// for a file with alpha, black for one without.
+fn decode_exr(bytes: &[u8], alpha: Alpha) -> Option<Pixmap> {
+    use exr::prelude::*;
+    let reader = exr::block::read(Cursor::new(bytes), false).ok()?;
+    let part = reader.headers().iter().find(|h| {
+        !h.deep
+            && ["R", "G", "B"]
+                .iter()
+                .all(|c| h.channels.find_index_of_channel(&Text::from(*c)).is_some())
+    })?;
+    // The header, not the scene's copy of the size, decides the buffer.
+    let display = part.shared_attributes.display_window;
+    let w = u32::try_from(display.size.width()).ok()?;
+    let h = u32::try_from(display.size.height()).ok()?;
+    if !bitmap::size_ok(w, h) {
+        return None;
+    }
+    let offset = part.own_attributes.layer_position - display.position;
+    let has_alpha = part
+        .channels
+        .find_index_of_channel(&Text::from("A"))
+        .is_some();
+    let blank = if has_alpha { [0; 4] } else { [0, 0, 0, 255] };
+    let (row, rows) = (w as usize, h as usize);
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .rgba_channels(
+            move |_, _| vec![blank; row * rows],
+            move |out: &mut Vec<[u8; 4]>, at: Vec2<usize>, (r, g, b, a): (f32, f32, f32, f32)| {
+                let p = at.to_i32() + offset;
+                if (0..row as i32).contains(&p.x()) && (0..rows as i32).contains(&p.y()) {
+                    let i = p.y() as usize * row + p.x() as usize;
+                    linear_pixel(&[r, g, b, a], &mut out[i], alpha);
+                }
+            },
+        )
+        .first_valid_layer()
+        .all_attributes()
+        .from_chunks(reader)
+        .ok()?;
+    let px = image.layer_data.channel_data.pixels;
+    Pixmap::from_vec(px.into_flattened(), IntSize::from_wh(w, h)?)
 }
 
 fn linear_pixel(p: &[f32], out: &mut [u8; 4], alpha: Alpha) {
@@ -387,11 +401,72 @@ mod tests {
         }
     }
 
+    /// Write an `exr` image to an [`ImageFile`] of its display size.
+    macro_rules! exr_file {
+        ($image:expr) => {{
+            let image = $image;
+            let size = image.attributes.display_window.size;
+            let mut bytes = Vec::new();
+            image.write().to_buffered(Cursor::new(&mut bytes)).unwrap();
+            ImageFile {
+                format: ImageFormat::Exr,
+                width: size.width() as u32,
+                height: size.height() as u32,
+                bytes: Arc::new(bytes),
+            }
+        }};
+    }
+
     #[test]
     fn opaque_rgb_exr_reads_like_rgba() {
-        let rgb = linear_to_pixmap(1, 1, &[0.2158, 0.0, 1.0], 3, Alpha::PremultipliedBlack);
-        let rgba = linear_to_pixmap(1, 1, &[0.2158, 0.0, 1.0, 1.0], 4, Alpha::PremultipliedBlack);
-        assert_eq!(rgb.unwrap().data(), rgba.unwrap().data());
+        use exr::prelude::*;
+        let ch = SpecificChannels::rgb(|_: Vec2<usize>| (0.2158_f32, 0.0_f32, 1.0_f32));
+        let f = exr_file!(Image::from_channels((1, 1), ch));
+        let p = decode(&f, Alpha::PremultipliedBlack).unwrap();
+        assert_eq!(
+            p.data(),
+            one_exr([0.2158, 0.0, 1.0, 1.0], Alpha::PremultipliedBlack)
+        );
+    }
+
+    #[test]
+    fn exr_data_window_sits_in_the_display_window() {
+        use exr::prelude::*;
+        // A one-pixel data window at x = 1 of a 3 x 1 display window.
+        let ch = SpecificChannels::rgba(|_: Vec2<usize>| (1.0_f32, 1.0_f32, 1.0_f32, 1.0_f32));
+        let mut layer = Layer::new(
+            (1, 1),
+            LayerAttributes::default(),
+            Encoding::UNCOMPRESSED,
+            ch,
+        );
+        layer.attributes.layer_position = Vec2(1, 0);
+        let mut image = Image::from_layer(layer);
+        image.attributes.display_window = IntegerBounds::new((0, 0), (3, 1));
+        let p = decode(&exr_file!(image), Alpha::PremultipliedBlack).unwrap();
+        assert_eq!((p.width(), p.height()), (3, 1));
+        assert_eq!(p.data(), [0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn exr_size_comes_from_the_file_header() {
+        // The scene says 1 x 1; the file is 2 x 1. The pixmap follows the
+        // file, which is what the bytes hold.
+        use exr::prelude::*;
+        let ch = SpecificChannels::rgba(|_: Vec2<usize>| (0.0_f32, 0.0_f32, 0.0_f32, 1.0_f32));
+        let mut f = exr_file!(Image::from_channels((2, 1), ch));
+        f.width = 1;
+        let p = decode(&f, Alpha::PremultipliedBlack).unwrap();
+        assert_eq!((p.width(), p.height()), (2, 1));
+    }
+
+    #[test]
+    fn garbage_exr_decodes_to_nothing() {
+        let mut f = exr([0.0; 4]);
+        let mut cut = f.bytes.to_vec();
+        cut.truncate(cut.len() / 2);
+        f.bytes = Arc::new(cut);
+        assert!(decode(&f, Alpha::Straight).is_none());
     }
 
     #[test]
