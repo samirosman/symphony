@@ -62,6 +62,8 @@ pub struct SoundState {
     sent: Option<Sent>,
     /// Play > Enable Sound.
     enabled: bool,
+    /// Play > Enable Sound Scrubbing.
+    scrubbing: bool,
     /// What the mixer last got for Enable Sound.
     sent_enabled: Option<bool>,
     /// Scene length and frame rate of the range the mixer is playing.
@@ -84,6 +86,7 @@ impl Default for SoundState {
             rx,
             sent: None,
             enabled: true,
+            scrubbing: false,
             sent_enabled: None,
             started: None,
             shown: 0,
@@ -108,6 +111,16 @@ impl SoundState {
         self.enabled = !self.enabled;
     }
 
+    pub fn scrubbing(&self) -> bool {
+        self.scrubbing
+    }
+
+    /// Play > Enable Sound Scrubbing. Off at start, as in Harmony, so
+    /// stepping through frames while drawing stays quiet.
+    pub fn toggle_scrubbing(&mut self) {
+        self.scrubbing = !self.scrubbing;
+    }
+
     /// While a scene with sound plays, set the frame from the sound the
     /// listener hears: the picture follows the sound, as in Harmony, and
     /// skips images rather than letting the sound stutter. `false` when
@@ -123,6 +136,18 @@ impl SoundState {
         if !s.playing || s.doc.sounds.is_empty() {
             if self.started.take().is_some() {
                 player.send(Command::Stop);
+            }
+            if s.frame != self.shown {
+                self.shown = s.frame;
+                // Scrubbing: the playhead moved by hand, so play the slice
+                // of sound under the new frame, once.
+                if self.scrubbing && self.enabled && !s.doc.sounds.is_empty() {
+                    let per = f64::from(s.doc.settings.fps.max(1.0));
+                    player.send(Command::Scrub {
+                        at: f64::from(s.frame.max(1) - 1) / per,
+                        length: 1.0 / per,
+                    });
+                }
             }
             return false;
         }

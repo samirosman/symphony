@@ -1234,6 +1234,7 @@ impl SymphonyApp {
                     Action::LastFrame => s.frame = s.length(),
                     Action::PlayPause => s.playing = !s.playing,
                     Action::EnableSound => self.sound.toggle_enabled(),
+                    Action::EnableSoundScrubbing => self.sound.toggle_scrubbing(),
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
                     Action::CreateEmptyDrawing => s.new_drawing(),
@@ -1507,6 +1508,8 @@ impl SymphonyApp {
             ui.separator();
             let on = self.sound.enabled();
             self.menu_toggle(ui, Action::EnableSound, on);
+            let on = self.sound.scrubbing();
+            self.menu_toggle(ui, Action::EnableSoundScrubbing, on);
         });
         ui.menu_button("View", |ui| {
             self.menu_action(ui, Action::ToggleOnionSkin);
