@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use symphony_core::bitmap::{self, Alpha, ImageFile, ImageFormat, ImageRef};
@@ -15,9 +16,24 @@ use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
 /// Decoded pixels kept between frames, so export decodes each image once.
 const CACHE_BYTES: usize = 1024 * 1024 * 1024;
 
-type Cache = HashMap<(u64, Alpha), Arc<Pixmap>>;
+struct Entry {
+    pixmap: Arc<Pixmap>,
+    /// The [`FRAME`] count when it was last drawn.
+    used: u64,
+}
+
+type Cache = HashMap<(u64, Alpha), Entry>;
 
 static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+
+/// Counts rendered frames, so the cache knows which images the frame
+/// being drawn already holds.
+static FRAME: AtomicU64 = AtomicU64::new(0);
+
+/// Call once before each frame is drawn.
+pub(crate) fn next_frame() {
+    FRAME.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Decode `file` to premultiplied RGBA, undoing the file's own alpha
 /// encoding. `None` if the bytes don't decode; never panics (E7.6).
@@ -115,18 +131,45 @@ fn srgb8(linear: f32) -> u8 {
 
 fn cached(scene: &Scene, r: ImageRef) -> Option<Arc<Pixmap>> {
     let file = scene.images.get(&r.key)?;
+    let frame = FRAME.load(Ordering::Relaxed);
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some(p) = cache.get(&(r.key, r.alpha)) {
-        return Some(p.clone());
+    if let Some(e) = cache.get_mut(&(r.key, r.alpha)) {
+        e.used = frame;
+        return Some(e.pixmap.clone());
     }
     let p = Arc::new(decode(file, r.alpha)?);
-    let used: usize = cache.values().map(|p| p.data().len()).sum();
-    if used + p.data().len() > CACHE_BYTES {
-        cache.clear();
-    }
-    cache.insert((r.key, r.alpha), p.clone());
+    store(cache, (r.key, r.alpha), p.clone(), frame, CACHE_BYTES);
     Some(p)
+}
+
+/// Keep `p` if it fits in `budget` bytes once the least recently drawn
+/// images are dropped. Images this frame has drawn stay: when a frame
+/// needs more than the budget, dropping them would decode every image
+/// again on every frame, so the extra one is drawn and not kept.
+fn store(cache: &mut Cache, key: (u64, Alpha), p: Arc<Pixmap>, frame: u64, budget: usize) {
+    let size = p.data().len();
+    let mut used: usize = cache.values().map(|e| e.pixmap.data().len()).sum();
+    while used + size > budget {
+        let oldest = cache
+            .iter()
+            .filter(|(_, e)| e.used != frame)
+            .min_by_key(|(_, e)| e.used)
+            .map(|(k, _)| *k);
+        let Some(k) = oldest else {
+            return;
+        };
+        if let Some(e) = cache.remove(&k) {
+            used -= e.pixmap.data().len();
+        }
+    }
+    cache.insert(
+        key,
+        Entry {
+            pixmap: p,
+            used: frame,
+        },
+    );
 }
 
 /// Draw the drawing's image into `pix` with `m` (drawing space to pixels).
@@ -262,6 +305,29 @@ mod tests {
             assert_eq!(srgb8(lin), code);
         }
         assert_eq!(srgb8(f32::INFINITY), 255);
+    }
+
+    #[test]
+    fn a_full_cache_drops_old_images_and_keeps_this_frames() {
+        let px = |n: u32| Arc::new(Pixmap::new(n, 1).unwrap());
+        let key = |k: u64| (k, Alpha::Straight);
+        let mut c = Cache::new();
+        // Budget: three 4-byte images.
+        store(&mut c, key(1), px(1), 1, 12);
+        store(&mut c, key(2), px(1), 2, 12);
+        store(&mut c, key(3), px(1), 3, 12);
+        // Frame 3 needs a fourth: image 1, drawn longest ago, goes.
+        store(&mut c, key(4), px(1), 3, 12);
+        assert!(!c.contains_key(&key(1)));
+        assert_eq!(c.len(), 3);
+        // Frame 4 draws 2, 3 and 4, then needs a fifth: nothing of this
+        // frame is dropped, and the fifth is not kept.
+        for k in 2..=4 {
+            c.get_mut(&key(k)).unwrap().used = 4;
+        }
+        store(&mut c, key(5), px(1), 4, 12);
+        assert!(!c.contains_key(&key(5)));
+        assert_eq!(c.len(), 3);
     }
 
     #[test]

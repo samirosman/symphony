@@ -113,6 +113,7 @@ fn render_display(
     if white_paper {
         paper.fill(tiny_skia::Color::WHITE);
     }
+    bitmap::next_frame();
     let k = width as f32 / scene.settings.width.max(1) as f32 * scene.camera_scale(frame);
     // Scene units have their origin at the stage centre, y down.
     let view =
