@@ -89,9 +89,10 @@ impl CanvasState {
         Pos2::new(sx, sy)
     }
 
-    #[cfg(test)]
+    /// Set the zoom (screen points per scene unit), e.g. from search.
     pub fn set_zoom(&mut self, zoom: f32) {
-        self.zoom = zoom;
+        self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.fit_pending = false;
     }
 
     pub fn busy(&self) -> bool {

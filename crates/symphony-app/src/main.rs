@@ -9,6 +9,7 @@ mod codec;
 mod keymap;
 mod presets;
 mod save_dialog;
+mod search;
 mod session;
 mod shot;
 #[cfg(test)]
@@ -71,6 +72,9 @@ struct Saved {
     use_openh264: bool,
     #[serde(default)]
     presets: Option<presets::Presets>,
+    /// How often each search result was chosen, to rank favourites first.
+    #[serde(default)]
+    search_uses: std::collections::HashMap<String, u32>,
 }
 
 fn yes() -> bool {
@@ -134,6 +138,13 @@ struct SymphonyApp {
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
     function: function::FunctionState,
+    /// The search box (Tab), when open.
+    palette: Option<views::palette::PaletteState>,
+    /// The view under the mouse last frame, for search ranking.
+    hovered_view: Option<View>,
+    /// Screenshot mode opened the search box already.
+    shot_search_opened: bool,
+    search_uses: std::collections::HashMap<String, u32>,
     node_view: node::NodeViewState,
     timing: timing::TimingState,
     export: export::ExportDialog,
@@ -254,6 +265,10 @@ impl SymphonyApp {
             .as_ref()
             .and_then(|s| s.presets.clone())
             .unwrap_or_default();
+        let search_uses = saved
+            .as_ref()
+            .map(|s| s.search_uses.clone())
+            .unwrap_or_default();
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -352,6 +367,10 @@ impl SymphonyApp {
             camera: Default::default(),
             drawing: Default::default(),
             function: Default::default(),
+            palette: None,
+            hovered_view: None,
+            shot_search_opened: false,
+            search_uses,
             node_view: Default::default(),
             timing: Default::default(),
             export: Default::default(),
@@ -792,6 +811,16 @@ impl SymphonyApp {
             | Action::ResetView => {
                 self.camera.apply(action);
                 self.drawing.apply(action);
+            }
+            Action::Search => {
+                // Tab keeps moving keyboard focus between controls when one
+                // has it; otherwise it opens search next to the mouse.
+                if ctx.memory(|mem| mem.focused().is_none()) && self.palette.is_none() {
+                    let at = ctx
+                        .pointer_hover_pos()
+                        .unwrap_or_else(|| ctx.content_rect().center());
+                    self.palette = Some(views::palette::PaletteState::new(at, self.hovered_view));
+                }
             }
             Action::MaximiseView => {
                 self.maximised = match self.maximised {
@@ -1376,6 +1405,360 @@ impl SymphonyApp {
 
     /// Brush and preset files dropped anywhere on the window import as
     /// Brush presets; while files hover, say what dropping will do.
+    /// Everything search can find, built fresh when it opens or the query
+    /// changes (it's small).
+    fn search_entries(&self) -> Vec<search::Entry> {
+        use search::{Command, Entry, Kind, Setting};
+        use symphony_core::stroke::ArtLayer;
+        let canvas = [View::Camera, View::Drawing];
+        let mut out: Vec<Entry> = Vec::new();
+        for a in Action::ALL {
+            if a == Action::Search {
+                continue;
+            }
+            let id = a.id();
+            let (kind, ctx): (Kind, Vec<View>) = match id.split('.').next().unwrap_or("") {
+                "tool" => (
+                    Kind::Tool,
+                    vec![View::Camera, View::Drawing, View::ToolProperties],
+                ),
+                "timing" | "frame" | "playback" | "layer" => {
+                    (Kind::Action, vec![View::Timeline, View::Xsheet])
+                }
+                "view" | "drawing" | "onion" => (Kind::Action, canvas.to_vec()),
+                _ => (Kind::Action, Vec::new()),
+            };
+            let mut e = Entry::new(a.name(), kind, Command::Action(a), id)
+                .words(&id.replace(['.', '_'], " "))
+                .ctx(&ctx);
+            e.shortcut = keymap::label(self.profile, a);
+            out.push(e);
+        }
+        // Views: bring a tab to the front.
+        for v in View::ALL {
+            out.push(
+                Entry::new(
+                    &format!("{} view", v.title()),
+                    Kind::View,
+                    Command::ShowView(v),
+                    &format!("view.show.{v:?}"),
+                )
+                .words("window panel tab"),
+            );
+        }
+        // Export, by format.
+        for (title, f, w) in [
+            (
+                "Export movie (MP4)",
+                symphony_render::Format::Mp4Movie,
+                "video h264 mp4 film",
+            ),
+            (
+                "Export GIF",
+                symphony_render::Format::AnimatedGif,
+                "animated loop",
+            ),
+            (
+                "Export image sequence (PNG)",
+                symphony_render::Format::PngSequence,
+                "frames pictures still",
+            ),
+        ] {
+            out.push(
+                Entry::new(
+                    title,
+                    Kind::Action,
+                    Command::OpenExport(f),
+                    &format!("export.{f:?}"),
+                )
+                .words(w),
+            );
+        }
+        // Settings.
+        let settings: [(&str, Setting, &str); 9] = [
+            (
+                "Brush size cursor",
+                Setting::BrushSizeCursor,
+                "circle outline cursor",
+            ),
+            (
+                "Brush size follows zoom",
+                Setting::SizeFollowsZoom,
+                "screen relative",
+            ),
+            (
+                "Support Overlay and Underlay Arts",
+                Setting::OverlayUnderlay,
+                "art layers advanced",
+            ),
+            (
+                "Interface animations",
+                Setting::InterfaceAnimations,
+                "motion reduce",
+            ),
+            ("Use no AI", Setting::UseNoAi, "ai machine learning assist"),
+            (
+                "Harmony shortcut profile",
+                Setting::ProfileHarmony,
+                "keys keyboard toon boom",
+            ),
+            (
+                "Symphony shortcut profile",
+                Setting::ProfileSymphony,
+                "keys keyboard",
+            ),
+            (
+                "Stroke detail (points kept per line)",
+                Setting::StrokeDetail,
+                "smooth points curve optimise jaggy wobbly",
+            ),
+            (
+                "Stage colour",
+                Setting::StageColour,
+                "grey gray background canvas paper",
+            ),
+        ];
+        for (title, s, w) in settings {
+            out.push(
+                Entry::new(
+                    title,
+                    Kind::Setting,
+                    Command::Setting(s),
+                    &format!("setting.{s:?}"),
+                )
+                .words(w),
+            );
+        }
+        out.push(
+            Entry::new(
+                "Preferences",
+                Kind::Setting,
+                Command::OpenPreferences,
+                "prefs",
+            )
+            .words("settings options"),
+        );
+        // Tool size and layer visibility.
+        out.push(
+            Entry::new(
+                "Bigger tool size",
+                Kind::Action,
+                Command::ToolSizeBy(1.25),
+                "size.up",
+            )
+            .words("increase thicker larger brush pencil eraser")
+            .ctx(&[View::Camera, View::Drawing, View::ToolProperties]),
+        );
+        out.push(
+            Entry::new(
+                "Smaller tool size",
+                Kind::Action,
+                Command::ToolSizeBy(0.8),
+                "size.down",
+            )
+            .words("decrease thinner finer brush pencil eraser")
+            .ctx(&[View::Camera, View::Drawing, View::ToolProperties]),
+        );
+        out.push(
+            Entry::new(
+                "Hide or show the selected layer",
+                Kind::Action,
+                Command::ToggleLayerVisible,
+                "layer.visible",
+            )
+            .words("visibility eye")
+            .ctx(&[View::Timeline, View::Xsheet]),
+        );
+        // Art layers.
+        let mut arts = vec![
+            (ArtLayer::LineArt, "Line Art"),
+            (ArtLayer::ColourArt, "Colour Art"),
+        ];
+        if self.s.overlay_underlay {
+            arts.push((ArtLayer::Overlay, "Overlay Art"));
+            arts.push((ArtLayer::Underlay, "Underlay Art"));
+        }
+        for (art, name) in arts {
+            out.push(
+                Entry::new(
+                    &format!("Draw on {name}"),
+                    Kind::Action,
+                    Command::SetArt(art),
+                    &format!("art.{art:?}"),
+                )
+                .words("art layer")
+                .ctx(&canvas),
+            );
+        }
+        // The scene's layers, colours and the user's presets.
+        for i in 0..self.s.layer_count() {
+            let name = self.s.layer_name(i);
+            out.push(
+                Entry::new(
+                    &format!("Layer {name}"),
+                    Kind::Layer,
+                    Command::SelectLayer(i),
+                    &format!("layer.{name}"),
+                )
+                .ctx(&[View::Timeline, View::Xsheet, View::Node]),
+            );
+        }
+        for sw in &self.s.doc.palette.swatches {
+            out.push(
+                Entry::new(
+                    &format!("Colour {}", sw.name),
+                    Kind::Colour,
+                    Command::SelectSwatch(sw.id),
+                    &format!("colour.{}", sw.name),
+                )
+                .words("swatch palette")
+                .ctx(&[View::Colour]),
+            );
+        }
+        for (pencil, list) in [(false, &self.presets.brush), (true, &self.presets.pencil)] {
+            for p in list {
+                let tool = if pencil { "Pencil" } else { "Brush" };
+                out.push(
+                    Entry::new(
+                        &format!("{tool} preset {}", p.name),
+                        Kind::Preset,
+                        Command::UsePreset {
+                            pencil,
+                            name: p.name.clone(),
+                        },
+                        &format!("preset.{tool}.{}", p.name),
+                    )
+                    .words(p.source.as_deref().unwrap_or(""))
+                    .ctx(&[View::ToolProperties]),
+                );
+            }
+        }
+        out
+    }
+
+    /// Show the search box when open, and run what is chosen.
+    fn search_box(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.palette.take() else {
+            return;
+        };
+        let entries = self.search_entries();
+        let uses = self.search_uses.clone();
+        match views::palette::ui(ctx, &mut st, &entries, &|k| {
+            uses.get(k).copied().unwrap_or(0)
+        }) {
+            views::palette::Outcome::Open => self.palette = Some(st),
+            views::palette::Outcome::Closed => {}
+            views::palette::Outcome::Chosen(cmd, key) => {
+                *self.search_uses.entry(key).or_insert(0) += 1;
+                self.run_command(ctx, cmd);
+            }
+        }
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, cmd: search::Command) {
+        use search::{Command, Setting};
+        match cmd {
+            Command::Action(a) => self.run(ctx, a),
+            Command::ShowView(v) => {
+                let found = self.layout_mut().find_tab(&v);
+                match found {
+                    Some(at) => {
+                        let _ = self.layout_mut().set_active_tab(at);
+                    }
+                    None => {
+                        self.s.notice = Some(format!(
+                            "The {} view isn't in this workspace. Add it from the Windows menu.",
+                            v.title()
+                        ))
+                    }
+                }
+            }
+            Command::OpenPreferences => self.show_preferences = true,
+            Command::OpenExport(f) => self.export.open(f, &self.s),
+            Command::Setting(s) => {
+                let flip = |b: &mut bool, name: &str, notice: &mut Option<String>| {
+                    *b = !*b;
+                    *notice = Some(format!("{name}: {}", if *b { "on" } else { "off" }));
+                };
+                let notice = &mut self.s.notice;
+                match s {
+                    Setting::BrushSizeCursor => {
+                        flip(&mut self.s.brush_size_cursor, "Brush size cursor", notice)
+                    }
+                    Setting::SizeFollowsZoom => flip(
+                        &mut self.s.size_follows_zoom,
+                        "Brush size follows zoom",
+                        notice,
+                    ),
+                    Setting::OverlayUnderlay => flip(
+                        &mut self.s.overlay_underlay,
+                        "Overlay and Underlay Arts",
+                        notice,
+                    ),
+                    Setting::InterfaceAnimations => {
+                        self.interface_animations = !self.interface_animations;
+                        theme::set_motion(ctx, self.interface_animations);
+                    }
+                    Setting::UseNoAi => self.use_no_ai = !self.use_no_ai,
+                    Setting::ProfileHarmony => self.profile = Profile::Harmony,
+                    Setting::ProfileSymphony => self.profile = Profile::Symphony,
+                    Setting::StrokeDetail | Setting::StageColour => self.show_preferences = true,
+                }
+            }
+            Command::GoToFrame(f) => self.s.frame = f.clamp(1, self.s.length()),
+            Command::SetZoom(z) => {
+                self.camera.set_zoom(z);
+                self.drawing.set_zoom(z);
+            }
+            Command::SetToolSize(n) => self.set_tool_size(|_| n),
+            Command::ToolSizeBy(k) => self.set_tool_size(|w| w * k),
+            Command::SetLength(n) => self.s.set_length(n),
+            Command::ToggleLayerVisible => {
+                let i = self.s.selected;
+                self.s.toggle_visible(i);
+            }
+            Command::SelectLayer(i) => self.s.selected = i,
+            Command::SelectSwatch(id) => self.s.swatch = id,
+            Command::UsePreset { pencil, name } => {
+                let list = if pencil {
+                    &self.presets.pencil
+                } else {
+                    &self.presets.brush
+                };
+                if let Some(p) = list.iter().find(|p| p.name == name).cloned() {
+                    if pencil {
+                        self.s.pencil = p.settings;
+                        self.s.tool = Tool::Pencil;
+                    } else {
+                        self.s.brush = p.settings;
+                        self.s.tool = Tool::Brush;
+                    }
+                    let tool = if pencil {
+                        presets::PresetTool::Pencil
+                    } else {
+                        presets::PresetTool::Brush
+                    };
+                    self.presets.set_current(tool, Some(name));
+                }
+            }
+            Command::SetArt(a) => self.s.set_art(a),
+        }
+    }
+
+    /// Change the current drawing tool's maximum size (minimum follows).
+    fn set_tool_size(&mut self, f: impl Fn(f32) -> f32) {
+        let b = match self.s.tool {
+            Tool::Pencil => &mut self.s.pencil,
+            Tool::Eraser => &mut self.s.eraser,
+            _ => &mut self.s.brush,
+        };
+        let old = b.max_width.max(0.01);
+        let new = f(old).clamp(0.5, 120.0);
+        b.min_width = (b.min_width * new / old).min(new);
+        b.max_width = new;
+        self.s.notice = Some(format!("Tool size {new:.1}"));
+    }
+
     fn file_drops(&mut self, ctx: &egui::Context) {
         if let Some(job) = &self.brush_import {
             if let Some(done) = job.poll() {
@@ -1640,10 +2023,14 @@ struct Viewer<'a> {
     device: Option<&'a DeviceInfo>,
     profile: Profile,
     presets: &'a mut presets::Presets,
+    hovered: &'a mut Option<View>,
 }
 
 impl Viewer<'_> {
     fn view(&mut self, ui: &mut egui::Ui, v: View) {
+        if ui.ui_contains_pointer() {
+            *self.hovered = Some(v);
+        }
         // Fade the incoming content in place. Pen coordinates and hit targets stay fixed.
         let duration = ui.style().animation_time as f64;
         if duration > 0.0 && !matches!(v, View::Camera | View::Drawing) {
@@ -1893,6 +2280,7 @@ impl eframe::App for SymphonyApp {
             device: device.as_ref(),
             profile: self.profile,
             presets: &mut self.presets,
+            hovered: &mut self.hovered_view,
         };
         let central = egui::Frame::new();
         egui::CentralPanel::default()
@@ -1969,6 +2357,17 @@ impl eframe::App for SymphonyApp {
             });
         self.show_licences = open;
         self.file_drops(&ctx);
+        // Screenshot mode: SYMPHONY_SHOT_SEARCH="query" opens search typed.
+        if let (Some(_), Ok(q)) = (&self.shot, std::env::var("SYMPHONY_SHOT_SEARCH")) {
+            if !self.shot_search_opened {
+                let mut st =
+                    views::palette::PaletteState::new(egui::pos2(520.0, 260.0), Some(View::Camera));
+                st.query = q;
+                self.palette = Some(st);
+                self.shot_search_opened = true;
+            }
+        }
+        self.search_box(&ctx);
         self.dialogs(&ctx);
 
         let pending = self.pen.as_ref().is_some_and(|p| p.has_pending());
@@ -2002,6 +2401,7 @@ impl eframe::App for SymphonyApp {
             size_follows_zoom: self.s.size_follows_zoom,
             use_openh264: self.use_openh264,
             presets: Some(self.presets.clone()),
+            search_uses: self.search_uses.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

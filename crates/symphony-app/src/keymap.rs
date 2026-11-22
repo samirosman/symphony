@@ -99,13 +99,14 @@ pub enum Action {
     SubstitutePrevious,
     GoToNextDrawing,
     GoToPreviousDrawing,
+    Search,
     ToolDropper,
     ToolHand,
     ToolZoom,
 }
 
 impl Action {
-    pub const ALL: [Action; 68] = [
+    pub const ALL: [Action; 69] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -171,6 +172,7 @@ impl Action {
         Action::SubstitutePrevious,
         Action::GoToNextDrawing,
         Action::GoToPreviousDrawing,
+        Action::Search,
         Action::ToolDropper,
         Action::ToolHand,
         Action::ToolZoom,
@@ -244,6 +246,7 @@ impl Action {
             Action::SubstitutePrevious => "timing.substitute_previous",
             Action::GoToNextDrawing => "timing.next_drawing",
             Action::GoToPreviousDrawing => "timing.previous_drawing",
+            Action::Search => "app.search",
             Action::ToolDropper => "tool.dropper",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
@@ -317,6 +320,7 @@ impl Action {
             Action::SubstitutePrevious => "Substitute Drawing Previous",
             Action::GoToNextDrawing => "Go to Next Drawing",
             Action::GoToPreviousDrawing => "Go to Previous Drawing",
+            Action::Search => "Search everything",
             Action::ToolDropper => "Dropper",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
@@ -432,6 +436,9 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::SubstitutePrevious => b(Key::OpenBracket, NONE),
         Action::GoToNextDrawing => b(Key::G, NONE),
         Action::GoToPreviousDrawing => b(Key::F, NONE),
+        // Symphony's search (Tristan). Harmony's published list leaves Tab
+        // free, so both profiles have it.
+        Action::Search => b(Key::Tab, NONE),
         Action::ToolDropper => b(Key::D, ALT),
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),
