@@ -45,6 +45,8 @@ struct PropertyDraft {
     initial: Node,
     initial_fov: Option<f32>,
     fov: Option<f32>,
+    initial_motion: Option<symphony_core::doc::CameraMotion>,
+    motion: Option<symphony_core::doc::CameraMotion>,
     node: Node,
 }
 
@@ -53,6 +55,7 @@ impl PropertyDraft {
         let mut node = s.doc.graph.node_at_frame(id, s.frame)?;
         node.name = node_name(&node).to_owned();
         let fov = (id == s.doc.display).then(|| s.doc.camera_fov.at(s.frame));
+        let motion = (id == s.doc.display).then(|| s.doc.camera_motion.clone());
         Some(Self {
             id,
             scene: s.key.clone(),
@@ -61,6 +64,8 @@ impl PropertyDraft {
             initial: node.clone(),
             initial_fov: fov,
             fov,
+            initial_motion: motion.clone(),
+            motion,
             node,
         })
     }
@@ -493,6 +498,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         NodeKind::Peg(peg) => {
             peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
             peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
+            peg_value(ui, "Depth Z", &mut peg.z, s.frame, s.animate);
             peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
             for (label, value) in [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)] {
                 let mut draft = value
@@ -559,6 +565,11 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         .suffix("°"),
                 );
             }
+            if let Some(motion) = &mut draft.motion {
+                peg_value(ui, "Camera X", &mut motion.x, s.frame, s.animate);
+                peg_value(ui, "Camera Y", &mut motion.y, s.frame, s.animate);
+                peg_value(ui, "Dolly Z", &mut motion.dolly, s.frame, s.animate);
+            }
         }
         NodeKind::Effect(Effect::Blur { radius }) => {
             widgets::precise_slider(
@@ -612,9 +623,9 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         }
         _ => {}
     }
-    let fov_changed = draft.fov != draft.initial_fov;
+    let camera_changed = draft.fov != draft.initial_fov || draft.motion != draft.initial_motion;
     let changed =
-        (draft.node != draft.initial || fov_changed) && !draft.node.name.trim().is_empty();
+        (draft.node != draft.initial || camera_changed) && !draft.node.name.trim().is_empty();
     let keyed = s.doc.graph.has_key(draft.id, s.frame);
     ui.horizontal_wrapped(|ui| {
         if ui
@@ -623,7 +634,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         {
             let animatable_changed = draft.node.enabled != draft.initial.enabled
                 || draft.node.kind != draft.initial.kind
-                || fov_changed;
+                || camera_changed;
             let use_key = animatable_changed && (s.animate || s.doc.graph.keys(draft.id).is_some());
             if !animatable_changed {
                 apply_name(s, draft);
@@ -711,7 +722,7 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                 peg.scale_x.get_or_insert(Value::Constant(1.0));
                 peg.scale_y.get_or_insert(Value::Constant(1.0));
             }
-            for value in [&mut peg.x, &mut peg.y, &mut peg.rotation]
+            for value in [&mut peg.x, &mut peg.y, &mut peg.z, &mut peg.rotation]
                 .into_iter()
                 .chain(peg.scale_x.iter_mut())
                 .chain(peg.scale_y.iter_mut())
@@ -737,6 +748,24 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
             after.set_key(s.frame, fov);
         } else if fov != draft.initial_fov.unwrap_or(fov) {
             after = Value::Constant(fov);
+        }
+        if let Some(motion) = &draft.motion {
+            let before = s.doc.camera_motion.clone();
+            let mut after = if delete {
+                before.clone()
+            } else {
+                motion.clone()
+            };
+            for value in [&mut after.x, &mut after.y, &mut after.dolly] {
+                if delete {
+                    value.remove_key(s.frame);
+                } else if key {
+                    value.set_key(s.frame, value.at(s.frame));
+                }
+            }
+            if before != after {
+                edits.push(Edit::SetCameraMotion { before, after });
+            }
         }
         if before != after {
             edits.push(Edit::SetCameraFov { before, after });
@@ -1762,6 +1791,41 @@ mod tests {
         s.undo();
         assert_eq!(s.doc.node_positions[&layer.peg], [200.0, 120.0]);
         assert!(!s.doc.node_positions.contains_key(&layer.node));
+    }
+
+    #[test]
+    fn camera_pan_and_peg_depth_can_be_keyed_and_retimed() {
+        let mut s = Session::new_scene();
+        let camera = s.doc.display;
+        let layer = s.doc.layers[0];
+        let mut draft = PropertyDraft::new(&s, camera).unwrap();
+        apply_properties(&mut s, &mut draft, true, false);
+        s.frame = 11;
+        draft = PropertyDraft::new(&s, camera).unwrap();
+        let motion = draft.motion.as_mut().unwrap();
+        motion.x.set_key(11, 100.0);
+        motion.dolly.set_key(11, 200.0);
+        apply_properties(&mut s, &mut draft, true, false);
+
+        s.frame = 1;
+        let mut draft = PropertyDraft::new(&s, layer.peg).unwrap();
+        apply_properties(&mut s, &mut draft, true, false);
+        s.frame = 11;
+        draft = PropertyDraft::new(&s, layer.peg).unwrap();
+        let NodeKind::Peg(peg) = &mut draft.node.kind else {
+            unreachable!()
+        };
+        peg.z.set_key(11, 300.0);
+        apply_properties(&mut s, &mut draft, true, false);
+
+        assert_eq!(s.doc.camera_motion.at(6), [50.0, 0.0, 100.0]);
+        assert_eq!(s.doc.graph.world_pose(layer.node, 6).unwrap().depth, 150.0);
+        assert_eq!(s.doc.graph.world_pose(layer.node, 11).unwrap().depth, 300.0);
+        s.frame = 5;
+        s.insert_inbetweens(2);
+        assert!(s.doc.camera_motion.dolly.has_key(13));
+        assert!(s.doc.graph.has_key(layer.peg, 13));
+        assert_eq!(s.doc.camera_motion.at(13), [100.0, 0.0, 200.0]);
     }
 
     #[test]

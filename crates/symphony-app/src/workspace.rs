@@ -22,10 +22,11 @@ pub enum View {
     Function,
     Library,
     NodeLibrary,
+    Multiplane,
 }
 
 impl View {
-    pub const ALL: [View; 11] = [
+    pub const ALL: [View; 12] = [
         View::Camera,
         View::Drawing,
         View::Timeline,
@@ -37,6 +38,7 @@ impl View {
         View::Function,
         View::Library,
         View::NodeLibrary,
+        View::Multiplane,
     ];
 
     pub fn title(self) -> &'static str {
@@ -46,6 +48,7 @@ impl View {
             View::Timeline => "Timeline",
             View::Xsheet => "Xsheet",
             View::Node => "Node",
+            View::Multiplane => "Multiplane",
             View::ToolProperties => "Tool Properties",
             View::Colour => "Colour",
             View::LayerProperties => "Layer Properties",
@@ -102,7 +105,7 @@ impl Workspace {
                 d
             }
             Workspace::Compositing => {
-                let mut d = DockState::new(vec![Node]);
+                let mut d = DockState::new(vec![Node, Multiplane]);
                 let s = d.main_surface_mut();
                 let [node, cam] = s.split_right(NodeIndex::root(), 0.5, vec![Camera]);
                 let [_node, _bottom] = s.split_below(node, 0.65, vec![LayerProperties, Library]);

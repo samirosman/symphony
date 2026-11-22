@@ -91,6 +91,8 @@ struct Drag {
 
 #[derive(Default)]
 pub struct SelectState {
+    /// Camera input uses the projected drawing for hit tests.
+    pub camera_space: bool,
     drag: Option<Drag>,
     lasso: Vec<Pos2>,
     polygon: Vec<Anchor>,
@@ -289,6 +291,7 @@ pub fn ui(
     }
     let mut finish_polygon = enter && !st.polygon.is_empty() && response.hovered();
 
+    let camera_space = st.camera_space;
     // Start a gesture.
     if response.drag_started() {
         if let Some(p) = view_pointer.or(response.interact_pointer_pos()) {
@@ -304,7 +307,15 @@ pub fn ui(
                         let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
                         s.ensure_pivot(s.selected, (cx, cy));
                     }
-                    let world = view.inverse().unwrap_or(Affine::IDENTITY).compose(m);
+                    let world = if camera_space {
+                        s.doc
+                            .layers
+                            .get(s.selected)
+                            .and_then(|layer| s.doc.graph.world_transform(layer.node, s.frame).ok())
+                            .unwrap_or(Affine::IDENTITY)
+                    } else {
+                        view.inverse().unwrap_or(Affine::IDENTITY).compose(m)
+                    };
                     Drag {
                         kind,
                         lo,

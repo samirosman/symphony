@@ -1,6 +1,5 @@
 //! CPU rendering (ENGINEERING E10.2): a scene frame becomes an RGBA image.
-//! Used by export now, and by the Write node and golden-image tests later.
-//! The Camera view draws the same tessellated strokes on the GPU (D3.6).
+//! Camera, export, and render tests share this graph and projection.
 //!
 //! Export runs on a background thread with progress and cancel (E5.2).
 
@@ -70,7 +69,9 @@ fn render_display(
     for command in commands {
         let current = layers.last_mut()?;
         match command {
-            RenderCommand::Drawing(item) => paint_drawing(current, scene, view, item, preview),
+            RenderCommand::Drawing(item) => {
+                paint_drawing(current, scene, frame, view, item, preview)
+            }
             RenderCommand::Gradient(gradient) => effects::gradient(current, gradient),
             RenderCommand::BeginEffect => {
                 // Bound temporary raster storage, including blur scratch space.
@@ -100,6 +101,7 @@ fn render_display(
 fn paint_drawing(
     pix: &mut Pixmap,
     scene: &Scene,
+    frame: u32,
     view: Affine,
     item: RenderItem,
     preview: Option<StrokePreview<'_>>,
@@ -107,7 +109,10 @@ fn paint_drawing(
     let Some(d) = scene.drawings.get(&item.drawing) else {
         return;
     };
-    let m = view.compose(item.transform);
+    let Some(project) = scene.project_plane(frame, item.depth) else {
+        return;
+    };
+    let m = view.compose(project).compose(item.transform);
     // Art layers back to front; within each, paint under ink.
     for art in ArtLayer::STACK {
         for fill in d.fills.iter().filter(|f| f.art == art) {
@@ -441,6 +446,66 @@ mod tests {
         let ink = s.palette.swatches[0].rgb[0];
         assert!(row.contains(&255), "paper shows through the grain: {row:?}");
         assert!(row.contains(&ink), "ink where the grain is white: {row:?}");
+    }
+
+    #[test]
+    fn camera_pan_moves_foreground_faster_than_background() {
+        use symphony_core::anim::Value;
+        use symphony_core::graph::NodeKind;
+        let mut scene = scene_with_line();
+        let near = scene.layers[0];
+        let drawing = scene.exposed(0, 1).unwrap();
+        let near_stroke = &mut scene.drawings.get_mut(&drawing).unwrap().strokes[0];
+        near_stroke.points[0].x = -10.0;
+        near_stroke.points[1].x = 10.0;
+        for point in &mut near_stroke.points {
+            point.y = -12.0;
+        }
+        let mut far_stroke = near_stroke.clone();
+        far_stroke.id = scene.ids.fresh();
+        for point in &mut far_stroke.points {
+            point.y = 48.0;
+        }
+
+        let mut history = History::default();
+        let layer = scene.make_layer("Far", 1);
+        history.apply(
+            &mut scene,
+            "Add layer",
+            vec![Edit::AddLayer(Box::new(layer))],
+        );
+        let far = scene.layers[1];
+        let mut drawing = scene.make_drawing(far.column);
+        drawing.strokes.push(far_stroke);
+        let cells = Edit::splice(&scene, far.column, 1, 0, vec![Some(drawing.id)]).unwrap();
+        history.apply(
+            &mut scene,
+            "Add drawing",
+            vec![Edit::AddDrawing { drawing }, cells],
+        );
+        for (node, z) in [(near.peg, -100.0), (far.peg, 200.0)] {
+            let NodeKind::Peg(peg) = &mut scene.graph.node_mut(node).unwrap().kind else {
+                unreachable!()
+            };
+            peg.z = Value::Constant(z);
+        }
+
+        let centre = |image: &Pixmap, row| {
+            let ink: Vec<_> = (0..image.width())
+                .filter(|&x| image.pixel(x, row).unwrap().alpha() > 200)
+                .collect();
+            (ink.first().unwrap() + ink.last().unwrap() + 1) as f32 * 0.5
+        };
+        let before = render_camera(&scene, 1, 200, 100, None).unwrap();
+        scene.camera_motion.x = Value::Constant(20.0);
+        let after = render_camera(&scene, 1, 200, 100, None).unwrap();
+        assert_eq!(centre(&before, 26) - centre(&after, 26), 40.0);
+        assert_eq!(centre(&before, 74) - centre(&after, 74), 10.0);
+
+        let exported = render_frame(&scene, 1, 200, 100).unwrap();
+        let ink = scene.palette.swatches[0].rgb;
+        assert_eq!(&exported[(60, 26)].0[..3], &ink);
+        assert_eq!(&exported[(90, 74)].0[..3], &ink);
     }
 
     #[test]

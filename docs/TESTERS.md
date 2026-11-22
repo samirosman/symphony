@@ -117,6 +117,20 @@ tab or in a floating panel. Right-click a tab for **Eject**, **Remove**,
 or **Add Tab**, and right-click the empty tab strip to add a view to that
 section.
 
+## Stage a multiplane shot
+
+Open **Multiplane** from the **Windows** menu or search **parallax**.
+Choose a drawing layer and move its peg in **Z**. Drag its plane in the
+side diagram or type a value in **Peg Z**. Positive values move it away
+from Camera. **Maintain Size** keeps that drawing's screen position
+and size at the current frame while you set depth.
+
+Open **Camera properties** and key **Camera X**, **Camera Y**, or
+**Dolly Z** over time. Camera X and Y pan the shot. Positive dolly moves
+the camera forward. Near artwork moves faster than far artwork, and
+Camera and exports use the same projection. Composite port order still
+controls stacking.
+
 ## Timeline keys and frames
 
 In Timeline, press **K** or click the diamond-plus button to set a

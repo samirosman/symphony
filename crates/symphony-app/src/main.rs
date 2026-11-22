@@ -461,11 +461,13 @@ impl SymphonyApp {
             }
             // SYMPHONY_SHOT_PAINT: the Paint tool with a protected colour,
             // to review the paint options and the protection marker.
-            // SYMPHONY_SHOT_VIEW=Function: bring that tab to the front.
-            if std::env::var("SYMPHONY_SHOT_VIEW").as_deref() == Ok("Function") {
-                for (_, dock) in layouts.iter_mut() {
-                    if let Some(found) = dock.find_tab(&View::Function) {
-                        let _ = dock.set_active_tab(found);
+            // Bring a named tab to the front for design review.
+            if let Ok(name) = std::env::var("SYMPHONY_SHOT_VIEW") {
+                if let Some(view) = View::ALL.into_iter().find(|view| view.title() == name) {
+                    for (_, dock) in layouts.iter_mut() {
+                        if let Some(found) = dock.find_tab(&view) {
+                            let _ = dock.set_active_tab(found);
+                        }
                     }
                 }
             }
@@ -1872,7 +1874,11 @@ impl SymphonyApp {
                     Command::ShowView(v),
                     &format!("view.show.{v:?}"),
                 )
-                .words("window panel tab"),
+                .words(if v == View::Multiplane {
+                    "window panel tab parallax depth side staging"
+                } else {
+                    "window panel tab"
+                }),
             );
         }
         // Export, by format.
@@ -2094,18 +2100,8 @@ impl SymphonyApp {
         match cmd {
             Command::Action(a) => self.run(ctx, a),
             Command::ShowView(v) => {
-                let found = self.layout_mut().find_tab(&v);
-                match found {
-                    Some(at) => {
-                        let _ = self.layout_mut().set_active_tab(at);
-                    }
-                    None => {
-                        self.s.notice = Some(format!(
-                            "The {} view isn't in this workspace. Add it from the Windows menu.",
-                            v.title()
-                        ))
-                    }
-                }
+                self.maximised = None;
+                self.show_view(v);
             }
             Command::OpenPreferences => self.show_preferences = true,
             Command::OpenExport(f) => self.export.open(f, &self.s),
@@ -2635,6 +2631,7 @@ impl Viewer<'_> {
             View::Timeline => timing::timeline(ui, self.s, self.timing, self.profile),
             View::Xsheet => timing::xsheet(ui, self.s, self.timing, self.profile),
             View::Node => node::ui(ui, self.s, self.node_view),
+            View::Multiplane => views::multiplane::ui(ui, self.s, self.node_view),
             View::ToolProperties => panels::tool_properties(ui, self.s, self.presets, self.device),
             View::Colour => panels::colour(ui, self.s),
             View::LayerProperties => node::inspector(ui, self.s, self.node_view),
@@ -2703,9 +2700,12 @@ impl egui_dock::TabViewer for Viewer<'_> {
     fn scroll_bars(&self, tab: &View) -> [bool; 2] {
         // Canvas-like views manage their own space.
         match tab {
-            View::Camera | View::Drawing | View::Node | View::Timeline | View::Xsheet => {
-                [false, false]
-            }
+            View::Camera
+            | View::Drawing
+            | View::Node
+            | View::Timeline
+            | View::Xsheet
+            | View::Multiplane => [false, false],
             _ => [false, true],
         }
     }

@@ -1697,6 +1697,25 @@ impl Session {
                 ));
             }
         }
+        let before_camera = &self.doc.camera_motion;
+        let mut after_camera = before_camera.clone();
+        for value in [
+            &mut after_camera.x,
+            &mut after_camera.y,
+            &mut after_camera.dolly,
+        ] {
+            if let Value::Keys(keys) = value {
+                for key in keys.iter_mut().filter(|key| key.frame >= from) {
+                    key.frame = key.frame.saturating_add(count);
+                }
+            }
+        }
+        if &after_camera != before_camera {
+            edits.push(Edit::SetCameraMotion {
+                before: before_camera.clone(),
+                after: after_camera,
+            });
+        }
         if let Value::Keys(keys) = &self.doc.camera_fov {
             let mut after = keys.clone();
             for key in after.iter_mut().filter(|key| key.frame >= from) {
@@ -1736,10 +1755,15 @@ impl Session {
                 continue;
             };
             let mut after = before.clone();
-            for value in [&mut after.x, &mut after.y, &mut after.rotation]
-                .into_iter()
-                .chain(after.scale_x.iter_mut())
-                .chain(after.scale_y.iter_mut())
+            for value in [
+                &mut after.x,
+                &mut after.y,
+                &mut after.z,
+                &mut after.rotation,
+            ]
+            .into_iter()
+            .chain(after.scale_x.iter_mut())
+            .chain(after.scale_y.iter_mut())
             {
                 if let Value::Keys(keys) = value {
                     for key in keys.iter_mut().filter(|key| key.frame >= from) {

@@ -40,6 +40,7 @@ fn placeholder(here: Option<View>) -> &'static str {
     match here {
         Some(View::Node | View::NodeLibrary) => "Search nodes and effects…",
         Some(View::Drawing) => "Search drawing tools and actions…",
+        Some(View::Multiplane) => "Search camera, depth, and staging…",
         Some(View::Camera) => "Search camera, playback, and views…",
         Some(View::Timeline | View::Xsheet) => "Search frames, layers, and timing…",
         Some(View::Colour) => "Search colours and palettes…",

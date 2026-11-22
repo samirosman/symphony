@@ -22,6 +22,9 @@ pub struct NodeId(pub usize);
 pub struct PegParams {
     pub x: Value,
     pub y: Value,
+    /// Positive depth places artwork farther from the camera.
+    #[serde(default)]
+    pub z: Value,
     pub rotation: Value,
     pub scale_x: Option<Value>,
     pub scale_y: Option<Value>,
@@ -45,6 +48,7 @@ impl PegParams {
         [
             Some(&self.x),
             Some(&self.y),
+            Some(&self.z),
             Some(&self.rotation),
             self.scale_x.as_ref(),
             self.scale_y.as_ref(),
@@ -188,6 +192,22 @@ pub struct Graph {
     keys: BTreeMap<NodeId, BTreeMap<u32, NodeKey>>,
 }
 
+/// Camera-facing artwork keeps a 2D transform and a separate depth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StagePose {
+    pub transform: Affine,
+    pub depth: f32,
+}
+
+impl Default for StagePose {
+    fn default() -> Self {
+        Self {
+            transform: Affine::IDENTITY,
+            depth: 0.0,
+        }
+    }
+}
+
 /// One drawing to draw, with its accumulated transform.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderItem {
@@ -195,6 +215,7 @@ pub struct RenderItem {
     pub column: Id,
     pub drawing: Id,
     pub transform: Affine,
+    pub depth: f32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -403,9 +424,13 @@ impl Graph {
 
     /// The full transform a drawing node gets from its pegs on `frame`.
     pub fn world_transform(&self, drawing: NodeId, frame: u32) -> Result<Affine, EvalError> {
-        match self.input(drawing, 0) {
+        self.world_pose(drawing, frame).map(|pose| pose.transform)
+    }
+
+    pub fn world_pose(&self, node: NodeId, frame: u32) -> Result<StagePose, EvalError> {
+        match self.input(node, 0) {
             Some(p) => self.eval_transform(p, frame, 0),
-            None => Ok(Affine::IDENTITY),
+            None => Ok(StagePose::default()),
         }
     }
 
@@ -461,15 +486,16 @@ impl Graph {
             NodeKind::Drawing { column } => {
                 let col = xs.column(*column);
                 if let Some(drawing) = col.filter(|c| c.visible).and_then(|c| c.get(frame)) {
-                    let transform = match self.input(id, 0) {
+                    let pose = match self.input(id, 0) {
                         Some(p) => self.eval_transform(p, frame, depth + 1)?,
-                        None => Affine::IDENTITY,
+                        None => StagePose::default(),
                     };
                     out.push(RenderCommand::Drawing(RenderItem {
                         node: id,
                         column: *column,
                         drawing,
-                        transform,
+                        transform: pose.transform,
+                        depth: pose.depth,
                     }));
                 }
             }
@@ -478,11 +504,11 @@ impl Graph {
         Ok(())
     }
 
-    fn eval_transform(&self, id: NodeId, frame: u32, depth: usize) -> Result<Affine, EvalError> {
+    fn eval_transform(&self, id: NodeId, frame: u32, depth: usize) -> Result<StagePose, EvalError> {
         let node = self.get(id, depth)?;
         let parent = match self.input(id, 0) {
             Some(p) => self.eval_transform(p, frame, depth + 1)?,
-            None => Affine::IDENTITY,
+            None => StagePose::default(),
         };
         Ok(match &node.kind {
             NodeKind::Peg(p)
@@ -490,7 +516,10 @@ impl Graph {
                     .sample_key(id, frame)
                     .map_or(node.enabled, |key| key.enabled) =>
             {
-                parent.compose(p.transform_at(frame))
+                StagePose {
+                    transform: parent.transform.compose(p.transform_at(frame)),
+                    depth: parent.depth + p.z.at(frame),
+                }
             }
             _ => parent,
         })

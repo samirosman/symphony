@@ -66,6 +66,26 @@ fn default_camera_fov() -> crate::anim::Value {
     crate::anim::Value::Constant(DEFAULT_CAMERA_FOV)
 }
 
+/// A camera looking straight down Z at flat artwork. Dolly is positive forward.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CameraMotion {
+    pub x: crate::anim::Value,
+    pub y: crate::anim::Value,
+    pub dolly: crate::anim::Value,
+}
+
+impl CameraMotion {
+    pub fn at(&self, frame: u32) -> [f32; 3] {
+        [self.x.at(frame), self.y.at(frame), self.dolly.at(frame)].map(|v| {
+            if v.is_finite() {
+                v
+            } else {
+                0.0
+            }
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scene {
     /// Source node counts for the Harmony import report.
@@ -95,6 +115,8 @@ pub struct Scene {
     pub display: NodeId,
     #[serde(default = "default_camera_fov")]
     pub camera_fov: crate::anim::Value,
+    #[serde(default)]
+    pub camera_motion: CameraMotion,
     pub ids: IdGen,
     /// Bumped by every applied edit (E3.6). Not saved.
     #[serde(skip)]
@@ -111,6 +133,36 @@ impl Scene {
             DEFAULT_CAMERA_FOV
         };
         (DEFAULT_CAMERA_FOV.to_radians() * 0.5).tan() / (fov.to_radians() * 0.5).tan()
+    }
+
+    /// The camera's original distance from artwork at depth zero, in scene units.
+    pub fn stage_distance(&self) -> f32 {
+        self.settings.width.max(1) as f32
+    }
+
+    pub fn distance_to_plane(&self, frame: u32, depth: f32) -> f32 {
+        self.stage_distance() + depth - self.camera_motion.at(frame)[2]
+    }
+
+    /// Camera-space affine projection for one camera-facing plane. Ignore planes
+    /// within the near clip distance or behind the camera.
+    pub fn project_plane(&self, frame: u32, depth: f32) -> Option<crate::math::Affine> {
+        use crate::math::Affine;
+        let [x, y, _] = self.camera_motion.at(frame);
+        let distance = self.distance_to_plane(frame, depth);
+        if distance < self.stage_distance() * 0.02 || !distance.is_finite() {
+            return None;
+        }
+        let scale = self.stage_distance() / distance;
+        Some(Affine::scale(scale, scale).compose(Affine::translate(-x, -y)))
+    }
+
+    pub fn camera_transform(&self, node: NodeId, frame: u32) -> Option<crate::math::Affine> {
+        let pose = self.graph.world_pose(node, frame).ok()?;
+        Some(
+            self.project_plane(frame, pose.depth)?
+                .compose(pose.transform),
+        )
     }
 
     pub fn new(settings: Settings) -> Self {
@@ -153,6 +205,7 @@ impl Scene {
             composite,
             display,
             camera_fov: default_camera_fov(),
+            camera_motion: CameraMotion::default(),
             ids,
             version: 0,
         }

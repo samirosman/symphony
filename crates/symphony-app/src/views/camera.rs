@@ -567,19 +567,19 @@ pub fn ui(
         Color32::from_rgba_unmultiplied(r, g, b, a)
     };
 
-    // The selected layer's transform, for onion skin and new strokes.
-    let layer_world = if drawing_only {
-        Affine::IDENTITY
+    // Use the same depth projection as the rendered stage for ink and hit tests.
+    let projected_layer = if drawing_only {
+        Some(Affine::IDENTITY)
     } else {
         s.doc
             .layers
             .get(s.selected)
-            .and_then(|l| s.doc.graph.world_transform(l.node, s.frame).ok())
-            .unwrap_or(Affine::IDENTITY)
+            .and_then(|layer| s.doc.camera_transform(layer.node, s.frame))
     };
+    let layer_world = projected_layer.unwrap_or(Affine::IDENTITY);
 
     // Onion skin: neighbouring drawings of the selected layer, tinted.
-    if s.onion.on {
+    if s.onion.on && projected_layer.is_some() {
         let (before, after) = s.onion_drawings();
         let tints = [
             CanvasColours::get(colours.onion_before),
@@ -618,10 +618,9 @@ pub fn ui(
             .map(|v| {
                 v.into_iter()
                     .filter_map(|i| {
-                        layers
-                            .iter()
-                            .position(|l| l.node == i.node)
-                            .map(|layer| (layer, i.drawing, i.transform))
+                        let layer = layers.iter().position(|l| l.node == i.node)?;
+                        let transform = s.doc.project_plane(s.frame, i.depth)?.compose(i.transform);
+                        Some((layer, i.drawing, transform))
                     })
                     .collect()
             })
@@ -720,6 +719,7 @@ pub fn ui(
             }
         }
     }
+    state.select.camera_space = !drawing_only;
     let navigating_now = space || s.tool == Tool::Hand;
     if matches!(s.tool, Tool::Select | Tool::Transform) && !navigating_now {
         select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
@@ -787,7 +787,8 @@ pub fn ui(
             | Tool::CloseGap
             | Tool::Dropper
             | Tool::LineEditor
-    ) && !space;
+    ) && !space
+        && projected_layer.is_some();
     let locked = s.doc.column(s.selected).is_some_and(|c| c.locked);
     for sm in samples {
         let pos = Pos2::new(sm.x as f32 / zoom_factor, sm.y as f32 / zoom_factor);

@@ -682,7 +682,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 if let Some(symphony_core::graph::NodeKind::Peg(peg)) =
                     s.doc.graph.node(*node).map(|node| &node.kind)
                 {
-                    for value in [&peg.x, &peg.y, &peg.rotation]
+                    for value in [&peg.x, &peg.y, &peg.z, &peg.rotation]
                         .into_iter()
                         .chain(peg.scale_x.iter())
                         .chain(peg.scale_y.iter())
