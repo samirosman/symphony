@@ -2,7 +2,7 @@
 //! placeholders for views that aren't built yet.
 
 use eframe::egui;
-use symphony_core::{graph::PegParams, id::Id};
+use symphony_core::id::Id;
 use symphony_pen::DeviceInfo;
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
@@ -11,14 +11,6 @@ use crate::keymap::{Action, Profile};
 use crate::presets::{self, Preset, PresetTool, Presets};
 use crate::session::{stencil_at, BrushSettings, PaintMode, Session, Tool};
 use symphony_core::stroke::Tip;
-
-/// A peg parameter row: label, which value, drag speed, unit suffix.
-type PegField = (
-    &'static str,
-    fn(&mut PegParams) -> &mut symphony_core::anim::Value,
-    f32,
-    &'static str,
-);
 
 /// Card content padding (D6.2).
 fn padded<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -843,57 +835,6 @@ pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
                 });
             }
         }
-    });
-}
-
-pub fn layer_properties(ui: &mut egui::Ui, s: &mut Session) {
-    padded(ui, |ui| {
-        let i = s.selected;
-        let frame = s.frame;
-        let id = ui
-            .scope_id()
-            .with(("layer-name", s.doc.layers.get(i).map(|l| l.column)));
-        let mut name = ui
-            .data_mut(|d| d.get_temp::<String>(id))
-            .unwrap_or_else(|| s.layer_name(i).to_owned());
-        let r = ui.add(egui::TextEdit::singleline(&mut name).font(theme::body()));
-        if r.changed() {
-            ui.data_mut(|d| d.insert_temp(id, name.clone()));
-        }
-        if r.lost_focus() {
-            s.rename_layer(i, &name);
-            ui.data_mut(|d| d.remove::<String>(id));
-        }
-        let mut visible = s.layer_visible(i);
-        if widgets::checkbox(ui, &mut visible, "Visible").changed() {
-            s.toggle_visible(i);
-        }
-        widgets::checkbox(ui, &mut s.animate, "Animate mode (edits set keyframes)");
-        ui.separator();
-        hint(ui, &format!("Peg at frame {frame}"));
-        let Some(p) = s.doc.peg(i).cloned() else {
-            return;
-        };
-        let fields: [PegField; 3] = [
-            ("Position X", |p| &mut p.x, 1.0, ""),
-            ("Position Y", |p| &mut p.y, 1.0, ""),
-            ("Rotation", |p| &mut p.rotation, 0.5, " deg"),
-        ];
-        egui::Grid::new("peg").num_columns(2).show(ui, |ui| {
-            for (label, pick, speed, suffix) in fields {
-                ui.label(label);
-                let mut copy = p.clone();
-                let mut v = pick(&mut copy).at(frame);
-                let r = ui.add(egui::DragValue::new(&mut v).speed(speed).suffix(suffix));
-                if r.changed() {
-                    s.set_peg_value(i, pick, v);
-                }
-                if r.drag_stopped() || r.lost_focus() {
-                    s.end_gesture();
-                }
-                ui.end_row();
-            }
-        });
     });
 }
 

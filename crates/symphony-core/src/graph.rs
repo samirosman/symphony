@@ -4,6 +4,8 @@
 //! Node IDs are slots that are never reused, so removing a node leaves a
 //! gap instead of renumbering the others (E2.2).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::anim::Value;
@@ -108,6 +110,68 @@ pub struct Node {
     pub enabled: bool,
 }
 
+/// Animated properties shared by every node, with image parameters where applicable.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeKey {
+    pub enabled: bool,
+    pub effect: Option<Effect>,
+    pub gradient: Option<Gradient>,
+}
+
+impl NodeKey {
+    pub fn from_node(node: &Node) -> Self {
+        Self {
+            enabled: node.enabled,
+            effect: match node.kind {
+                NodeKind::Effect(value) => Some(value),
+                _ => None,
+            },
+            gradient: match node.kind {
+                NodeKind::Gradient(value) => Some(value),
+                _ => None,
+            },
+        }
+    }
+
+    fn between(self, next: Self, t: f32) -> Self {
+        let lerp = |from: f32, to: f32| from + (to - from) * t;
+        let effect = match (self.effect, next.effect) {
+            (Some(Effect::Blur { radius: a }), Some(Effect::Blur { radius: b })) => {
+                Some(Effect::Blur { radius: lerp(a, b) })
+            }
+            (Some(Effect::Grain { amount: a, seed }), Some(Effect::Grain { amount: b, .. })) => {
+                Some(Effect::Grain {
+                    amount: lerp(a, b),
+                    seed,
+                })
+            }
+            (Some(Effect::Opacity { amount: a }), Some(Effect::Opacity { amount: b })) => {
+                Some(Effect::Opacity { amount: lerp(a, b) })
+            }
+            _ => self.effect,
+        };
+        let gradient = self
+            .gradient
+            .zip(next.gradient)
+            .map(|(a, b)| {
+                let colour = |from: [u8; 4], to: [u8; 4]| {
+                    std::array::from_fn(|i| lerp(from[i] as f32, to[i] as f32).round() as u8)
+                };
+                Gradient {
+                    start: colour(a.start, b.start),
+                    end: colour(a.end, b.end),
+                    angle: lerp(a.angle, b.angle),
+                }
+            })
+            .or(self.gradient);
+        Self {
+            enabled: self.enabled,
+            effect,
+            gradient,
+        }
+    }
+}
+
 /// Output of `from` feeds input port `port` of `to`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
@@ -120,6 +184,8 @@ pub struct Link {
 pub struct Graph {
     nodes: Vec<Option<Node>>,
     links: Vec<Link>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    keys: BTreeMap<NodeId, BTreeMap<u32, NodeKey>>,
 }
 
 /// One drawing to draw, with its accumulated transform.
@@ -152,6 +218,54 @@ impl Graph {
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id.0).and_then(Option::as_ref)
+    }
+
+    pub fn keys(&self, id: NodeId) -> Option<&BTreeMap<u32, NodeKey>> {
+        self.keys.get(&id)
+    }
+
+    pub fn has_key(&self, id: NodeId, frame: u32) -> bool {
+        self.keys(id).is_some_and(|keys| keys.contains_key(&frame))
+            || self
+                .node(id)
+                .is_some_and(|node| matches!(&node.kind, NodeKind::Peg(peg) if peg.has_key(frame)))
+    }
+
+    pub(crate) fn set_keys(&mut self, id: NodeId, keys: BTreeMap<u32, NodeKey>) {
+        if keys.is_empty() {
+            self.keys.remove(&id);
+        } else {
+            self.keys.insert(id, keys);
+        }
+    }
+
+    fn sample_key(&self, id: NodeId, frame: u32) -> Option<NodeKey> {
+        let keys = self.keys(id)?;
+        let Some((&start, &value)) = keys.range(..=frame).next_back() else {
+            return keys.first_key_value().map(|(_, key)| *key);
+        };
+        if start == frame {
+            return Some(value);
+        }
+        Some(match keys.range(frame..).next() {
+            Some((&end, &next)) => {
+                value.between(next, (frame - start) as f32 / (end - start) as f32)
+            }
+            None => value,
+        })
+    }
+
+    pub fn node_at_frame(&self, id: NodeId, frame: u32) -> Option<Node> {
+        let mut node = self.node(id)?.clone();
+        if let Some(key) = self.sample_key(id, frame) {
+            node.enabled = key.enabled;
+            match &mut node.kind {
+                NodeKind::Effect(effect) => *effect = key.effect.unwrap_or(*effect),
+                NodeKind::Gradient(gradient) => *gradient = key.gradient.unwrap_or(*gradient),
+                _ => {}
+            }
+        }
+        Some(node)
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
@@ -311,7 +425,9 @@ impl Graph {
         out: &mut Vec<RenderCommand>,
     ) -> Result<(), EvalError> {
         let node = self.get(id, depth)?;
-        if !node.enabled && !matches!(node.kind, NodeKind::Effect(_)) {
+        let key = self.sample_key(id, frame);
+        let enabled = key.map_or(node.enabled, |key| key.enabled);
+        if !enabled && !matches!(node.kind, NodeKind::Effect(_)) {
             return Ok(());
         }
         match &node.kind {
@@ -326,15 +442,19 @@ impl Graph {
                     self.eval_image(src, xs, frame, depth + 1, out)?;
                 }
             }
-            NodeKind::Gradient(gradient) => out.push(RenderCommand::Gradient(*gradient)),
+            NodeKind::Gradient(gradient) => out.push(RenderCommand::Gradient(
+                key.and_then(|key| key.gradient).unwrap_or(*gradient),
+            )),
             NodeKind::Effect(effect) => {
                 if let Some(src) = self.input(id, 0) {
-                    if node.enabled {
+                    if enabled {
                         out.push(RenderCommand::BeginEffect);
                     }
                     self.eval_image(src, xs, frame, depth + 1, out)?;
-                    if node.enabled {
-                        out.push(RenderCommand::EndEffect(*effect));
+                    if enabled {
+                        out.push(RenderCommand::EndEffect(
+                            key.and_then(|key| key.effect).unwrap_or(*effect),
+                        ));
                     }
                 }
             }
@@ -365,7 +485,13 @@ impl Graph {
             None => Affine::IDENTITY,
         };
         Ok(match &node.kind {
-            NodeKind::Peg(p) if node.enabled => parent.compose(p.transform_at(frame)),
+            NodeKind::Peg(p)
+                if self
+                    .sample_key(id, frame)
+                    .map_or(node.enabled, |key| key.enabled) =>
+            {
+                parent.compose(p.transform_at(frame))
+            }
             _ => parent,
         })
     }

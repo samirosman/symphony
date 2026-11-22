@@ -296,7 +296,7 @@ pub fn ui(
             let start_drag =
                 |kind: Kind, lo: [f32; 2], hi: [f32; 2], m: Affine, s: &mut Session| {
                     let peg = if transform_tool {
-                        s.doc.peg(s.selected).map(|_| current_peg(s))
+                        s.transform_peg(s.selected).map(|_| current_peg(s))
                     } else {
                         None
                     };
@@ -518,7 +518,7 @@ pub fn ui(
         let m = st.preview.map_or(m, |l| m.compose(l));
         draw_box(painter, lo, hi, m);
         if transform_tool {
-            if let Some(p) = s.doc.peg(s.selected) {
+            if let Some(p) = s.transform_peg(s.selected) {
                 // The pivot is amber, because it belongs to animation (DESIGN §4.3).
                 let world = items
                     .iter()
@@ -549,7 +549,7 @@ fn world_of(s: &Session, items: &[Item]) -> Affine {
 }
 
 fn current_peg(s: &Session) -> PegValues {
-    let p = s.doc.peg(s.selected).cloned().unwrap_or_default();
+    let p = s.transform_peg(s.selected).cloned().unwrap_or_default();
     let f = s.frame;
     PegValues {
         x: p.x.at(f),
@@ -574,6 +574,18 @@ fn apply_peg_drag(s: &mut Session, d: &Drag, l: Affine) {
                 ..d.world
             };
             let (dx, dy) = linear.apply(l.tx, l.ty);
+            let (dx, dy) = s
+                .transform_peg_id(layer)
+                .and_then(|id| s.doc.graph.world_transform(id, s.frame).ok())
+                .and_then(|parent| {
+                    Affine {
+                        tx: 0.0,
+                        ty: 0.0,
+                        ..parent
+                    }
+                    .inverse()
+                })
+                .map_or((dx, dy), |parent| parent.apply(dx, dy));
             s.adjust_peg(layer, |v| {
                 v.x = start.x + dx;
                 v.y = start.y + dy;

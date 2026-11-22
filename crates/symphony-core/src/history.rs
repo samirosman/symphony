@@ -3,9 +3,10 @@
 //! gesture is one step (E3.2), so a whole stroke, drag or erase undoes at once.
 
 use crate::doc::{LayerSnapshot, Scene};
-use crate::graph::{Link, Node, NodeId, NodeKind, PegParams};
+use crate::graph::{Link, Node, NodeId, NodeKey, NodeKind, PegParams};
 use crate::id::Id;
 use crate::stroke::{Drawing, Fill, Stroke};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
@@ -18,6 +19,11 @@ pub enum Edit {
         id: NodeId,
         before: Node,
         after: Node,
+    },
+    SetNodeKeys {
+        id: NodeId,
+        before: BTreeMap<u32, NodeKey>,
+        after: BTreeMap<u32, NodeKey>,
     },
     MoveNode {
         id: NodeId,
@@ -175,6 +181,10 @@ impl Edit {
                         }
                     }
                 }
+            }
+            Edit::SetNodeKeys { id, before, after } => {
+                s.graph
+                    .set_keys(*id, if forward { after } else { before }.clone());
             }
             Edit::MoveNode { id, before, after } => {
                 if let Some(position) = if forward { Some(*after) } else { *before } {

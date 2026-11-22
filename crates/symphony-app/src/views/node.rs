@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::{
-    graph::{Effect, Link, Node, NodeId, NodeKind},
+    graph::{Effect, Link, Node, NodeId, NodeKey, NodeKind},
     history::Edit,
 };
 
@@ -24,12 +24,39 @@ enum Drag {
 #[derive(Default)]
 pub struct NodeViewState {
     pan: Vec2,
+    zoom: Option<f32>,
+    anchor_x: Option<f32>,
+    fit_next: Option<Rect>,
     drag: Option<Drag>,
     library_search: String,
-    selected: Option<NodeId>,
-    properties: Option<(NodeId, Node, Node)>,
+    properties: Option<PropertyDraft>,
+    properties_open: bool,
     preview: Option<egui::TextureHandle>,
     preview_open: bool,
+}
+
+struct PropertyDraft {
+    id: NodeId,
+    scene: String,
+    version: u64,
+    frame: u32,
+    initial: Node,
+    node: Node,
+}
+
+impl PropertyDraft {
+    fn new(s: &Session, id: NodeId) -> Option<Self> {
+        let mut node = s.doc.graph.node_at_frame(id, s.frame)?;
+        node.name = node_name(&node).to_owned();
+        Some(Self {
+            id,
+            scene: s.key.clone(),
+            version: s.doc.version,
+            frame: s.frame,
+            initial: node.clone(),
+            node,
+        })
+    }
 }
 
 const W: f32 = 136.0;
@@ -68,7 +95,7 @@ pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
         .chain(effect_nodes())
 }
 
-fn node_name(node: &Node) -> &str {
+pub(super) fn node_name(node: &Node) -> &str {
     if matches!(node.kind, NodeKind::Display) && node.name == "Display" {
         "Camera"
     } else {
@@ -87,11 +114,11 @@ pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKin
     {
         y += H + 20.0;
     }
-    add_node(s, state, kind, [x, y]);
+    add_node(s, kind, [x, y]);
     state.pan = Vec2::new(-x, (105.0 - y).min(0.0));
 }
 
-fn add_node(s: &mut Session, state: &mut NodeViewState, kind: NodeKind, position: [f32; 2]) {
+fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
     let id = s.doc.graph.next_id();
     s.history.apply(
         &mut s.doc,
@@ -106,14 +133,50 @@ fn add_node(s: &mut Session, state: &mut NodeViewState, kind: NodeKind, position
             position,
         }],
     );
-    state.selected = Some(id);
+    s.select_graph_node(id, true);
 }
 
 fn open_properties(s: &Session, state: &mut NodeViewState, id: NodeId) {
-    if let Some(node) = s.doc.graph.node(id) {
-        let mut draft = node.clone();
-        draft.name = node_name(node).to_owned();
-        state.properties = Some((id, node.clone(), draft));
+    if state.properties.as_ref().is_none_or(|draft| draft.id != id) {
+        state.properties = PropertyDraft::new(s, id);
+    }
+    state.properties_open = true;
+}
+
+fn selected_node(s: &Session) -> Option<NodeId> {
+    s.selected_node
+        .filter(|&id| s.doc.graph.node(id).is_some())
+        .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node))
+}
+
+fn sync_properties(s: &Session, state: &mut NodeViewState) {
+    if let Some(id) = selected_node(s) {
+        if state.properties.as_ref().is_none_or(|draft| {
+            draft.id != id
+                || draft.scene != s.key
+                || draft.frame != s.frame
+                || draft.version != s.doc.version
+        }) {
+            state.properties = PropertyDraft::new(s, id);
+        }
+    } else {
+        state.properties = None;
+    }
+}
+
+pub fn inspector(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
+    sync_properties(s, state);
+    if let Some(draft) = &mut state.properties {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(theme::CARD_PAD))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading(kind_label(&draft.node.kind));
+                    property_form(ui, s, draft);
+                });
+            });
+    } else {
+        ui.label("Select a node to edit its properties.");
     }
 }
 
@@ -173,6 +236,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         ui.menu_button("Add node", |ui| {
             if ui.button("Drawing").clicked() {
                 s.add_layer();
+                if let Some(layer) = s.doc.layers.get(s.selected) {
+                    s.select_graph_node(layer.node, true);
+                }
                 ui.close();
             }
             for kind in [NodeKind::Peg(Default::default()), NodeKind::Composite] {
@@ -189,17 +255,15 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                 }
             }
         });
-        if ui.button("Reset pan").clicked() {
+        if ui.button("Reset view").clicked() {
             state.pan = Vec2::ZERO;
+            state.zoom = None;
         }
         if ui
-            .add_enabled(
-                state.selected.and_then(|id| s.doc.graph.node(id)).is_some(),
-                egui::Button::new("Properties"),
-            )
+            .add_enabled(selected_node(s).is_some(), egui::Button::new("Properties"))
             .clicked()
         {
-            if let Some(id) = state.selected {
+            if let Some(id) = selected_node(s) {
                 open_properties(s, state, id);
             }
         }
@@ -214,149 +278,250 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
 }
 
 fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
-    let Some((id, before, draft)) = &mut state.properties else {
+    if !state.properties_open {
+        return;
+    }
+    sync_properties(s, state);
+    let Some(draft) = &mut state.properties else {
         return;
     };
-    if !s.doc.graph.node(*id).is_some_and(|node| node == before) {
-        state.properties = None;
-        return;
-    }
-    let mut open = true;
-    let mut apply = false;
-    egui::Window::new(format!("{} properties", kind_label(&draft.kind)))
+    egui::Window::new(format!("{} properties", kind_label(&draft.node.kind)))
         .id(egui::Id::unique("node-properties"))
         .collapsible(false)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut draft.name);
-            });
-            ui.checkbox(&mut draft.enabled, "Enabled");
-            ui.separator();
-            match &mut draft.kind {
-                NodeKind::Peg(peg) => {
-                    peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
-                    peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
-                    peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
-                    for (label, value) in
-                        [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)]
-                    {
-                        let mut draft = value
-                            .clone()
-                            .unwrap_or(symphony_core::anim::Value::Constant(1.0));
-                        if peg_value(ui, label, &mut draft, s.frame, s.animate) {
-                            *value = Some(draft);
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Pivot");
-                        ui.add(egui::DragValue::new(&mut peg.pivot.0).prefix("X "));
-                        ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
-                    });
+        .open(&mut state.properties_open)
+        .show(ctx, |ui| property_form(ui, s, draft));
+}
+
+fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        ui.text_edit_singleline(&mut draft.node.name);
+    });
+    ui.checkbox(&mut draft.node.enabled, "Enabled");
+    ui.checkbox(&mut s.animate, "Animate mode");
+    ui.separator();
+    match &mut draft.node.kind {
+        NodeKind::Peg(peg) => {
+            peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
+            peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
+            peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
+            for (label, value) in [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)] {
+                let mut draft = value
+                    .clone()
+                    .unwrap_or(symphony_core::anim::Value::Constant(1.0));
+                if peg_value(ui, label, &mut draft, s.frame, s.animate) {
+                    *value = Some(draft);
                 }
-                NodeKind::Drawing { column } => {
-                    if let Some(source) = s.doc.xsheet.column(*column) {
-                        ui.label(format!("Exposure column  {}", source.name));
-                        ui.label(format!(
-                            "Current drawing  {}",
-                            source
-                                .get(s.frame)
-                                .and_then(|drawing| s.doc.drawings.get(&drawing))
-                                .map_or("Empty", |d| &d.name)
-                        ));
-                    }
-                }
-                NodeKind::Composite => {
-                    let count = s
-                        .doc
-                        .graph
-                        .links()
-                        .iter()
-                        .filter(|link| link.to == *id)
-                        .count();
-                    ui.label(format!("{count} connected inputs"));
-                    ui.label("Lower port numbers are in front.");
-                }
-                NodeKind::Display => {
-                    let input = s
-                        .doc
-                        .graph
-                        .input(*id, 0)
-                        .and_then(|from| s.doc.graph.node(from));
-                    ui.label(format!(
-                        "Input  {}",
-                        input.map_or("Disconnected", node_name)
-                    ));
-                    ui.label(format!(
-                        "Stage  {} × {}",
-                        s.doc.settings.width, s.doc.settings.height
-                    ));
-                }
-                NodeKind::Effect(Effect::Blur { radius }) => {
-                    ui.add(
-                        egui::Slider::new(radius, 0.0..=128.0)
-                            .text("Radius")
-                            .suffix(" px"),
-                    );
-                }
-                NodeKind::Effect(Effect::Grain { amount, seed }) => {
-                    ui.add(egui::Slider::new(amount, 0.0..=1.0).text("Amount"));
-                    ui.horizontal(|ui| {
-                        ui.label("Seed");
-                        ui.add(egui::DragValue::new(seed));
-                    });
-                }
-                NodeKind::Effect(Effect::Opacity { amount }) => {
-                    let mut percent = *amount * 100.0;
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut percent, 0.0..=100.0)
-                                .text("Opacity")
-                                .suffix("%"),
-                        )
-                        .changed()
-                    {
-                        *amount = percent / 100.0;
-                    }
-                }
-                NodeKind::Gradient(gradient) => {
-                    ui.horizontal(|ui| {
-                        super::colour_picker::swatch(ui, &mut gradient.start);
-                        ui.label("Start");
-                        super::colour_picker::swatch(ui, &mut gradient.end);
-                        ui.label("End");
-                    });
-                    ui.add(
-                        egui::Slider::new(&mut gradient.angle, 0.0..=360.0)
-                            .text("Angle")
-                            .suffix("°"),
-                    );
-                }
-                _ => {}
             }
-            apply = ui
-                .add_enabled(
-                    before != draft && !draft.name.trim().is_empty(),
-                    egui::Button::new("Apply"),
+            ui.horizontal(|ui| {
+                ui.label("Pivot");
+                ui.add(egui::DragValue::new(&mut peg.pivot.0).prefix("X "));
+                ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
+            });
+        }
+        NodeKind::Drawing { column } => {
+            if let Some(source) = s.doc.xsheet.column(*column) {
+                ui.label(format!("Exposure column  {}", source.name));
+                ui.label(format!(
+                    "Current drawing  {}",
+                    source
+                        .get(s.frame)
+                        .and_then(|drawing| s.doc.drawings.get(&drawing))
+                        .map_or("Empty", |d| &d.name)
+                ));
+            }
+        }
+        NodeKind::Composite => {
+            let count = s
+                .doc
+                .graph
+                .links()
+                .iter()
+                .filter(|link| link.to == draft.id)
+                .count();
+            ui.label(format!("{count} connected inputs"));
+            ui.label("Lower port numbers are in front.");
+        }
+        NodeKind::Display => {
+            let input = s
+                .doc
+                .graph
+                .input(draft.id, 0)
+                .and_then(|from| s.doc.graph.node(from));
+            ui.label(format!(
+                "Input  {}",
+                input.map_or("Disconnected", node_name)
+            ));
+            ui.label(format!(
+                "Stage  {} × {}",
+                s.doc.settings.width, s.doc.settings.height
+            ));
+        }
+        NodeKind::Effect(Effect::Blur { radius }) => {
+            ui.add(
+                egui::Slider::new(radius, 0.0..=128.0)
+                    .text("Radius")
+                    .suffix(" px"),
+            );
+        }
+        NodeKind::Effect(Effect::Grain { amount, seed }) => {
+            ui.add(egui::Slider::new(amount, 0.0..=1.0).text("Amount"));
+            ui.horizontal(|ui| {
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(seed));
+            });
+        }
+        NodeKind::Effect(Effect::Opacity { amount }) => {
+            let mut percent = *amount * 100.0;
+            if ui
+                .add(
+                    egui::Slider::new(&mut percent, 0.0..=100.0)
+                        .text("Opacity")
+                        .suffix("%"),
                 )
-                .clicked();
-        });
-    if apply {
-        s.history.apply(
-            &mut s.doc,
-            "Change node properties",
-            vec![Edit::SetNodeProperties {
-                id: *id,
-                before: before.clone(),
-                after: draft.clone(),
-            }],
-        );
-        *before = draft.clone();
-        state.preview = None;
+                .changed()
+            {
+                *amount = percent / 100.0;
+            }
+        }
+        NodeKind::Gradient(gradient) => {
+            ui.horizontal(|ui| {
+                super::colour_picker::swatch(ui, &mut gradient.start);
+                ui.label("Start");
+                super::colour_picker::swatch(ui, &mut gradient.end);
+                ui.label("End");
+            });
+            ui.add(
+                egui::Slider::new(&mut gradient.angle, 0.0..=360.0)
+                    .text("Angle")
+                    .suffix("°"),
+            );
+        }
+        _ => {}
     }
-    if !open {
-        state.properties = None;
+    let changed = draft.node != draft.initial && !draft.node.name.trim().is_empty();
+    let keyed = s.doc.graph.has_key(draft.id, s.frame);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(changed, egui::Button::new("Apply"))
+            .clicked()
+        {
+            let animatable_changed = draft.node.enabled != draft.initial.enabled
+                || draft.node.kind != draft.initial.kind;
+            let use_key = animatable_changed && (s.animate || s.doc.graph.keys(draft.id).is_some());
+            if !animatable_changed {
+                apply_name(s, draft);
+            } else {
+                apply_properties(s, draft, use_key, false);
+            }
+        }
+        if ui
+            .add_enabled(
+                !draft.node.name.trim().is_empty(),
+                egui::Button::new(if keyed { "Update key" } else { "Set key" }),
+            )
+            .on_hover_text(format!("Frame {}", s.frame))
+            .clicked()
+        {
+            apply_properties(s, draft, true, false);
+        }
+        if ui
+            .add_enabled(keyed, egui::Button::new("Delete key"))
+            .clicked()
+        {
+            apply_properties(s, draft, false, true);
+        }
+    });
+}
+
+fn apply_name(s: &mut Session, draft: &mut PropertyDraft) {
+    if let Some(before) = s.doc.graph.node(draft.id).cloned() {
+        let mut after = before.clone();
+        after.name.clone_from(&draft.node.name);
+        if before != after {
+            s.history.apply(
+                &mut s.doc,
+                "Rename node",
+                vec![Edit::SetNodeProperties {
+                    id: draft.id,
+                    before,
+                    after,
+                }],
+            );
+        }
+        if let Some(current) = PropertyDraft::new(s, draft.id) {
+            *draft = current;
+        }
+    }
+}
+
+fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delete: bool) {
+    let id = draft.id;
+    let Some(before) = s.doc.graph.node(id).cloned() else {
+        return;
+    };
+    let mut after = if key || delete {
+        before.clone()
+    } else {
+        draft.node.clone()
+    };
+    let mut edits = Vec::new();
+    if key {
+        after.name.clone_from(&draft.node.name);
+    }
+    if key || delete {
+        let before_keys = s.doc.graph.keys(id).cloned().unwrap_or_default();
+        let mut after_keys = before_keys.clone();
+        if delete {
+            after_keys.remove(&s.frame);
+        } else {
+            after_keys.insert(s.frame, NodeKey::from_node(&draft.node));
+        }
+        if before_keys != after_keys {
+            edits.push(Edit::SetNodeKeys {
+                id,
+                before: before_keys,
+                after: after_keys,
+            });
+        }
+        if let NodeKind::Peg(peg) = if delete {
+            &before.kind
+        } else {
+            &draft.node.kind
+        } {
+            use symphony_core::anim::Value;
+            let mut peg = peg.clone();
+            if !delete {
+                peg.scale_x.get_or_insert(Value::Constant(1.0));
+                peg.scale_y.get_or_insert(Value::Constant(1.0));
+            }
+            for value in [&mut peg.x, &mut peg.y, &mut peg.rotation]
+                .into_iter()
+                .chain(peg.scale_x.iter_mut())
+                .chain(peg.scale_y.iter_mut())
+            {
+                if delete {
+                    value.remove_key(s.frame);
+                } else {
+                    value.set_key(s.frame, value.at(s.frame));
+                }
+            }
+            after.kind = NodeKind::Peg(peg);
+        }
+    }
+    if before != after {
+        edits.push(Edit::SetNodeProperties { id, before, after });
+    }
+    let action = if delete {
+        "Delete node key"
+    } else if key {
+        "Set node key"
+    } else {
+        "Change node properties"
+    };
+    s.history.apply(&mut s.doc, action, edits);
+    if let Some(current) = PropertyDraft::new(s, id) {
+        *draft = current;
     }
 }
 
@@ -421,14 +586,164 @@ fn preview(ctx: &egui::Context, s: &Session, state: &mut NodeViewState) {
         });
 }
 
+pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
+    let mut depth = BTreeMap::new();
+    let mut pending: BTreeMap<_, usize> = s.doc.graph.nodes().map(|(id, _)| (id, 0)).collect();
+    let mut downstream = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    for link in s.doc.graph.links() {
+        if pending.contains_key(&link.from) {
+            if let Some(degree) = pending.get_mut(&link.to) {
+                *degree += 1;
+                downstream.entry(link.from).or_default().push(link.to);
+            }
+        }
+    }
+    let mut ready: Vec<_> = pending
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(&id, _)| id)
+        .collect();
+    while let Some(id) = ready.pop() {
+        let level = *depth.entry(id).or_insert(0);
+        for &next in downstream.get(&id).into_iter().flatten() {
+            let target = depth.entry(next).or_insert(0);
+            *target = (*target).max(level + 1);
+            if let Some(count) = pending.get_mut(&next) {
+                *count -= 1;
+                if *count == 0 {
+                    ready.push(next);
+                }
+            }
+        }
+    }
+    let mut rows = BTreeMap::<usize, Vec<NodeId>>::new();
+    for (id, _) in s.doc.graph.nodes() {
+        rows.entry(depth.get(&id).copied().unwrap_or_default())
+            .or_default()
+            .push(id);
+    }
+    let mut edits = Vec::new();
+    let mut bounds = Rect::NOTHING;
+    for (row, ids) in rows {
+        let mut offset = 0.0;
+        let widths: Vec<_> = ids
+            .iter()
+            .map(|&id| card_width(&s.doc.graph, id) + 32.0)
+            .collect();
+        let centre = widths.iter().sum::<f32>() * 0.5;
+        for (id, width) in ids.into_iter().zip(widths) {
+            let after = [offset + width * 0.5 - centre, 43.0 + row as f32 * 98.0];
+            offset += width;
+            bounds = bounds.union(Rect::from_center_size(
+                Pos2::new(after[0], after[1]),
+                Vec2::new(width - 32.0, H),
+            ));
+            let before = s.doc.node_positions.get(&id).copied();
+            if before != Some(after) {
+                edits.push(Edit::MoveNode { id, before, after });
+            }
+        }
+    }
+    s.history.apply(&mut s.doc, "Arrange nodes", edits);
+    state.fit_next = bounds.is_finite().then_some(bounds);
+    state.drag = None;
+}
+
+fn card_width(graph: &symphony_core::graph::Graph, id: NodeId) -> f32 {
+    if graph
+        .node(id)
+        .is_some_and(|node| matches!(node.kind, NodeKind::Composite))
+    {
+        let count = graph.links().iter().filter(|link| link.to == id).count() + 1;
+        W.max(count as f32 * 16.0 + 16.0)
+    } else {
+        W
+    }
+}
+
+fn peg_colour(graph: &symphony_core::graph::Graph, id: NodeId) -> Option<egui::Color32> {
+    const COLOURS: [(u8, u8, u8); 5] = [
+        (111, 194, 168),
+        (135, 172, 223),
+        (191, 155, 219),
+        (206, 172, 116),
+        (216, 143, 150),
+    ];
+    if matches!(graph.node(id)?.kind, NodeKind::Peg(_)) {
+        let (r, g, b) = COLOURS[id.0 % COLOURS.len()];
+        Some(egui::Color32::from_rgb(r, g, b))
+    } else {
+        None
+    }
+}
+
+fn minimap(painter: &egui::Painter, viewport: Rect, bounds: Rect) {
+    if !bounds.is_finite()
+        || viewport.contains_rect(bounds)
+        || viewport.width() <= 16.0
+        || viewport.height() <= 16.0
+    {
+        return;
+    }
+    let full = bounds.union(viewport);
+    let size = (viewport.size() * 0.35).min(Vec2::new(116.0, 68.0));
+    let scale = (size.x / full.width()).min(size.y / full.height());
+    let map = Rect::from_min_size(
+        viewport.right_bottom() - full.size() * scale - Vec2::splat(12.0),
+        full.size() * scale,
+    );
+    let visible = Rect::from_min_size(
+        map.min + (viewport.min - full.min) * scale,
+        viewport.size() * scale,
+    );
+    painter.rect(
+        map,
+        3.0,
+        theme::BG_RAISED,
+        Stroke::new(1.0, theme::LINE_STRONG),
+        StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        visible,
+        2.0,
+        Stroke::new(1.0, theme::ACCENT_SELECT),
+        StrokeKind::Inside,
+    );
+}
+
 fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Option<NodeKind>) {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let viewport = resp.rect;
-    let origin = viewport.center_top() + state.pan;
+    let anchor =
+        viewport.left_top() + Vec2::X * *state.anchor_x.get_or_insert(viewport.width() / 2.0);
+    let mut zoom = state.zoom.unwrap_or(1.0);
+    if let Some(bounds) = state.fit_next.take() {
+        let room = (viewport.size() - Vec2::splat(36.0)).max(Vec2::splat(1.0));
+        zoom = (room.x / bounds.width())
+            .min(room.y / bounds.height())
+            .clamp(0.25, 1.0);
+        state.zoom = Some(zoom);
+        state.pan = viewport.center() - anchor - bounds.center().to_vec2() * zoom;
+    }
+    if state.drag.is_none() {
+        if let Some(pointer) = resp.hover_pos() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            let new_zoom = (zoom * (scroll * 0.004).exp()).clamp(0.25, 2.5);
+            if new_zoom != zoom {
+                let local = (pointer - anchor - state.pan) / zoom;
+                state.pan = pointer - anchor - local * new_zoom;
+                state.zoom = Some(new_zoom);
+                zoom = new_zoom;
+                ui.input_mut(|input| input.smooth_scroll_delta = Vec2::ZERO);
+            }
+        }
+    }
+    let origin = anchor + state.pan;
+    let grid = GRID * zoom * if zoom < 0.5 { 2.0 } else { 1.0 };
     let grid_origin = viewport.min
         + Vec2::new(
-            (origin.x - viewport.left()).rem_euclid(GRID),
-            state.pan.y.rem_euclid(GRID),
+            (origin.x - viewport.left()).rem_euclid(grid),
+            state.pan.y.rem_euclid(grid),
         );
     painter.rect_filled(viewport, 0.0, theme::BG_INPUT);
     let mut y = grid_origin.y;
@@ -436,21 +751,20 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         let mut x = grid_origin.x;
         while x < viewport.right() {
             painter.circle_filled(Pos2::new(x, y), 0.65, theme::LINE_SUBTLE);
-            x += GRID;
+            x += grid;
         }
-        y += GRID;
+        y += grid;
     }
 
     let mut positions = BTreeMap::new();
-    let row_scale = ((viewport.height() - H) / 291.0).clamp(0.62, 1.0);
     let middle = s.doc.layers.len().saturating_sub(1) as f32 / 2.0;
     for (index, layer) in s.doc.layers.iter().enumerate() {
         let x = (index as f32 - middle) * (W + 26.0);
-        positions.insert(layer.peg, Vec2::new(x, 43.0 * row_scale));
-        positions.insert(layer.node, Vec2::new(x, 120.0 * row_scale));
+        positions.insert(layer.peg, Vec2::new(x, 43.0));
+        positions.insert(layer.node, Vec2::new(x, 120.0));
     }
-    positions.insert(s.doc.composite, Vec2::new(0.0, 209.0 * row_scale));
-    positions.insert(s.doc.display, Vec2::new(0.0, 291.0 * row_scale));
+    positions.insert(s.doc.composite, Vec2::new(0.0, 209.0));
+    positions.insert(s.doc.display, Vec2::new(0.0, 291.0));
 
     let mut cards = BTreeMap::new();
     let mut inputs = BTreeMap::<Input, Pos2>::new();
@@ -469,7 +783,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 position += delta;
             }
         }
-        let center = origin + position;
+        let center = origin + position * zoom;
         let ports = if matches!(node.kind, NodeKind::Composite) {
             let mut used: Vec<_> = s
                 .doc
@@ -491,8 +805,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         } else {
             vec![0]
         };
-        let width = W.max(ports.len() as f32 * 16.0 + 16.0);
-        let card = Rect::from_center_size(center, Vec2::new(width, H));
+        let width = card_width(&s.doc.graph, id) * zoom;
+        let card = Rect::from_center_size(center, Vec2::new(width, H * zoom));
         cards.insert(id, (card, position));
         let count = ports.len() as f32;
         for (index, port) in ports.into_iter().enumerate() {
@@ -504,29 +818,72 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
 
+    if let Some(Drag::Node(id, _)) = state.drag {
+        if ui.input(|i| i.modifiers.shift) {
+            let connected = s
+                .doc
+                .graph
+                .links()
+                .iter()
+                .filter_map(|link| {
+                    let from = outputs.get(&link.from)?;
+                    let to = inputs.get(&(link.to, link.port))?;
+                    let y = to.y - from.y;
+                    if !(0.0..=160.0).contains(&y) {
+                        return None;
+                    }
+                    let dx = if link.from == id {
+                        to.x - from.x
+                    } else if link.to == id {
+                        from.x - to.x
+                    } else {
+                        return None;
+                    };
+                    (dx.abs() <= 20.0).then_some(dx)
+                })
+                .min_by(|a, b| a.abs().total_cmp(&b.abs()));
+            if let Some(dx) = connected {
+                if let Some((card, position)) = cards.get_mut(&id) {
+                    let offset = Vec2::X * dx;
+                    *card = card.translate(offset);
+                    *position += offset / zoom;
+                    if let Some(out) = outputs.get_mut(&id) {
+                        *out += offset;
+                    }
+                    for ((node, _), input) in &mut inputs {
+                        if *node == id {
+                            *input += offset;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(kind) = add {
-        let mut center = viewport.center() + Vec2::new(W * 0.65, 0.0);
+        let mut center = viewport.center() + Vec2::new(W * 0.65 * zoom, 0.0);
         while cards.values().any(|(card, _)| {
             card.expand(12.0)
-                .intersects(Rect::from_center_size(center, Vec2::new(W, H)))
+                .intersects(Rect::from_center_size(center, Vec2::new(W, H) * zoom))
         }) {
-            center.y += H + 20.0;
+            center.y += (H + 20.0) * zoom;
         }
-        let position = center - origin;
-        add_node(s, state, kind, [position.x, position.y]);
+        let position = (center - origin) / zoom;
+        add_node(s, kind, [position.x, position.y]);
         ui.ctx().request_repaint();
     }
 
+    let hit_radius = 9.0 * zoom.min(1.0);
     let input_at = |p: Pos2| {
         inputs
             .iter()
-            .find(|(_, at)| at.distance(p) <= 9.0)
+            .find(|(_, at)| at.distance(p) <= hit_radius)
             .map(|(&key, _)| key)
     };
     let output_at = |p: Pos2| {
         outputs
             .iter()
-            .find(|(_, at)| at.distance(p) <= 9.0)
+            .find(|(_, at)| at.distance(p) <= hit_radius)
             .map(|(&key, _)| key)
     };
     let node_at = |p| {
@@ -552,6 +909,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     old_input: None,
                 })
             } else if let Some(node) = node_at(point) {
+                s.select_graph_node(node, true);
                 Some(Drag::Node(node, Vec2::ZERO))
             } else {
                 Some(Drag::Pan)
@@ -561,7 +919,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     if resp.dragged() {
         match state.drag.as_mut() {
             Some(Drag::Pan) => state.pan += resp.drag_delta(),
-            Some(Drag::Node(_, delta)) => *delta += resp.drag_delta(),
+            Some(Drag::Node(_, delta)) => *delta += resp.drag_delta() / zoom,
             _ => {}
         }
         ui.ctx().request_repaint();
@@ -607,20 +965,11 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         ui.ctx().request_repaint();
     }
     if resp.clicked() || resp.double_clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            state.selected = node_at(pos);
-            if let Some(id) = state.selected {
-                if resp.double_clicked() {
-                    open_properties(s, state, id);
-                }
-                if let Some(layer) = s
-                    .doc
-                    .layers
-                    .iter()
-                    .position(|l| l.node == id || l.peg == id)
-                {
-                    s.selected = layer;
-                }
+        if let Some(id) = resp.interact_pointer_pos().and_then(node_at) {
+            s.select_graph_node(id, true);
+            ui.ctx().request_repaint();
+            if resp.double_clicked() {
+                open_properties(s, state, id);
             }
         }
     }
@@ -631,46 +980,50 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             continue;
         }
         if let (Some(&from), Some(&to)) = (outputs.get(&link.from), inputs.get(&input)) {
-            curve(&painter, from, to, Stroke::new(1.5, theme::LINE_CONTROL));
+            let ink = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
+            curve(&painter, from, to, Stroke::new(1.5, ink));
         }
     }
     if let Some(Drag::Cable { source, .. }) = state.drag {
         if let (Some(&from), Some(to)) =
             (outputs.get(&source), ui.input(|i| i.pointer.latest_pos()))
         {
-            curve(&painter, from, to, Stroke::new(2.0, theme::ACCENT_SELECT));
+            let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::ACCENT_SELECT);
+            curve(&painter, from, to, Stroke::new(2.0, ink));
         }
     }
     for (id, (card, _)) in &cards {
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
-        let selected = state.selected == Some(*id)
-            || s.doc
-                .layers
-                .get(s.selected)
-                .is_some_and(|l| l.peg == *id || l.node == *id);
+        let selected = selected_node(s) == Some(*id);
+        let peg = peg_colour(&s.doc.graph, *id);
         let edge = if selected {
             theme::ACCENT_SELECT
         } else {
-            theme::LINE_STRONG
+            peg.unwrap_or(theme::LINE_STRONG)
         };
+        let face = peg.map_or(theme::BG_RAISED, |colour| {
+            theme::BG_RAISED.lerp_to_gamma(colour, 0.12)
+        });
         painter.rect(
             *card,
             theme::RADIUS_CONTROL,
-            theme::BG_RAISED,
-            Stroke::new(1.0, edge),
+            face,
+            Stroke::new(if selected { 2.0 } else { 1.0 }, edge),
             StrokeKind::Inside,
         );
+        let mut font = theme::body();
+        font.size *= zoom;
         widgets::fitted_text(
             ui,
             &painter,
             card.center(),
             Align2::CENTER_CENTER,
             node_name(node),
-            theme::body(),
+            font,
             theme::TEXT_PRIMARY,
-            card.width() - 16.0,
+            card.width() - 16.0 * zoom,
         );
     }
 
@@ -708,8 +1061,13 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             _ => true,
         };
         let filled = s.doc.graph.input(input.0, input.1).is_some();
-        let highlighted = hover.is_some_and(|p| p.distance(point) <= 9.0) && compatible;
-        socket(&painter, point, transform, filled, highlighted);
+        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius) && compatible;
+        let ink = s
+            .doc
+            .graph
+            .input(input.0, input.1)
+            .and_then(|from| peg_colour(&s.doc.graph, from));
+        socket(&painter, point, transform, filled, highlighted, ink, zoom);
     }
     for (id, point) in outputs {
         let transform = s
@@ -717,17 +1075,37 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .graph
             .node(id)
             .is_some_and(|n| matches!(n.kind, NodeKind::Peg(_)));
-        let highlighted = hover.is_some_and(|p| p.distance(point) <= 9.0);
-        socket(&painter, point, transform, true, highlighted);
+        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius);
+        socket(
+            &painter,
+            point,
+            transform,
+            true,
+            highlighted,
+            peg_colour(&s.doc.graph, id),
+            zoom,
+        );
     }
+    let bounds = cards
+        .values()
+        .fold(Rect::NOTHING, |bounds, (card, _)| bounds.union(*card));
+    minimap(&painter, viewport, bounds);
 }
 
-fn socket(painter: &egui::Painter, point: Pos2, transform: bool, filled: bool, hover: bool) {
-    let radius = if hover { 5.0 } else { 3.5 };
+fn socket(
+    painter: &egui::Painter,
+    point: Pos2,
+    transform: bool,
+    filled: bool,
+    hover: bool,
+    ink: Option<egui::Color32>,
+    zoom: f32,
+) {
+    let radius = if hover { 5.0 } else { 3.5 } * zoom.clamp(0.25, 1.4);
     let color = if hover {
         theme::ACCENT_SELECT
     } else {
-        theme::LINE_CONTROL
+        ink.unwrap_or(theme::LINE_CONTROL)
     };
     let fill = if filled { color } else { theme::BG_INPUT };
     let stroke = Stroke::new(1.0, color);
@@ -801,6 +1179,141 @@ mod tests {
     use egui_kittest::Harness;
 
     #[test]
+    fn wheel_zoom_anchors_the_pointer_and_resize_keeps_the_graph_origin() {
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (session, state)| canvas(ui, session, state, None),
+                (Session::new_scene(), NodeViewState::default()),
+            );
+        harness.run_steps(2);
+        let anchor = harness.state().1.anchor_x.unwrap();
+        let pointer = Pos2::new(320.0, 195.0);
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(pointer));
+        harness.run_steps(1);
+        harness.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, 80.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        let state = &harness.state().1;
+        let zoom = state.zoom.unwrap();
+        assert!(zoom > 1.0, "scrolling up zooms in");
+        // The zoom transform interpolates between the original origin and pointer.
+        assert!(state.pan.x > 0.0 && state.pan.y < 0.0);
+        let pan = state.pan;
+        harness.set_size(Vec2::new(1000.0, 630.0));
+        harness.input_mut().events.push(egui::Event::PointerGone);
+        harness.run_steps(2);
+        let state = &harness.state().1;
+        assert_eq!(state.anchor_x, Some(anchor));
+        assert_eq!(state.pan, pan);
+        assert_eq!(state.zoom, Some(zoom));
+    }
+
+    #[test]
+    fn shift_drag_aligns_connected_ports_without_changing_wiring() {
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (session, state, origin)| {
+                    *origin = ui.available_rect_before_wrap().center_top();
+                    canvas(ui, session, state, None);
+                },
+                (Session::new_scene(), NodeViewState::default(), Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let (s, _, origin) = harness.state();
+        let layer = s.doc.layers[0];
+        let start = *origin + Vec2::new(0.0, 43.0);
+        let end = *origin + Vec2::new(14.0, 58.0);
+        let shift = egui::Modifiers::SHIFT;
+        for (pos, pressed) in [(start, Some(true)), (end, None), (end, Some(false))] {
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::ModifiersChanged(shift));
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: shift,
+                });
+            }
+            harness.run_steps(1);
+        }
+        let s = &harness.state().0;
+        assert_eq!(s.doc.node_positions[&layer.peg], [0.0, 58.0]);
+        assert_eq!(s.doc.graph.input(layer.node, 0), Some(layer.peg));
+    }
+
+    #[test]
+    fn arranging_follows_wires_and_undo_restores_positions() {
+        let mut s = Session::new_scene();
+        let mut state = NodeViewState::default();
+        let layer = s.doc.layers[0];
+        s.doc.node_positions.insert(layer.peg, [200.0, 120.0]);
+        arrange(&mut s, &mut state);
+        assert!(s
+            .doc
+            .graph
+            .links()
+            .iter()
+            .all(|link| s.doc.node_positions[&link.from][1] < s.doc.node_positions[&link.to][1]));
+        assert!(state.fit_next.is_some());
+        s.undo();
+        assert_eq!(s.doc.node_positions[&layer.peg], [200.0, 120.0]);
+        assert!(!s.doc.node_positions.contains_key(&layer.node));
+    }
+
+    #[test]
+    fn effect_keys_interpolate_and_are_undoable() {
+        let mut s = Session::new_scene();
+        add_node(
+            &mut s,
+            NodeKind::Effect(Effect::Opacity { amount: 0.0 }),
+            [0.0, 80.0],
+        );
+        let effect = s.selected_node.unwrap();
+        s.doc.graph.connect(s.doc.composite, effect, 0);
+        s.doc.graph.connect(effect, s.doc.display, 0);
+        let mut draft = PropertyDraft::new(&s, effect).unwrap();
+        apply_properties(&mut s, &mut draft, true, false);
+        s.frame = 11;
+        draft = PropertyDraft::new(&s, effect).unwrap();
+        draft.node.kind = NodeKind::Effect(Effect::Opacity { amount: 1.0 });
+        apply_properties(&mut s, &mut draft, true, false);
+
+        let amount_at = |s: &Session| {
+            s.doc
+                .graph
+                .render_commands(s.doc.display, &s.doc.xsheet, 6)
+                .unwrap()
+                .into_iter()
+                .find_map(|command| match command {
+                    symphony_core::graph::RenderCommand::EndEffect(Effect::Opacity { amount }) => {
+                        Some(amount)
+                    }
+                    _ => None,
+                })
+        };
+        assert_eq!(amount_at(&s), Some(0.5));
+        s.undo();
+        assert_eq!(amount_at(&s), Some(0.0));
+    }
+
+    #[test]
     fn camera_opens_properties_on_double_click_and_search_adds_a_node() {
         let mut harness = Harness::builder()
             .with_size(Vec2::new(760.0, 560.0))
@@ -833,16 +1346,16 @@ mod tests {
             ]);
             harness.run_steps(1);
             if i == 1 {
-                assert_eq!(harness.state().1.selected, Some(camera));
+                assert_eq!(harness.state().0.selected_node, Some(camera));
             }
         }
         let (session, state, _) = harness.state_mut();
-        let (selected, _, draft) = state.properties.as_ref().unwrap();
-        assert_eq!(*selected, camera);
-        assert_eq!(draft.name, "Camera");
+        let draft = state.properties.as_ref().unwrap();
+        assert_eq!(draft.id, camera);
+        assert_eq!(draft.node.name, "Camera");
 
         add_from_search(session, state, NodeKind::Gradient(Default::default()));
-        let added = state.selected.unwrap();
+        let added = session.selected_node.unwrap();
         assert!(matches!(
             session.doc.graph.node(added).unwrap().kind,
             NodeKind::Gradient(_)

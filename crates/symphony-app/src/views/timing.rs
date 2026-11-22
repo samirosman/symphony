@@ -307,6 +307,17 @@ fn rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: R
     }
 }
 
+fn reveal_track(ui: &egui::Ui, row: Rect, reveal: bool) {
+    let visible = ui.clip_rect();
+    if reveal && (row.top() < visible.top() || row.bottom() > visible.bottom()) {
+        let x = visible.center().x;
+        ui.scroll_to_rect(
+            Rect::from_min_max(Pos2::new(x, row.top()), Pos2::new(x, row.bottom())),
+            None,
+        );
+    }
+}
+
 pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {
     header(ui, s, profile);
     const HEAD: f32 = 176.0;
@@ -315,6 +326,19 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
     let rh = theme::ROW;
     let rows = s.layer_count();
     let len = s.length();
+    let node_tracks: Vec<_> = s
+        .doc
+        .graph
+        .nodes()
+        .filter(|(_, node)| !matches!(node.kind, symphony_core::graph::NodeKind::Drawing { .. }))
+        .map(|(id, node)| (id, super::node::node_name(node).to_owned()))
+        .collect();
+    let track_count = rows + node_tracks.len();
+    let reveal = s.reveal_node_track.take();
+    let visible_node = s
+        .selected_node
+        .filter(|&id| s.doc.graph.node(id).is_some())
+        .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node));
     let width = HEAD + len as f32 * cw + 16.0;
 
     egui::ScrollArea::both()
@@ -322,12 +346,12 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
         .show(ui, |ui| {
             let size = Vec2::new(
                 width.max(ui.available_width()),
-                (RULER + rows as f32 * rh + 8.0).max(ui.available_height()),
+                (RULER + track_count as f32 * rh + 8.0).max(ui.available_height()),
             );
             let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
             let o = resp.rect.min;
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
-            let rows_bottom = o.y + RULER + rows as f32 * rh;
+            let rows_bottom = o.y + RULER + track_count as f32 * rh;
 
             for f in (5..=len).step_by(5) {
                 let x = frame_x(f) + cw;
@@ -357,12 +381,14 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
 
             for i in 0..rows {
                 let y = o.y + RULER + i as f32 * rh;
-                let sel = i == s.selected;
+                let node = s.doc.layers[i].node;
+                let sel = visible_node == Some(node);
                 let visible = s.layer_visible(i);
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
                     Vec2::new(width - 8.0, rh - 2.0),
                 );
+                reveal_track(ui, row, reveal == Some(node));
                 if sel {
                     painter.rect_filled(row, theme::RADIUS_CONTROL as f32, theme::BG_RAISED);
                     let edge = Rect::from_min_size(row.min, Vec2::new(3.0, row.height()));
@@ -450,9 +476,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         // playhead and any keyframe diamond it would sit under.
                         let text_w = 7.0 * name.len() as f32;
                         let mut obstacles: Vec<f32> = (start..f)
-                            .filter(|fr| {
-                                s.doc.peg(i).is_some_and(|p| p.has_key(*fr)) || *fr == s.frame
-                            })
+                            .filter(|fr| s.doc.graph.has_key(node, *fr) || *fr == s.frame)
                             .map(|fr| frame_x(fr) + cw / 2.0)
                             .collect();
                         obstacles.sort_by(f32::total_cmp);
@@ -473,16 +497,67 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         }
                     }
                 }
-                if let Some(peg) = s.doc.peg(i) {
-                    for f in 1..=len {
-                        if peg.has_key(f) {
-                            key_diamond(
-                                &painter,
-                                Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0),
-                                4.5,
-                            );
-                        }
+                for f in s
+                    .doc
+                    .graph
+                    .keys(node)
+                    .into_iter()
+                    .flat_map(|keys| keys.keys().copied())
+                    .filter(|f| (1..=len).contains(f))
+                {
+                    key_diamond(
+                        &painter,
+                        Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0),
+                        4.5,
+                    );
+                }
+            }
+
+            for (index, (node, name)) in node_tracks.iter().enumerate() {
+                let y = o.y + RULER + (rows + index) as f32 * rh;
+                let row = Rect::from_min_size(
+                    Pos2::new(o.x + 4.0, y + 1.0),
+                    Vec2::new(width - 8.0, rh - 2.0),
+                );
+                reveal_track(ui, row, reveal == Some(*node));
+                if visible_node == Some(*node) {
+                    painter.rect_filled(row, theme::RADIUS_CONTROL, theme::BG_RAISED);
+                }
+                widgets::fitted_text(
+                    ui,
+                    &painter,
+                    Pos2::new(o.x + 18.0, y + rh / 2.0),
+                    Align2::LEFT_CENTER,
+                    name,
+                    theme::body(),
+                    theme::TEXT_SECONDARY,
+                    HEAD - 30.0,
+                );
+                let mut frames = std::collections::BTreeSet::new();
+                frames.extend(
+                    s.doc
+                        .graph
+                        .keys(*node)
+                        .into_iter()
+                        .flat_map(|keys| keys.keys().copied()),
+                );
+                if let Some(symphony_core::graph::NodeKind::Peg(peg)) =
+                    s.doc.graph.node(*node).map(|node| &node.kind)
+                {
+                    for value in [&peg.x, &peg.y, &peg.rotation]
+                        .into_iter()
+                        .chain(peg.scale_x.iter())
+                        .chain(peg.scale_y.iter())
+                    {
+                        frames.extend(value.keys().iter().map(|key| key.frame));
                     }
+                }
+                for f in frames.into_iter().filter(|f| (1..=len).contains(f)) {
+                    key_diamond(
+                        &painter,
+                        Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0),
+                        4.5,
+                    );
                 }
             }
 
@@ -507,17 +582,24 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         if rel.x < 32.0 && resp.clicked() {
                             s.toggle_visible(row);
                         }
-                        s.selected = row;
+                        s.select_graph_node(s.doc.layers[row].node, false);
                     }
                     if resp.double_clicked() && rel.x < HEAD - PARAM_W - 8.0 {
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
+                    }
+                } else if resp.clicked() || resp.drag_started() {
+                    let index = ((p.y - o.y - RULER) / rh).floor() as isize - rows as isize;
+                    if let Some((node, _)) =
+                        usize::try_from(index).ok().and_then(|i| node_tracks.get(i))
+                    {
+                        s.select_graph_node(*node, false);
                     }
                 }
             }
             if resp.secondary_clicked() {
                 t.menu_row = resp.interact_pointer_pos().and_then(row_at);
                 if let Some(r) = t.menu_row {
-                    s.selected = r;
+                    s.select_graph_node(s.doc.layers[r].node, false);
                 }
             }
             if let Some(row) = t.menu_row {
@@ -683,7 +765,7 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
                 }
                 if let Some(c) = col_at(p) {
                     if resp.clicked() || resp.drag_started() {
-                        s.selected = c;
+                        s.select_graph_node(s.doc.layers[c].node, false);
                     }
                     if resp.double_clicked() && rel.y < HEAD {
                         t.renaming = Some((c, s.layer_name(c).to_owned()));
@@ -693,7 +775,7 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
             if resp.secondary_clicked() {
                 t.menu_row = resp.interact_pointer_pos().and_then(col_at);
                 if let Some(c) = t.menu_row {
-                    s.selected = c;
+                    s.select_graph_node(s.doc.layers[c].node, false);
                 }
             }
             if let Some(c) = t.menu_row {

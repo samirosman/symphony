@@ -30,6 +30,7 @@ pub enum Command {
     SelectSwatch(symphony_core::id::Id),
     UsePreset { pencil: bool, name: String },
     SetArt(symphony_core::stroke::ArtLayer),
+    ArrangeNodes,
     AddDrawingNode,
     AddNode(symphony_core::graph::NodeKind),
 }

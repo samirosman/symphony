@@ -1229,6 +1229,11 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ResetRotation);
             self.menu_action(ui, Action::ResetPan);
             self.menu_action(ui, Action::ResetView);
+            ui.separator();
+            if ui.button("Arrange Nodes").clicked() {
+                views::node::arrange(&mut self.s, &mut self.node_view);
+                ui.close();
+            }
         });
         ui.menu_button("Windows", |ui| {
             for v in View::ALL {
@@ -1543,6 +1548,16 @@ impl SymphonyApp {
         let canvas = [View::Camera, View::Drawing];
         let mut out: Vec<Entry> = Vec::new();
         let node_views = vec![View::Node, View::NodeLibrary];
+        out.push(
+            Entry::new(
+                "Arrange Nodes",
+                Kind::Node,
+                Command::ArrangeNodes,
+                "node.arrange",
+            )
+            .words("auto arrange layout tidy graph")
+            .ctx(&node_views),
+        );
         for kind in views::node::addable_nodes() {
             let name = views::node::kind_label(&kind);
             let mut entry = Entry::new(
@@ -1906,7 +1921,13 @@ impl SymphonyApp {
                 }
             }
             Command::SetArt(a) => self.s.set_art(a),
-            Command::AddDrawingNode => self.s.add_layer(),
+            Command::ArrangeNodes => views::node::arrange(&mut self.s, &mut self.node_view),
+            Command::AddDrawingNode => {
+                self.s.add_layer();
+                if let Some(layer) = self.s.doc.layers.get(self.s.selected) {
+                    self.s.select_graph_node(layer.node, true);
+                }
+            }
             Command::AddNode(kind) => {
                 views::node::add_from_search(&mut self.s, &mut self.node_view, kind)
             }
@@ -2254,7 +2275,7 @@ impl Viewer<'_> {
             View::Node => node::ui(ui, self.s, self.node_view),
             View::ToolProperties => panels::tool_properties(ui, self.s, self.presets, self.device),
             View::Colour => panels::colour(ui, self.s),
-            View::LayerProperties => panels::layer_properties(ui, self.s),
+            View::LayerProperties => node::inspector(ui, self.s, self.node_view),
             View::Function => function::ui(ui, self.s, self.function),
             View::NodeLibrary => node::library(ui, self.s, self.node_view),
             View::Library => panels::planned(ui, "Library (templates and symbols)", "M6"),

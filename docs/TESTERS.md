@@ -75,6 +75,23 @@ drag. Undo and redo cover placement, node creation, and cable edits.
 Node positions and cables are saved with the project. After a manual
 cable edit, composite input order controls stacking in the graph.
 
+Scroll in the Node view to zoom around the pointer. Drag empty space
+to pan. Hold Shift while moving a connected node to line up nearby
+ports vertically. A two-rectangle minimap appears when nodes extend
+beyond the viewport. Use **View → Arrange Nodes** or find **Arrange
+Nodes** in Tab search to lay the graph out by signal flow. Undo restores
+the previous positions.
+
+Selecting a node reveals its Timeline track and updates **Layer
+Properties**. The floating properties window uses the same controls.
+Pegs have their own tracks. Select a connected peg and use **Transform**
+in Camera to move the artwork through that peg. The drawing's strokes
+stay in drawing coordinates.
+
+Choose a frame and click **Set key** in node properties. Every node can
+key its enabled state. Peg transforms and numeric effect properties can
+also change over time. Keys appear on the node's Timeline track.
+
 ## Select and colour drawings
 
 With **Select**, click an existing stroke to select it. On empty space,

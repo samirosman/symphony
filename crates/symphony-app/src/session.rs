@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use symphony_core::anim::Value;
 use symphony_core::doc::{Scene, Settings};
-use symphony_core::graph::{NodeKind, PegParams};
+use symphony_core::graph::{NodeId, NodeKind, PegParams};
 use symphony_core::history::{Edit, History};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
@@ -311,6 +311,8 @@ pub struct Session {
     pub frame: u32,
     pub playing: bool,
     pub selected: usize,
+    pub selected_node: Option<NodeId>,
+    pub reveal_node_track: Option<NodeId>,
     pub tool: Tool,
     pub brush: BrushSettings,
     pub pencil: BrushSettings,
@@ -401,6 +403,8 @@ impl Session {
             frame: 1,
             playing: false,
             selected: 0,
+            selected_node: None,
+            reveal_node_track: None,
             tool: Tool::Brush,
             brush: BrushSettings {
                 min_width: 0.6,
@@ -1301,12 +1305,70 @@ impl Session {
         };
     }
 
+    pub fn select_graph_node(&mut self, id: NodeId, reveal: bool) {
+        self.selected_node = Some(id);
+        if reveal {
+            self.reveal_node_track = Some(id);
+        }
+        if let Some(layer) = self.doc.layers.iter().position(|layer| layer.node == id) {
+            self.selected = layer;
+            return;
+        }
+        if !matches!(
+            self.doc.graph.node(id).map(|node| &node.kind),
+            Some(NodeKind::Peg(_))
+        ) {
+            return;
+        }
+        let drives = |index| self.peg_drives_layer(id, index);
+        if !drives(self.selected) {
+            if let Some(layer) = (0..self.doc.layers.len())
+                .find(|&i| drives(i))
+                .or_else(|| self.doc.layers.iter().position(|layer| layer.peg == id))
+            {
+                self.selected = layer;
+            }
+        }
+    }
+
+    fn peg_drives_layer(&self, peg: NodeId, layer: usize) -> bool {
+        let Some(layer) = self.doc.layers.get(layer) else {
+            return false;
+        };
+        let mut upstream = self.doc.graph.input(layer.node, 0);
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(id) = upstream.filter(|id| visited.insert(*id)) {
+            if id == peg {
+                return true;
+            }
+            upstream = self.doc.graph.input(id, 0);
+        }
+        false
+    }
+
+    pub fn transform_peg_id(&self, layer: usize) -> Option<NodeId> {
+        let node = self.doc.layers.get(layer)?.node;
+        let id = self
+            .selected_node
+            .filter(|&id| self.peg_drives_layer(id, layer))
+            .or_else(|| self.doc.graph.input(node, 0))?;
+        matches!(self.doc.graph.node(id)?.kind, NodeKind::Peg(_)).then_some(id)
+    }
+
+    pub fn transform_peg(&self, layer: usize) -> Option<&PegParams> {
+        let id = self.transform_peg_id(layer)?;
+        match &self.doc.graph.node(id)?.kind {
+            NodeKind::Peg(peg) => Some(peg),
+            _ => None,
+        }
+    }
+
     // ---- Transform tool (layers, through their pegs) ----------------------
 
     /// Change the selected layer's peg in one gesture step. In Animate mode
     /// values are keyed on the current frame; otherwise constants change.
     pub fn adjust_peg(&mut self, layer: usize, f: impl FnOnce(&mut PegValues)) {
-        let Some(mut p) = self.doc.peg(layer).cloned() else {
+        let Some(mut p) = self.transform_peg(layer).cloned() else {
             return;
         };
         let frame = self.frame;
@@ -1339,13 +1401,15 @@ impl Session {
         if v.scale_y != old.scale_y {
             set(p.scale_y.get_or_insert(Value::Constant(1.0)), v.scale_y);
         }
-        self.set_peg(layer, p);
+        if let Some(id) = self.transform_peg_id(layer) {
+            self.set_peg_by_id(id, p);
+        }
     }
 
     /// Put the peg's pivot at `pivot` (drawing space) if the peg has never
     /// been rotated or scaled, so turning a drawing happens around its middle.
     pub fn ensure_pivot(&mut self, layer: usize, pivot: (f32, f32)) {
-        let Some(p) = self.doc.peg(layer).cloned() else {
+        let Some(p) = self.transform_peg(layer).cloned() else {
             return;
         };
         let untouched = p.pivot == (0.0, 0.0)
@@ -1355,7 +1419,9 @@ impl Session {
         if untouched {
             let mut p = p;
             p.pivot = pivot;
-            self.set_peg(layer, p);
+            if let Some(id) = self.transform_peg_id(layer) {
+                self.set_peg_by_id(id, p);
+            }
         }
     }
 
@@ -1536,6 +1602,28 @@ impl Session {
             }
         }
         for (id, node) in self.doc.graph.nodes() {
+            if let Some(before) = self.doc.graph.keys(id) {
+                let after = before
+                    .iter()
+                    .map(|(&frame, &key)| {
+                        (
+                            if frame >= from {
+                                frame.saturating_add(count)
+                            } else {
+                                frame
+                            },
+                            key,
+                        )
+                    })
+                    .collect();
+                if *before != after {
+                    edits.push(Edit::SetNodeKeys {
+                        id,
+                        before: before.clone(),
+                        after,
+                    });
+                }
+            }
             let NodeKind::Peg(before) = &node.kind else {
                 continue;
             };
@@ -1708,35 +1796,26 @@ impl Session {
         let Some(l) = self.doc.layers.get(layer).copied() else {
             return;
         };
-        let Some(before) = self.doc.peg(layer).cloned() else {
+        self.set_peg_by_id(l.peg, after);
+    }
+
+    fn set_peg_by_id(&mut self, id: NodeId, after: PegParams) {
+        let Some(NodeKind::Peg(before)) = self.doc.graph.node(id).map(|node| &node.kind) else {
             return;
         };
-        if before != after {
+        if *before != after {
+            let before = before.clone();
             self.history.apply_merged(
                 &mut self.doc,
                 "Move peg",
-                &format!("peg-{}", l.peg.0),
+                &format!("peg-{}", id.0),
                 Edit::SetPeg {
-                    node: l.peg,
+                    node: id,
                     before,
                     after,
                 },
             );
         }
-    }
-
-    /// Change one peg value at the current frame: a key in Animate mode,
-    /// otherwise the constant value.
-    pub fn set_peg_value(&mut self, layer: usize, pick: fn(&mut PegParams) -> &mut Value, v: f32) {
-        let Some(mut p) = self.doc.peg(layer).cloned() else {
-            return;
-        };
-        let value = pick(&mut p);
-        match value {
-            Value::Constant(c) if !self.animate => *c = v,
-            _ => value.set_key(self.frame, v),
-        }
-        self.set_peg(layer, p);
     }
 
     fn apply_palette(
@@ -2144,6 +2223,26 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_upstream_peg_moves_the_layer_without_editing_artwork() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        let layer = s.doc.layers[0];
+        let drawing = s.doc.exposed(0, s.frame).unwrap();
+        let strokes = s.doc.drawings[&drawing].strokes.clone();
+        let upstream = s.doc.graph.add("Rig", NodeKind::Peg(PegParams::default()));
+        s.doc.graph.connect(upstream, layer.peg, 0);
+        s.select_graph_node(upstream, true);
+        s.adjust_peg(0, |peg| peg.x += 24.0);
+        assert_eq!(
+            s.doc.graph.world_transform(layer.node, s.frame).unwrap().tx,
+            24.0
+        );
+        assert_eq!(s.doc.drawings[&drawing].strokes, strokes);
+        assert_eq!(s.selected_node, Some(upstream));
+        assert_eq!(s.reveal_node_track, Some(upstream));
+    }
 
     #[test]
     fn inserted_inbetweens_hold_exposures_and_move_keys_at_any_rate() {
