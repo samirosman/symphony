@@ -400,12 +400,31 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
                     angle: 0.0,
                     follow: false,
                     grain_scale: 1.0,
+                    flow: 1.0,
+                    hardness: 1.0,
+                    opacity_by_pressure: [1.0; 4],
                 });
             }
         });
         if let Some(t) = &mut b.texture {
             slider(ui, "Spacing", &mut t.spacing, 0.01..=3.0);
             slider(ui, "Opacity", &mut t.opacity, 0.0..=1.0);
+            slider(ui, "Flow", &mut t.flow, 0.01..=1.0);
+            hint(
+                ui,
+                "Below 1, each stamp lays down a little and overlaps build up.",
+            );
+            if t.tip.is_none() {
+                slider(ui, "Hardness", &mut t.hardness, 0.0..=1.0);
+            }
+            // One lever for how much light pressure fades the stroke.
+            let mut fade = 1.0 - t.opacity_by_pressure[0];
+            slider(ui, "Pressure fades opacity", &mut fade, 0.0..=1.0);
+            let fade = fade.clamp(0.0, 1.0);
+            let linear = [1.0 - fade, 1.0 - fade * 2.0 / 3.0, 1.0 - fade / 3.0, 1.0];
+            if (linear[0] - t.opacity_by_pressure[0]).abs() > 1e-4 {
+                t.opacity_by_pressure = linear;
+            }
             slider(ui, "Tip angle", &mut t.angle, -180.0..=180.0);
             widgets::checkbox(ui, &mut t.follow, "Turn tip with the stroke");
             if t.grain.is_some() {

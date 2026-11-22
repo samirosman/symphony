@@ -46,6 +46,9 @@ fn main() {
             angle: 0.0,
             follow: true,
             grain_scale: 1.0,
+            flow: 1.0,
+            hardness: 1.0,
+            opacity_by_pressure: [1.0; 4],
         };
         let start = std::time::Instant::now();
         let n = 10;

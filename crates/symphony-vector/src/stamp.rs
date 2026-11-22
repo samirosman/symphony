@@ -84,7 +84,8 @@ pub struct Stamper {
     /// Points already stamped, and the distance left over to the next stamp.
     done: usize,
     carry: f32,
-    last: Option<([f32; 2], f32)>,
+    /// The last point: position, diameter and pen pressure.
+    last: Option<([f32; 2], f32, f32)>,
     stamps: usize,
 }
 
@@ -113,23 +114,27 @@ impl Stamper {
         } else {
             0.1
         };
-        let new: Vec<([f32; 2], f32)> = stroke
+        let new: Vec<([f32; 2], f32, f32)> = stroke
             .points
             .iter()
             .skip(self.done)
             .map(|p| {
                 let (x, y) = self.m.apply(p.x, p.y);
-                ([x, y], (stroke.width_at(p.pressure) * self.k).max(0.0))
+                (
+                    [x, y],
+                    (stroke.width_at(p.pressure) * self.k).max(0.0),
+                    p.pressure,
+                )
             })
             .collect();
         self.done = stroke.points.len();
-        for (c, d) in new {
+        for (c, d, pr) in new {
             if !(c[0].is_finite() && c[1].is_finite() && d.is_finite()) {
                 continue;
             }
-            let Some((a, wa)) = self.last else {
-                self.stamp(c, d, 0.0, tip);
-                self.last = Some((c, d));
+            let Some((a, wa, pa)) = self.last else {
+                self.stamp(c, d, 0.0, pr, tip);
+                self.last = Some((c, d, pr));
                 continue;
             };
             let (dx, dy) = (c[0] - a[0], c[1] - a[1]);
@@ -142,11 +147,12 @@ impl Stamper {
             while t <= len {
                 let f = t / len;
                 let w = wa + (d - wa) * f;
-                self.stamp([a[0] + dx * f, a[1] + dy * f], w, heading, tip);
+                let p = pa + (pr - pa) * f;
+                self.stamp([a[0] + dx * f, a[1] + dy * f], w, heading, p, tip);
                 t += (spacing * w).max(0.5);
             }
             self.carry = t - len;
-            self.last = Some((c, d));
+            self.last = Some((c, d, pr));
         }
     }
 
@@ -228,8 +234,21 @@ impl Stamper {
         true
     }
 
-    fn stamp(&mut self, c: [f32; 2], d: f32, heading: f32, tip: Option<&Texture>) {
+    fn stamp(&mut self, c: [f32; 2], d: f32, heading: f32, pressure: f32, tip: Option<&Texture>) {
         self.stamps += 1;
+        // Each stamp raises pixels toward its own opacity (faded by
+        // pressure) and never past it; flow is how far each step goes.
+        // This is how Krita's and Harmony's brushes combine dabs, so soft
+        // edges stay soft and low flow builds up gently.
+        let clean = |v: f32, d: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { d };
+        let level = clean(self.tex.opacity_at(pressure), 1.0);
+        let flow = clean(self.tex.flow, 1.0);
+        if level <= 0.0 || flow <= 0.0 {
+            return;
+        }
+        // Soft edge width for the round tip: a hard tip keeps 1 pixel of
+        // anti-aliasing, a soft one fades over part of its radius.
+        let soft = (d * 0.5 * (1.0 - clean(self.tex.hardness, 1.0))).max(1.0);
         if d < 0.3 || self.stamps > MAX_STAMPS {
             return;
         }
@@ -284,11 +303,14 @@ impl Stamper {
                         }
                     }
                     // A hard round tip with one pixel of anti-aliasing.
-                    None => (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0),
+                    None => ((r - (dx * dx + dy * dy).sqrt()) / soft + 0.5).clamp(0.0, 1.0),
                 };
                 if a > 0.0 {
                     let i = row + (px - b[0]) as usize;
-                    self.acc[i] += a * (1.0 - self.acc[i]);
+                    let target = a * level;
+                    if target > self.acc[i] {
+                        self.acc[i] += (target - self.acc[i]) * flow;
+                    }
                 }
             }
         }
@@ -395,6 +417,9 @@ mod tests {
             angle: 0.0,
             follow: false,
             grain_scale: 1.0,
+            flow: 1.0,
+            hardness: 1.0,
+            opacity_by_pressure: [1.0; 4],
         }
     }
 
@@ -438,7 +463,9 @@ mod tests {
         // Twice the scale gives twice the coverage width, still solid.
         let c = rasterize(&line(8.0), &tex(), None, None, Affine::scale(2.0, 2.0), ALL).unwrap();
         assert_eq!(at(&c, 100, 40), 255);
-        assert_eq!(at(&c, 100, 47), 255);
+        // The last pixel inside the edge is solid, give or take
+        // anti-aliasing.
+        assert!(at(&c, 100, 47) >= 245, "{}", at(&c, 100, 47));
         assert_eq!(at(&c, 100, 50), 0);
     }
 
@@ -462,6 +489,41 @@ mod tests {
             s.extend(&part, None);
         }
         assert_eq!(s.coverage(None).unwrap(), whole);
+    }
+
+    #[test]
+    fn flow_builds_up_and_pressure_fades() {
+        // Low flow: one stamp is faint, many overlapping ones build up.
+        let mut t = tex();
+        t.flow = 0.1;
+        t.spacing = 0.05;
+        let c = rasterize(&line(8.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let middle = at(&c, 50, 20);
+        assert!(middle > 200, "built up: {middle}");
+        let end = at(&c, 7, 20);
+        assert!(end < middle, "fainter where fewer stamps overlap: {end}");
+        // Opacity following pressure: light pressure lays down less.
+        let mut t = tex();
+        t.opacity_by_pressure = [0.0, 0.33, 0.66, 1.0];
+        let mut light = line(8.0);
+        for p in &mut light.points {
+            p.pressure = 0.2;
+        }
+        light.min_width = 8.0;
+        let faint = rasterize(&light, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let strong = rasterize(&line(8.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert!(at(&faint, 50, 20) < at(&strong, 50, 20));
+    }
+
+    #[test]
+    fn soft_round_tips_fade_at_the_edge() {
+        let mut t = tex();
+        t.hardness = 0.2;
+        let soft = rasterize(&line(16.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let hard = rasterize(&line(16.0), &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
+        // Near the edge the soft line is partly transparent.
+        assert_eq!(at(&hard, 50, 26), 255);
+        assert!(at(&soft, 50, 26) < 255);
     }
 
     #[test]

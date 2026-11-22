@@ -14,13 +14,16 @@ fn main() {
                 );
                 for b in &got.brushes {
                     println!(
-                        "  {:<32} {:<10} size {:>7.1} min {:.2} curve {} opacity {:.2} spacing {:.3} smooth {:.2}{}{}{}",
+                        "  {:<32} {:<10} size {:>7.1} min {:.2} curve {} opacity {:.2} flow {:.2} hard {:.2} opacity@0.2 {:.2} spacing {:.3} smooth {:.2}{}{}{}",
                         b.name,
                         b.source.title(),
                         b.diameter,
                         b.min_fraction,
                         b.size_curve.len(),
                         b.opacity,
+                        b.flow,
+                        b.hardness,
+                        b.opacity_at(0.2),
                         b.spacing,
                         b.smoothing,
                         b.tip.as_ref().map_or(String::new(), |t| format!(" tip {}x{}", t.width(), t.height())),

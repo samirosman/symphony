@@ -85,6 +85,32 @@ pub struct StrokeTexture {
     /// Grain pixels per drawing unit.
     #[serde(default = "one")]
     pub grain_scale: f32,
+    /// How much each stamp lays down, 0..=1. Below 1, overlapping stamps
+    /// build up (Krita, Harmony and Procreate flow).
+    #[serde(default = "one")]
+    pub flow: f32,
+    /// Edge of the round tip (no tip image): 1 is hard, lower is softer.
+    #[serde(default = "one")]
+    pub hardness: f32,
+    /// Stamp opacity at pen pressures 0, 1/3, 2/3 and 1: how pressure
+    /// fades the stroke. All 1 means pressure doesn't change opacity.
+    #[serde(default = "full")]
+    pub opacity_by_pressure: [f32; 4],
+}
+
+fn full() -> [f32; 4] {
+    [1.0; 4]
+}
+
+impl StrokeTexture {
+    /// Stamp opacity for a pen pressure.
+    pub fn opacity_at(&self, pressure: f32) -> f32 {
+        let x = pressure.clamp(0.0, 1.0) * 3.0;
+        let i = (x.floor() as usize).min(2);
+        let f = x - i as f32;
+        let c = &self.opacity_by_pressure;
+        (c[i] * (1.0 - f) + c[i + 1] * f).clamp(0.0, 1.0)
+    }
 }
 
 fn one() -> f32 {

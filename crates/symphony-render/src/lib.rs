@@ -347,6 +347,9 @@ mod tests {
                 angle: 0.0,
                 follow: false,
                 grain_scale: 1.0,
+                flow: 1.0,
+                hardness: 1.0,
+                opacity_by_pressure: [1.0; 4],
             });
         let img = render_frame(&s, 1, 200, 100).unwrap();
         let row: Vec<u8> = (90..110).map(|x| img.get_pixel(x, 50).0[0]).collect();

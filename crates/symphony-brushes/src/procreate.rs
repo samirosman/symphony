@@ -132,6 +132,13 @@ fn brush(archive: &[u8]) -> Result<Brush, Error> {
     let pressure = num("dynamicsPressureSize").unwrap_or(0.0);
     b.min_fraction = (1.0 - pressure).clamp(0.0, 1.0);
     b.opacity = num("paintOpacity").unwrap_or(1.0);
+    // How much pressure fades opacity, 0..1.
+    let fade = num("dynamicsPressureOpacity")
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    if fade > 0.0 {
+        b.opacity_curve = vec![[0.0, 1.0 - fade], [1.0, 1.0]];
+    }
     b.spacing = num("plotSpacing").unwrap_or(0.1);
     b.smoothing = num("plotSmoothing")
         .unwrap_or(0.0)

@@ -79,6 +79,14 @@ fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
             angle: b.angle,
             follow: false,
             grain_scale: 1.0,
+            flow: b.flow,
+            hardness: b.hardness,
+            opacity_by_pressure: [
+                b.opacity_at(0.0),
+                b.opacity_at(1.0 / 3.0),
+                b.opacity_at(2.0 / 3.0),
+                b.opacity_at(1.0),
+            ],
         }),
     }
 }

@@ -46,7 +46,7 @@ fn read(path: &std::path::Path, stem: &str) -> Result<Brush, Error> {
     let name = name.split(" - ").next().unwrap_or(&name).trim().to_owned();
     let mut b = Brush::new(name, Source::ClipStudio);
     let row = db.query_row(
-        "SELECT BrushSize, Opacity, BrushInterval, Stickness FROM Variant LIMIT 1",
+        "SELECT BrushSize, Opacity, BrushInterval, Stickness, BrushFlow, BrushHardness FROM Variant LIMIT 1",
         [],
         |r| {
             Ok((
@@ -54,10 +54,15 @@ fn read(path: &std::path::Path, stem: &str) -> Result<Brush, Error> {
                 r.get::<_, Option<f64>>(1)?,
                 r.get::<_, Option<f64>>(2)?,
                 r.get::<_, Option<f64>>(3)?,
+                r.get::<_, Option<f64>>(4)?,
+                r.get::<_, Option<f64>>(5)?,
             ))
         },
     );
-    if let Ok((size, opacity, interval, stick)) = row {
+    if let Ok((size, opacity, interval, stick, flow, hardness)) = row {
+        // Clip Studio stores these as 0..100.
+        b.flow = flow.map_or(1.0, |v| (v / 100.0) as f32);
+        b.hardness = hardness.map_or(1.0, |v| (v / 100.0) as f32);
         b.diameter = size.unwrap_or(10.0) as f32;
         // Clip Studio stores opacity as 0..100.
         b.opacity = opacity.map_or(1.0, |o| (o / 100.0) as f32);

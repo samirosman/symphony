@@ -65,8 +65,7 @@ fn preset_xml(png: &[u8]) -> Result<String, Error> {
 
 pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
     let xml = preset_xml(png)?;
-    let doc =
-        roxmltree::Document::parse(&xml).map_err(|_| Error::Damaged("unreadable preset".into()))?;
+    let doc = parse_with_doctype(&xml).map_err(|_| Error::Damaged("unreadable preset".into()))?;
     let root = doc.root_element();
     let name = root.attribute("name").unwrap_or("Krita brush");
     // Krita names often start with a sort prefix like "b)_".
@@ -91,6 +90,12 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
     let num = |k: &str| params.get(k).and_then(|v| v.trim().parse::<f32>().ok());
 
     b.opacity = num("OpacityValue").unwrap_or(1.0);
+    b.flow = num("FlowValue").unwrap_or(1.0);
+    // Opacity follows the pen when the opacity sensor has a pressure curve
+    // (alone, or among several sensors).
+    if let Some(curve) = pressure_curve(params.get("OpacitySensor").copied().unwrap_or("")) {
+        b.opacity_curve = curve;
+    }
     b.eraser = params.get("EraserMode").is_some_and(|v| v.trim() == "true")
         || params
             .get("CompositeOp")
@@ -100,7 +105,7 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         .is_some_and(|v| v.trim() == "true")
     {
         let sensor = params.get("SizeSensor").copied().unwrap_or("");
-        if let Some(curve) = roxmltree::Document::parse(sensor).ok().and_then(|d| {
+        if let Some(curve) = parse_with_doctype(sensor).ok().and_then(|d| {
             d.descendants()
                 .find(|n| n.has_tag_name("curve"))
                 .and_then(|n| n.text().map(str::to_owned))
@@ -115,7 +120,7 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
     }
 
     let def = params.get("brush_definition").copied().unwrap_or("");
-    if let Ok(d) = roxmltree::Document::parse(def) {
+    if let Ok(d) = parse_with_doctype(def) {
         let brush = d.root_element();
         let attr = |k: &str| brush.attribute(k).and_then(|v| v.parse::<f32>().ok());
         b.spacing = attr("spacing").unwrap_or(0.1);
@@ -129,6 +134,17 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
                         .attribute("diameter")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(10.0);
+                    // Krita's fade: 1 is a hard edge, lower fades in from
+                    // the edge. Gaussian tips are soft.
+                    let fade = m
+                        .attribute("hfade")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(1.0);
+                    b.hardness = if m.attribute("id") == Some("gauss") {
+                        fade.min(0.3)
+                    } else {
+                        fade
+                    };
                 }
             }
             _ => {
@@ -157,6 +173,30 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         b.grain = find(file).and_then(|data| mask(&data, false));
     }
     Ok(b)
+}
+
+/// Krita's settings start with `<!DOCTYPE params>`, which the XML reader
+/// refuses by default; a bare DOCTYPE with no internal subset is harmless.
+fn parse_with_doctype(text: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
+    roxmltree::Document::parse_with_options(
+        text,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// The pressure curve of a Krita sensor setting, if it has one: either a
+/// lone pressure sensor or a pressure child in a sensor list.
+fn pressure_curve(sensor: &str) -> Option<Vec<[f32; 2]>> {
+    let d = parse_with_doctype(sensor).ok()?;
+    let node = d.descendants().find(|n| {
+        n.attribute("id") == Some("pressure") && n.children().any(|c| c.has_tag_name("curve"))
+    })?;
+    let text = node.children().find(|c| c.has_tag_name("curve"))?.text()?;
+    let c = parse_curve(text);
+    (c.len() >= 2).then_some(c)
 }
 
 /// A `.bundle`: a zip with `paintoppresets/`, `brushes/` and `patterns/`.
@@ -209,4 +249,44 @@ pub fn bundle(bytes: &[u8]) -> Result<Imported, Error> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal .kpp: a PNG signature and a tEXt "preset" chunk (the
+    /// reader doesn't need image data or CRCs).
+    fn kpp(xml: &str) -> Vec<u8> {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut body = b"preset\0".to_vec();
+        body.extend_from_slice(xml.as_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(b"tEXt");
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out
+    }
+
+    #[test]
+    fn reads_flow_opacity_by_pressure_and_soft_tips() {
+        let xml = r#"<Preset name="b)_Soft_Pen" paintopid="paintbrush">
+<param name="FlowValue" type="string"><![CDATA[0.33]]></param>
+<param name="OpacityValue" type="string"><![CDATA[1]]></param>
+<param name="OpacitySensor" type="string"><![CDATA[<!DOCTYPE params><params id="sensorslist"><ChildSensor id="fuzzy"><curve>0,0;1,1;</curve></ChildSensor><ChildSensor id="pressure"><curve>0,0.2;1,1;</curve></ChildSensor></params>]]></param>
+<param name="PressureSize" type="string"><![CDATA[true]]></param>
+<param name="SizeSensor" type="string"><![CDATA[<!DOCTYPE params><params id="pressure"><curve>0,0.5;1,1;</curve></params>]]></param>
+<param name="brush_definition" type="string"><![CDATA[<Brush type="auto_brush" spacing="0.1"><MaskGenerator diameter="24" hfade="0.4" id="default" type="circle"/></Brush>]]></param>
+</Preset>"#;
+        let b = preset(&kpp(xml), &|_| None).unwrap().sanitise();
+        assert_eq!(b.name, "Soft Pen");
+        assert!((b.flow - 0.33).abs() < 1e-4);
+        assert!(
+            (b.opacity_at(0.0) - 0.2).abs() < 1e-4,
+            "pressure curve, not the fuzzy one"
+        );
+        assert!((b.hardness - 0.4).abs() < 1e-4);
+        assert_eq!(b.diameter, 24.0);
+        assert!((b.min_fraction - 0.5).abs() < 1e-4);
+    }
 }

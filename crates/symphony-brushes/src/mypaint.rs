@@ -27,6 +27,24 @@ pub fn preset(bytes: &[u8], stem: &str) -> Result<Brush, Error> {
         .exp();
     b.diameter = radius * 2.0;
     b.opacity = base("opaque").unwrap_or(1.0);
+    b.hardness = base("hardness").unwrap_or(1.0);
+    // opaque_multiply with a pressure input: opacity follows the pen.
+    let pressure_points = |key: &str| -> Option<Vec<[f32; 2]>> {
+        let pts = settings
+            .get(key)?
+            .get("inputs")?
+            .get("pressure")?
+            .as_array()?;
+        let c: Vec<[f32; 2]> = pts
+            .iter()
+            .filter_map(|p| p.as_array())
+            .filter_map(|p| Some([p.first()?.as_f64()? as f32, p.get(1)?.as_f64()? as f32]))
+            .collect();
+        (c.len() >= 2).then_some(c)
+    };
+    if let Some(c) = pressure_points("opaque_multiply") {
+        b.opacity_curve = c;
+    }
     b.eraser = base("eraser").unwrap_or(0.0) > 0.5;
     b.smoothing = (base("slow_tracking").unwrap_or(0.0) / 10.0).clamp(0.0, 1.0);
     b.spacing = 1.0 / base("dabs_per_actual_radius").unwrap_or(2.0).max(0.1) / 2.0;

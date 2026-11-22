@@ -61,8 +61,15 @@ pub struct Brush {
     /// Pressure to size, as (pressure, fraction) points from 0 to 1. Empty
     /// means linear between `min_fraction` and 1.
     pub size_curve: Vec<[f32; 2]>,
-    /// 0..=1.
+    /// 0..=1: the most the stroke can reach.
     pub opacity: f32,
+    /// How much each stamp lays down, 0..=1; below 1, overlaps build up.
+    pub flow: f32,
+    /// Round-tip edge, 1 hard .. 0 soft (no effect on image tips).
+    pub hardness: f32,
+    /// Pressure to stamp opacity, as (pressure, opacity) points. Empty
+    /// means pressure doesn't change opacity.
+    pub opacity_curve: Vec<[f32; 2]>,
     /// Distance between tip stamps, as a fraction of the diameter.
     pub spacing: f32,
     /// Stroke stabilisation, 0..=1.
@@ -86,6 +93,9 @@ impl Brush {
             min_fraction: 0.0,
             size_curve: Vec::new(),
             opacity: 1.0,
+            flow: 1.0,
+            hardness: 1.0,
+            opacity_curve: Vec::new(),
             spacing: 0.1,
             smoothing: 0.0,
             angle: 0.0,
@@ -111,6 +121,16 @@ impl Brush {
         self.diameter = fix(self.diameter, 0.1, 5000.0, 10.0);
         self.min_fraction = fix(self.min_fraction, 0.0, 1.0, 0.0);
         self.opacity = fix(self.opacity, 0.0, 1.0, 1.0);
+        self.flow = fix(self.flow, 0.01, 1.0, 1.0);
+        self.hardness = fix(self.hardness, 0.0, 1.0, 1.0);
+        self.opacity_curve
+            .retain(|p| p[0].is_finite() && p[1].is_finite());
+        self.opacity_curve.truncate(64);
+        for p in &mut self.opacity_curve {
+            p[0] = p[0].clamp(0.0, 1.0);
+            p[1] = p[1].clamp(0.0, 1.0);
+        }
+        self.opacity_curve.sort_by(|a, b| a[0].total_cmp(&b[0]));
         self.spacing = fix(self.spacing, 0.001, 10.0, 0.1);
         self.smoothing = fix(self.smoothing, 0.0, 1.0, 0.0);
         self.angle = fix(self.angle, -360.0, 360.0, 0.0);
@@ -126,6 +146,11 @@ impl Brush {
             self.min_fraction = first[1];
         }
         self
+    }
+
+    /// Stamp opacity at `pressure`, from the opacity curve (1 without one).
+    pub fn opacity_at(&self, pressure: f32) -> f32 {
+        curve_at(&self.opacity_curve, pressure).unwrap_or(1.0)
     }
 
     /// Size fraction at `pressure`, from the curve or linear.
@@ -309,6 +334,22 @@ fn read_entry<R: Read>(entry: R, size: u64) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(size as usize);
     entry.take(MAX_ENTRY + 1).read_to_end(&mut buf).ok()?;
     (buf.len() as u64 <= MAX_ENTRY).then_some(buf)
+}
+
+/// A piecewise-linear curve's value at `x`, or `None` if it's empty.
+fn curve_at(c: &[[f32; 2]], x: f32) -> Option<f32> {
+    let x = x.clamp(0.0, 1.0);
+    let first = c.first()?;
+    if x <= first[0] {
+        return Some(first[1]);
+    }
+    for w in c.windows(2) {
+        if x <= w[1][0] {
+            let t = (x - w[0][0]) / (w[1][0] - w[0][0]).max(1e-6);
+            return Some(w[0][1] + (w[1][1] - w[0][1]) * t);
+        }
+    }
+    Some(c[c.len() - 1][1])
 }
 
 /// Krita sorts presets with prefixes like "b) ": drop them.
