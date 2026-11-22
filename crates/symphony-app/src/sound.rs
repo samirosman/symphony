@@ -24,7 +24,9 @@ const PEAKS_PER_SECOND: u32 = 400;
 pub struct Ready {
     /// At the output's rate and channel count; empty with no output.
     pcm: Arc<Vec<f32>>,
-    pub peaks: Peaks,
+    peaks: Peaks,
+    /// Scale that makes the loudest sample of the file fill the row.
+    gain: f32,
 }
 
 enum Done {
@@ -90,9 +92,10 @@ impl Default for SoundState {
 }
 
 impl SoundState {
-    /// Waveform peaks of a file, once it is decoded.
-    pub fn peaks(&self, key: u64) -> Option<&Peaks> {
-        self.ready.get(&key).map(|r| &r.peaks)
+    /// Waveform peaks of a file, once it is decoded, and the scale that
+    /// normalizes its drawing (the sound itself plays as it is).
+    pub fn peaks(&self, key: u64) -> Option<(&Peaks, f32)> {
+        self.ready.get(&key).map(|r| (&r.peaks, r.gain))
     }
 
     pub fn enabled(&self) -> bool {
@@ -334,10 +337,26 @@ fn make_ready(
     } else {
         Arc::new(Vec::new())
     };
+    let peaks = Peaks::new(samples, PEAKS_PER_SECOND);
     Ok(Ready {
         pcm,
-        peaks: Peaks::new(samples, PEAKS_PER_SECOND),
+        gain: normalize(&peaks),
+        peaks,
     })
+}
+
+/// The scale that makes the loudest peak reach 1. A silent file is left
+/// as it is, so noise isn't blown up to full height.
+fn normalize(peaks: &Peaks) -> f32 {
+    let loudest = peaks
+        .bins
+        .iter()
+        .fold(0.0f32, |m, &(lo, hi)| m.max(-lo).max(hi));
+    if loudest < 1e-3 {
+        1.0
+    } else {
+        1.0 / loudest
+    }
 }
 
 /// The track name: the file name without its extension, as in Harmony.
@@ -351,6 +370,16 @@ fn track_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_loudest_peak_fills_the_row() {
+        let peaks = |bins| Peaks {
+            per_second: 1,
+            bins,
+        };
+        assert_eq!(normalize(&peaks(vec![(-0.25, 0.1), (0.0, 0.2)])), 4.0);
+        assert_eq!(normalize(&peaks(vec![(0.0, 0.0)])), 1.0);
+    }
 
     #[test]
     fn names_a_track_after_its_file() {

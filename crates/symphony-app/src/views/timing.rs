@@ -415,6 +415,7 @@ fn waveform(
     painter: &egui::Painter,
     block: Rect,
     peaks: &symphony_audio::Peaks,
+    gain: f32,
     offset: f64,
     seconds_per_pixel: f64,
     colour: egui::Color32,
@@ -425,6 +426,7 @@ fn waveform(
     while x < block.right() {
         let from = offset + f64::from(x - block.left()) * seconds_per_pixel;
         let (lo, hi) = peaks.range(from, from + seconds_per_pixel);
+        let (lo, hi) = ((lo * gain).max(-1.0), (hi * gain).min(1.0));
         if hi > lo {
             painter.line_segment(
                 [
@@ -898,7 +900,7 @@ pub fn timeline(
                 );
                 painter.rect_filled(block, theme::RADIUS_CONTROL as f32, theme::BG_HOVER);
                 blocks.push((track.id, block));
-                if let Some(peaks) = sounds.peaks(track.key) {
+                if let Some((peaks, gain)) = sounds.peaks(track.key) {
                     let colour = if on {
                         theme::TEXT_SECONDARY
                     } else {
@@ -910,6 +912,7 @@ pub fn timeline(
                         &painter,
                         block.shrink2(Vec2::new(1.0, 2.0)),
                         peaks,
+                        gain,
                         track.offset(file),
                         seconds_per_pixel,
                         colour,
