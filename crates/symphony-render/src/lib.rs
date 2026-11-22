@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use image::{Delay, Frame, RgbaImage};
 use symphony_core::doc::Scene;
 use symphony_core::graph::{RenderCommand, RenderItem};
+use symphony_core::id::Id;
 use symphony_core::math::Affine;
 use symphony_core::stroke::{ArtLayer, StrokeKind};
 use symphony_vector::tessellate;
@@ -21,9 +22,42 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Transform};
 /// Render `frame` at `width` x `height` pixels (the scene's aspect is
 /// kept; the stage fills the image). Background is white paper.
 pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Option<RgbaImage> {
+    let pixmap = render_display(scene, frame, width, height, true, None)?;
+    RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
+}
+
+/// Temporary drawing-space transform for the Select tool's live preview.
+#[derive(Clone, Copy)]
+pub struct StrokePreview<'a> {
+    pub drawing: Id,
+    pub strokes: &'a [Id],
+    pub transform: Affine,
+}
+
+/// Render the Display graph as a premultiplied RGBA stage with transparent paper.
+pub fn render_camera(
+    scene: &Scene,
+    frame: u32,
+    width: u32,
+    height: u32,
+    preview: Option<StrokePreview<'_>>,
+) -> Option<Pixmap> {
+    render_display(scene, frame, width, height, false, preview)
+}
+
+fn render_display(
+    scene: &Scene,
+    frame: u32,
+    width: u32,
+    height: u32,
+    white_paper: bool,
+    preview: Option<StrokePreview<'_>>,
+) -> Option<Pixmap> {
     let (width, height) = (width.max(1), height.max(1));
     let mut paper = Pixmap::new(width, height)?;
-    paper.fill(tiny_skia::Color::WHITE);
+    if white_paper {
+        paper.fill(tiny_skia::Color::WHITE);
+    }
     let k = width as f32 / scene.settings.width.max(1) as f32;
     // Scene units have their origin at the stage centre, y down.
     let view =
@@ -36,7 +70,7 @@ pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Optio
     for command in commands {
         let current = layers.last_mut()?;
         match command {
-            RenderCommand::Drawing(item) => paint_drawing(current, scene, view, item),
+            RenderCommand::Drawing(item) => paint_drawing(current, scene, view, item, preview),
             RenderCommand::Gradient(gradient) => effects::gradient(current, gradient),
             RenderCommand::BeginEffect => {
                 // Bound temporary raster storage, including blur scratch space.
@@ -60,10 +94,16 @@ pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Optio
             }
         }
     }
-    RgbaImage::from_raw(width, height, layers.pop()?.take())
+    layers.pop()
 }
 
-fn paint_drawing(pix: &mut Pixmap, scene: &Scene, view: Affine, item: RenderItem) {
+fn paint_drawing(
+    pix: &mut Pixmap,
+    scene: &Scene,
+    view: Affine,
+    item: RenderItem,
+    preview: Option<StrokePreview<'_>>,
+) {
     let Some(d) = scene.drawings.get(&item.drawing) else {
         return;
     };
@@ -96,7 +136,14 @@ fn paint_drawing(pix: &mut Pixmap, scene: &Scene, view: Affine, item: RenderItem
                 None,
             );
         }
-        paint_strokes(pix, scene, d, art, m);
+        paint_strokes(
+            pix,
+            scene,
+            d,
+            art,
+            m,
+            preview.filter(|p| p.drawing == item.drawing),
+        );
     }
 }
 
@@ -107,6 +154,7 @@ fn paint_strokes(
     d: &symphony_core::stroke::Drawing,
     art: ArtLayer,
     m: Affine,
+    preview: Option<StrokePreview<'_>>,
 ) {
     {
         for st in d
@@ -114,6 +162,10 @@ fn paint_strokes(
             .iter()
             .filter(|s| s.art == art && s.kind != StrokeKind::Invisible)
         {
+            let m = match preview {
+                Some(p) if p.strokes.contains(&st.id) => m.compose(p.transform),
+                _ => m,
+            };
             if let Some(tex) = &st.texture {
                 paint_textured(pix, scene, st, tex, m);
                 continue;

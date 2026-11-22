@@ -1,5 +1,5 @@
 //! Camera and Drawing views: one canvas, two modes (DESIGN D3.6).
-//! - Camera shows the composited scene (every visible layer, with pegs).
+//! - Camera renders the Display node, including compositing effects.
 //! - Drawing shows only the selected layer's drawing, untransformed.
 //!
 //! Navigation: Space+drag pans, Shift+Space+drag rotates, pinch or
@@ -18,6 +18,9 @@ use symphony_vector::{pressure_curve, scale_of, tessellate, Smoother};
 use crate::keymap::{self, Action, Profile};
 use crate::session::{apply_stencil, CanvasColours, Session, Stencil, Tool};
 use crate::views::select::{self, SelectState};
+
+#[path = "camera_render.rs"]
+mod camera_render;
 
 /// Eraser radius, in screen points.
 const MIN_ZOOM: f32 = 0.05;
@@ -43,6 +46,7 @@ pub struct CanvasState {
     pub select: SelectState,
     /// Stamped textured strokes, reused while only panning.
     strokes: super::textured::Cache,
+    display: camera_render::Cache,
 }
 
 impl Default for CanvasState {
@@ -58,6 +62,7 @@ impl Default for CanvasState {
             last_view: Affine::IDENTITY,
             select: SelectState::default(),
             strokes: Default::default(),
+            display: Default::default(),
         }
     }
 }
@@ -147,6 +152,7 @@ impl CanvasState {
         self.pan = Vec2::ZERO;
         self.fit_pending = true;
         self.rotation = 0.0;
+        self.display = Default::default();
     }
 
     pub fn rotate_by(&mut self, degrees: f32) {
@@ -609,7 +615,16 @@ pub fn ui(
     };
     // While the Select tool drags, the selected strokes draw through the preview.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
-    for (_, d, m) in &items {
+    if !drawing_only && !state.display.paint(&painter, s, corners, preview) {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Couldn’t render the Display output.",
+            theme::body(),
+            theme::TEXT_PRIMARY,
+        );
+    }
+    for (_, d, m) in items.iter().filter(|_| drawing_only || s.show_strokes) {
         if let Some(dr) = s.doc.drawings.get(d) {
             let moving = preview.is_some() && s.selection.drawing == Some(*d);
             // Art layers back to front; within each, paint under ink.
@@ -619,14 +634,19 @@ pub fn ui(
                 if drawing_only && !s.art_preview && art != s.art {
                     continue;
                 }
-                for f in dr.fills.iter().filter(|f| f.art == art) {
-                    paint_mesh(
-                        &painter,
-                        symphony_vector::fill::fill_mesh(&f.contours, view.compose(*m)),
-                        colour(s, f.swatch),
-                    );
+                if drawing_only {
+                    for f in dr.fills.iter().filter(|f| f.art == art) {
+                        paint_mesh(
+                            &painter,
+                            symphony_vector::fill::fill_mesh(&f.contours, view.compose(*m)),
+                            colour(s, f.swatch),
+                        );
+                    }
                 }
                 for st in dr.strokes.iter().filter(|st| st.art == art) {
+                    if !drawing_only && st.kind != StrokeKind::Invisible {
+                        continue;
+                    }
                     let m = match preview {
                         Some(l) if moving && s.selection.strokes.contains(&st.id) => {
                             view.compose(*m).compose(l)

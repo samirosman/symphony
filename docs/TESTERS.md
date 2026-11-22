@@ -84,10 +84,13 @@ Select a node and click **Properties**. Set blur radius, grain amount
 and seed, gradient colors and angle, or opacity. Click **Apply** to
 commit the change as one undo step.
 
-Use **Render preview** to inspect the current frame. Click **Render
-current frame** after changing the wiring or playhead. These effects
-are also rendered in exports. The drawing canvas uses its interactive
-vector preview.
+**Camera** renders the current frame from the Display node, including
+compositing and effects. **Drawing** shows the current exposure of the
+selected drawing node in its own coordinates. Use **Preview All Art
+Layers** to see the entire drawing while you edit.
+
+Exports render the same Display graph. From the Node view, **Render
+preview** also lets you check an individual frame.
 
 ## Harmony scene structure
 
