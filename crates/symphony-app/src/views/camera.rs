@@ -69,6 +69,19 @@ struct Active {
 }
 
 impl CanvasState {
+    /// Where scene point (`x`, `y`) was on screen last frame (UI tests).
+    #[cfg(test)]
+    pub fn to_screen(&self, x: f32, y: f32) -> Pos2 {
+        let m = self.last_view.inverse().unwrap_or(Affine::IDENTITY);
+        let (sx, sy) = m.apply(x, y);
+        Pos2::new(sx, sy)
+    }
+
+    #[cfg(test)]
+    pub fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = zoom;
+    }
+
     pub fn busy(&self) -> bool {
         self.active.is_some() || self.erasing.is_some() || self.select.busy()
     }
@@ -310,7 +323,10 @@ fn bottom_toolbar(ui: &mut egui::Ui, state: &mut CanvasState, profile: Profile) 
                         for z in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0] {
                             ui.selectable_value(&mut zoom, z, format!("{:.0}%", z * 100.0));
                         }
-                    });
+                    })
+                    .response
+                    // Screen readers announce it as "Zoom".
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Zoom"));
                 state.zoom = zoom;
                 ui.add_space(8.0);
                 for (label, action) in [
@@ -657,7 +673,8 @@ pub fn ui(
                 if erasing {
                     if let Some(d) = s.doc.exposed(s.selected, s.frame) {
                         state.erasing = Some((d, to_local, None));
-                        let r = eraser_radius(s, sm.pressure) * local_px;
+                        let r = eraser_radius(s, sm.pressure) * size_unit(s, px)
+                            / scale_of(layer_world).max(1e-6);
                         erase_at(s, state, (sx, sy), r);
                     }
                 } else {
@@ -686,8 +703,10 @@ pub fn ui(
                     };
                     let mut smoother = Smoother::new(settings.smoothing);
                     let first = smoother.push(p, 0.0).unwrap_or(p);
-                    // Widths are in screen points, so a stroke looks the same at any zoom when drawn.
-                    let k = px / scale_of(layer_world).max(1e-6);
+                    // Sizes are scene units by default, so zooming in makes
+                    // the brush look bigger, as on paper. With "Brush size
+                    // follows zoom" they are screen points instead.
+                    let k = size_unit(s, px) / scale_of(layer_world).max(1e-6);
                     state.active = Some(Active {
                         layer: s.selected,
                         frame: s.frame,
@@ -731,13 +750,22 @@ pub fn ui(
                         }
                     }
                 } else if state.erasing.is_some() {
-                    let local_px = px / scale_of(layer_world).max(1e-6);
-                    let r = eraser_radius(s, sm.pressure) * local_px;
+                    let r = eraser_radius(s, sm.pressure) * size_unit(s, px)
+                        / scale_of(layer_world).max(1e-6);
                     erase_at(s, state, (sx, sy), r);
                 }
             }
             Phase::Up => {
                 if let Some(mut a) = state.active.take() {
+                    // Where the pen lifted is part of the line: without it,
+                    // every stroke lost its last stretch and drawn shapes
+                    // didn't close. Lifting reports ~0 pressure, so keep
+                    // the last pressure.
+                    let (x, y) = a.to_local.apply(sx, sy);
+                    let pressure = a.stroke.points.last().map_or(1.0, |p| p.pressure);
+                    if let Some(p) = a.smoother.push(Point { x, y, pressure }, a.min_step) {
+                        a.stroke.points.push(p);
+                    }
                     if let Some(p) = a.smoother.finish() {
                         a.stroke.points.push(p);
                     }
@@ -799,6 +827,7 @@ pub fn ui(
             pen_eraser,
             locked,
             hint: state.select.hover,
+            screen_per_size: size_unit(s, px) / px,
         },
     );
     bottom_toolbar(ui, state, profile);
@@ -818,6 +847,16 @@ fn zoom_at(state: &mut CanvasState, rect: Rect, w: f32, h: f32, p: Pos2, factor:
 /// Erase whole strokes under the eraser. (Cutting strokes in two comes
 /// with the vector editing tools.)
 /// Eraser radius in screen points for this pen pressure.
+/// Scene units per unit of tool size: 1 (sizes are scene units), or the
+/// scene size of a screen point when sizes follow the zoom.
+fn size_unit(s: &Session, px: f32) -> f32 {
+    if s.size_follows_zoom {
+        px
+    } else {
+        1.0
+    }
+}
+
 fn eraser_radius(s: &Session, pressure: f32) -> f32 {
     s.eraser
         .width_at_pressure(pressure_curve(pressure, s.pressure_gamma))
@@ -861,6 +900,8 @@ struct Mods {
     locked: bool,
     /// Handle hint from Select/Transform.
     hint: Option<Icon>,
+    /// Screen points per unit of tool size, for the size circle.
+    screen_per_size: f32,
 }
 
 /// Our canvas cursor (D8.11): a crosshair plus the active tool's icon, or a
@@ -928,14 +969,14 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
     // Brush Size Cursor preference is on (as in Harmony).
     let erasing = pen_eraser || s.tool == Tool::Eraser;
     let radius = if erasing {
-        Some((s.eraser.max_width * 0.5).max(1.5))
+        Some((s.eraser.max_width * 0.5 * m.screen_per_size).max(1.5))
     } else if s.brush_size_cursor && matches!(s.tool, Tool::Brush | Tool::Pencil) {
         let b = if s.tool == Tool::Pencil {
             s.pencil
         } else {
             s.brush
         };
-        Some((b.max_width * 0.5).max(1.5))
+        Some((b.max_width * 0.5 * m.screen_per_size).max(1.5))
     } else {
         None
     };

@@ -1,0 +1,221 @@
+//! UI tests: drive the real Camera view with simulated pen input, the way
+//! an artist would, and check the scene that results. These catch bugs in
+//! the wiring between input, tools and the document that unit tests of
+//! each part can't see.
+
+use eframe::egui::{self, Pos2, Vec2};
+use egui_kittest::Harness;
+use symphony_core::stroke::{ArtLayer, StrokeKind};
+use symphony_pen::{PenSample, Phase, Tool as PenTool};
+
+use crate::keymap::Profile;
+use crate::session::{Session, Tool};
+use crate::views::camera::{self, CanvasState};
+
+pub struct Rig {
+    pub s: Session,
+    pub canvas: CanvasState,
+    samples: Vec<PenSample>,
+}
+
+pub fn rig() -> Harness<'static, Rig> {
+    let mut s = Session::new_scene();
+    s.animate = false;
+    let rig = Rig {
+        s,
+        canvas: CanvasState::default(),
+        samples: Vec::new(),
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1000.0, 700.0))
+        .build_ui_state(
+            |ui, r: &mut Rig| {
+                let samples = std::mem::take(&mut r.samples);
+                camera::ui(
+                    ui,
+                    &mut r.s,
+                    &mut r.canvas,
+                    &samples,
+                    false,
+                    Profile::Harmony,
+                );
+            },
+            rig,
+        );
+    h.run_steps(2);
+    h
+}
+
+fn sample(p: Pos2, phase: Phase, pressure: f32, tool: PenTool) -> PenSample {
+    PenSample {
+        x: p.x as f64,
+        y: p.y as f64,
+        pressure,
+        tilt_x: 0.0,
+        tilt_y: 0.0,
+        rotation: 0.0,
+        tangential: 0.0,
+        phase,
+        tool,
+        buttons: 0,
+        time: 0.0,
+    }
+}
+
+/// Drag through scene points with the current tool (or the pen's eraser
+/// end when `tool` is `PenTool::Eraser`), one frame per point.
+pub fn drag(h: &mut Harness<'static, Rig>, scene: &[(f32, f32)], pressure: f32, tool: PenTool) {
+    let n = scene.len();
+    for (i, &(x, y)) in scene.iter().enumerate() {
+        let p = h.state().canvas.to_screen(x, y);
+        let phase = match i {
+            0 => Phase::Down,
+            _ if i + 1 == n => Phase::Up,
+            _ => Phase::Move,
+        };
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        h.state_mut().samples.push(sample(p, phase, pressure, tool));
+        h.step();
+    }
+    h.run_steps(2);
+}
+
+/// A straight line of `steps` points from a to b.
+pub fn line(a: (f32, f32), b: (f32, f32), steps: usize) -> Vec<(f32, f32)> {
+    (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+        })
+        .collect()
+}
+
+pub fn click(h: &mut Harness<'static, Rig>, x: f32, y: f32) {
+    drag(h, &[(x, y), (x, y)], 1.0, PenTool::Pen);
+}
+
+/// The strokes of the drawing at frame 1 of layer `layer`.
+pub fn strokes(h: &Harness<'static, Rig>, layer: usize) -> Vec<symphony_core::stroke::Stroke> {
+    let s = &h.state().s;
+    s.doc
+        .exposed(layer, 1)
+        .and_then(|d| s.doc.drawings.get(&d))
+        .map(|d| d.strokes.clone())
+        .unwrap_or_default()
+}
+
+pub fn fills(h: &Harness<'static, Rig>, layer: usize) -> Vec<symphony_core::stroke::Fill> {
+    let s = &h.state().s;
+    s.doc
+        .exposed(layer, 1)
+        .and_then(|d| s.doc.drawings.get(&d))
+        .map(|d| d.fills.clone())
+        .unwrap_or_default()
+}
+
+/// A closed square drawn with the brush, from (x0,y0) to (x1,y1).
+pub fn draw_square(h: &mut Harness<'static, Rig>, x0: f32, y0: f32, x1: f32, y1: f32) {
+    h.state_mut().s.tool = Tool::Brush;
+    let mut pts = line((x0, y0), (x1, y0), 8);
+    pts.extend(line((x1, y0), (x1, y1), 8));
+    pts.extend(line((x1, y1), (x0, y1), 8));
+    pts.extend(line((x0, y1), (x0, y0), 8));
+    drag(h, &pts, 1.0, PenTool::Pen);
+}
+
+#[test]
+fn drawing_a_stroke_adds_one_brush_stroke() {
+    let mut h = rig();
+    h.state_mut().s.tool = Tool::Brush;
+    drag(
+        &mut h,
+        &line((-100.0, 0.0), (100.0, 0.0), 20),
+        1.0,
+        PenTool::Pen,
+    );
+    let st = strokes(&h, 0);
+    assert_eq!(st.len(), 1);
+    assert_eq!(st[0].kind, StrokeKind::Brush);
+    assert_eq!(st[0].art, ArtLayer::LineArt);
+    assert!(st[0].points.len() >= 2);
+    // The line ends where the pen lifted (it used to stop short).
+    let end = st[0].points.last().unwrap();
+    assert!((end.x - 100.0).abs() < 0.5 && end.y.abs() < 0.5, "{end:?}");
+}
+
+#[test]
+fn brush_size_is_fixed_to_the_drawing_by_default() {
+    let mut h = rig();
+    let size = h.state().s.brush.max_width;
+    h.state_mut().canvas.set_zoom(2.0);
+    h.run_steps(2);
+    h.state_mut().s.tool = Tool::Brush;
+    drag(
+        &mut h,
+        &line((-50.0, 0.0), (50.0, 0.0), 10),
+        1.0,
+        PenTool::Pen,
+    );
+    let st = strokes(&h, 0);
+    // Width in drawing units equals the setting, whatever the zoom.
+    assert!(
+        (st[0].max_width - size).abs() < 0.01,
+        "{} vs {size}",
+        st[0].max_width
+    );
+
+    // With "Brush size follows zoom", sizes are screen points: the line's
+    // width in the drawing is the size divided by the on-screen scale.
+    h.state_mut().s.size_follows_zoom = true;
+    let c = &h.state().canvas;
+    let screen_per_scene = c.to_screen(100.0, 0.0).distance(c.to_screen(0.0, 0.0)) / 100.0;
+    drag(
+        &mut h,
+        &line((-50.0, 40.0), (50.0, 40.0), 10),
+        1.0,
+        PenTool::Pen,
+    );
+    let want = size / screen_per_scene;
+    let st = strokes(&h, 0);
+    assert!(
+        (st[1].max_width - want).abs() < 0.05,
+        "{} vs {want}",
+        st[1].max_width
+    );
+    // Zooming in further makes newly drawn lines finer in the drawing.
+    h.state_mut().canvas.set_zoom(4.0);
+    h.run_steps(2);
+    drag(
+        &mut h,
+        &line((-50.0, 80.0), (50.0, 80.0), 10),
+        1.0,
+        PenTool::Pen,
+    );
+    let st = strokes(&h, 0);
+    assert!(
+        (st[2].max_width - want / 2.0).abs() < 0.05,
+        "{} vs {}",
+        st[2].max_width,
+        want / 2.0
+    );
+}
+
+#[test]
+fn painting_inside_a_closed_shape_fills_it() {
+    let mut h = rig();
+    draw_square(&mut h, -100.0, -100.0, 100.0, 100.0);
+    h.state_mut().s.tool = Tool::Paint;
+    click(&mut h, 0.0, 0.0);
+    let f = fills(&h, 0);
+    let st = strokes(&h, 0);
+    assert_eq!(
+        f.len(),
+        1,
+        "one painted zone; notice {:?}; ends {:?} {:?}",
+        h.state().s.notice,
+        st.first().map(|s| s.points[0]),
+        st.first().and_then(|s| s.points.last().copied())
+    );
+    assert!(f[0].contains(0.0, 0.0));
+    assert!(!f[0].contains(150.0, 0.0));
+}

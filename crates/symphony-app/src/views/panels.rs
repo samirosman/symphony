@@ -790,12 +790,18 @@ pub fn preferences(
     use_no_ai: &mut bool,
     brush_size_cursor: &mut bool,
     overlay_underlay: &mut bool,
+    size_follows_zoom: &mut bool,
 ) {
     ui.heading("Tools");
     widgets::checkbox(ui, brush_size_cursor, "Brush size cursor");
     hint(
         ui,
         "Shows the brush size as a circle around the cursor, as in Harmony.",
+    );
+    widgets::checkbox(ui, size_follows_zoom, "Brush size follows zoom");
+    hint(
+        ui,
+        "On: a brush is the same size on screen at any zoom, so zoomed-in lines are finer. Off (default): sizes belong to the drawing, so zooming in makes the brush look bigger.",
     );
     widgets::checkbox(ui, overlay_underlay, "Support Overlay and Underlay Arts");
     hint(
