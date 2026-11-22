@@ -7,6 +7,11 @@
 //! The compositor sends tablet events instead of pointer events while a pen
 //! is in proximity, so the toolkit never wakes up for them: `set_waker`
 //! lets the app repaint as soon as samples arrive.
+//!
+//! The pen's cursor is the app's job too: tablet-v2 shows none until the
+//! client sets one. `set_cursor` gives each pen over our window the shape
+//! the UI asks for, through the cursor-shape protocol. A compositor
+//! without that protocol keeps its own default.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -25,6 +30,10 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{
     event_created_child, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::{self, Shape, WpCursorShapeDeviceV1},
+    wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1},
+};
 use wayland_protocols::wp::tablet::zv2::client::{
     zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
     zwp_tablet_pad_group_v2::{self, ZwpTabletPadGroupV2},
@@ -36,7 +45,7 @@ use wayland_protocols::wp::tablet::zv2::client::{
     zwp_tablet_v2::{self, ZwpTabletV2},
 };
 
-use crate::{DeviceInfo, PenError, PenSample, Phase, Tool};
+use crate::{Cursor, DeviceInfo, PenError, PenSample, Phase, Tool};
 
 // Linux input event codes (linux/input-event-codes.h).
 const BTN_LEFT: u32 = 0x110;
@@ -57,9 +66,72 @@ struct Shared {
     samples: Vec<PenSample>,
     device: DeviceInfo,
     waker: Option<Waker>,
+    /// What the UI last asked for.
+    cursor: Cursor,
+    /// Pens over our window that can take a cursor shape.
+    near: Vec<Near>,
+}
+
+/// A pen over our window, with the serial of its proximity event, which
+/// every cursor request must carry.
+struct Near {
+    tool: ZwpTabletToolV2,
+    shape: WpCursorShapeDeviceV1,
+    serial: u32,
+}
+
+impl Near {
+    fn show(&self, cursor: Cursor) {
+        match shape_of(cursor) {
+            Some(shape) => self.shape.set_shape(self.serial, shape),
+            None => self.tool.set_cursor(self.serial, None, 0, 0),
+        }
+    }
+}
+
+/// The protocol's shape for `cursor`; `None` hides it.
+fn shape_of(cursor: Cursor) -> Option<Shape> {
+    Some(match cursor {
+        Cursor::Hidden => return None,
+        Cursor::Default => Shape::Default,
+        Cursor::ContextMenu => Shape::ContextMenu,
+        Cursor::Help => Shape::Help,
+        Cursor::Pointer => Shape::Pointer,
+        Cursor::Progress => Shape::Progress,
+        Cursor::Wait => Shape::Wait,
+        Cursor::Cell => Shape::Cell,
+        Cursor::Crosshair => Shape::Crosshair,
+        Cursor::Text => Shape::Text,
+        Cursor::VerticalText => Shape::VerticalText,
+        Cursor::Alias => Shape::Alias,
+        Cursor::Copy => Shape::Copy,
+        Cursor::Move => Shape::Move,
+        Cursor::NoDrop => Shape::NoDrop,
+        Cursor::NotAllowed => Shape::NotAllowed,
+        Cursor::Grab => Shape::Grab,
+        Cursor::Grabbing => Shape::Grabbing,
+        Cursor::AllScroll => Shape::AllScroll,
+        Cursor::ResizeEw => Shape::EwResize,
+        Cursor::ResizeNs => Shape::NsResize,
+        Cursor::ResizeNesw => Shape::NeswResize,
+        Cursor::ResizeNwse => Shape::NwseResize,
+        Cursor::ResizeE => Shape::EResize,
+        Cursor::ResizeN => Shape::NResize,
+        Cursor::ResizeNe => Shape::NeResize,
+        Cursor::ResizeNw => Shape::NwResize,
+        Cursor::ResizeS => Shape::SResize,
+        Cursor::ResizeSe => Shape::SeResize,
+        Cursor::ResizeSw => Shape::SwResize,
+        Cursor::ResizeW => Shape::WResize,
+        Cursor::ResizeCol => Shape::ColResize,
+        Cursor::ResizeRow => Shape::RowResize,
+        Cursor::ZoomIn => Shape::ZoomIn,
+        Cursor::ZoomOut => Shape::ZoomOut,
+    })
 }
 
 pub struct Backend {
+    conn: Connection,
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -102,6 +174,7 @@ impl Backend {
             .map_err(|_| PenError::MonitorFailed)?;
 
         Ok(Backend {
+            conn,
             shared,
             stop,
             thread: Some(thread),
@@ -127,6 +200,23 @@ impl Backend {
             .lock()
             .map(|s| s.device.clone())
             .unwrap_or_default()
+    }
+
+    /// Called by the app each frame. Requests go out only on a change, or
+    /// from the reader thread when a pen comes near.
+    pub fn set_cursor(&self, cursor: Cursor) {
+        let Ok(mut s) = self.shared.lock() else {
+            return;
+        };
+        if s.cursor == cursor {
+            return;
+        }
+        s.cursor = cursor;
+        for n in &s.near {
+            n.show(cursor);
+        }
+        drop(s);
+        let _ = self.conn.flush();
     }
 
     pub fn set_waker(&self, waker: Waker) {
@@ -202,6 +292,8 @@ struct ToolState {
     buttons: u32,
     serial: u64,
     capabilities: u64,
+    /// Sets this pen's cursor, when the compositor has cursor-shape.
+    shape: Option<WpCursorShapeDeviceV1>,
 }
 
 impl Default for ToolState {
@@ -223,6 +315,7 @@ impl Default for ToolState {
             buttons: 0,
             serial: 0,
             capabilities: 0,
+            shape: None,
         }
     }
 }
@@ -242,6 +335,7 @@ struct State {
     device: DeviceInfo,
     device_changed: bool,
     manager: Option<ZwpTabletManagerV2>,
+    cursor_shapes: Option<WpCursorShapeManagerV1>,
     seats: Vec<WlSeat>,
     tablet_seats: Vec<ZwpTabletSeatV2>,
     pointers: Vec<WlPointer>,
@@ -259,6 +353,7 @@ impl State {
             device: DeviceInfo::default(),
             device_changed: false,
             manager: None,
+            cursor_shapes: None,
             seats: Vec::new(),
             tablet_seats: Vec::new(),
             pointers: Vec::new(),
@@ -290,6 +385,12 @@ impl State {
         }
     }
 
+    fn forget_near(&self, tool: &ZwpTabletToolV2) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.near.retain(|n| n.tool != *tool);
+        }
+    }
+
     fn pair_seats(&mut self, qh: &QueueHandle<State>) {
         let Some(manager) = &self.manager else {
             return;
@@ -304,6 +405,17 @@ impl State {
     /// Destroy everything we created, so the compositor stops sending to a
     /// queue nobody reads.
     fn release(&mut self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.near.clear();
+        }
+        for t in self.tools.values_mut() {
+            if let Some(d) = t.shape.take() {
+                d.destroy();
+            }
+        }
+        if let Some(m) = self.cursor_shapes.take() {
+            m.destroy();
+        }
         for p in self.pointers.drain(..) {
             if p.version() >= 3 {
                 p.release();
@@ -349,6 +461,10 @@ impl Dispatch<WlRegistry, ()> for State {
                 "zwp_tablet_manager_v2" => {
                     state.manager = Some(registry.bind(name, 1, qh, ()));
                     state.pair_seats(qh);
+                }
+                // Version 1 has the tablet tool request.
+                "wp_cursor_shape_manager_v1" => {
+                    state.cursor_shapes = Some(registry.bind(name, 1, qh, ()));
                 }
                 _ => {}
             }
@@ -469,10 +585,20 @@ impl Dispatch<ZwpTabletSeatV2, ()> for State {
         event: zwp_tablet_seat_v2::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         if let zwp_tablet_seat_v2::Event::ToolAdded { id } = event {
-            state.tools.insert(id.id(), ToolState::default());
+            let shape = state
+                .cursor_shapes
+                .as_ref()
+                .map(|m| m.get_tablet_tool_v2(&id, qh, ()));
+            state.tools.insert(
+                id.id(),
+                ToolState {
+                    shape,
+                    ..ToolState::default()
+                },
+            );
         }
     }
 
@@ -519,15 +645,34 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
         use zwp_tablet_tool_v2::Event as E;
 
         if let E::Removed = event {
-            state.tools.remove(&tool.id());
+            state.forget_near(tool);
+            if let Some(d) = state.tools.remove(&tool.id()).and_then(|t| t.shape) {
+                d.destroy();
+            }
             tool.destroy();
             return;
         }
+        if let E::ProximityOut = event {
+            state.forget_near(tool);
+        }
         if let E::ProximityIn {
-            tablet, surface, ..
+            serial,
+            tablet,
+            surface,
         } = &event
         {
             let ours = state.is_ours(surface);
+            let shape = state.tools.get(&tool.id()).and_then(|t| t.shape.clone());
+            if let (true, Some(shape), Ok(mut s)) = (ours, shape, state.shared.lock()) {
+                let near = Near {
+                    tool: tool.clone(),
+                    shape,
+                    serial: *serial,
+                };
+                near.show(s.cursor);
+                s.near.retain(|n| n.tool != *tool);
+                s.near.push(near);
+            }
             let (vendor_id, tablet_id) = state.tablets.get(&tablet.id()).copied().unwrap_or((0, 0));
             if let Some(t) = state.tools.get_mut(&tool.id()) {
                 t.ours = ours;
@@ -718,6 +863,30 @@ impl Dispatch<ZwpTabletPadStripV2, ()> for State {
         _: &mut Self,
         _: &ZwpTabletPadStripV2,
         _: zwp_tablet_pad_strip_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeManagerV1,
+        _: wp_cursor_shape_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeDeviceV1,
+        _: wp_cursor_shape_device_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,

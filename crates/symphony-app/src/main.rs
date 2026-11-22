@@ -3585,6 +3585,9 @@ impl SymphonyApp {
         self.search_box(&ctx);
         self.dialogs(&ctx);
 
+        if let Some(pen) = &self.pen {
+            pen.set_cursor(pen_cursor(ctx.output(|o| o.cursor_icon)));
+        }
         let pending = self.pen.as_ref().is_some_and(|p| p.has_pending());
         if pending || self.camera.busy() || self.drawing.busy() {
             ctx.request_repaint();
@@ -3594,6 +3597,50 @@ impl SymphonyApp {
         }
         // Keep autosave ticking even when idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
+    }
+}
+
+/// The pen's cursor for what egui wants this frame. The canvas asks for
+/// none and draws its own.
+fn pen_cursor(icon: egui::CursorIcon) -> symphony_pen::Cursor {
+    use egui::CursorIcon as I;
+    use symphony_pen::Cursor as C;
+    match icon {
+        I::None => C::Hidden,
+        I::Default => C::Default,
+        I::ContextMenu => C::ContextMenu,
+        I::Help => C::Help,
+        I::PointingHand => C::Pointer,
+        I::Progress => C::Progress,
+        I::Wait => C::Wait,
+        I::Cell => C::Cell,
+        I::Crosshair => C::Crosshair,
+        I::Text => C::Text,
+        I::VerticalText => C::VerticalText,
+        I::Alias => C::Alias,
+        I::Copy => C::Copy,
+        I::Move => C::Move,
+        I::NoDrop => C::NoDrop,
+        I::NotAllowed => C::NotAllowed,
+        I::Grab => C::Grab,
+        I::Grabbing => C::Grabbing,
+        I::AllScroll => C::AllScroll,
+        I::ResizeHorizontal => C::ResizeEw,
+        I::ResizeVertical => C::ResizeNs,
+        I::ResizeNeSw => C::ResizeNesw,
+        I::ResizeNwSe => C::ResizeNwse,
+        I::ResizeEast => C::ResizeE,
+        I::ResizeNorth => C::ResizeN,
+        I::ResizeNorthEast => C::ResizeNe,
+        I::ResizeNorthWest => C::ResizeNw,
+        I::ResizeSouth => C::ResizeS,
+        I::ResizeSouthEast => C::ResizeSe,
+        I::ResizeSouthWest => C::ResizeSw,
+        I::ResizeWest => C::ResizeW,
+        I::ResizeColumn => C::ResizeCol,
+        I::ResizeRow => C::ResizeRow,
+        I::ZoomIn => C::ZoomIn,
+        I::ZoomOut => C::ZoomOut,
     }
 }
 

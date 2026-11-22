@@ -39,6 +39,49 @@ pub enum Tool {
     Eraser,
 }
 
+/// The cursor to show for a pen over the window. The names follow the CSS
+/// cursor names, as egui's and Wayland's do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cursor {
+    /// No cursor: the app draws its own (the canvas does).
+    Hidden,
+    #[default]
+    Default,
+    ContextMenu,
+    Help,
+    Pointer,
+    Progress,
+    Wait,
+    Cell,
+    Crosshair,
+    Text,
+    VerticalText,
+    Alias,
+    Copy,
+    Move,
+    NoDrop,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    AllScroll,
+    ResizeEw,
+    ResizeNs,
+    ResizeNesw,
+    ResizeNwse,
+    ResizeE,
+    ResizeN,
+    ResizeNe,
+    ResizeNw,
+    ResizeS,
+    ResizeSe,
+    ResizeSw,
+    ResizeW,
+    ResizeCol,
+    ResizeRow,
+    ZoomIn,
+    ZoomOut,
+}
+
 /// One input sample. Position is in logical points from the top-left of the
 /// window's content area (multiply by the window scale factor for pixels).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -150,6 +193,17 @@ impl PenInput {
     /// pen samples on as pointer events.
     pub fn toolkit_sees_pen(&self) -> bool {
         !cfg!(target_os = "linux")
+    }
+
+    /// Show `cursor` for a pen over the window; call it each frame with
+    /// what the UI wants. Only Wayland needs it: there the app sets the
+    /// pen's cursor itself, and without a call the pen has none. Elsewhere
+    /// the toolkit sets it, because it sees the pen as a mouse.
+    pub fn set_cursor(&self, cursor: Cursor) {
+        #[cfg(target_os = "linux")]
+        self.backend.set_cursor(cursor);
+        #[cfg(not(target_os = "linux"))]
+        let _ = cursor;
     }
 
     /// Take every sample received since the last call, oldest first.
