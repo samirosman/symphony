@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 symphony-core = { path = "../symphony-core" }
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "aiff", "pcm", "mp3", "id3v2"] }
+cpal = "0.18.2"
+rubato = "5.1.0"
+rtrb = "0.4.1"
