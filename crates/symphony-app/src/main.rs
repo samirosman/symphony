@@ -12,6 +12,7 @@ mod save_dialog;
 mod search;
 mod session;
 mod shot;
+mod sound;
 #[cfg(test)]
 mod ui_tests;
 mod update;
@@ -253,6 +254,7 @@ struct SymphonyApp {
     node_view: node::NodeViewState,
     timing: timing::TimingState,
     export: export::ExportDialog,
+    sound: sound::SoundState,
     maximised: Option<View>,
     show_preferences: bool,
     prefs_page: PrefsPage,
@@ -719,6 +721,7 @@ impl SymphonyApp {
             node_view: Default::default(),
             timing: Default::default(),
             export: Default::default(),
+            sound: Default::default(),
             maximised: None,
             show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
             // SYMPHONY_SHOT_PREFS=Canvas opens that page in screenshot runs.
@@ -1359,6 +1362,16 @@ impl SymphonyApp {
                 ui.close();
                 self.guard(ui.ctx(), Pending::ImportHarmony);
             }
+            ui.menu_button("Import", |ui| {
+                if ui
+                    .button("Sound...")
+                    .on_hover_text("Add WAV, AIFF or MP3 files as sound tracks")
+                    .clicked()
+                {
+                    ui.close();
+                    self.sound.import_dialog(&mut self.s, ui.ctx());
+                }
+            });
             ui.separator();
             self.menu_action(ui, Action::Save);
             self.menu_item(ui, Action::SaveAs, "Save as...".into());
@@ -1853,6 +1866,9 @@ impl SymphonyApp {
                         },
                         None,
                     ));
+                }
+                if let Some(label) = self.sound.activity() {
+                    jobs.push((label, None));
                 }
                 if self.saving_jobs > 0 {
                     jobs.push(("Saving".into(), None));
@@ -2869,6 +2885,7 @@ struct Viewer<'a> {
     node_view: &'a mut node::NodeViewState,
     function: &'a mut function::FunctionState,
     timing: &'a mut timing::TimingState,
+    sound: &'a sound::SoundState,
     samples: &'a [PenSample],
     device: Option<&'a DeviceInfo>,
     profile: Profile,
@@ -2917,7 +2934,7 @@ impl Viewer<'_> {
         match v {
             View::Camera => camera::ui(ui, self.s, self.camera, self.samples, false, self.profile),
             View::Drawing => camera::ui(ui, self.s, self.drawing, self.samples, true, self.profile),
-            View::Timeline => timing::timeline(ui, self.s, self.timing, self.profile),
+            View::Timeline => timing::timeline(ui, self.s, self.timing, self.sound, self.profile),
             View::Xsheet => timing::xsheet(ui, self.s, self.timing, self.profile),
             View::Node => node::ui(ui, self.s, self.node_view),
             View::Multiplane => views::multiplane::ui(ui, self.s, self.node_view),
@@ -3396,6 +3413,7 @@ impl SymphonyApp {
             node_view: &mut self.node_view,
             function: &mut self.function,
             timing: &mut self.timing,
+            sound: &self.sound,
             samples: &samples,
             device: device.as_ref(),
             profile: self.profile,
@@ -3518,6 +3536,7 @@ impl SymphonyApp {
             });
         self.show_licences = open;
         self.file_drops(&ctx);
+        self.sound.update(&mut self.s, &ctx);
         // Screenshot mode: SYMPHONY_SHOT_SEARCH="query" opens search typed.
         if let (Some(_), Ok(q)) = (&self.shot, std::env::var("SYMPHONY_SHOT_SEARCH")) {
             if !self.shot_search_opened {

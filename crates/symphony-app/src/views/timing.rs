@@ -7,8 +7,12 @@ use eframe::egui::{self, Align2, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
+use symphony_core::id::Id;
+use symphony_core::sound;
+
 use crate::keymap::{self, Action, Profile};
 use crate::session::{InsertExposure, Session};
+use crate::sound::SoundState;
 
 #[derive(Default)]
 pub struct TimingState {
@@ -19,6 +23,10 @@ pub struct TimingState {
     swap_text: Option<(usize, String)>,
     /// Parameters column drag: row, starting drawing index, pixels dragged.
     swap_drag: Option<(usize, usize, f32)>,
+    /// Sound track being renamed, and the name typed so far.
+    renaming_sound: Option<(Id, String)>,
+    /// Sound track whose context menu is open.
+    sound_menu: Option<Id>,
 }
 
 /// Width of the Timeline's Parameters field (the exposed drawing's name).
@@ -330,6 +338,81 @@ fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usiz
     }
 }
 
+fn sound_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, id: Id) {
+    let Some(track) = s.doc.sounds.iter().find(|t| t.id == id) else {
+        return;
+    };
+    let (name, on) = (track.name.clone(), track.enabled);
+    if ui.button("Rename sound").clicked() {
+        t.renaming_sound = Some((id, name));
+        ui.close();
+    }
+    if ui
+        .button(if on { "Mute sound" } else { "Unmute sound" })
+        .clicked()
+    {
+        s.toggle_sound(id);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Delete sound").clicked() {
+        s.delete_sound(id);
+        ui.close();
+    }
+}
+
+/// [`rename_field`] for a sound track's name.
+fn sound_rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
+    let Some((id, text)) = t.renaming_sound.as_mut() else {
+        return;
+    };
+    let id = *id;
+    let resp = ui.put(rect, egui::TextEdit::singleline(text).font(theme::body()));
+    resp.request_focus();
+    let (enter, esc) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if esc {
+        t.renaming_sound = None;
+    } else if enter || resp.lost_focus() {
+        let name = text.clone();
+        t.renaming_sound = None;
+        s.rename_sound(id, &name);
+    }
+}
+
+/// A sound track's waveform over `block`, which starts at the track's
+/// first frame. One line per pixel column, from the lowest to the highest
+/// sample in that slice of time.
+fn waveform(
+    painter: &egui::Painter,
+    block: Rect,
+    peaks: &symphony_audio::Peaks,
+    seconds_per_pixel: f64,
+    colour: egui::Color32,
+) {
+    let mid = block.center().y;
+    let half = block.height() / 2.0 - 1.0;
+    let mut x = block.left().ceil();
+    while x < block.right() {
+        let from = f64::from(x - block.left()) * seconds_per_pixel;
+        let (lo, hi) = peaks.range(from, from + seconds_per_pixel);
+        if hi > lo {
+            painter.line_segment(
+                [
+                    Pos2::new(x + 0.5, mid - hi * half),
+                    Pos2::new(x + 0.5, mid - lo * half + 1.0),
+                ],
+                Stroke::new(1.0, colour),
+            );
+        }
+        x += 1.0;
+    }
+}
+
 /// Inline rename field over a layer name. Enter or clicking away keeps it,
 /// Escape cancels (D8.6).
 /// Harmony's Timeline Parameters column for a drawing layer: the drawing
@@ -469,13 +552,21 @@ fn reveal_track(ui: &egui::Ui, row: Rect, reveal: bool) {
     }
 }
 
-pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {
+pub fn timeline(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    t: &mut TimingState,
+    sounds: &SoundState,
+    profile: Profile,
+) {
     header(ui, s, profile);
     const HEAD: f32 = 176.0;
     const RULER: f32 = 28.0;
     let cw = theme::FRAME_CELL;
     let rh = theme::ROW;
-    let rows = s.layer_count();
+    // Sound tracks come after the drawing layers, as in Harmony.
+    let layers = s.layer_count();
+    let rows = layers + s.doc.sounds.len();
     let len = s.length();
     let reveal = s.reveal_node_track.take();
     let visible_node = super::node::selected_node(s);
@@ -568,7 +659,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
-            for i in 0..rows {
+            for i in 0..layers {
                 let y = o.y + RULER + i as f32 * rh;
                 let node = s.doc.layers[i].node;
                 let sel = visible_node == Some(node);
@@ -731,6 +822,72 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
+            let fps = s.doc.settings.fps.max(1.0);
+            for (j, track) in s.doc.sounds.iter().enumerate() {
+                let y = o.y + RULER + (layers + j) as f32 * rh;
+                let on = track.enabled;
+                let eye_rect =
+                    Rect::from_center_size(Pos2::new(o.x + 22.0, y + rh / 2.0), Vec2::splat(16.0));
+                // Mute uses the layer's show/hide icon until the icon set
+                // has a speaker.
+                icons::paint(
+                    &painter,
+                    eye_rect,
+                    if on { Icon::Eye } else { Icon::EyeOff },
+                    if on {
+                        theme::TEXT_SECONDARY
+                    } else {
+                        theme::TEXT_DISABLED
+                    },
+                );
+                if !matches!(&t.renaming_sound, Some((id, _)) if *id == track.id) {
+                    widgets::fitted_text(
+                        ui,
+                        &painter,
+                        Pos2::new(o.x + 40.0, y + rh / 2.0),
+                        Align2::LEFT_CENTER,
+                        &track.name,
+                        theme::body(),
+                        if on {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
+                        HEAD - 56.0,
+                    );
+                }
+                let Some(file) = s.doc.sound_files.get(&track.key) else {
+                    continue;
+                };
+                let first = track.start.max(1);
+                if first > len {
+                    continue;
+                }
+                // A sound longer than the scene stops at the scene end.
+                let last = sound::last_frame(track.start, file, fps).min(len);
+                let block = Rect::from_min_max(
+                    Pos2::new(frame_x(first) + 1.0, y + 5.0),
+                    Pos2::new(frame_x(last + 1) - 1.0, y + rh - 5.0),
+                );
+                painter.rect_filled(block, theme::RADIUS_CONTROL as f32, theme::BG_HOVER);
+                if let Some(peaks) = sounds.peaks(track.key) {
+                    let colour = if on {
+                        theme::TEXT_SECONDARY
+                    } else {
+                        theme::TEXT_DISABLED
+                    };
+                    let seconds_per_pixel = 1.0 / (f64::from(fps) * f64::from(cw));
+                    // Inset so the waveform stays inside the rounded block.
+                    waveform(
+                        &painter,
+                        block.shrink2(Vec2::new(1.0, 2.0)),
+                        peaks,
+                        seconds_per_pixel,
+                        colour,
+                    );
+                }
+            }
+
             let cx = frame_x(s.frame.min(len)) + cw / 2.0;
             painter.line_segment(
                 [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
@@ -747,7 +904,15 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 if rel.x >= HEAD {
                     s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);
                 }
-                if let Some(row) = row_at(p) {
+                if let Some(j) = row_at(p).and_then(|r| r.checked_sub(layers)) {
+                    let id = s.doc.sounds[j].id;
+                    if rel.x < 32.0 && resp.clicked() {
+                        s.toggle_sound(id);
+                    }
+                    if resp.double_clicked() && rel.x < HEAD {
+                        t.renaming_sound = Some((id, s.doc.sounds[j].name.clone()));
+                    }
+                } else if let Some(row) = row_at(p) {
                     if resp.clicked() || resp.drag_started() {
                         if rel.x < 32.0 && resp.clicked() {
                             s.toggle_visible(row);
@@ -767,15 +932,37 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
             if resp.secondary_clicked() {
-                t.menu_row = resp.interact_pointer_pos().and_then(row_at);
+                let row = resp.interact_pointer_pos().and_then(row_at);
+                t.sound_menu = row
+                    .and_then(|r| r.checked_sub(layers))
+                    .map(|j| s.doc.sounds[j].id);
+                t.menu_row = row.filter(|&r| r < layers);
                 if let Some(r) = t.menu_row {
                     s.select_graph_node(s.doc.layers[r].node, false);
                 }
             }
-            if let Some(row) = t.menu_row {
+            if let Some(id) = t.sound_menu {
+                resp.context_menu(|ui| sound_menu(ui, s, t, id));
+            } else if let Some(row) = t.menu_row {
                 resp.context_menu(|ui| layer_menu(ui, s, t, row));
             }
 
+            let renaming = t
+                .renaming_sound
+                .as_ref()
+                .and_then(|(id, _)| s.doc.sounds.iter().position(|t| t.id == *id));
+            if let Some(j) = renaming {
+                let y = o.y + RULER + (layers + j) as f32 * rh;
+                sound_rename_field(
+                    ui,
+                    s,
+                    t,
+                    Rect::from_min_size(
+                        Pos2::new(o.x + 36.0, y + 3.0),
+                        Vec2::new(HEAD - 52.0, rh - 6.0),
+                    ),
+                );
+            }
             if let Some((row, _)) = t.renaming {
                 let y = o.y + RULER + row as f32 * rh;
                 rename_field(
