@@ -416,7 +416,7 @@ pub fn phrase(query: &str) -> Vec<Entry> {
         out.push(Entry::new(
             &format!("Set the tool size to {n}"),
             Kind::Go,
-            Command::SetToolSize(n.clamp(0.5, 120.0)),
+            Command::SetToolSize(n.clamp(0.5, 2000.0)),
             "phrase.size",
         ));
     }

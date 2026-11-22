@@ -275,7 +275,7 @@ fn sanitised(mut s: BrushSettings) -> BrushSettings {
             default
         }
     };
-    s.max_width = clean(s.max_width, 0.5, 60.0, 4.0);
+    s.max_width = clean(s.max_width, 0.5, crate::views::panels::MAX_TOOL_SIZE, 4.0);
     s.min_width = clean(s.min_width, 0.0, s.max_width, 0.0);
     s.smoothing = clean(s.smoothing, 0.0, 0.95, 0.3);
     if let Some(t) = &mut s.texture {

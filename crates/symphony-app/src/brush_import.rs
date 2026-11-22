@@ -58,8 +58,8 @@ impl BrushImport {
     }
 }
 
-/// Symphony's tools take sizes up to 60 points; bigger stamps are capped.
-const MAX_WIDTH: f32 = 60.0;
+/// Imported sizes are kept, up to the largest size the tools accept.
+const MAX_WIDTH: f32 = crate::views::panels::MAX_TOOL_SIZE;
 
 fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
     let max = b.diameter.clamp(0.5, MAX_WIDTH);
@@ -219,9 +219,13 @@ mod tests {
         .brushes
         .remove(0);
         b.min_fraction = 0.25;
+        // A big stamp keeps its size (no 60-point cap any more)...
         let s = settings(&b, None, None);
-        assert_eq!(s.max_width, MAX_WIDTH);
-        assert_eq!(s.min_width, 15.0);
+        assert!((s.max_width - b.diameter).abs() < 0.01);
+        assert!((s.min_width - b.diameter * 0.25).abs() < 0.01);
+        // ...up to the tools' typed maximum.
+        b.diameter = 1.0e6;
+        assert_eq!(settings(&b, None, None).max_width, MAX_WIDTH);
     }
 
     #[test]

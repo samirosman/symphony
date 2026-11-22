@@ -1815,7 +1815,7 @@ impl SymphonyApp {
             _ => &mut self.s.brush,
         };
         let old = b.max_width.max(0.01);
-        let new = f(old).clamp(0.5, 120.0);
+        let new = f(old).clamp(0.5, panels::MAX_TOOL_SIZE);
         b.min_width = (b.min_width * new / old).min(new);
         b.max_width = new;
         self.s.notice = Some(format!("Tool size {new:.1}"));

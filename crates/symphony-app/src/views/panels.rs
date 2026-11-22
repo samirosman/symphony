@@ -46,6 +46,25 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     );
 }
 
+/// The largest tool size that can be typed. The size sliders stop at a
+/// recommended size that keeps drawing fast; bigger is allowed by typing.
+pub const MAX_TOOL_SIZE: f32 = 2000.0;
+
+/// A size slider: the track covers the recommended range, and the number
+/// box accepts anything up to `MAX_TOOL_SIZE`.
+fn size_slider(ui: &mut egui::Ui, label: &str, v: &mut f32, recommended: f32) {
+    hint(ui, label);
+    ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
+    ui.add(
+        egui::Slider::new(v, 0.0..=recommended)
+            .clamping(egui::SliderClamping::Never),
+    )
+    .on_hover_text(format!(
+        "The slider goes to {recommended:.0}, a size that stays fast. Type a bigger number to go up to {MAX_TOOL_SIZE:.0}."
+    ));
+    *v = v.clamp(0.0, MAX_TOOL_SIZE);
+}
+
 fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>) {
     hint(ui, label);
     ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
@@ -372,8 +391,9 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
     preset_list(ui, s, presets, tool);
     ui.add_space(8.0);
     let mut b = if pencil { s.pencil } else { s.brush };
-    slider(ui, "Maximum size", &mut b.max_width, 0.5..=60.0);
-    slider(ui, "Minimum size", &mut b.min_width, 0.0..=60.0);
+    size_slider(ui, "Maximum size", &mut b.max_width, 60.0);
+    b.max_width = b.max_width.max(0.5);
+    size_slider(ui, "Minimum size", &mut b.min_width, 60.0);
     b.min_width = b.min_width.min(b.max_width);
     slider(ui, "Smoothing", &mut b.smoothing, 0.0..=0.95);
     hint(
@@ -495,8 +515,9 @@ fn tool_properties_body(
             Tool::Eraser => {
                 section(ui, "Eraser");
                 let e = &mut s.eraser;
-                slider(ui, "Maximum size", &mut e.max_width, 1.0..=120.0);
-                slider(ui, "Minimum size", &mut e.min_width, 0.5..=120.0);
+                size_slider(ui, "Maximum size", &mut e.max_width, 120.0);
+                e.max_width = e.max_width.max(1.0);
+                size_slider(ui, "Minimum size", &mut e.min_width, 120.0);
                 e.min_width = e.min_width.min(e.max_width);
                 hint(ui, "Erases the lines and paint it passes over, on the current art layer unless the options below say otherwise. Pen pressure sets the size. The eraser end of your pen works with any tool.");
                 ui.add_space(4.0);
