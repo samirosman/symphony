@@ -326,9 +326,7 @@ fn bottom_toolbar(ui: &mut egui::Ui, state: &mut CanvasState, profile: Profile) 
                     })
                     .response
                     // Screen readers announce it as "Zoom".
-                    .widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Zoom")
-                    });
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Zoom"));
                 state.zoom = zoom;
                 ui.add_space(8.0);
                 for (label, action) in [
@@ -759,6 +757,15 @@ pub fn ui(
             }
             Phase::Up => {
                 if let Some(mut a) = state.active.take() {
+                    // Where the pen lifted is part of the line: without it,
+                    // every stroke lost its last stretch and drawn shapes
+                    // didn't close. Lifting reports ~0 pressure, so keep
+                    // the last pressure.
+                    let (x, y) = a.to_local.apply(sx, sy);
+                    let pressure = a.stroke.points.last().map_or(1.0, |p| p.pressure);
+                    if let Some(p) = a.smoother.push(Point { x, y, pressure }, a.min_step) {
+                        a.stroke.points.push(p);
+                    }
                     if let Some(p) = a.smoother.finish() {
                         a.stroke.points.push(p);
                     }

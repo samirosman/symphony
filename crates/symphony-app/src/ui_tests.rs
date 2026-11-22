@@ -138,6 +138,9 @@ fn drawing_a_stroke_adds_one_brush_stroke() {
     assert_eq!(st[0].kind, StrokeKind::Brush);
     assert_eq!(st[0].art, ArtLayer::LineArt);
     assert!(st[0].points.len() >= 2);
+    // The line ends where the pen lifted (it used to stop short).
+    let end = st[0].points.last().unwrap();
+    assert!((end.x - 100.0).abs() < 0.5 && end.y.abs() < 0.5, "{end:?}");
 }
 
 #[test]
@@ -195,4 +198,24 @@ fn brush_size_is_fixed_to_the_drawing_by_default() {
         st[2].max_width,
         want / 2.0
     );
+}
+
+#[test]
+fn painting_inside_a_closed_shape_fills_it() {
+    let mut h = rig();
+    draw_square(&mut h, -100.0, -100.0, 100.0, 100.0);
+    h.state_mut().s.tool = Tool::Paint;
+    click(&mut h, 0.0, 0.0);
+    let f = fills(&h, 0);
+    let st = strokes(&h, 0);
+    assert_eq!(
+        f.len(),
+        1,
+        "one painted zone; notice {:?}; ends {:?} {:?}",
+        h.state().s.notice,
+        st.first().map(|s| s.points[0]),
+        st.first().and_then(|s| s.points.last().copied())
+    );
+    assert!(f[0].contains(0.0, 0.0));
+    assert!(!f[0].contains(150.0, 0.0));
 }
