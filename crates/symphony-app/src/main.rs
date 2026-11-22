@@ -1135,6 +1135,11 @@ impl SymphonyApp {
         let now = ctx.input(|i| i.time);
         let dt = self.last_time.map_or(0.0, |t| now - t);
         self.last_time = Some(now);
+        if self.sound.drive(&mut self.s) {
+            self.frame_clock = 0.0;
+            ctx.request_repaint();
+            return;
+        }
         if !self.s.playing {
             self.frame_clock = 0.0;
             return;
@@ -1228,6 +1233,7 @@ impl SymphonyApp {
                     Action::FirstFrame => s.frame = 1,
                     Action::LastFrame => s.frame = s.length(),
                     Action::PlayPause => s.playing = !s.playing,
+                    Action::EnableSound => self.sound.toggle_enabled(),
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
                     Action::CreateEmptyDrawing => s.new_drawing(),
@@ -1486,6 +1492,9 @@ impl SymphonyApp {
             self.menu_action(ui, Action::NextFrame);
             self.menu_action(ui, Action::FirstFrame);
             self.menu_action(ui, Action::LastFrame);
+            ui.separator();
+            let on = self.sound.enabled();
+            self.menu_toggle(ui, Action::EnableSound, on);
         });
         ui.menu_button("View", |ui| {
             self.menu_action(ui, Action::ToggleOnionSkin);

@@ -57,6 +57,14 @@ pub struct SoundState {
     tx: Sender<Done>,
     rx: Receiver<Done>,
     sent: Option<Sent>,
+    /// Play > Enable Sound.
+    enabled: bool,
+    /// What the mixer last got for Enable Sound.
+    sent_enabled: Option<bool>,
+    /// Scene length and frame rate of the range the mixer is playing.
+    started: Option<(u32, u32)>,
+    /// The frame last shown from the sound, to see the user move it.
+    shown: u32,
 }
 
 impl Default for SoundState {
@@ -72,6 +80,10 @@ impl Default for SoundState {
             tx,
             rx,
             sent: None,
+            enabled: true,
+            sent_enabled: None,
+            started: None,
+            shown: 0,
         }
     }
 }
@@ -80,6 +92,61 @@ impl SoundState {
     /// Waveform peaks of a file, once it is decoded.
     pub fn peaks(&self, key: u64) -> Option<&Peaks> {
         self.ready.get(&key).map(|r| &r.peaks)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Play > Enable Sound. Off, a scene with sound still plays in time
+    /// with it, in silence.
+    pub fn toggle_enabled(&mut self) {
+        self.enabled = !self.enabled;
+    }
+
+    /// While a scene with sound plays, set the frame from the sound the
+    /// listener hears: the picture follows the sound, as in Harmony, and
+    /// skips images rather than letting the sound stutter. `false` when
+    /// the app's own timer runs playback instead (no sound, or no output).
+    pub fn drive(&mut self, s: &mut Session) -> bool {
+        let Some(player) = &mut self.player else {
+            return false;
+        };
+        if self.sent_enabled != Some(self.enabled) && player.send(Command::SetEnabled(self.enabled))
+        {
+            self.sent_enabled = Some(self.enabled);
+        }
+        if !s.playing || s.doc.sounds.is_empty() {
+            if self.started.take().is_some() {
+                player.send(Command::Stop);
+            }
+            return false;
+        }
+        let fps = s.doc.settings.fps.max(1.0);
+        let len = s.length().max(1);
+        let range = (len, fps.to_bits());
+        // Started, the scene changed length or rate, or the user moved the
+        // playhead: play again from the frame shown, looping to frame 1.
+        if self.started != Some(range) || s.frame != self.shown {
+            let per = f64::from(fps);
+            let play = Command::Play {
+                from: 0.0,
+                until: f64::from(len) / per,
+                at: f64::from(s.frame.clamp(1, len) - 1) / per,
+                looping: true,
+            };
+            if player.send(play) {
+                self.started = Some(range);
+                self.shown = s.frame;
+            }
+            return true;
+        }
+        if player.caught_up() {
+            let frame = (player.time() * f64::from(fps)).floor() as u32 + 1;
+            s.frame = frame.clamp(1, len);
+            self.shown = s.frame;
+        }
+        true
     }
 
     /// Words for the status bar while work runs (D17.5).

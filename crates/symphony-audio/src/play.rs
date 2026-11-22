@@ -97,11 +97,13 @@ fn remix(s: &Samples, channels: u16) -> Vec<f32> {
 pub enum Command {
     /// Replace every clip (a track was added, muted, moved).
     SetClips(Vec<Clip>),
-    /// Play from `from` seconds. Stop at `until`, or go back to `from`
-    /// there when `looping`.
+    /// Play the range `from` to `until` seconds, starting at `at` (clamped
+    /// into the range). Stop at `until`, or go back to `from` there when
+    /// `looping`, as playback loops back to frame 1 from any frame.
     Play {
         from: f64,
         until: f64,
+        at: f64,
         looping: bool,
     },
     Stop,
@@ -132,6 +134,8 @@ pub struct Clock {
     from: AtomicU64,
     until: AtomicU64,
     looping: AtomicBool,
+    /// Play and Scrub commands the mixer has taken.
+    plays: AtomicU64,
 }
 
 impl Clock {
@@ -147,6 +151,7 @@ impl Clock {
             from: AtomicU64::new(0),
             until: AtomicU64::new(0),
             looping: AtomicBool::new(false),
+            plays: AtomicU64::new(0),
         }
     }
 
@@ -250,13 +255,15 @@ impl Mixer {
                 Command::Play {
                     from,
                     until,
+                    at,
                     looping,
                 } => {
                     self.from = self.frames(from);
                     self.until = self.frames(until).max(self.from + 1);
-                    self.position = self.from;
+                    self.position = self.frames(at).clamp(self.from, self.until - 1);
                     self.looping = looping;
                     self.playing = true;
+                    self.clock.plays.fetch_add(1, Ordering::Relaxed);
                 }
                 Command::Stop => self.playing = false,
                 Command::Scrub { at, length } => {
@@ -265,6 +272,7 @@ impl Mixer {
                     self.position = self.from;
                     self.looping = false;
                     self.playing = true;
+                    self.clock.plays.fetch_add(1, Ordering::Relaxed);
                 }
                 Command::SetEnabled(on) => self.enabled = on,
             }
@@ -342,6 +350,8 @@ pub struct Player {
     commands: Producer<Command>,
     garbage: Consumer<Vec<Clip>>,
     clock: Arc<Clock>,
+    /// Play and Scrub commands sent.
+    plays: u64,
     _stream: cpal::Stream,
 }
 
@@ -382,6 +392,7 @@ impl Player {
             commands,
             garbage,
             clock,
+            plays: 0,
             _stream: stream,
         })
     }
@@ -397,7 +408,20 @@ impl Player {
     /// Send a command. `false` if the mixer is too far behind to take it.
     pub fn send(&mut self, c: Command) -> bool {
         self.collect();
-        self.commands.push(c).is_ok()
+        let play = matches!(c, Command::Play { .. } | Command::Scrub { .. });
+        let sent = self.commands.push(c).is_ok();
+        if sent && play {
+            self.plays += 1;
+        }
+        sent
+    }
+
+    /// The mixer has taken the last Play or Scrub sent, so [`time`] is in
+    /// the new range. Until then it still reports the old one.
+    ///
+    /// [`time`]: Player::time
+    pub fn caught_up(&self) -> bool {
+        self.clock.plays.load(Ordering::Relaxed) == self.plays
     }
 
     /// Free track data the mixer has let go of. Called by [`send`]; call it
@@ -496,6 +520,7 @@ mod tests {
         tx.push(Command::Play {
             from: 0.0,
             until: 1.0,
+            at: 0.0,
             looping: false,
         })
         .ok();
@@ -514,6 +539,7 @@ mod tests {
         tx.push(Command::Play {
             from: 0.0,
             until: 0.2,
+            at: 0.0,
             looping: false,
         })
         .ok();
@@ -522,10 +548,35 @@ mod tests {
         tx.push(Command::Play {
             from: 0.1,
             until: 0.3,
+            at: 0.1,
             looping: true,
         })
         .ok();
         assert_eq!(render(&mut m, 5), [0.2, 0.3, 0.2, 0.3, 0.2]);
+    }
+
+    #[test]
+    fn starts_inside_the_range_and_loops_to_its_start() {
+        let (mut m, mut tx, _) = mixer();
+        tx.push(Command::SetClips(vec![clip(vec![0.1, 0.2, 0.3], 0)]))
+            .ok();
+        tx.push(Command::Play {
+            from: 0.0,
+            until: 0.3,
+            at: 0.2,
+            looping: true,
+        })
+        .ok();
+        assert_eq!(render(&mut m, 4), [0.3, 0.1, 0.2, 0.3]);
+        // A start past the end plays the last frame first.
+        tx.push(Command::Play {
+            from: 0.0,
+            until: 0.3,
+            at: 5.0,
+            looping: true,
+        })
+        .ok();
+        assert_eq!(render(&mut m, 2), [0.3, 0.1]);
     }
 
     #[test]
@@ -551,6 +602,7 @@ mod tests {
         tx.push(Command::Play {
             from: 0.0,
             until: 1.0,
+            at: 0.0,
             looping: false,
         })
         .ok();
@@ -571,6 +623,7 @@ mod tests {
         tx.push(Command::Play {
             from: 0.0,
             until: 1.0,
+            at: 0.0,
             looping: false,
         })
         .ok();
@@ -603,6 +656,7 @@ mod tests {
         tx.push(Command::Play {
             from: 1.0,
             until: 10.0,
+            at: 1.0,
             looping: false,
         })
         .ok();
@@ -619,6 +673,7 @@ mod tests {
         tx.push(Command::Play {
             from: 0.1,
             until: 0.3,
+            at: 0.1,
             looping: true,
         })
         .ok();
@@ -627,6 +682,7 @@ mod tests {
         tx.push(Command::Play {
             from: 0.0,
             until: 0.3,
+            at: 0.0,
             looping: false,
         })
         .ok();

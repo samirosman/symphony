@@ -47,6 +47,7 @@ fn main() {
     player.send(Command::Play {
         from: 0.0,
         until: length,
+        at: 0.0,
         looping: false,
     });
     while start.elapsed() < Duration::from_secs_f64(length + 0.5) {
