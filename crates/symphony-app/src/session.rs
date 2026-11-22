@@ -271,6 +271,9 @@ pub struct Session {
     pub art_preview: bool,
     /// Preference: Support Overlay and Underlay Arts (off, as in Harmony).
     pub overlay_underlay: bool,
+    /// Preference: tool sizes are screen points, so the brush looks the
+    /// same size at any zoom. Off by default: sizes are scene units.
+    pub size_follows_zoom: bool,
     /// Select tool options, as in Harmony: Marquee instead of Lasso, and
     /// Easy Drag (drag from anywhere inside the box).
     pub marquee_mode: bool,
@@ -351,6 +354,7 @@ impl Session {
             art: ArtLayer::LineArt,
             art_preview: true,
             overlay_underlay: false,
+            size_follows_zoom: false,
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),

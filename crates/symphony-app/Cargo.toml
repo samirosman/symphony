@@ -29,3 +29,6 @@ symphony-render = { path = "../symphony-render" }
 symphony-ui = { path = "../symphony-ui" }
 symphony-vector = { path = "../symphony-vector" }
 ureq = "3"
+
+[dev-dependencies]
+egui_kittest = "0.37"
