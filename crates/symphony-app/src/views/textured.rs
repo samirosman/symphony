@@ -402,6 +402,10 @@ fn key(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> u64 {
     for p in &stroke.points {
         (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
     }
+    // An erased stroke's outline changes what shows.
+    for q in stroke.shape.iter().flatten() {
+        (q[0].to_bits(), q[1].to_bits()).hash(&mut h);
+    }
     (stroke.min_width.to_bits(), stroke.max_width.to_bits()).hash(&mut h);
     (
         tex.tip,
@@ -411,6 +415,10 @@ fn key(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> u64 {
     )
         .hash(&mut h);
     (tex.angle.to_bits(), tex.follow, tex.grain_scale.to_bits()).hash(&mut h);
+    (tex.flow.to_bits(), tex.hardness.to_bits()).hash(&mut h);
+    for v in tex.opacity_by_pressure {
+        v.to_bits().hash(&mut h);
+    }
     for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
         v.to_bits().hash(&mut h);
     }

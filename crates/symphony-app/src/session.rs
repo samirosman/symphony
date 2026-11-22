@@ -653,7 +653,9 @@ impl Session {
             if !symphony_vector::bounds(st).is_some_and(|(lo, hi)| near(lo, hi)) {
                 continue;
             }
-            let by_shape = st.kind == StrokeKind::Brush && st.texture.is_none();
+            // Brush strokes, textured or not, lose exactly the eraser's
+            // shape; a textured one keeps its texture, clipped to it.
+            let by_shape = st.kind == StrokeKind::Brush;
             if by_shape {
                 let outlines = shape::outline(st);
                 let mut hit = false;

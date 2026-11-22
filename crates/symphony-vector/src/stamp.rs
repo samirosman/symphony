@@ -68,7 +68,24 @@ pub fn rasterize(
     };
     let mut s = Stamper::new(*tex, m, clip);
     s.extend(&curved, tip);
-    s.coverage(grain)
+    let mut c = s.coverage(grain)?;
+    // An erased textured stroke: keep only what's inside its outline.
+    if !stroke.shape.is_empty() {
+        let inv = m.inverse()?;
+        for row in 0..c.height as i32 {
+            for col in 0..c.width as i32 {
+                let i = (row * c.width as i32 + col) as usize;
+                if c.data[i] == 0 {
+                    continue;
+                }
+                let (x, y) = inv.apply((c.x + col) as f32 + 0.5, (c.y + row) as f32 + 0.5);
+                if !crate::shape::hits_shape(&stroke.shape, x, y, 0.0) {
+                    c.data[i] = 0;
+                }
+            }
+        }
+    }
+    Some(c)
 }
 
 /// Stamps a stroke a piece at a time, so the stroke being drawn only

@@ -473,3 +473,45 @@ fn curve_look() {
         .save(path)
         .unwrap();
 }
+
+#[test]
+fn erasing_a_textured_line_keeps_its_texture_and_cuts_its_shape() {
+    use symphony_core::stroke::StrokeTexture;
+    let mut h = rig();
+    h.state_mut().s.brush.texture = Some(StrokeTexture {
+        tip: None,
+        grain: None,
+        spacing: 0.1,
+        opacity: 1.0,
+        angle: 0.0,
+        follow: false,
+        grain_scale: 1.0,
+        flow: 1.0,
+        hardness: 1.0,
+        opacity_by_pressure: [1.0; 4],
+    });
+    h.state_mut().s.brush.min_width = 20.0;
+    h.state_mut().s.brush.max_width = 20.0;
+    brush_line(&mut h, (-200.0, 0.0), (200.0, 0.0));
+    erase_line(&mut h, (0.0, -60.0), (0.0, 60.0));
+    let st = strokes(&h, 0);
+    assert_eq!(st.len(), 2, "cut in two");
+    for piece in &st {
+        assert!(piece.texture.is_some(), "still textured");
+        assert!(!piece.shape.is_empty(), "clipped to an outline");
+        // Nothing of it is stamped where the eraser went.
+        let c = symphony_vector::stamp::rasterize(
+            piece,
+            piece.texture.as_ref().unwrap(),
+            None,
+            None,
+            symphony_core::math::Affine::IDENTITY,
+            [-1000, -1000, 1000, 1000],
+        )
+        .unwrap();
+        let (cx, cy) = (0 - c.x, 0 - c.y);
+        if cx >= 0 && cy >= 0 && cx < c.width as i32 && cy < c.height as i32 {
+            assert_eq!(c.data[(cy * c.width as i32 + cx) as usize], 0);
+        }
+    }
+}
