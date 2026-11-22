@@ -133,26 +133,31 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
 
 | Token | Hex | Use |
 |---|---|---|
-| `bg.base` | `#12161B` | Window background, gaps between docks |
-| `bg.panel` | `#22282F` | View content background |
-| `bg.raised` | `#303944` | Toolbars, tab bars, headers, buttons at rest |
-| `bg.hover` | `#3D4855` | Hovered buttons and rows |
-| `bg.input` | `#191E24` | Text fields, slider rails, wells |
-| `line.subtle` | `#37414C` | Dividers and grid lines |
-| `line.strong` | `#556575` | Outlines of containers |
-| `line.control` | `#94A1AE` | Edges of checkboxes and radios when off |
-| `text.primary` | `#E7EBEF` | Labels, values, icons |
-| `text.secondary` | `#B1BEC9` | Hints, units, secondary info. Never on `bg.hover`. |
-| `text.disabled` | `#686D77` | Disabled controls only, never information |
+| `bg.base` | `#17181A` | Window background, gaps between docks |
+| `bg.panel` | `#242628` | View content background |
+| `bg.raised` | `#303336` | Toolbars, tab bars, headers, buttons at rest |
+| `bg.hover` | `#3C4044` | Hovered buttons and rows |
+| `bg.input` | `#1D1F21` | Text fields, slider rails, wells |
+| `line.subtle` | `#393C40` | Dividers and grid lines |
+| `line.strong` | `#595F66` | Outlines of containers |
+| `line.control` | `#949CA4` | Edges of checkboxes and radios when off |
+| `text.primary` | `#E8EAEC` | Labels, values, icons |
+| `text.secondary` | `#B5BAC0` | Hints, units, secondary info. Never on `bg.hover`. |
+| `text.disabled` | `#747980` | Disabled controls only, never information |
 | `accent.select` | `#81B4F8` | "Cel blue": selection outlines, active tool, focused tab, focus ring |
 | `accent.select.fill` | `#3D63B8` | Fill behind selected items (white text on it is 5.7:1) |
 | `accent.time` | `#F0A63A` | "Light-table amber": playhead, current frame, keyframes, animate mode |
 | `state.danger` | `#E86A62` | Eraser, destructive actions, errors. Icons and markers only, not body text. |
 | `state.ok` | `#62C484` | Confirmed good states (tablet connected). Rare. |
-| `canvas.surround` | `#484B4F` | Area around the stage. A neutral mid grey. |
+| `canvas.surround` | `#464749` | Area around the stage. A neutral mid grey. |
 | `canvas.stage` | `#FFFFFF` | The stage (paper) |
 
 ### 4.2 Rules
+
+Use neutral graphite surfaces around artwork to limit perceived colour casts.
+Blue identifies selection, keyboard focus and primary actions. Standard
+controls use neutral fills through hover and press. Amber identifies time
+and animation state.
 - **D4.1 Colour carries meaning, never decoration.** Blue means
   *selected/active*. Amber means *time* (now, keys, animate mode). Red
   means *destructive*. Nothing else is coloured.
@@ -232,6 +237,13 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
   a `line.subtle` divider, never both.
 - **D6.6 UI scale** is a preference from 75% to 200%, and everything
   scales together.
+
+- **D6.7 Shared controls.** Use `widgets::primary_button` for the main
+  action in a dialog, such as Export. Use the standard button for secondary
+  actions. Use `widgets::checkbox`, `widgets::radio_value` and
+  `icons::button` for their respective controls so keyboard focus, disabled
+  states and accessibility labels are consistent. Review new controls in the
+  running app at 1280×800 and 1024×640, including a keyboard pass.
 
 ---
 
