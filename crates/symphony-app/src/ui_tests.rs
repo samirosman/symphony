@@ -219,3 +219,114 @@ fn painting_inside_a_closed_shape_fills_it() {
     assert!(f[0].contains(0.0, 0.0));
     assert!(!f[0].contains(150.0, 0.0));
 }
+
+/// Drag the eraser (the Eraser tool, full pressure) along a line.
+fn erase_line(h: &mut Harness<'static, Rig>, a: (f32, f32), b: (f32, f32)) {
+    h.state_mut().s.tool = Tool::Eraser;
+    drag(h, &line(a, b, 6), 1.0, PenTool::Pen);
+}
+
+fn brush_line(h: &mut Harness<'static, Rig>, a: (f32, f32), b: (f32, f32)) {
+    h.state_mut().s.tool = Tool::Brush;
+    drag(h, &line(a, b, 20), 1.0, PenTool::Pen);
+}
+
+#[test]
+fn erasing_across_a_brush_line_splits_it_with_the_eraser_shape() {
+    let mut h = rig();
+    brush_line(&mut h, (-200.0, 0.0), (200.0, 0.0));
+    erase_line(&mut h, (0.0, -60.0), (0.0, 60.0));
+    let st = strokes(&h, 0);
+    assert_eq!(st.len(), 2, "cut in two");
+    for piece in &st {
+        assert!(!piece.shape.is_empty(), "brush pieces are outlines");
+        assert!(
+            !symphony_vector::hits(piece, 0.0, 0.0, 0.0),
+            "nothing left under the eraser"
+        );
+    }
+    // The eraser end of the pen erases too, whatever tool is active.
+    h.state_mut().s.tool = Tool::Brush;
+    drag(
+        &mut h,
+        &line((-150.0, -60.0), (-150.0, 60.0), 6),
+        1.0,
+        PenTool::Eraser,
+    );
+    assert_eq!(strokes(&h, 0).len(), 3, "the pen's eraser end cut again");
+}
+
+#[test]
+fn erasing_paint_leaves_a_hole() {
+    let mut h = rig();
+    draw_square(&mut h, -150.0, -150.0, 150.0, 150.0);
+    h.state_mut().s.tool = Tool::Paint;
+    click(&mut h, 0.0, 0.0);
+    assert!(fills(&h, 0)[0].contains(0.0, 0.0));
+    erase_line(&mut h, (-10.0, 0.0), (10.0, 0.0));
+    let f = fills(&h, 0);
+    assert!(!f.is_empty(), "the rest of the paint stays");
+    assert!(
+        !f.iter().any(|f| f.contains(0.0, 0.0)),
+        "a hole where the eraser went"
+    );
+    assert!(f.iter().any(|f| f.contains(100.0, 100.0)));
+}
+
+#[test]
+fn erase_all_layers_reaches_through_every_visible_layer() {
+    let mut h = rig();
+    brush_line(&mut h, (-200.0, 0.0), (200.0, 0.0));
+    h.state_mut().s.add_layer();
+    let top = h.state().s.selected;
+    brush_line(&mut h, (-200.0, 0.0), (200.0, 0.0));
+    let bottom = if top == 0 { 1 } else { 0 };
+    // Only the selected layer by default.
+    erase_line(&mut h, (-100.0, -60.0), (-100.0, 60.0));
+    assert_eq!(strokes(&h, top).len(), 2);
+    assert_eq!(strokes(&h, bottom).len(), 1);
+    // Every visible layer with the option on.
+    h.state_mut().s.erase_all_layers = true;
+    erase_line(&mut h, (100.0, -60.0), (100.0, 60.0));
+    assert_eq!(strokes(&h, top).len(), 3);
+    assert_eq!(strokes(&h, bottom).len(), 2);
+}
+
+#[test]
+fn erase_all_frames_reaches_every_drawing_of_the_layer() {
+    let mut h = rig();
+    brush_line(&mut h, (-200.0, 0.0), (200.0, 0.0));
+    h.state_mut().s.frame = 2;
+    brush_line(&mut h, (-200.0, 0.0), (200.0, 0.0));
+    let s = &h.state().s;
+    let (d1, d2) = (s.doc.exposed(0, 1).unwrap(), s.doc.exposed(0, 2).unwrap());
+    assert_ne!(d1, d2, "two drawings");
+    let count = |h: &Harness<'static, Rig>, d| h.state().s.doc.drawings[&d].strokes.len();
+    h.state_mut().s.erase_all_frames = true;
+    erase_line(&mut h, (0.0, -60.0), (0.0, 60.0));
+    assert_eq!(count(&h, d1), 2);
+    assert_eq!(count(&h, d2), 2);
+    // One drag is one undo, across all the drawings it touched.
+    h.state_mut().s.undo();
+    assert_eq!(count(&h, d1), 1);
+    assert_eq!(count(&h, d2), 1);
+}
+
+/// Renders an erased line to a PNG for a human look (not a pass/fail
+/// check): `SYMPHONY_UI_SHOT=path cargo test -p symphony-app erased_line_look`.
+#[test]
+fn erased_line_look() {
+    let Ok(path) = std::env::var("SYMPHONY_UI_SHOT") else {
+        return;
+    };
+    let mut h = rig();
+    h.state_mut().s.brush.max_width = 40.0;
+    h.state_mut().s.brush.min_width = 40.0;
+    brush_line(&mut h, (-300.0, 0.0), (300.0, 0.0));
+    h.state_mut().s.eraser.max_width = 50.0;
+    erase_line(&mut h, (-120.0, -80.0), (-120.0, 80.0));
+    erase_line(&mut h, (60.0, -40.0), (140.0, -10.0));
+    let s = &h.state().s;
+    let img = symphony_render::render_frame(&s.doc, 1, 960, 540).unwrap();
+    img.save(path).unwrap();
+}

@@ -471,14 +471,21 @@ fn tool_properties_body(
                 slider(ui, "Maximum size", &mut e.max_width, 1.0..=120.0);
                 slider(ui, "Minimum size", &mut e.min_width, 0.5..=120.0);
                 e.min_width = e.min_width.min(e.max_width);
-                hint(ui, "Erases the parts of lines it passes over, on the current art layer. Pen pressure sets the size. The eraser end of your pen works with any tool.");
+                hint(ui, "Erases the lines and paint it passes over, on the current art layer unless the options below say otherwise. Pen pressure sets the size. The eraser end of your pen works with any tool.");
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     hint(ui, "Tip style");
                     ui.selectable_value(&mut s.eraser_tip, Tip::Round, "Round");
                     ui.selectable_value(&mut s.eraser_tip, Tip::Flat, "Flat");
                 });
-                hint(ui, "The shape left at the ends of a line where you cut it.");
+                hint(ui, "The shape left at the ends of a pencil line where you cut it. Brush lines and paint lose exactly the eraser's shape.");
+                ui.add_space(6.0);
+                widgets::checkbox(ui, &mut s.erase_all_art, "Apply to all art layers");
+                hint(ui, "Erase Line Art, Colour Art, Overlay and Underlay together, like Harmony's Apply to Line and Colour Art.");
+                widgets::checkbox(ui, &mut s.erase_all_layers, "Erase all layers");
+                hint(ui, "Erase through every visible layer under the eraser, not only the selected one.");
+                widgets::checkbox(ui, &mut s.erase_all_frames, "Erase all frames");
+                hint(ui, "Erase the same place in every drawing of the layer, not only the one at this frame.");
             }
             Tool::Select | Tool::Transform => {
                 let select = s.tool == Tool::Select;

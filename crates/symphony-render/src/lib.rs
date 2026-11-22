@@ -294,6 +294,7 @@ mod tests {
             ],
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         let cells = Edit::splice(&s, col, 1, 0, vec![Some(did), Some(did), Some(did)]).unwrap();
         h.apply(

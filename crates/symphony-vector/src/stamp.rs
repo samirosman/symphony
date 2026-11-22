@@ -376,6 +376,7 @@ mod tests {
                 .collect(),
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         }
     }
 

@@ -54,6 +54,13 @@ pub enum Edit {
     },
     /// Swap one stroke for others at the same depth (the Eraser cutting a
     /// line into pieces, or erasing it all when `after` is empty).
+    /// Swap one paint zone for what's left of it (the Eraser).
+    ReplaceFill {
+        drawing: Id,
+        index: usize,
+        before: Fill,
+        after: Vec<Fill>,
+    },
     ReplaceStroke {
         drawing: Id,
         /// Depth of `before` in the drawing, where `after` goes.
@@ -146,6 +153,23 @@ impl Edit {
                         d.strokes
                             .insert((*index).min(d.strokes.len()), stroke.clone());
                     }
+                }
+            }
+            Edit::ReplaceFill {
+                drawing,
+                index,
+                before,
+                after,
+            } => {
+                if let Some(d) = s.drawings.get_mut(drawing) {
+                    let (gone, new): (Vec<Id>, Vec<Fill>) = if forward {
+                        (vec![before.id], after.clone())
+                    } else {
+                        (after.iter().map(|x| x.id).collect(), vec![before.clone()])
+                    };
+                    d.fills.retain(|x| !gone.contains(&x.id));
+                    let at = (*index).min(d.fills.len());
+                    d.fills.splice(at..at, new);
                 }
             }
             Edit::ReplaceStroke {
@@ -484,6 +508,7 @@ mod tests {
             }],
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         }
     }
 
@@ -641,6 +666,7 @@ mod tests {
             }],
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         let (a, b, c) = (mk(&mut s, 0.0), mk(&mut s, 1.0), mk(&mut s, 2.0));
         for st in [&a, &b, &c] {

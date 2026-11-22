@@ -111,6 +111,27 @@ pub fn find_zone(
 
 /// Mark grid cells covered by the stroke (its width, or at least a cell).
 fn rasterize(st: &Stroke, ink: &mut [bool], w: usize, h: usize, origin: [f32; 2], cell: f32) {
+    if !st.shape.is_empty() {
+        // Erased brush strokes: every cell whose centre is in the outline,
+        // plus the outline's own edge so thin parts still close zones.
+        let Some((lo, hi)) = crate::bounds(st) else {
+            return;
+        };
+        let gx0 = (((lo[0] - origin[0]) / cell).floor().max(0.0) as usize).min(w);
+        let gy0 = (((lo[1] - origin[1]) / cell).floor().max(0.0) as usize).min(h);
+        let gx1 = (((hi[0] - origin[0]) / cell).ceil().max(0.0) as usize + 1).min(w);
+        let gy1 = (((hi[1] - origin[1]) / cell).ceil().max(0.0) as usize + 1).min(h);
+        for gy in gy0..gy1 {
+            for gx in gx0..gx1 {
+                let x = origin[0] + (gx as f32 + 0.5) * cell;
+                let y = origin[1] + (gy as f32 + 0.5) * cell;
+                if crate::shape::hits_shape(&st.shape, x, y, cell * 0.5) {
+                    ink[gy * w + gx] = true;
+                }
+            }
+        }
+        return;
+    }
     let to_grid = |px: f32, py: f32| ((px - origin[0]) / cell, (py - origin[1]) / cell);
     let radius = |p: f32| (st.width_at(p) * 0.5 / cell).max(0.75);
     let mut mark = |ax: f32, ay: f32, ar: f32, bx: f32, by: f32, br: f32| {
@@ -321,6 +342,7 @@ mod tests {
                 .collect(),
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         }
     }
 

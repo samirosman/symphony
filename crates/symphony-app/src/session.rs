@@ -251,6 +251,12 @@ pub struct Session {
     /// on cut pencil lines (Harmony's Tip Style).
     pub eraser: BrushSettings,
     pub eraser_tip: symphony_core::stroke::Tip,
+    /// Eraser options: all art layers (Harmony's Apply to Line and Colour
+    /// Art), every visible Timeline layer under the eraser, and every
+    /// drawing of the layer (all frames).
+    pub erase_all_art: bool,
+    pub erase_all_layers: bool,
+    pub erase_all_frames: bool,
     pub swatch: Id,
     /// Pressure response, as a gamma (E4.1). 1 = linear.
     pub pressure_gamma: f32,
@@ -339,6 +345,9 @@ impl Session {
                 texture: None,
             },
             eraser_tip: symphony_core::stroke::Tip::Round,
+            erase_all_art: false,
+            erase_all_layers: false,
+            erase_all_frames: false,
             swatch,
             pressure_gamma: 1.0,
             onion: Onion {
@@ -438,6 +447,7 @@ impl Session {
                     points,
                     tips: Default::default(),
                     texture: None,
+                    shape: Vec::new(),
                 };
                 s.commit_stroke(layer, 1, st);
             }
@@ -567,29 +577,96 @@ impl Session {
 
     /// Erase strokes by ID from `drawing`. Repeated calls during one eraser
     /// gesture undo as a single step.
-    /// Harmony's Eraser on vector art: cut every line on the current art
-    /// layer that `eraser` (discs in drawing space) covers. Pieces stay at
-    /// the line's depth; a whole drag is one undo step (call `end_gesture`).
+    /// Harmony's Eraser on vector art, over discs in drawing space.
+    /// Brush strokes and paint lose exactly the eraser's shape (they become
+    /// outlines); pencil lines, textured strokes and invisible lines are cut
+    /// along their centreline with the eraser's tip style. Works on the
+    /// current art layer, or all of them with "Apply to all art layers".
+    /// Pieces keep their depth; a whole drag is one undo step (call
+    /// `end_gesture`).
     pub fn erase(&mut self, drawing: Id, eraser: &[symphony_vector::cut::Disc]) {
+        use symphony_vector::shape;
+        let all_art = self.erase_all_art;
         let art = self.art;
         let tip = self.eraser_tip;
+        let on = |a: ArtLayer| all_art || a == art;
         let Some(d) = self.doc.drawings.get(&drawing) else {
             return;
         };
-        let cuts: Vec<(Id, Vec<Stroke>)> = d
-            .strokes
+        let poly = shape::eraser_shape(eraser);
+        // The eraser's reach, to skip everything nowhere near it quickly.
+        let Some(reach) = eraser
             .iter()
-            .filter(|st| st.art == art)
-            .filter_map(|st| Some((st.id, symphony_vector::cut::cut(st, eraser, tip)?)))
-            .collect();
-        for (id, mut pieces) in cuts {
-            let Some(d) = self.doc.drawings.get(&drawing) else {
-                return;
-            };
-            let Some(index) = d.strokes.iter().position(|x| x.id == id) else {
+            .map(|(c, r)| ([c[0] - r, c[1] - r], [c[0] + r, c[1] + r]))
+            .reduce(|(a0, a1), (b0, b1)| {
+                (
+                    [a0[0].min(b0[0]), a0[1].min(b0[1])],
+                    [a1[0].max(b1[0]), a1[1].max(b1[1])],
+                )
+            })
+        else {
+            return;
+        };
+        let near = |lo: [f32; 2], hi: [f32; 2]| {
+            lo[0] <= reach.1[0] && lo[1] <= reach.1[1] && hi[0] >= reach.0[0] && hi[1] >= reach.0[1]
+        };
+        // What changes, worked out first, then applied one edit at a time.
+        let mut strokes: Vec<(Id, Vec<Stroke>)> = Vec::new();
+        for st in d.strokes.iter().filter(|st| on(st.art)) {
+            if !symphony_vector::bounds(st).is_some_and(|(lo, hi)| near(lo, hi)) {
+                continue;
+            }
+            let by_shape = st.kind == StrokeKind::Brush && st.texture.is_none();
+            if by_shape {
+                let outlines = shape::outline(st);
+                let mut hit = false;
+                let mut left: Vec<shape::Shape> = Vec::new();
+                for o in &outlines {
+                    match shape::erase(o, &poly) {
+                        Some(parts) => {
+                            hit = true;
+                            left.extend(parts);
+                        }
+                        None => left.push(o.clone()),
+                    }
+                }
+                if hit {
+                    let pieces = left
+                        .into_iter()
+                        .map(|sh| Stroke {
+                            shape: sh,
+                            ..st.clone()
+                        })
+                        .collect();
+                    strokes.push((st.id, pieces));
+                }
+            } else if let Some(pieces) = symphony_vector::cut::cut(st, eraser, tip) {
+                strokes.push((st.id, pieces));
+            }
+        }
+        let mut fills: Vec<(Id, Vec<symphony_core::stroke::Fill>)> = Vec::new();
+        for f in d.fills.iter().filter(|f| on(f.art)) {
+            if let Some(parts) = shape::erase(&f.contours, &poly) {
+                let pieces = parts
+                    .into_iter()
+                    .map(|contours| symphony_core::stroke::Fill {
+                        contours,
+                        ..f.clone()
+                    })
+                    .collect();
+                fills.push((f.id, pieces));
+            }
+        }
+        for (id, mut pieces) in strokes {
+            let Some(index) = self
+                .doc
+                .drawings
+                .get(&drawing)
+                .and_then(|d| d.strokes.iter().position(|x| x.id == id))
+            else {
                 continue;
             };
-            let before = d.strokes[index].clone();
+            let before = self.doc.drawings[&drawing].strokes[index].clone();
             for p in &mut pieces {
                 p.id = self.doc.ids.fresh();
             }
@@ -598,6 +675,31 @@ impl Session {
                 "Erase",
                 "erase",
                 Edit::ReplaceStroke {
+                    drawing,
+                    index,
+                    before,
+                    after: pieces,
+                },
+            );
+        }
+        for (id, mut pieces) in fills {
+            let Some(index) = self
+                .doc
+                .drawings
+                .get(&drawing)
+                .and_then(|d| d.fills.iter().position(|x| x.id == id))
+            else {
+                continue;
+            };
+            let before = self.doc.drawings[&drawing].fills[index].clone();
+            for p in &mut pieces {
+                p.id = self.doc.ids.fresh();
+            }
+            self.history.apply_merged(
+                &mut self.doc,
+                "Erase",
+                "erase",
+                Edit::ReplaceFill {
                     drawing,
                     index,
                     before,
@@ -819,6 +921,7 @@ impl Session {
             points: vec![Point { pressure: 1.0, ..a }, Point { pressure: 1.0, ..b }],
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         self.history.apply(
             &mut self.doc,
@@ -1686,6 +1789,7 @@ mod tests {
             ],
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         }
     }
 
@@ -1764,6 +1868,7 @@ mod tests {
                 .collect(),
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         s.commit_stroke(0, 1, st);
     }
@@ -1855,6 +1960,7 @@ mod tests {
                 .collect(),
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         // A line thick in the middle gives a stencil thick in the middle.
         let swell = stencil_from(&line(|t| (t * std::f32::consts::PI).sin())).unwrap();
@@ -1924,33 +2030,99 @@ mod tests {
     #[test]
     fn eraser_cuts_lines_and_one_drag_undoes_at_once() {
         let mut s = Session::new_scene();
-        square_drawing(&mut s);
+        square_drawing(&mut s); // one closed brush stroke: a ring
         let d = s.doc.exposed(0, 1).unwrap();
         let original = s.doc.drawings[&d].strokes.clone();
-        // Two stamps of one drag: through the top edge, then the bottom.
+        let strokes = |s: &Session| s.doc.drawings[&d].strokes.clone();
+        // Through the top edge: the ring opens into one C-shaped outline.
         s.erase(d, &[([50.0, 10.0], 5.0)]);
-        assert_eq!(
-            s.doc.drawings[&d].strokes.len(),
-            2,
-            "the square opens into two pieces"
-        );
+        assert_eq!(strokes(&s).len(), 1);
+        assert!(!strokes(&s)[0].shape.is_empty(), "now an outline");
+        assert!(!symphony_vector::hits(&strokes(&s)[0], 50.0, 10.0, 0.0));
+        assert!(symphony_vector::hits(&strokes(&s)[0], 30.0, 10.0, 0.0));
+        // Through the bottom edge too: two separate pieces.
         s.erase(d, &[([50.0, 90.0], 5.0)]);
-        assert_eq!(s.doc.drawings[&d].strokes.len(), 3);
+        assert_eq!(strokes(&s).len(), 2);
         s.end_gesture();
-        // Pieces keep their ends where the eraser's edge was.
-        let ends: Vec<f32> = s.doc.drawings[&d]
-            .strokes
-            .iter()
-            .flat_map(|st| [st.points[0].x, st.points.last().unwrap().x])
-            .collect();
-        assert!(ends.iter().any(|x| (x - 45.0).abs() < 0.1));
-        assert!(ends.iter().any(|x| (x - 55.0).abs() < 0.1));
         // Other art layers are untouched by the eraser.
         s.art = ArtLayer::ColourArt;
         s.erase(d, &[([10.0, 50.0], 5.0)]);
-        assert_eq!(s.doc.drawings[&d].strokes.len(), 3);
+        assert_eq!(strokes(&s).len(), 2);
         s.undo();
-        assert_eq!(s.doc.drawings[&d].strokes, original, "one drag, one undo");
+        assert_eq!(strokes(&s), original, "one drag, one undo");
+    }
+
+    #[test]
+    fn pencil_lines_are_cut_along_their_centreline() {
+        let mut s = Session::new_scene();
+        let swatch = s.swatch;
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: 2.0,
+            points: [(0.0, 0.0), (100.0, 0.0)]
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, 1, st);
+        let d = s.doc.exposed(0, 1).unwrap();
+        s.eraser_tip = symphony_core::stroke::Tip::Flat;
+        s.erase(d, &[([50.0, 0.0], 10.0)]);
+        let pieces = &s.doc.drawings[&d].strokes;
+        assert_eq!(pieces.len(), 2);
+        assert!(
+            pieces.iter().all(|p| p.shape.is_empty()),
+            "still centrelines"
+        );
+        assert_eq!(pieces[0].tips.end, symphony_core::stroke::Tip::Flat);
+    }
+
+    #[test]
+    fn eraser_removes_paint_and_can_reach_every_art_layer() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        s.paint_mode = PaintMode::Paint;
+        s.swatch = s.doc.palette.swatches[1].id;
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        let d = s.doc.exposed(0, 1).unwrap();
+        let area = |s: &Session| -> f32 {
+            s.doc.drawings[&d]
+                .fills
+                .iter()
+                .map(|f| symphony_vector::shape::shape_area(&f.contours))
+                .sum()
+        };
+        let before = area(&s);
+        s.erase(d, &[([50.0, 50.0], 10.0)]);
+        let after = area(&s);
+        let hole = std::f32::consts::PI * 100.0;
+        assert!(
+            (before - after - hole).abs() < hole * 0.05,
+            "{before} -> {after}"
+        );
+        assert!(!s.doc.drawings[&d].fills[0].contains(50.0, 50.0));
+        s.end_gesture();
+
+        // Paint on Colour Art isn't touched from Line Art...
+        s.undo();
+        s.doc.drawings.get_mut(&d).unwrap().fills[0].art = ArtLayer::ColourArt;
+        s.erase(d, &[([50.0, 50.0], 10.0)]);
+        assert!(s.doc.drawings[&d].fills[0].contains(50.0, 50.0));
+        // ...unless the eraser applies to all art layers.
+        s.erase_all_art = true;
+        s.erase(d, &[([50.0, 50.0], 10.0)]);
+        assert!(!s.doc.drawings[&d].fills[0].contains(50.0, 50.0));
     }
 
     #[test]
@@ -2064,6 +2236,7 @@ mod tests {
                 .collect(),
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         s.commit_stroke(0, 1, open);
         s.paint_at(0, 1, 50.0, 50.0, 1.0);

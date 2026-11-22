@@ -1250,6 +1250,7 @@ impl SymphonyApp {
                 points,
                 tips: Default::default(),
                 texture: b.texture,
+                shape: Vec::new(),
             };
             let layer = self.s.doc.layers.len().saturating_sub(1);
             self.s.commit_stroke(layer, 1, st);

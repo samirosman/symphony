@@ -29,9 +29,8 @@ pub struct CanvasState {
     /// Degrees, clockwise.
     rotation: f32,
     active: Option<Active>,
-    /// Drawing being erased, scene -> drawing transform, and the last
-    /// eraser stamp (drawing space) so the drag erases a continuous path.
-    erasing: Option<(Id, Affine, Option<symphony_vector::cut::Disc>)>,
+    /// An eraser drag in progress.
+    erasing: Option<Erasing>,
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
     pub select: SelectState,
@@ -52,6 +51,13 @@ impl Default for CanvasState {
             strokes: Default::default(),
         }
     }
+}
+
+/// What one eraser drag erases: drawings with their scene -> drawing
+/// transforms, and the last stamp (scene space) so the path is continuous.
+struct Erasing {
+    targets: Vec<(Id, Affine)>,
+    last: Option<symphony_vector::cut::Disc>,
 }
 
 struct Active {
@@ -671,10 +677,13 @@ pub fn ui(
                     continue;
                 }
                 if erasing {
-                    if let Some(d) = s.doc.exposed(s.selected, s.frame) {
-                        state.erasing = Some((d, to_local, None));
-                        let r = eraser_radius(s, sm.pressure) * size_unit(s, px)
-                            / scale_of(layer_world).max(1e-6);
+                    let targets = eraser_targets(s, &items, layer_world);
+                    if !targets.is_empty() {
+                        state.erasing = Some(Erasing {
+                            targets,
+                            last: None,
+                        });
+                        let r = eraser_radius(s, sm.pressure) * size_unit(s, px);
                         erase_at(s, state, (sx, sy), r);
                     }
                 } else {
@@ -728,6 +737,7 @@ pub fn ui(
                                 Default::default()
                             },
                             texture: settings.texture.filter(|_| kind == StrokeKind::Brush),
+                            shape: Vec::new(),
                         },
                         stencil: settings.stencil.filter(|_| kind == StrokeKind::Pencil),
                         live: None,
@@ -750,8 +760,7 @@ pub fn ui(
                         }
                     }
                 } else if state.erasing.is_some() {
-                    let r = eraser_radius(s, sm.pressure) * size_unit(s, px)
-                        / scale_of(layer_world).max(1e-6);
+                    let r = eraser_radius(s, sm.pressure) * size_unit(s, px);
                     erase_at(s, state, (sx, sy), r);
                 }
             }
@@ -865,18 +874,54 @@ fn eraser_radius(s: &Session, pressure: f32) -> f32 {
 
 /// Erase from the last stamp to this one: discs along the segment, so a
 /// fast drag leaves no gaps.
+/// The drawings one eraser drag works on: the selected layer, or every
+/// visible layer in the view ("Erase all layers"), and the drawing at this
+/// frame, or all of each layer's drawings ("Erase all frames").
+fn eraser_targets(s: &Session, items: &[select::Item], layer_world: Affine) -> Vec<(Id, Affine)> {
+    let layers: Vec<(usize, Affine)> = if s.erase_all_layers {
+        items
+            .iter()
+            .filter(|(layer, _, _)| s.layer_visible(*layer))
+            .map(|(layer, _, world)| (*layer, *world))
+            .collect()
+    } else {
+        vec![(s.selected, layer_world)]
+    };
+    let mut out: Vec<(Id, Affine)> = Vec::new();
+    for (layer, world) in layers {
+        let Some(to_local) = world.inverse() else {
+            continue;
+        };
+        let drawings: Vec<Id> = if s.erase_all_frames {
+            s.element_drawings(layer).into_iter().map(|d| d.0).collect()
+        } else {
+            s.doc.exposed(layer, s.frame).into_iter().collect()
+        };
+        for d in drawings {
+            if !out.iter().any(|(o, _)| *o == d) {
+                out.push((d, to_local));
+            }
+        }
+    }
+    out
+}
+
+/// Erase from the last stamp to this one: discs along the segment, so a
+/// fast drag leaves no gaps. `radius` is in scene units.
 fn erase_at(s: &mut Session, state: &mut CanvasState, scene_pt: (f32, f32), radius: f32) {
-    let Some((d, to_local, last)) = state.erasing.as_mut() else {
+    let Some(e) = state.erasing.as_mut() else {
         return;
     };
-    let (x, y) = to_local.apply(scene_pt.0, scene_pt.1);
+    let (x, y) = scene_pt;
     let here = ([x, y], radius.max(0.01));
-    let mut discs = vec![here];
-    if let Some((p, r)) = *last {
+    // In path order, from the last stamp to this one: the eraser shape
+    // joins them into one smooth capsule, and pencil cutting checks along it.
+    let mut discs = Vec::new();
+    if let Some((p, r)) = e.last {
         let len = (x - p[0]).hypot(y - p[1]);
         let step = (radius.min(r) * 0.5).max(0.01);
         let n = ((len / step).ceil() as usize).min(2000);
-        for i in 1..n {
+        for i in 0..n {
             let t = i as f32 / n as f32;
             discs.push((
                 [p[0] + (x - p[0]) * t, p[1] + (y - p[1]) * t],
@@ -884,9 +929,20 @@ fn erase_at(s: &mut Session, state: &mut CanvasState, scene_pt: (f32, f32), radi
             ));
         }
     }
-    *last = Some(here);
-    let d = *d;
-    s.erase(d, &discs);
+    discs.push(here);
+    e.last = Some(here);
+    let targets = e.targets.clone();
+    for (d, to_local) in targets {
+        let k = scale_of(to_local);
+        let local: Vec<symphony_vector::cut::Disc> = discs
+            .iter()
+            .map(|(c, r)| {
+                let (lx, ly) = to_local.apply(c[0], c[1]);
+                ([lx, ly], r * k)
+            })
+            .collect();
+        s.erase(d, &local);
+    }
 }
 
 #[derive(Clone, Copy)]

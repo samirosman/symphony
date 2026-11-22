@@ -36,6 +36,7 @@ fn main() {
             points,
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         };
         let tex = StrokeTexture {
             tip: Some(1),

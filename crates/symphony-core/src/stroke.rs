@@ -127,6 +127,11 @@ pub struct Stroke {
     /// Set for textured vector brush strokes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture: Option<StrokeTexture>,
+    /// Once a brush stroke is erased, its outline (outer contour first,
+    /// then holes, even-odd): drawn, hit and painted against instead of
+    /// the centreline, so the eraser's shape shows exactly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape: Vec<Vec<[f32; 2]>>,
 }
 
 impl Stroke {

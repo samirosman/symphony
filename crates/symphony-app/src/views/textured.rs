@@ -456,6 +456,7 @@ pub fn sample(
         points,
         tips: Default::default(),
         texture: Some(*tex),
+        shape: Vec::new(),
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key(&stroke, tex, Affine::scale(ppp, ppp), [0, 0, 0, 0]).hash(&mut h);

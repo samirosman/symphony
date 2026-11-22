@@ -9,6 +9,7 @@
 
 pub mod cut;
 pub mod fill;
+pub mod shape;
 pub mod stamp;
 
 use symphony_core::math::Affine;
@@ -86,6 +87,10 @@ const CAP_SEGMENTS: usize = 8;
 /// width from pressure, and round caps at both ends. Points closer than
 /// `min_step` (output units) are skipped to keep the strip clean.
 pub fn tessellate(stroke: &Stroke, transform: Affine, min_step: f32) -> Mesh {
+    // An erased brush stroke is its outline.
+    if !stroke.shape.is_empty() {
+        return fill::fill_mesh(&stroke.shape, transform);
+    }
     let k = scale_of(transform);
     let mut pts: Vec<([f32; 2], f32)> = Vec::with_capacity(stroke.points.len());
     for p in &stroke.points {
@@ -171,6 +176,9 @@ fn disc(mesh: &mut Mesh, c: [f32; 2], r: f32) {
 /// Does a circle at (`x`, `y`) with radius `r` touch the stroke (in the
 /// stroke's own coordinates)?
 pub fn hits(stroke: &Stroke, x: f32, y: f32, r: f32) -> bool {
+    if !stroke.shape.is_empty() {
+        return shape::hits_shape(&stroke.shape, x, y, r);
+    }
     let near = |p: &Point| r + stroke.width_at(p.pressure) * 0.5;
     match stroke.points.as_slice() {
         [] => false,
@@ -192,6 +200,16 @@ pub fn hits(stroke: &Stroke, x: f32, y: f32, r: f32) -> bool {
 
 /// Bounding box of a stroke including its width, as (min, max).
 pub fn bounds(stroke: &Stroke) -> Option<([f32; 2], [f32; 2])> {
+    if !stroke.shape.is_empty() {
+        let mut it = stroke.shape.iter().flatten();
+        let f = it.next()?;
+        let (mut lo, mut hi) = (*f, *f);
+        for p in it {
+            lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+            hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+        }
+        return Some((lo, hi));
+    }
     let mut it = stroke.points.iter();
     let first = it.next()?;
     let r0 = stroke.width_at(first.pressure) * 0.5;
@@ -229,6 +247,11 @@ pub fn transformed(stroke: &Stroke, m: Affine) -> Stroke {
         p.x = x;
         p.y = y;
     }
+    for p in out.shape.iter_mut().flatten() {
+        let (x, y) = m.apply(p[0], p[1]);
+        *p = [x, y];
+    }
+    // A mirror flips the outline's winding; even-odd filling doesn't mind.
     out.min_width *= k;
     out.max_width *= k;
     out
@@ -271,6 +294,7 @@ mod tests {
                 .collect(),
             tips: Default::default(),
             texture: None,
+            shape: Vec::new(),
         }
     }
 
