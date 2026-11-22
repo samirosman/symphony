@@ -25,6 +25,17 @@ pub enum Command {
     SetToolSize(f32),
     ToolSizeBy(f32),
     SetLength(u32),
+    Timeline(crate::views::timing::TimelineAction),
+    InsertInbetweens(u32),
+    ReuseDrawing(symphony_core::id::Id),
+    SetFrameRate(f32),
+    AddSwatch,
+    ToggleAnimate,
+    ShowNodeProperties,
+    RenderNodePreview,
+    ResetNodeView,
+    ResetWorkspace,
+    UpdateApp,
     ToggleLayerVisible,
     SelectLayer(usize),
     SelectSwatch(symphony_core::id::Id),
@@ -407,6 +418,38 @@ pub fn phrase(query: &str) -> Vec<Entry> {
         return Vec::new();
     };
     let has = |options: &[&str]| words.iter().any(|w| options.contains(&w.as_str()));
+    if has(&["insert", "add"])
+        && has(&[
+            "frame",
+            "frames",
+            "inbetween",
+            "inbetweens",
+            "between",
+            "betweens",
+        ])
+    {
+        let count = (n as u32).clamp(1, 100_000);
+        return vec![Entry::new(
+            &format!("Insert {count} in-between frames"),
+            Kind::Go,
+            Command::InsertInbetweens(count),
+            "phrase.insert_frames",
+        )];
+    }
+    if has(&["fps"]) || (has(&["frame"]) && has(&["rate"])) {
+        if [12.0, 24.0, 30.0, 48.0].contains(&n) {
+            return vec![Entry::new(
+                &format!("Set Scene to {n} FPS"),
+                Kind::Go,
+                Command::SetFrameRate(n),
+                "phrase.fps",
+            )];
+        }
+        return Vec::new();
+    }
+    if has(&["reuse", "drawing"]) && !has(&["go", "jump"]) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     if has(&["zoom", "magnify", "%"]) || query.contains('%') {
         let pct = n.clamp(5.0, 3200.0);
@@ -450,6 +493,19 @@ pub fn phrase(query: &str) -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_phrases_do_not_steal_named_drawing_searches() {
+        assert!(phrase("reuse drawing 12").is_empty());
+        assert!(matches!(
+            phrase("insert 3 frames")[0].command,
+            Command::InsertInbetweens(3)
+        ));
+        assert!(matches!(
+            phrase("set scene to 24 fps")[0].command,
+            Command::SetFrameRate(24.0)
+        ));
+    }
 
     fn catalogue() -> Vec<Entry> {
         vec![

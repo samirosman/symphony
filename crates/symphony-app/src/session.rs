@@ -301,6 +301,13 @@ pub struct Selection {
     pub strokes: Vec<Id>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertExposure {
+    New,
+    Duplicate,
+    Reuse(Id),
+}
+
 pub struct Session {
     pub doc: Scene,
     pub history: History,
@@ -802,6 +809,83 @@ impl Session {
                 },
             );
         }
+    }
+
+    pub fn can_insert_exposure(&self) -> bool {
+        self.doc
+            .column(self.selected)
+            .is_some_and(|column| !column.locked && column.len().max(self.frame) < 100_000)
+    }
+
+    /// Insert into one drawing layer and keep the rest of the scene in place.
+    pub fn insert_exposure(&mut self, operation: InsertExposure) {
+        if !self.can_insert_exposure() {
+            self.note("The drawing layer is locked or has reached the scene frame limit");
+            return;
+        }
+        let Some(column) = self.doc.column(self.selected) else {
+            return;
+        };
+        let (column_id, last) = (column.id, column.len());
+        let frame = self.frame + 1;
+        let mut edits = Vec::new();
+        let (id, title) = match operation {
+            InsertExposure::Reuse(id) => {
+                if !self
+                    .doc
+                    .drawings
+                    .get(&id)
+                    .is_some_and(|drawing| drawing.column == column_id)
+                {
+                    self.note("Choose a drawing from this layer");
+                    return;
+                }
+                (id, "Reuse drawing")
+            }
+            InsertExposure::New => {
+                let drawing = self.doc.make_drawing(column_id);
+                let id = drawing.id;
+                edits.push(Edit::AddDrawing { drawing });
+                (id, "Insert new drawing")
+            }
+            InsertExposure::Duplicate => {
+                let Some(source) = column
+                    .get(self.frame)
+                    .and_then(|id| self.doc.drawings.get(&id))
+                    .cloned()
+                else {
+                    self.note("There’s no drawing in this frame to duplicate");
+                    return;
+                };
+                let mut drawing = self.doc.make_drawing(column_id);
+                drawing.strokes = source.strokes;
+                drawing.fills = source.fills;
+                for stroke in &mut drawing.strokes {
+                    stroke.id = self.doc.ids.fresh();
+                }
+                for fill in &mut drawing.fills {
+                    fill.id = self.doc.ids.fresh();
+                }
+                let id = drawing.id;
+                edits.push(Edit::AddDrawing { drawing });
+                (id, "Duplicate drawing")
+            }
+        };
+        let Some(cells) = Edit::splice(&self.doc, column_id, frame, 0, vec![Some(id)]) else {
+            return;
+        };
+        edits.push(cells);
+        let length = self.length();
+        let end = frame.max(last + 1);
+        if end > length {
+            edits.push(Edit::SetLength {
+                before: length,
+                after: end,
+            });
+        }
+        self.history.apply(&mut self.doc, title, edits);
+        self.frame = frame;
+        self.validate_selection();
     }
 
     /// Harmony's Create Empty Drawing: a new drawing in the current cell.
@@ -1430,17 +1514,29 @@ impl Session {
     /// Hold the current drawing one frame longer (+1) or shorter (-1),
     /// shifting everything after it.
     pub fn change_exposure(&mut self, delta: i32) {
-        let Some(col) = self.doc.layers.get(self.selected).map(|l| l.column) else {
+        let Some(column) = self.doc.column(self.selected) else {
             return;
         };
+        if column.locked || (delta > 0 && !self.can_insert_exposure()) {
+            self.note("The drawing layer is locked or has reached the scene frame limit");
+            return;
+        }
+        let (col, last) = (column.id, column.len());
         let Some(d) = self.doc.exposed(self.selected, self.frame) else {
             self.note("There's no drawing in this cell to extend");
             return;
         };
         if delta > 0 {
             if let Some(e) = Edit::splice(&self.doc, col, self.frame, 0, vec![Some(d)]) {
-                self.history
-                    .apply(&mut self.doc, "Increase exposure", vec![e]);
+                let mut edits = vec![e];
+                let length = self.length();
+                if last + 1 > length {
+                    edits.push(Edit::SetLength {
+                        before: length,
+                        after: last + 1,
+                    });
+                }
+                self.history.apply(&mut self.doc, "Extend exposure", edits);
             }
         } else {
             let column = self.doc.xsheet.column(col);
@@ -2223,6 +2319,44 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_duplicate_and_reuse_have_different_drawing_identity() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        let original = s.doc.exposed(0, 1).unwrap();
+        let original_stroke = s.doc.drawings[&original].strokes[0].id;
+        s.insert_exposure(InsertExposure::Duplicate);
+        let copy = s.doc.exposed(0, 2).unwrap();
+        assert_ne!(original, copy);
+        assert_ne!(s.doc.drawings[&copy].strokes[0].id, original_stroke);
+        assert_eq!(
+            s.doc.drawings[&copy].strokes[0].points,
+            s.doc.drawings[&original].strokes[0].points
+        );
+        s.insert_exposure(InsertExposure::Reuse(original));
+        assert_eq!(s.doc.exposed(0, 3), Some(original));
+        s.undo();
+        assert_eq!(s.doc.exposed(0, 3), None);
+        s.undo();
+        assert_eq!(s.doc.exposed(0, 2), None);
+        assert!(!s.doc.drawings.contains_key(&copy));
+    }
+
+    #[test]
+    fn inserting_at_the_scene_end_extends_the_scene_and_undo_restores_length() {
+        let mut s = Session::new_scene();
+        let end = s.length();
+        s.frame = end;
+        s.insert_exposure(InsertExposure::New);
+        assert_eq!(s.frame, end + 1);
+        assert_eq!(s.length(), end + 1);
+        assert!(s.doc.exposed(0, end + 1).is_some());
+        s.undo();
+        assert_eq!(s.frame, end);
+        assert_eq!(s.length(), end);
+        assert_eq!(s.doc.exposed(0, end + 1), None);
+    }
 
     #[test]
     fn selected_upstream_peg_moves_the_layer_without_editing_artwork() {

@@ -92,6 +92,25 @@ Choose a frame and click **Set key** in node properties. Every node can
 key its enabled state. Peg transforms and numeric effect properties can
 also change over time. Keys appear on the node's Timeline track.
 
+Hold **Alt** (Option on Mac) while dragging a node with free ports.
+Drop it near a compatible open socket to connect it, or onto a cable
+to insert it between the connected nodes. Proposed wires are highlighted
+during the drag. Undo restores the old wiring and node position together.
+
+## Timeline keys and frames
+
+In Timeline, press **K** or click the diamond-plus button to set a
+keyframe on the selected node at the playhead. The **Frames** menu and
+**Tab** search let you insert a blank drawing, duplicate the current
+drawing, extend its exposure, or reuse an existing drawing from the
+layer. Insert and duplicate place the new exposure after the playhead
+and shift later exposures on that layer.
+
+A duplicate is independent artwork. Reuse exposes the same drawing
+again, so edits appear in each of its exposures. To shift timing across
+all layers, search for **Insert In-between Frame** or type a quantity
+such as **insert 3 frames**.
+
 ## Select and colour drawings
 
 With **Select**, click an existing stroke to select it. On empty space,

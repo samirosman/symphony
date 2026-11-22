@@ -149,6 +149,32 @@ fn selected_node(s: &Session) -> Option<NodeId> {
         .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node))
 }
 
+pub fn set_selected_key(s: &mut Session, delete: bool) {
+    if let Some(mut draft) = selected_node(s).and_then(|id| PropertyDraft::new(s, id)) {
+        apply_properties(s, &mut draft, !delete, delete);
+    }
+}
+
+pub fn selected_has_key(s: &Session) -> bool {
+    selected_node(s).is_some_and(|id| s.doc.graph.has_key(id, s.frame))
+}
+
+pub fn show_selected_properties(s: &Session, state: &mut NodeViewState) {
+    if let Some(id) = selected_node(s) {
+        open_properties(s, state, id);
+    }
+}
+
+pub fn reset_view(state: &mut NodeViewState) {
+    state.pan = Vec2::ZERO;
+    state.zoom = None;
+}
+
+pub fn show_render_preview(state: &mut NodeViewState) {
+    state.preview_open = true;
+    state.preview = None;
+}
+
 fn sync_properties(s: &Session, state: &mut NodeViewState) {
     if let Some(id) = selected_node(s) {
         if state.properties.as_ref().is_none_or(|draft| {
@@ -220,14 +246,170 @@ fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: O
     }
 }
 
-fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
+fn cable_points(from: Pos2, to: Pos2) -> [Pos2; 4] {
     let bend = ((to.y - from.y).abs() * 0.5).clamp(16.0, 120.0);
+    [from, from + Vec2::Y * bend, to - Vec2::Y * bend, to]
+}
+
+fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
     painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        [from, from + Vec2::Y * bend, to - Vec2::Y * bend, to],
+        cable_points(from, to),
         false,
         egui::Color32::TRANSPARENT,
         stroke,
     ));
+}
+
+#[derive(Clone, Copy)]
+enum AutoWire {
+    Join(Link),
+    Insert {
+        old: Link,
+        moving: NodeId,
+        port: usize,
+    },
+}
+
+impl AutoWire {
+    fn links(self) -> [Option<Link>; 2] {
+        match self {
+            Self::Join(link) => [Some(link), None],
+            Self::Insert { old, moving, port } => [
+                Some(Link {
+                    from: old.from,
+                    to: moving,
+                    port,
+                }),
+                Some(Link {
+                    from: moving,
+                    ..old
+                }),
+            ],
+        }
+    }
+
+    fn replaced(self) -> Option<Link> {
+        match self {
+            Self::Join(_) => None,
+            Self::Insert { old, .. } => Some(old),
+        }
+    }
+
+    fn edit(self, s: &Session) -> Edit {
+        let before = s.doc.graph.links().to_vec();
+        let mut after = before.clone();
+        if let Some(old) = self.replaced() {
+            after.retain(|link| *link != old);
+        }
+        after.extend(self.links().into_iter().flatten());
+        Edit::RewireNodes {
+            before,
+            after,
+            was_custom: s.doc.custom_wiring,
+        }
+    }
+}
+
+fn near_cable(point: Pos2, from: Pos2, to: Pos2) -> f32 {
+    let [a, b, c, d] = cable_points(from, to).map(Pos2::to_vec2);
+    let mut previous = a;
+    let mut best = f32::INFINITY;
+    for step in 1..=20 {
+        let t = step as f32 / 20.0;
+        let u = 1.0 - t;
+        let next = a * u.powi(3) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * t.powi(3);
+        let edge = next - previous;
+        let along =
+            ((point.to_vec2() - previous).dot(edge) / edge.length_sq().max(0.0001)).clamp(0.0, 1.0);
+        best = best.min((point.to_vec2() - (previous + edge * along)).length());
+        previous = next;
+    }
+    best
+}
+
+fn nearby_wiring(
+    graph: &symphony_core::graph::Graph,
+    moving: NodeId,
+    card: Rect,
+    inputs: &BTreeMap<Input, Pos2>,
+    outputs: &BTreeMap<NodeId, Pos2>,
+) -> Option<AutoWire> {
+    const REACH: f32 = 26.0;
+    let free_inputs = || {
+        inputs
+            .iter()
+            .filter(|((id, port), _)| *id == moving && graph.input(*id, *port).is_none())
+    };
+    let free_output = outputs
+        .get(&moving)
+        .filter(|_| !graph.links().iter().any(|link| link.from == moving));
+    if free_output.is_some() {
+        if let Some(((_, port), _)) = free_inputs().next() {
+            let crossing = graph
+                .links()
+                .iter()
+                .filter_map(|&old| {
+                    let from = *outputs.get(&old.from)?;
+                    let to = *inputs.get(&(old.to, old.port))?;
+                    let point = card.center();
+                    if point.y <= from.y || point.y >= to.y {
+                        return None;
+                    }
+                    let distance = near_cable(point, from, to);
+                    (distance <= REACH
+                        && graph.can_connect(old.from, moving)
+                        && graph.can_connect(moving, old.to))
+                    .then_some((
+                        distance,
+                        AutoWire::Insert {
+                            old,
+                            moving,
+                            port: *port,
+                        },
+                    ))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, candidate)) = crossing {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let incoming = free_inputs().flat_map(|(&(_, port), &to)| {
+        outputs.iter().filter_map(move |(&from, &at)| {
+            let distance = to.distance(at);
+            (distance <= REACH && at.y <= card.center().y && graph.can_connect(from, moving))
+                .then_some((
+                    distance,
+                    AutoWire::Join(Link {
+                        from,
+                        to: moving,
+                        port,
+                    }),
+                ))
+        })
+    });
+    let outgoing = free_output.into_iter().flat_map(|&at| {
+        inputs.iter().filter_map(move |(&(to, port), &point)| {
+            let distance = at.distance(point);
+            (distance <= REACH
+                && point.y >= card.center().y
+                && graph.input(to, port).is_none()
+                && graph.can_connect(moving, to))
+            .then_some((
+                distance,
+                AutoWire::Join(Link {
+                    from: moving,
+                    to,
+                    port,
+                }),
+            ))
+        })
+    });
+    incoming
+        .chain(outgoing)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, candidate)| candidate)
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
@@ -256,25 +438,24 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
             }
         });
         if ui.button("Reset view").clicked() {
-            state.pan = Vec2::ZERO;
-            state.zoom = None;
+            reset_view(state);
         }
         if ui
             .add_enabled(selected_node(s).is_some(), egui::Button::new("Properties"))
             .clicked()
         {
-            if let Some(id) = selected_node(s) {
-                open_properties(s, state, id);
-            }
+            show_selected_properties(s, state);
         }
         if ui.button("Render preview").clicked() {
-            state.preview_open = true;
-            state.preview = None;
+            show_render_preview(state);
         }
     });
     canvas(ui, s, state, add);
-    properties(ui.ctx(), s, state);
-    preview(ui.ctx(), s, state);
+}
+
+pub fn windows(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
+    properties(ctx, s, state);
+    preview(ctx, s, state);
 }
 
 fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
@@ -818,8 +999,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
 
+    let alt = ui.input(|i| i.modifiers.alt);
     if let Some(Drag::Node(id, _)) = state.drag {
-        if ui.input(|i| i.modifiers.shift) {
+        if !alt && ui.input(|i| i.modifiers.shift) {
             let connected = s
                 .doc
                 .graph
@@ -927,21 +1109,30 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.drag = None;
     }
+    let mut auto_wire = match state.drag {
+        Some(Drag::Node(id, delta)) if alt && delta.length_sq() > 0.0 => cards
+            .get(&id)
+            .and_then(|(card, _)| nearby_wiring(&s.doc.graph, id, *card, &inputs, &outputs)),
+        _ => None,
+    };
     if resp.drag_stopped() {
         match state.drag.take() {
             Some(Drag::Node(id, delta)) if delta.length_sq() > 0.0 => {
                 if let Some((_, position)) = cards.get(&id) {
                     // cards reflect the drag offset accumulated before this frame.
                     let before = s.doc.node_positions.get(&id).copied();
-                    s.history.apply(
-                        &mut s.doc,
-                        "Move node",
-                        vec![Edit::MoveNode {
-                            id,
-                            before,
-                            after: [position.x, position.y],
-                        }],
-                    );
+                    let mut edits = vec![Edit::MoveNode {
+                        id,
+                        before,
+                        after: [position.x, position.y],
+                    }];
+                    let action = if let Some(wiring) = auto_wire.take() {
+                        edits.push(wiring.edit(s));
+                        "Move and connect node"
+                    } else {
+                        "Move node"
+                    };
+                    s.history.apply(&mut s.doc, action, edits);
                 }
             }
             Some(Drag::Cable { source, old_input }) => {
@@ -975,6 +1166,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
 
     for link in s.doc.graph.links() {
+        if auto_wire.and_then(AutoWire::replaced) == Some(*link) {
+            continue;
+        }
         let input = (link.to, link.port);
         if matches!(state.drag, Some(Drag::Cable { old_input: Some(old), .. }) if old == input) {
             continue;
@@ -990,6 +1184,15 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         {
             let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::ACCENT_SELECT);
             curve(&painter, from, to, Stroke::new(2.0, ink));
+        }
+    }
+    if let Some(wiring) = auto_wire {
+        for link in wiring.links().into_iter().flatten() {
+            if let (Some(&from), Some(&to)) =
+                (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
+            {
+                curve(&painter, from, to, Stroke::new(2.0, theme::ACCENT_SELECT));
+            }
         }
     }
     for (id, (card, _)) in &cards {
@@ -1215,6 +1418,51 @@ mod tests {
         assert_eq!(state.anchor_x, Some(anchor));
         assert_eq!(state.pan, pan);
         assert_eq!(state.zoom, Some(zoom));
+    }
+
+    #[test]
+    fn alt_drag_inserts_a_peg_into_a_cable_in_one_undo_step() {
+        let mut session = Session::new_scene();
+        let layer = session.doc.layers[0];
+        let start = [160.0, 82.0];
+        let inserted = session.doc.graph.next_id();
+        add_node(&mut session, NodeKind::Peg(Default::default()), start);
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (session, state, origin)| {
+                    *origin = ui.available_rect_before_wrap().center_top();
+                    canvas(ui, session, state, None);
+                },
+                (session, NodeViewState::default(), Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let origin = harness.state().2;
+        let from = origin + Vec2::new(start[0], start[1]);
+        let to = origin + Vec2::new(0.0, 82.0);
+        let alt = egui::Modifiers::ALT;
+        for (pos, pressed) in [(from, Some(true)), (to, None), (to, Some(false))] {
+            harness.input_mut().events.extend([
+                egui::Event::ModifiersChanged(alt),
+                egui::Event::PointerMoved(pos),
+            ]);
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: alt,
+                });
+            }
+            harness.run_steps(1);
+        }
+        let s = &mut harness.state_mut().0;
+        assert_eq!(s.doc.graph.input(inserted, 0), Some(layer.peg));
+        assert_eq!(s.doc.graph.input(layer.node, 0), Some(inserted));
+        s.undo();
+        assert_eq!(s.doc.graph.input(inserted, 0), None);
+        assert_eq!(s.doc.graph.input(layer.node, 0), Some(layer.peg));
+        assert_eq!(s.doc.node_positions[&inserted], start);
     }
 
     #[test]

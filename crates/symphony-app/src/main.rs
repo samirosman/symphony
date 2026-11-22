@@ -1037,6 +1037,18 @@ impl SymphonyApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.palette.is_none() && !ctx.text_edit_focused() {
+            let here = self.hovered_view.or_else(|| {
+                self.layout_mut()
+                    .find_active_focused()
+                    .map(|(_, view)| *view)
+            });
+            if here == Some(View::Timeline)
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
+            {
+                views::timing::TimelineAction::SetKey.run(&mut self.s);
+            }
+        }
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -1197,7 +1209,10 @@ impl SymphonyApp {
                 }
             });
             ui.separator();
-            self.menu_action(ui, Action::IncreaseExposure);
+            views::timing::TimelineAction::SetKey.menu(ui, &mut self.s);
+            views::timing::TimelineAction::Duplicate.menu(ui, &mut self.s);
+            views::timing::TimelineAction::InsertNew.menu(ui, &mut self.s);
+            views::timing::TimelineAction::Extend.menu(ui, &mut self.s);
             self.menu_action(ui, Action::DecreaseExposure);
             ui.separator();
             self.menu_action(ui, Action::SubstitutePrevious);
@@ -1601,6 +1616,102 @@ impl SymphonyApp {
             e.shortcut = keymap::label(self.profile, a);
             out.push(e);
         }
+        let timing_views = [View::Timeline, View::Xsheet];
+        for action in views::timing::TimelineAction::ALL {
+            let mut entry = Entry::new(
+                action.label(),
+                Kind::Action,
+                Command::Timeline(action),
+                &format!("timeline.{action:?}"),
+            )
+            .words(action.keywords())
+            .ctx(&timing_views);
+            if action == views::timing::TimelineAction::SetKey {
+                entry.shortcut = "K in Timeline".into();
+            }
+            out.push(entry);
+        }
+        for (id, name) in self.s.element_drawings(self.s.selected) {
+            out.push(
+                Entry::new(
+                    &format!("Reuse Drawing {name}"),
+                    Kind::Action,
+                    Command::ReuseDrawing(id),
+                    &format!("timeline.reuse.{}", id.0),
+                )
+                .words("insert existing drawing exposure frame")
+                .ctx(&timing_views),
+            );
+        }
+        for fps in [12.0, 24.0, 30.0, 48.0] {
+            out.push(
+                Entry::new(
+                    &format!("Set Scene to {fps} FPS"),
+                    Kind::Setting,
+                    Command::SetFrameRate(fps),
+                    &format!("timing.fps.{fps}"),
+                )
+                .words("frame rate playback speed")
+                .ctx(&timing_views),
+            );
+        }
+        for (title, command, key, words, views) in [
+            (
+                "Open Node Properties",
+                Command::ShowNodeProperties,
+                "node.properties",
+                "inspect layer settings",
+                &[View::Node, View::LayerProperties][..],
+            ),
+            (
+                "Render Node Preview",
+                Command::RenderNodePreview,
+                "node.preview",
+                "display camera effects",
+                &[View::Node, View::Camera][..],
+            ),
+            (
+                "Reset Node View",
+                Command::ResetNodeView,
+                "node.reset",
+                "reset pan zoom",
+                &[View::Node][..],
+            ),
+            (
+                "Add Colour Swatch",
+                Command::AddSwatch,
+                "colour.add",
+                "new color palette",
+                &[View::Colour][..],
+            ),
+            (
+                "Toggle Animate Mode",
+                Command::ToggleAnimate,
+                "timing.animate",
+                "auto key animation",
+                &[View::LayerProperties, View::Timeline][..],
+            ),
+            (
+                "Reset This Workspace",
+                Command::ResetWorkspace,
+                "workspace.reset",
+                "restore panels default docking",
+                &[][..],
+            ),
+            (
+                "Update Symphony",
+                Command::UpdateApp,
+                "app.update",
+                "rebuild latest version",
+                &[][..],
+            ),
+        ] {
+            out.push(
+                Entry::new(title, Kind::Action, command, key)
+                    .words(words)
+                    .ctx(views),
+            );
+        }
         // Views: bring a tab to the front.
         for v in View::ALL {
             out.push(
@@ -1891,6 +2002,26 @@ impl SymphonyApp {
             }
             Command::SetToolSize(n) => self.set_tool_size(|_| n),
             Command::ToolSizeBy(k) => self.set_tool_size(|w| w * k),
+            Command::Timeline(action) => action.run(&mut self.s),
+            Command::InsertInbetweens(count) => self
+                .s
+                .insert_inbetweens(count.min(100_000u32.saturating_sub(self.s.length()))),
+            Command::ReuseDrawing(id) => self
+                .s
+                .insert_exposure(crate::session::InsertExposure::Reuse(id)),
+            Command::SetFrameRate(fps) => self.s.set_frame_rate(fps),
+            Command::AddSwatch => self.s.add_swatch(),
+            Command::ToggleAnimate => self.s.animate = !self.s.animate,
+            Command::ShowNodeProperties => {
+                views::node::show_selected_properties(&self.s, &mut self.node_view)
+            }
+            Command::RenderNodePreview => views::node::show_render_preview(&mut self.node_view),
+            Command::ResetNodeView => views::node::reset_view(&mut self.node_view),
+            Command::ResetWorkspace => {
+                *self.layout_mut() = self.workspace.preset();
+                self.maximised = None;
+            }
+            Command::UpdateApp => self.guard(ctx, Pending::Update),
             Command::SetLength(n) => self.s.set_length(n),
             Command::ToggleLayerVisible => {
                 let i = self.s.selected;
@@ -2563,6 +2694,7 @@ impl eframe::App for SymphonyApp {
             .filter_map(|node| node.get_leaf())
             .filter_map(|leaf| leaf.tabs.get(leaf.active.0).copied())
             .collect();
+        self.hovered_view = None;
         let mut viewer = Viewer {
             ctx: ctx.clone(),
             active,
@@ -2672,6 +2804,7 @@ impl eframe::App for SymphonyApp {
                 self.shot_search_opened = true;
             }
         }
+        views::node::windows(&ctx, &mut self.s, &mut self.node_view);
         self.search_box(&ctx);
         self.dialogs(&ctx);
 

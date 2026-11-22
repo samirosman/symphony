@@ -8,7 +8,7 @@ use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
 use crate::keymap::{self, Action, Profile};
-use crate::session::Session;
+use crate::session::{InsertExposure, Session};
 
 #[derive(Default)]
 pub struct TimingState {
@@ -25,64 +25,196 @@ const PARAM_W: f32 = 48.0;
 /// Pixels of drag per drawing when scrubbing the Parameters field.
 const PARAM_STEP: f32 = 12.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineAction {
+    SetKey,
+    DeleteKey,
+    InsertNew,
+    Duplicate,
+    Extend,
+    InsertInbetween,
+    DeleteLayer,
+}
+
+impl TimelineAction {
+    pub const ALL: [Self; 7] = [
+        Self::SetKey,
+        Self::DeleteKey,
+        Self::InsertNew,
+        Self::Duplicate,
+        Self::Extend,
+        Self::InsertInbetween,
+        Self::DeleteLayer,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SetKey => "Set Keyframe",
+            Self::DeleteKey => "Delete Keyframe",
+            Self::InsertNew => "Insert New Drawing Frame",
+            Self::Duplicate => "Duplicate Drawing Frame",
+            Self::Extend => "Extend Exposure",
+            Self::InsertInbetween => "Insert In-between Frame",
+            Self::DeleteLayer => "Delete Layer",
+        }
+    }
+
+    pub fn keywords(self) -> &'static str {
+        match self {
+            Self::SetKey => "add create key pose animation timeline",
+            Self::DeleteKey => "remove key pose animation timeline",
+            Self::InsertNew => "add new frame drawing blank empty cel cell",
+            Self::Duplicate => "copy clone duplicate frame exposure independent cel",
+            Self::Extend => "hold extend increase exposure length one frame",
+            Self::InsertInbetween => "insert new frame all layers hold timing scene",
+            Self::DeleteLayer => "remove layer timeline",
+        }
+    }
+
+    fn enabled(self, s: &Session) -> bool {
+        match self {
+            Self::SetKey => !s.doc.layers.is_empty() || s.selected_node.is_some(),
+            Self::DeleteKey => super::node::selected_has_key(s),
+            Self::InsertNew => s.can_insert_exposure(),
+            Self::Duplicate | Self::Extend => {
+                s.can_insert_exposure() && s.doc.exposed(s.selected, s.frame).is_some()
+            }
+            Self::InsertInbetween => s.length() < 100_000,
+            Self::DeleteLayer => s.layer_count() > 1,
+        }
+    }
+
+    pub fn run(self, s: &mut Session) {
+        match self {
+            Self::SetKey => super::node::set_selected_key(s, false),
+            Self::DeleteKey => super::node::set_selected_key(s, true),
+            Self::InsertNew => s.insert_exposure(InsertExposure::New),
+            Self::Duplicate => s.insert_exposure(InsertExposure::Duplicate),
+            Self::Extend => s.change_exposure(1),
+            Self::InsertInbetween => s.insert_inbetweens(1),
+            Self::DeleteLayer => s.delete_layer(s.selected),
+        }
+    }
+
+    pub fn menu(self, ui: &mut egui::Ui, s: &mut Session) {
+        let button = egui::Button::new(self.label());
+        let button = if self == Self::SetKey {
+            button.shortcut_text("K in Timeline")
+        } else {
+            button
+        };
+        if ui.add_enabled(self.enabled(s), button).clicked() {
+            self.run(s);
+            ui.close();
+        }
+    }
+}
+
+fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
+    for action in [
+        TimelineAction::InsertNew,
+        TimelineAction::Duplicate,
+        TimelineAction::Extend,
+    ] {
+        action.menu(ui, s);
+    }
+    ui.menu_button("Reuse Existing Drawing", |ui| {
+        let drawings = s.element_drawings(s.selected);
+        if drawings.is_empty() {
+            ui.label("This layer has no drawings yet.");
+        }
+        egui::ScrollArea::vertical()
+            .max_height(280.0)
+            .show(ui, |ui| {
+                for (id, name) in drawings {
+                    if ui
+                        .add_enabled(s.can_insert_exposure(), egui::Button::new(name))
+                        .clicked()
+                    {
+                        s.insert_exposure(InsertExposure::Reuse(id));
+                        ui.close();
+                    }
+                }
+            });
+    });
+    ui.separator();
+    TimelineAction::InsertInbetween.menu(ui, s);
+    TimelineAction::DeleteKey.menu(ui, s);
+}
+
 /// View header: transport, timing fields and layer buttons (D3.2).
 pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                let available = ui.available_width();
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if icons::button(ui, Icon::FirstFrame, false, true, "First frame").clicked() {
-                    s.frame = 1;
+                if available >= 285.0 {
+                    if icons::button(ui, Icon::FirstFrame, false, true, "First frame").clicked() {
+                        s.frame = 1;
+                    }
+                    if icons::button(
+                        ui,
+                        Icon::PrevFrame,
+                        false,
+                        true,
+                        &keymap::tooltip(profile, Action::PrevFrame),
+                    )
+                    .clicked()
+                    {
+                        s.frame = s.frame.saturating_sub(1).max(1);
+                    }
+                    let icon = if s.playing { Icon::Pause } else { Icon::Play };
+                    if icons::button(
+                        ui,
+                        icon,
+                        s.playing,
+                        true,
+                        &keymap::tooltip(profile, Action::PlayPause),
+                    )
+                    .clicked()
+                    {
+                        s.playing = !s.playing;
+                    }
+                    if icons::button(
+                        ui,
+                        Icon::NextFrame,
+                        false,
+                        true,
+                        &keymap::tooltip(profile, Action::NextFrame),
+                    )
+                    .clicked()
+                    {
+                        s.frame = (s.frame + 1).min(s.length());
+                    }
+                    if icons::button(ui, Icon::LastFrame, false, true, "Last frame").clicked() {
+                        s.frame = s.length();
+                    }
+                    ui.add_space(12.0);
                 }
-                if icons::button(
-                    ui,
-                    Icon::PrevFrame,
-                    false,
-                    true,
-                    &keymap::tooltip(profile, Action::PrevFrame),
-                )
-                .clicked()
-                {
-                    s.frame = s.frame.saturating_sub(1).max(1);
-                }
-                let icon = if s.playing { Icon::Pause } else { Icon::Play };
-                if icons::button(
-                    ui,
-                    icon,
-                    s.playing,
-                    true,
-                    &keymap::tooltip(profile, Action::PlayPause),
-                )
-                .clicked()
-                {
-                    s.playing = !s.playing;
-                }
-                if icons::button(
-                    ui,
-                    Icon::NextFrame,
-                    false,
-                    true,
-                    &keymap::tooltip(profile, Action::NextFrame),
-                )
-                .clicked()
-                {
-                    s.frame = (s.frame + 1).min(s.length());
-                }
-                if icons::button(ui, Icon::LastFrame, false, true, "Last frame").clicked() {
-                    s.frame = s.length();
-                }
-                ui.add_space(16.0);
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
                 let len = s.length();
                 // In a narrow card (like the Hand-Drawn Xsheet) keep only the
                 // frame field, so nothing runs past the card edge.
-                let compact = ui.available_width() < 330.0;
+                let compact = available < 535.0;
                 ui.add(
                     egui::DragValue::new(&mut s.frame)
                         .range(1..=len)
                         .prefix("Frame "),
                 );
+                if icons::button(
+                    ui,
+                    Icon::AddKeyframe,
+                    super::node::selected_has_key(s),
+                    TimelineAction::SetKey.enabled(s),
+                    "Set keyframe (K in Timeline)",
+                )
+                .clicked()
+                {
+                    TimelineAction::SetKey.run(s);
+                }
+                ui.menu_button("Frames", |ui| frame_menu(ui, s));
                 if compact {
                     return;
                 }
@@ -253,7 +385,7 @@ fn parameters_field(
             "Drawing at this frame. Drag sideways to swap it, or double-click to type a name.",
         );
     if resp.drag_started() || resp.clicked() {
-        s.selected = row;
+        s.select_graph_node(s.doc.layers[row].node, false);
     }
     if resp.double_clicked() {
         t.swap_text = Some((row, name.unwrap_or_default()));
