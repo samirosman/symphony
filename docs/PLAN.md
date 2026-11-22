@@ -156,7 +156,7 @@ continues.
 - 🟡 **Brush**: filled contour, pressure size and opacity, smoothing (size and smoothing done; opacity later)
 - ⬜ Textured vector brushes (greyscale bitmap mask)
 - ⬜ Bitmap layers and bitmap brushes (tip and paper textures, blending)
-- 🟡 Eraser (vector and bitmap): removes whole vector strokes; cutting comes next
+- 🟡 Eraser (vector and bitmap): cuts vector lines along its path, pressure size, Round/Flat tip style (done). Still to do: Bevel tip, partial-width erasing of brush shapes, eraser presets, bitmap
 - ⬜ Line, Rectangle, Ellipse and Polyline tools
 - ⬜ Text tool
 - 🟡 Stroke tool (invisible lines used for painting zones): invisible strokes exist (Close Gap makes them); the drawing tool is next

@@ -467,7 +467,18 @@ fn tool_properties_body(
             }
             Tool::Eraser => {
                 section(ui, "Eraser");
-                hint(ui, "Removes whole strokes it touches. The eraser end of your pen works with any tool.");
+                let e = &mut s.eraser;
+                slider(ui, "Maximum size", &mut e.max_width, 1.0..=120.0);
+                slider(ui, "Minimum size", &mut e.min_width, 0.5..=120.0);
+                e.min_width = e.min_width.min(e.max_width);
+                hint(ui, "Erases the parts of lines it passes over, on the current art layer. Pen pressure sets the size. The eraser end of your pen works with any tool.");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    hint(ui, "Tip style");
+                    ui.selectable_value(&mut s.eraser_tip, Tip::Round, "Round");
+                    ui.selectable_value(&mut s.eraser_tip, Tip::Flat, "Flat");
+                });
+                hint(ui, "The shape left at the ends of a line where you cut it.");
             }
             Tool::Select | Tool::Transform => {
                 let select = s.tool == Tool::Select;

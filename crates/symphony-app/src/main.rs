@@ -245,6 +245,7 @@ impl SymphonyApp {
             match std::env::var("SYMPHONY_SHOT_TOOL").as_deref() {
                 Ok("Brush") => s.tool = Tool::Brush,
                 Ok("Pencil") => s.tool = Tool::Pencil,
+                Ok("Eraser") => s.tool = Tool::Eraser,
                 _ => {}
             }
             if std::env::var_os("SYMPHONY_SHOT_PAINT").is_some() {
@@ -356,7 +357,8 @@ impl SymphonyApp {
         }
         let (gamma, cursor) = (self.s.pressure_gamma, self.s.brush_size_cursor);
         let layers = self.s.overlay_underlay;
-        let (brush, pencil) = (self.s.brush, self.s.pencil);
+        let (brush, pencil, eraser) = (self.s.brush, self.s.pencil, self.s.eraser);
+        let eraser_tip = self.s.eraser_tip;
         self.s = next;
         self.s.pressure_gamma = gamma;
         self.s.brush_size_cursor = cursor;
@@ -364,6 +366,8 @@ impl SymphonyApp {
         // Tool settings belong to the artist, not the scene.
         self.s.brush = brush;
         self.s.pencil = pencil;
+        self.s.eraser = eraser;
+        self.s.eraser_tip = eraser_tip;
         self.autosaved_version = self.s.doc.version;
         self.camera.reset_view();
         self.drawing.reset_view();

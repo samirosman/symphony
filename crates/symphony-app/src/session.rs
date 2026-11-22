@@ -113,6 +113,13 @@ pub fn art_name(art: ArtLayer) -> &'static str {
     }
 }
 
+impl BrushSettings {
+    /// Width for a pen pressure (already through the pressure curve).
+    pub fn width_at_pressure(&self, pressure: f32) -> f32 {
+        self.min_width + (self.max_width - self.min_width) * pressure.clamp(0.0, 1.0)
+    }
+}
+
 /// A thickness profile sampled evenly from start to end of a line.
 pub type Stencil = [f32; STENCIL_SAMPLES];
 pub const STENCIL_SAMPLES: usize = 16;
@@ -213,6 +220,10 @@ pub struct Session {
     pub tool: Tool,
     pub brush: BrushSettings,
     pub pencil: BrushSettings,
+    /// Eraser size (pressure between minimum and maximum) and the tip left
+    /// on cut pencil lines (Harmony's Tip Style).
+    pub eraser: BrushSettings,
+    pub eraser_tip: symphony_core::stroke::Tip,
     pub swatch: Id,
     /// Pressure response, as a gamma (E4.1). 1 = linear.
     pub pressure_gamma: f32,
@@ -289,6 +300,15 @@ impl Session {
                 stencil: None,
                 texture: None,
             },
+            eraser: BrushSettings {
+                min_width: 8.0,
+                max_width: 20.0,
+                smoothing: 0.0,
+                tips: Tips::default(),
+                stencil: None,
+                texture: None,
+            },
+            eraser_tip: symphony_core::stroke::Tip::Round,
             swatch,
             pressure_gamma: 1.0,
             onion: Onion {
@@ -516,23 +536,41 @@ impl Session {
 
     /// Erase strokes by ID from `drawing`. Repeated calls during one eraser
     /// gesture undo as a single step.
-    pub fn erase(&mut self, drawing: Id, stroke_ids: &[Id]) {
-        for sid in stroke_ids {
+    /// Harmony's Eraser on vector art: cut every line on the current art
+    /// layer that `eraser` (discs in drawing space) covers. Pieces stay at
+    /// the line's depth; a whole drag is one undo step (call `end_gesture`).
+    pub fn erase(&mut self, drawing: Id, eraser: &[symphony_vector::cut::Disc]) {
+        let art = self.art;
+        let tip = self.eraser_tip;
+        let Some(d) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let cuts: Vec<(Id, Vec<Stroke>)> = d
+            .strokes
+            .iter()
+            .filter(|st| st.art == art)
+            .filter_map(|st| Some((st.id, symphony_vector::cut::cut(st, eraser, tip)?)))
+            .collect();
+        for (id, mut pieces) in cuts {
             let Some(d) = self.doc.drawings.get(&drawing) else {
                 return;
             };
-            let Some(index) = d.strokes.iter().position(|s| s.id == *sid) else {
+            let Some(index) = d.strokes.iter().position(|x| x.id == id) else {
                 continue;
             };
-            let stroke = d.strokes[index].clone();
+            let before = d.strokes[index].clone();
+            for p in &mut pieces {
+                p.id = self.doc.ids.fresh();
+            }
             self.history.apply_merged(
                 &mut self.doc,
                 "Erase",
                 "erase",
-                Edit::RemoveStroke {
+                Edit::ReplaceStroke {
                     drawing,
                     index,
-                    stroke,
+                    before,
+                    after: pieces,
                 },
             );
         }
@@ -1693,6 +1731,38 @@ mod tests {
             ..line(|_| 1.0)
         })
         .is_none());
+    }
+
+    #[test]
+    fn eraser_cuts_lines_and_one_drag_undoes_at_once() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        let d = s.doc.exposed(0, 1).unwrap();
+        let original = s.doc.drawings[&d].strokes.clone();
+        // Two stamps of one drag: through the top edge, then the bottom.
+        s.erase(d, &[([50.0, 10.0], 5.0)]);
+        assert_eq!(
+            s.doc.drawings[&d].strokes.len(),
+            2,
+            "the square opens into two pieces"
+        );
+        s.erase(d, &[([50.0, 90.0], 5.0)]);
+        assert_eq!(s.doc.drawings[&d].strokes.len(), 3);
+        s.end_gesture();
+        // Pieces keep their ends where the eraser's edge was.
+        let ends: Vec<f32> = s.doc.drawings[&d]
+            .strokes
+            .iter()
+            .flat_map(|st| [st.points[0].x, st.points.last().unwrap().x])
+            .collect();
+        assert!(ends.iter().any(|x| (x - 45.0).abs() < 0.1));
+        assert!(ends.iter().any(|x| (x - 55.0).abs() < 0.1));
+        // Other art layers are untouched by the eraser.
+        s.art = ArtLayer::ColourArt;
+        s.erase(d, &[([10.0, 50.0], 5.0)]);
+        assert_eq!(s.doc.drawings[&d].strokes.len(), 3);
+        s.undo();
+        assert_eq!(s.doc.drawings[&d].strokes, original, "one drag, one undo");
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //!   round caps, for any renderer.
 //! - [`hits`]: does a circle touch a stroke (eraser, selection)?
 
+pub mod cut;
 pub mod fill;
 pub mod stamp;
 

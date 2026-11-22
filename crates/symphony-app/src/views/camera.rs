@@ -13,14 +13,13 @@ use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
-use symphony_vector::{hits, pressure_curve, scale_of, tessellate, Smoother};
+use symphony_vector::{pressure_curve, scale_of, tessellate, Smoother};
 
 use crate::keymap::{self, Action, Profile};
 use crate::session::{apply_stencil, Session, Stencil, Tool};
 use crate::views::select::{self, SelectState};
 
 /// Eraser radius, in screen points.
-const ERASER_RADIUS: f32 = 10.0;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
 
@@ -30,7 +29,9 @@ pub struct CanvasState {
     /// Degrees, clockwise.
     rotation: f32,
     active: Option<Active>,
-    erasing: Option<(Id, Affine)>,
+    /// Drawing being erased, scene -> drawing transform, and the last
+    /// eraser stamp (drawing space) so the drag erases a continuous path.
+    erasing: Option<(Id, Affine, Option<symphony_vector::cut::Disc>)>,
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
     pub select: SelectState,
@@ -655,8 +656,9 @@ pub fn ui(
                 }
                 if erasing {
                     if let Some(d) = s.doc.exposed(s.selected, s.frame) {
-                        state.erasing = Some((d, to_local));
-                        erase_at(s, state, (sx, sy), ERASER_RADIUS * local_px);
+                        state.erasing = Some((d, to_local, None));
+                        let r = eraser_radius(s, sm.pressure) * local_px;
+                        erase_at(s, state, (sx, sy), r);
                     }
                 } else {
                     let settings = if s.tool == Tool::Pencil {
@@ -730,7 +732,8 @@ pub fn ui(
                     }
                 } else if state.erasing.is_some() {
                     let local_px = px / scale_of(layer_world).max(1e-6);
-                    erase_at(s, state, (sx, sy), ERASER_RADIUS * local_px);
+                    let r = eraser_radius(s, sm.pressure) * local_px;
+                    erase_at(s, state, (sx, sy), r);
                 }
             }
             Phase::Up => {
@@ -814,26 +817,37 @@ fn zoom_at(state: &mut CanvasState, rect: Rect, w: f32, h: f32, p: Pos2, factor:
 
 /// Erase whole strokes under the eraser. (Cutting strokes in two comes
 /// with the vector editing tools.)
-fn erase_at(s: &mut Session, state: &CanvasState, scene_pt: (f32, f32), radius: f32) {
-    let Some((d, to_local)) = state.erasing else {
+/// Eraser radius in screen points for this pen pressure.
+fn eraser_radius(s: &Session, pressure: f32) -> f32 {
+    s.eraser
+        .width_at_pressure(pressure_curve(pressure, s.pressure_gamma))
+        * 0.5
+}
+
+/// Erase from the last stamp to this one: discs along the segment, so a
+/// fast drag leaves no gaps.
+fn erase_at(s: &mut Session, state: &mut CanvasState, scene_pt: (f32, f32), radius: f32) {
+    let Some((d, to_local, last)) = state.erasing.as_mut() else {
         return;
     };
     let (x, y) = to_local.apply(scene_pt.0, scene_pt.1);
-    let ids: Vec<Id> = s
-        .doc
-        .drawings
-        .get(&d)
-        .map(|dr| {
-            dr.strokes
-                .iter()
-                .filter(|st| st.art == s.art && hits(st, x, y, radius))
-                .map(|st| st.id)
-                .collect()
-        })
-        .unwrap_or_default();
-    if !ids.is_empty() {
-        s.erase(d, &ids);
+    let here = ([x, y], radius.max(0.01));
+    let mut discs = vec![here];
+    if let Some((p, r)) = *last {
+        let len = (x - p[0]).hypot(y - p[1]);
+        let step = (radius.min(r) * 0.5).max(0.01);
+        let n = ((len / step).ceil() as usize).min(2000);
+        for i in 1..n {
+            let t = i as f32 / n as f32;
+            discs.push((
+                [p[0] + (x - p[0]) * t, p[1] + (y - p[1]) * t],
+                r + (radius - r) * t,
+            ));
+        }
     }
+    *last = Some(here);
+    let d = *d;
+    s.erase(d, &discs);
 }
 
 #[derive(Clone, Copy)]
@@ -914,7 +928,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
     // Brush Size Cursor preference is on (as in Harmony).
     let erasing = pen_eraser || s.tool == Tool::Eraser;
     let radius = if erasing {
-        Some(ERASER_RADIUS)
+        Some((s.eraser.max_width * 0.5).max(1.5))
     } else if s.brush_size_cursor && matches!(s.tool, Tool::Brush | Tool::Pencil) {
         let b = if s.tool == Tool::Pencil {
             s.pencil

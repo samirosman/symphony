@@ -52,6 +52,15 @@ pub enum Edit {
         index: usize,
         stroke: Stroke,
     },
+    /// Swap one stroke for others at the same depth (the Eraser cutting a
+    /// line into pieces, or erasing it all when `after` is empty).
+    ReplaceStroke {
+        drawing: Id,
+        /// Depth of `before` in the drawing, where `after` goes.
+        index: usize,
+        before: Stroke,
+        after: Vec<Stroke>,
+    },
     AddDrawing {
         drawing: Drawing,
     },
@@ -137,6 +146,23 @@ impl Edit {
                         d.strokes
                             .insert((*index).min(d.strokes.len()), stroke.clone());
                     }
+                }
+            }
+            Edit::ReplaceStroke {
+                drawing,
+                index,
+                before,
+                after,
+            } => {
+                if let Some(d) = s.drawings.get_mut(drawing) {
+                    let (gone, new): (Vec<Id>, Vec<Stroke>) = if forward {
+                        (vec![before.id], after.clone())
+                    } else {
+                        (after.iter().map(|x| x.id).collect(), vec![before.clone()])
+                    };
+                    d.strokes.retain(|x| !gone.contains(&x.id));
+                    let at = (*index).min(d.strokes.len());
+                    d.strokes.splice(at..at, new);
                 }
             }
             Edit::AddFill { drawing, fill } => {
@@ -590,6 +616,81 @@ mod tests {
         assert_eq!(s.drawings[&did].strokes[0].points[0].x, 10.0);
         h.undo(&mut s);
         assert_eq!(s.drawings[&did].strokes[0].points[0].x, 0.0);
+    }
+
+    #[test]
+    fn replacing_a_stroke_keeps_its_depth_through_undo() {
+        let mut s = Scene::new(Settings::default());
+        let mut h = History::default();
+        let snap = s.make_layer("A", 0);
+        h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        let d = s.make_drawing(s.layers[0].column);
+        let did = d.id;
+        h.apply(&mut s, "Draw", vec![Edit::AddDrawing { drawing: d }]);
+        let mk = |s: &mut Scene, x: f32| Stroke {
+            id: s.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: 1.0,
+            max_width: 1.0,
+            points: vec![Point {
+                x,
+                y: 0.0,
+                pressure: 1.0,
+            }],
+            tips: Default::default(),
+            texture: None,
+        };
+        let (a, b, c) = (mk(&mut s, 0.0), mk(&mut s, 1.0), mk(&mut s, 2.0));
+        for st in [&a, &b, &c] {
+            h.apply(
+                &mut s,
+                "Draw",
+                vec![Edit::AddStroke {
+                    drawing: did,
+                    stroke: st.clone(),
+                }],
+            );
+        }
+        let ids = |s: &Scene| {
+            s.drawings[&did]
+                .strokes
+                .iter()
+                .map(|x| x.id)
+                .collect::<Vec<_>>()
+        };
+        let (p, q) = (mk(&mut s, 5.0), mk(&mut s, 6.0));
+        h.apply(
+            &mut s,
+            "Erase",
+            vec![Edit::ReplaceStroke {
+                drawing: did,
+                index: 1,
+                before: b.clone(),
+                after: vec![p.clone(), q.clone()],
+            }],
+        );
+        assert_eq!(ids(&s), vec![a.id, p.id, q.id, c.id]);
+        h.undo(&mut s);
+        assert_eq!(ids(&s), vec![a.id, b.id, c.id]);
+        h.apply(
+            &mut s,
+            "Erase",
+            vec![Edit::ReplaceStroke {
+                drawing: did,
+                index: 1,
+                before: b.clone(),
+                after: vec![],
+            }],
+        );
+        assert_eq!(ids(&s), vec![a.id, c.id]);
+        h.undo(&mut s);
+        assert_eq!(
+            ids(&s),
+            vec![a.id, b.id, c.id],
+            "fully erased line comes back in place"
+        );
     }
 
     #[test]
