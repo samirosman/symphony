@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use symphonia::core::audio::GenericAudioBufferRef;
+use symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
@@ -38,6 +39,15 @@ impl Samples {
         self.data.is_empty()
     }
 }
+
+/// Frames every MP3 decoder outputs before the first real sample: the
+/// delay of its filter bank. Symphonia trims it, and the encoder's own
+/// delay, only when the file has a LAME header. Without one, a sound
+/// started 1105 frames late in our test (529 here plus LAME's 576), about
+/// 23 ms at 48 kHz. The encoder's part differs between encoders, so only
+/// this part is trimmed. The same value is in Symphonia's LAME header
+/// reader (`symphonia-bundle-mp3` 0.6.1, `demuxer.rs`).
+const MP3_DECODER_DELAY: usize = 529;
 
 /// Lets Symphonia read shared file bytes without copying them.
 struct Shared(Arc<Vec<u8>>);
@@ -87,6 +97,12 @@ fn decode_inner(bytes: &Arc<Vec<u8>>) -> Result<Samples, String> {
         .as_ref()
         .and_then(|p| p.audio())
         .ok_or("it has no sound in it")?;
+    // Symphonia trims the start itself when the file says how much.
+    let mut skip = if params.codec == CODEC_ID_MP3 && track.delay.is_none() {
+        MP3_DECODER_DELAY
+    } else {
+        0
+    };
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(|_| "its sound is in a kind of encoding Symphony can't read".to_string())?;
@@ -109,7 +125,7 @@ fn decode_inner(bytes: &Arc<Vec<u8>>) -> Result<Samples, String> {
             Err(Error::DecodeError(_)) => continue,
             Err(e) => return Err(unreadable(e)),
         };
-        append(&mut out, &buf, &mut chunk)?;
+        append(&mut out, &buf, &mut chunk, &mut skip)?;
     }
     let out = out.ok_or("it has no sound in it")?;
     if out.is_empty() {
@@ -119,11 +135,12 @@ fn decode_inner(bytes: &Arc<Vec<u8>>) -> Result<Samples, String> {
 }
 
 /// Add one decoded packet, checking it against the limits and against
-/// the packets before it.
+/// the packets before it. The first `skip` frames are dropped.
 fn append(
     out: &mut Option<Samples>,
     buf: &GenericAudioBufferRef<'_>,
     chunk: &mut Vec<f32>,
+    skip: &mut usize,
 ) -> Result<(), String> {
     let rate = buf.spec().rate();
     let channels = u16::try_from(buf.spec().channels().count()).unwrap_or(u16::MAX);
@@ -146,7 +163,10 @@ fn append(
         return Err("it is longer than 10 minutes".into());
     }
     buf.copy_to_vec_interleaved(chunk);
-    s.data.extend_from_slice(chunk);
+    let ch = usize::from(channels);
+    let dropped = (*skip).min(chunk.len() / ch);
+    *skip -= dropped;
+    s.data.extend_from_slice(&chunk[dropped * ch..]);
     Ok(())
 }
 
@@ -226,6 +246,18 @@ mod tests {
         assert_eq!(s.data[0], 0.0);
         assert!((s.data[1] - 0.5).abs() < 1e-4);
         assert!((s.data[2] + 0.5).abs() < 1e-4);
+    }
+
+    /// 0.25 s at 8 kHz with a click at frame 800, from LAME through
+    /// ffmpeg with no LAME header (`-write_xing 0`).
+    const MP3_NO_HEADER: &[u8] = include_bytes!("../testdata/click-800-no-header.mp3");
+
+    #[test]
+    fn trims_the_decoder_delay_of_an_mp3_without_a_header() {
+        let (_, _, s) = import_bytes(MP3_NO_HEADER.to_vec()).unwrap();
+        let first = s.data.iter().position(|x| x.abs() > 0.05).unwrap();
+        // 800, plus LAME's own 576, which only the header could tell.
+        assert!((1366..=1386).contains(&first), "click at {first}");
     }
 
     #[test]
