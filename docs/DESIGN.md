@@ -198,6 +198,10 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
   pick out a single word.
 - **D5.4 Spelling:** Canadian/British, the same as Harmony ("Colour").
   Keep it consistent across UI and docs.
+- **D5.5 Text that doesn't fit ends in an ellipsis, and hovering it shows
+  the full text** (after the normal tooltip delay). Never let text run
+  past its box or overlap other text. Use `widgets::fitted_text` for
+  painted text and `Label::truncate()` for labels.
 
 ---
 

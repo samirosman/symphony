@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, Align2, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_ui::icons::{self, Icon};
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 
 use crate::keymap::{self, Action, Profile};
 use crate::session::Session;
@@ -285,12 +285,15 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     } else {
                         theme::TEXT_SECONDARY
                     };
-                    painter.text(
+                    widgets::fitted_text(
+                        ui,
+                        &painter,
                         Pos2::new(o.x + 40.0, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         s.layer_name(i),
                         theme::body(),
                         name_col,
+                        HEAD - 48.0,
                     );
                 }
 
@@ -492,12 +495,15 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
                     } else {
                         theme::TEXT_SECONDARY
                     };
-                    painter.text(
+                    widgets::fitted_text(
+                        ui,
+                        &painter,
                         head.center(),
                         Align2::CENTER_CENTER,
                         s.layer_name(i),
                         theme::body(),
                         text,
+                        head.width() - 8.0,
                     );
                 }
                 painter.line_segment(

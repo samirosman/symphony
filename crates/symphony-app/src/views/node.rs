@@ -7,7 +7,7 @@ use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
 
 use crate::session::Session;
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 
 #[derive(Default)]
 pub struct NodeViewState {
@@ -117,20 +117,26 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         // Show the type under the name only when it adds information.
         let kind = kind_label(&node.kind);
         if node.name == kind {
-            painter.text(
+            widgets::fitted_text(
+                ui,
+                &painter,
                 r.center(),
                 Align2::CENTER_CENTER,
                 &node.name,
                 theme::body(),
                 name_col,
+                r.width() - 10.0,
             );
         } else {
-            painter.text(
+            widgets::fitted_text(
+                ui,
+                &painter,
                 r.center() - Vec2::new(0.0, 7.0),
                 Align2::CENTER_CENTER,
                 &node.name,
                 theme::body(),
                 name_col,
+                r.width() - 10.0,
             );
             painter.text(
                 r.center() + Vec2::new(0.0, 9.0),

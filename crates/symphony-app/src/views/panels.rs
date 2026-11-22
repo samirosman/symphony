@@ -220,30 +220,28 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                 );
                 p.rect_filled(sample, 3.0, theme::CANVAS_STAGE);
                 paint_sample(p, sample, ink, &preset.settings, 1.0, pencil);
-                // Long names end in an ellipsis instead of running off.
+                // Long names end in an ellipsis; the row's tooltip below
+                // starts with the full name (D5.5).
                 let tag = if preset.settings.stencil.is_some() && pencil {
                     56.0
                 } else {
                     0.0
                 };
                 let left = sample.right() + 8.0;
-                let mut job = egui::text::LayoutJob::single_section(
-                    preset.name.clone(),
-                    egui::TextFormat::simple(
-                        theme::body(),
-                        if selected {
-                            theme::ON_ACCENT
-                        } else {
-                            theme::TEXT_PRIMARY
-                        },
-                    ),
+                widgets::fit_text(
+                    ui,
+                    p,
+                    egui::pos2(left, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &preset.name,
+                    theme::body(),
+                    if selected {
+                        theme::ON_ACCENT
+                    } else {
+                        theme::TEXT_PRIMARY
+                    },
+                    rect.right() - 6.0 - tag - left,
                 );
-                job.wrap = egui::text::TextWrapping::truncate_at_width(
-                    (rect.right() - 6.0 - tag - left).max(8.0),
-                );
-                let galley = ui.fonts_mut(|f| f.layout_job(job));
-                let top = rect.center().y - galley.size().y * 0.5;
-                p.galley(egui::pos2(left, top), galley, theme::TEXT_PRIMARY);
                 if preset.settings.stencil.is_some() && pencil {
                     p.text(
                         egui::pos2(rect.right() - 6.0, rect.center().y),

@@ -107,3 +107,64 @@ pub fn radio_value<T: PartialEq + Copy>(
     }
     r
 }
+
+/// Paint text cut to `max_width` with an ellipsis (DESIGN D5.5). `pos` is
+/// placed by `align`, as in `Painter::text`. Returns the drawn rectangle
+/// and whether the text was cut.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_text(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: Pos2,
+    align: egui::Align2,
+    text: &str,
+    font: egui::FontId,
+    colour: egui::Color32,
+    max_width: f32,
+) -> (Rect, bool) {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(font, colour),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(8.0));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let rect = align.anchor_size(pos, galley.size());
+    let elided = galley.elided;
+    painter.galley(rect.min, galley, colour);
+    (rect, elided)
+}
+
+/// [`fit_text`] plus the full text on hover when it was cut (D5.5). Use
+/// this unless the surrounding widget's own tooltip already names it.
+#[allow(clippy::too_many_arguments)]
+pub fn fitted_text(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: Pos2,
+    align: egui::Align2,
+    text: &str,
+    font: egui::FontId,
+    colour: egui::Color32,
+    max_width: f32,
+) -> Rect {
+    let (rect, elided) = fit_text(ui, painter, pos, align, text, font, colour, max_width);
+    if elided && ui.rect_contains_pointer(rect) {
+        let rested = ui.input(|i| i.pointer.time_since_last_movement())
+            >= ui.style().interaction.tooltip_delay;
+        if rested {
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                ui.scope_id().with(("fitted-text", text)),
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| ui.label(text));
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f32(
+                    ui.style().interaction.tooltip_delay,
+                ));
+        }
+    }
+    rect
+}
