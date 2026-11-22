@@ -958,11 +958,18 @@ fn minimap(painter: &egui::Painter, viewport: Rect, bounds: Rect) {
         map.min + (viewport.min - full.min) * scale,
         viewport.size() * scale,
     );
+    let softness = egui::Shadow {
+        offset: [0, 1],
+        blur: 8,
+        spread: 0,
+        color: theme::SHADOW.gamma_multiply(0.62),
+    };
+    painter.add(softness.as_shape(map, 4));
     painter.rect(
         map,
-        3.0,
-        theme::BG_RAISED,
-        Stroke::new(1.0, theme::LINE_STRONG),
+        4.0,
+        theme::BG_RAISED.gamma_multiply(0.86),
+        Stroke::new(1.0, theme::LINE_STRONG.gamma_multiply(0.8)),
         StrokeKind::Inside,
     );
     painter.rect_stroke(

@@ -34,6 +34,12 @@ impl Choice {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum ChromeSide {
+    Top,
+    Bottom,
+}
+
 pub struct Wallpaper {
     pub choice: Choice,
     pub blur: u8,
@@ -155,6 +161,28 @@ impl Wallpaper {
         )
     }
 
+    /// Fade both the cached backdrop sample and the chrome tint into the workspace.
+    pub fn chrome(&self, rect: Rect, side: ChromeSide) -> egui::Shape {
+        let mut layers = Vec::new();
+        if !self.textures.is_empty() && self.backdrop.is_positive() {
+            let (lower, upper, blend) = blur_mix(self.blur.max(GLASS_BLUR));
+            let level = if blend < 0.5 { lower } else { upper };
+            layers.push(egui::Shape::mesh(chrome_mesh(
+                rect,
+                side,
+                Some((self.textures[level].id(), self.backdrop)),
+                Color32::from_gray(204),
+            )));
+        }
+        layers.push(egui::Shape::mesh(chrome_mesh(
+            rect,
+            side,
+            None,
+            theme::GLASS_CHROME,
+        )));
+        egui::Shape::Vec(layers)
+    }
+
     fn sample(&self, rect: Rect, radius: f32, amount: u8, tint: Color32) -> Option<egui::Shape> {
         if !rect.is_positive() || !self.backdrop.is_positive() || self.textures.is_empty() {
             return None;
@@ -226,6 +254,57 @@ impl Wallpaper {
             ui.label(error);
         }
     }
+}
+
+fn chrome_mesh(
+    rect: Rect,
+    side: ChromeSide,
+    texture: Option<(egui::TextureId, Rect)>,
+    fill: Color32,
+) -> egui::Mesh {
+    let mut mesh = texture.map_or_else(egui::Mesh::default, |(id, _)| egui::Mesh::with_texture(id));
+    let inside = match side {
+        ChromeSide::Top => rect.top(),
+        ChromeSide::Bottom => rect.bottom(),
+    };
+    let edge = match side {
+        ChromeSide::Top => rect.bottom(),
+        ChromeSide::Bottom => rect.top(),
+    };
+    let direction = (edge - inside).signum();
+    let transition = rect.height().min(4.0);
+    let start = edge - direction * transition;
+    let end = edge + direction * 6.0;
+    for (row, (y, alpha)) in [
+        (inside, 1.0),
+        (start, 1.0),
+        (egui::lerp(start..=end, 0.25), 0.84),
+        (egui::lerp(start..=end, 0.5), 0.5),
+        (egui::lerp(start..=end, 0.75), 0.16),
+        (end, 0.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for x in [rect.left(), rect.right()] {
+            let pos = Pos2::new(x, y);
+            let uv = texture.map_or(egui::epaint::WHITE_UV, |(_, backdrop)| {
+                let offset = pos - backdrop.min;
+                Pos2::new(offset.x / backdrop.width(), offset.y / backdrop.height())
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos,
+                uv,
+                color: fill.gamma_multiply(alpha),
+            });
+        }
+        if row > 0 {
+            let previous = (row as u32 - 1) * 2;
+            mesh.add_triangle(previous, previous + 1, previous + 2);
+            mesh.add_triangle(previous + 1, previous + 3, previous + 2);
+        }
+    }
+    mesh
 }
 
 fn blur_mix(amount: u8) -> (usize, usize, f32) {
@@ -311,6 +390,25 @@ fn load(path: &Path) -> Result<Vec<RgbImage>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_feathers_toward_the_workspace_on_both_edges() {
+        let rect = Rect::from_min_max(Pos2::new(0.0, 40.0), Pos2::new(400.0, 64.0));
+        let top = chrome_mesh(rect, ChromeSide::Top, None, Color32::WHITE);
+        let bottom = chrome_mesh(rect, ChromeSide::Bottom, None, Color32::WHITE);
+        assert_eq!(top.vertices[0].pos.y, rect.top());
+        assert_eq!(bottom.vertices[0].pos.y, rect.bottom());
+        assert_eq!(top.vertices.last().unwrap().pos.y, rect.bottom() + 6.0);
+        assert_eq!(bottom.vertices.last().unwrap().pos.y, rect.top() - 6.0);
+        for mesh in [top, bottom] {
+            assert_eq!(mesh.vertices[0].color.a(), 255);
+            assert_eq!(mesh.vertices.last().unwrap().color.a(), 0);
+            assert!(mesh
+                .vertices
+                .windows(2)
+                .all(|pair| pair[0].color.a() >= pair[1].color.a()));
+        }
+    }
 
     #[test]
     fn blur_slider_blends_cached_levels_and_preserves_zero() {

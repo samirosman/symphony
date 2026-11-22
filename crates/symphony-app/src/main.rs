@@ -2833,17 +2833,30 @@ impl eframe::App for SymphonyApp {
         }
 
         self.wallpaper.paint(ui);
-        let base = egui::Frame::new().fill(theme::GLASS_CHROME);
-        egui::Panel::top("top-bar")
+        let chrome = ui.painter().clone();
+        let top_background = chrome.add(egui::Shape::Noop);
+        let top = egui::Panel::top("top-bar")
             .show_separator_line(false)
-            .frame(base.inner_margin(egui::Margin::symmetric(10, 0)))
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 0)))
             .exact_size(theme::TOP_BAR)
             .show(ui, |ui| self.top_bar(ui));
-        egui::Panel::bottom("status")
+        chrome.set(
+            top_background,
+            self.wallpaper
+                .chrome(top.response.rect, wallpaper::ChromeSide::Top),
+        );
+
+        let bottom_background = chrome.add(egui::Shape::Noop);
+        let bottom = egui::Panel::bottom("status")
             .show_separator_line(false)
-            .frame(base.inner_margin(egui::Margin::symmetric(12, 0)))
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)))
             .exact_size(theme::STATUS_BAR)
             .show(ui, |ui| self.status_bar(ui, device.as_ref()));
+        chrome.set(
+            bottom_background,
+            self.wallpaper
+                .chrome(bottom.response.rect, wallpaper::ChromeSide::Bottom),
+        );
         self.tools_panel(ui);
 
         if self.tool_options_open {
