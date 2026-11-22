@@ -17,3 +17,8 @@ members = [
 version = "0.1.0-preview.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
+
+# egui_dock with Symphony's changes (rounded, fading drop targets). MIT
+# licensed; see vendor/egui_dock/LICENSE and vendor/README.md.
+[patch.crates-io]
+egui_dock = { path = "vendor/egui_dock" }

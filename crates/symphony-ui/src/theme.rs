@@ -153,6 +153,16 @@ pub fn set_motion(ctx: &egui::Context, enabled: bool) {
     ctx.all_styles_mut(|style| style.animation_time = if enabled { 0.12 } else { 0.0 });
 }
 
+/// Floating views' window frame: transparent, because the app paints the
+/// glass backdrop under the contents, with the glass corners, edge and a
+/// soft shadow.
+pub fn glass_window_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::window(style)
+        .fill(Color32::TRANSPARENT)
+        .corner_radius(GLASS_RADIUS)
+        .stroke(Stroke::new(1.0, Color32::from_white_alpha(22)))
+}
+
 /// One inner rim on the same rounded rectangle as the glass fill.
 pub fn glass_rim(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_stroke(
@@ -321,6 +331,8 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.main_surface_border_rounding = CornerRadius::ZERO;
     d.separator.width = GUTTER;
     d.separator.extra = 0.0;
+    // Easier to grab, and the crossing of two dividers is a real target.
+    d.separator.extra_interact_width = 6.0;
     d.separator.color_idle = Color32::TRANSPARENT;
     // The app draws its own slim rounded grip (main.rs resize_grip).
     d.separator.color_hovered = Color32::TRANSPARENT;

@@ -296,36 +296,30 @@ fn resize_grip(ui: &egui::Ui, leaves: &[egui::Rect]) {
         return;
     }
     let gap = theme::GUTTER * 2.0 + 2.0;
-    let mut bar: Option<egui::Rect> = None;
+    // Gaps next to the pointer: vertical ones (side by side views) and
+    // horizontal ones (stacked views). Near a crossing, both count.
+    let mut vertical: Option<egui::Rect> = None;
+    let mut horizontal: Option<egui::Rect> = None;
     for a in leaves {
         for b in leaves {
-            // Side by side: a vertical gap between a's right and b's left.
             let dx = b.left() - a.right();
             let (top, bottom) = (a.top().max(b.top()), a.bottom().min(b.bottom()));
             if dx > 0.0 && dx <= gap && bottom > top {
                 let r = egui::Rect::from_x_y_ranges(a.right()..=b.left(), top..=bottom);
-                if r.expand(3.0).contains(p) {
-                    bar = Some(egui::Rect::from_center_size(
-                        r.center(),
-                        egui::vec2(3.0, (r.height() - 24.0).max(12.0)),
-                    ));
+                if r.expand2(egui::vec2(3.0, gap)).contains(p) {
+                    vertical = Some(r);
                 }
             }
-            // Stacked: a horizontal gap between a's bottom and b's top.
             let dy = b.top() - a.bottom();
             let (left, right) = (a.left().max(b.left()), a.right().min(b.right()));
             if dy > 0.0 && dy <= gap && right > left {
                 let r = egui::Rect::from_x_y_ranges(left..=right, a.bottom()..=b.top());
-                if r.expand(3.0).contains(p) {
-                    bar = Some(egui::Rect::from_center_size(
-                        r.center(),
-                        egui::vec2((r.width() - 24.0).max(12.0), 3.0),
-                    ));
+                if r.expand2(egui::vec2(gap, 3.0)).contains(p) {
+                    horizontal = Some(r);
                 }
             }
         }
     }
-    let Some(bar) = bar else { return };
     let dragging = ui.input(|i| i.pointer.primary_down());
     let colour = if dragging {
         theme::ACCENT_SELECT
@@ -333,7 +327,116 @@ fn resize_grip(ui: &egui::Ui, leaves: &[egui::Rect]) {
         theme::TEXT_SECONDARY.gamma_multiply(0.7)
     };
     let painter = ui.painter();
-    painter.rect_filled(bar, 1.5, colour);
+    let pill = |r: egui::Rect| {
+        painter.rect_filled(r, 1.5, colour);
+    };
+    match (vertical, horizontal) {
+        // A crossing: a small cross, since dragging here moves both ways.
+        (Some(v), Some(h)) => {
+            let c = egui::pos2(v.center().x, h.center().y);
+            pill(egui::Rect::from_center_size(c, egui::vec2(3.0, 26.0)));
+            pill(egui::Rect::from_center_size(c, egui::vec2(26.0, 3.0)));
+        }
+        (Some(v), None) if v.expand(3.0).contains(p) => pill(egui::Rect::from_center_size(
+            v.center(),
+            egui::vec2(3.0, (v.height() - 24.0).max(12.0)),
+        )),
+        (None, Some(h)) if h.expand(3.0).contains(p) => pill(egui::Rect::from_center_size(
+            h.center(),
+            egui::vec2((h.width() - 24.0).max(12.0), 3.0),
+        )),
+        _ => {}
+    }
+}
+
+/// When a view lands somewhere new (docked, undocked into a window, or
+/// merged into another view's tabs), a glass outline travels from where it
+/// was to where it landed with the shared Settle motion, so you see where
+/// it went.
+fn settle_moved_views(ctx: &egui::Context, layout: &egui_dock::DockState<View>) {
+    use symphony_ui::motion::{self, Motion};
+    #[derive(Clone)]
+    struct Ghost {
+        view: View,
+        from: egui::Rect,
+        start: f64,
+    }
+    let seen_id = egui::Id::unique("symphony-dock-seen");
+    let ghost_id = egui::Id::unique("symphony-dock-ghosts");
+    let now = ctx.input(|i| i.time);
+    // Each view: its leaf's rect, and who it shares the leaf with.
+    let mut current: Vec<(View, egui::Rect, Vec<View>)> = Vec::new();
+    for (_, leaf) in layout.iter_leaves() {
+        let rect = leaf.rect();
+        if !rect.is_positive() || !rect.is_finite() {
+            continue;
+        }
+        let mut group = leaf.tabs.clone();
+        group.sort_by_key(|v| format!("{v:?}"));
+        for &v in &leaf.tabs {
+            current.push((v, rect, group.clone()));
+        }
+    }
+    let seen: Vec<(View, egui::Rect, Vec<View>)> =
+        ctx.data(|d| d.get_temp(seen_id)).unwrap_or_default();
+    let mut ghosts: Vec<Ghost> = ctx.data(|d| d.get_temp(ghost_id)).unwrap_or_default();
+    if motion::enabled(ctx) {
+        for (v, rect, group) in &current {
+            let moved = seen
+                .iter()
+                .find(|(s, ..)| s == v)
+                .filter(|(_, old, old_group)| {
+                    old_group != group
+                        && (old.min - rect.min).length() + (old.max - rect.max).length() > 4.0
+                });
+            if let Some((_, old, _)) = moved {
+                ghosts.retain(|g| g.view != *v);
+                ghosts.push(Ghost {
+                    view: *v,
+                    from: *old,
+                    start: now,
+                });
+            }
+        }
+    }
+    // Views that vanished for a frame (a drop resolves over two frames)
+    // keep their last place.
+    let mut keep = current.clone();
+    for s in &seen {
+        if !keep.iter().any(|(v, ..)| *v == s.0) && layout.find_tab(&s.0).is_some() {
+            keep.push(s.clone());
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(seen_id, keep));
+    let length = Motion::Settle.seconds();
+    ghosts.retain(|g| now - g.start < length);
+    if !ghosts.is_empty() {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("symphony-dock-ghost-layer"),
+        ));
+        for g in &ghosts {
+            let Some((_, to, _)) = current.iter().find(|(v, ..)| *v == g.view) else {
+                continue;
+            };
+            let t = ((now - g.start) / length) as f32;
+            let p = Motion::Settle.ease(t);
+            let rect = egui::Rect::from_min_max(
+                g.from.min + (to.min - g.from.min) * p,
+                g.from.max + (to.max - g.from.max) * p,
+            );
+            let fade = 1.0 - t * t;
+            painter.rect(
+                rect,
+                theme::GLASS_RADIUS,
+                theme::ACCENT_SELECT.gamma_multiply(0.07 * fade),
+                egui::Stroke::new(1.5, theme::ACCENT_SELECT.gamma_multiply(0.6 * fade)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(ghost_id, ghosts));
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -3041,13 +3144,29 @@ impl eframe::App for SymphonyApp {
                     // final only after the splitters have processed this frame.
                     let painter = ui.painter().clone();
                     let background = painter.add(egui::Shape::Noop);
+                    // Floating views are glass like every other panel:
+                    // the blurred wallpaper under a translucent tint.
+                    let wallpaper = &self.wallpaper;
+                    let backdrop = |rect: egui::Rect| {
+                        let mut shapes: Vec<egui::Shape> =
+                            wallpaper.glass(rect).into_iter().collect();
+                        shapes.push(egui::Shape::rect_filled(
+                            rect,
+                            theme::GLASS_RADIUS,
+                            theme::GLASS_PANEL,
+                        ));
+                        shapes
+                    };
                     DockArea::new(layout)
                         .style(theme::dock_style(ui.style()))
+                        .window_frame(theme::glass_window_frame(ui.style()))
+                        .window_backdrop(&backdrop)
                         .show_add_buttons(false)
                         .show_close_buttons(true)
                         .show_leaf_close_all_buttons(false)
                         .show_leaf_collapse_buttons(false)
                         .show_inside(ui, &mut viewer);
+                    settle_moved_views(ui.ctx(), layout);
                     let tab_request = viewer
                         .tab_request
                         .take()
@@ -3324,6 +3443,137 @@ mod workspace_control_tests {
         });
         harness.run_steps(1);
         assert!((harness.state().0 - before - 0.1).abs() < 0.0001);
+    }
+
+    /// Where each left/right divider sits: (top of its area, x).
+    fn divider_xs(layout: &DockState<View>) -> Vec<(f32, f32)> {
+        let mut xs: Vec<(f32, f32)> = layout
+            .main_surface()
+            .iter()
+            .filter_map(|n| match n {
+                egui_dock::Node::Horizontal(s) => {
+                    Some((s.rect.top(), s.rect.left() + s.rect.width() * s.fraction))
+                }
+                _ => None,
+            })
+            .collect();
+        xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        xs
+    }
+
+    #[test]
+    fn dragging_a_divider_near_its_neighbour_snaps_them_into_line() {
+        struct TestViewer;
+        impl egui_dock::TabViewer for TestViewer {
+            type Tab = View;
+            fn id(&mut self, tab: &mut View) -> egui::Id {
+                egui::Id::unique(("snap-test-tab", *tab))
+            }
+            fn title(&mut self, tab: &mut View) -> egui::WidgetText {
+                tab.title().into()
+            }
+            fn ui(&mut self, _: &mut egui::Ui, _: &mut View) {}
+        }
+        // Two rows, each split left/right, the dividers 35 points apart.
+        let mut layout = DockState::new(vec![View::Camera]);
+        let surface = layout.main_surface_mut();
+        let [top, bottom] =
+            surface.split_below(egui_dock::NodeIndex::root(), 0.5, vec![View::Timeline]);
+        surface.split_right(top, 0.5, vec![View::Drawing]);
+        surface.split_right(bottom, 0.55, vec![View::Node]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(700.0, 400.0))
+            .build_ui_state(
+                |ui, layout| {
+                    DockArea::new(layout)
+                        .style(theme::dock_style(ui.style()))
+                        .show_inside(ui, &mut TestViewer);
+                },
+                layout,
+            );
+        harness.run_steps(3);
+        let xs = divider_xs(harness.state());
+        let (target, start) = (xs[0].1, xs[1].1);
+        assert!(start - target > 20.0, "{xs:?}");
+        // Drag the bottom divider to 6 points short of the top one.
+        let y = 300.0;
+        let mut at = egui::pos2(start, y);
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        harness.run_steps(1);
+        while at.x > target + 6.0 {
+            at.x = (at.x - 4.0).max(target + 6.0);
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(at));
+            harness.run_steps(1);
+        }
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        let xs = divider_xs(harness.state());
+        assert!((xs[0].1 - xs[1].1).abs() < 0.5, "snapped into line: {xs:?}");
+        assert!((xs[0].1 - target).abs() < 0.5, "the other one stays put");
+
+        // Lined up, the crossing moves all three dividers, on both axes.
+        let row_y = |layout: &DockState<View>| {
+            layout
+                .main_surface()
+                .iter()
+                .find_map(|n| match n {
+                    egui_dock::Node::Vertical(s) => {
+                        Some(s.rect.top() + s.rect.height() * s.fraction)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let y0 = row_y(harness.state());
+        let mut at = egui::pos2(xs[0].1, y0);
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        harness.run_steps(1);
+        for _ in 0..10 {
+            at += egui::vec2(4.0, 3.0);
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(at));
+            harness.run_steps(1);
+        }
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        let moved = divider_xs(harness.state());
+        assert!(
+            (moved[0].1 - moved[1].1).abs() < 0.5,
+            "still in line: {moved:?}"
+        );
+        assert!(moved[0].1 - xs[0].1 > 30.0, "moved across: {moved:?}");
+        assert!(row_y(harness.state()) - y0 > 20.0, "moved down too");
     }
 
     #[test]
