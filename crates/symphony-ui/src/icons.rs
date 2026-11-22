@@ -37,10 +37,15 @@ pub enum Icon {
     Forbidden,
     Minus,
     CloseGap,
+    ArtPreview,
+    ArtOverlay,
+    ArtLine,
+    ArtColour,
+    ArtUnderlay,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 27] = [
+    pub const ALL: [Icon; 32] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -68,6 +73,11 @@ impl Icon {
         Icon::Forbidden,
         Icon::Minus,
         Icon::CloseGap,
+        Icon::ArtPreview,
+        Icon::ArtOverlay,
+        Icon::ArtLine,
+        Icon::ArtColour,
+        Icon::ArtUnderlay,
     ];
 }
 
@@ -378,6 +388,22 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             g.dot(p, 5.0, 7.0, 1.35);
             g.dot(p, 11.0, 7.0, 1.35);
             g.dot(p, 8.0, 7.0, 0.65);
+        }
+        // Art layers: a stack of three sheets, the current one filled.
+        Icon::ArtPreview | Icon::ArtOverlay | Icon::ArtUnderlay => {
+            let sheet = |y: f32| [(2.0, y), (10.5, y), (14.0, y - 3.5), (5.5, y - 3.5)];
+            for (i, y) in [6.0, 9.5, 13.0].into_iter().enumerate() {
+                let filled = matches!((icon, i), (Icon::ArtOverlay, 0) | (Icon::ArtUnderlay, 2));
+                if filled {
+                    g.fill(p, &sheet(y));
+                }
+                g.closed(p, &sheet(y));
+            }
+        }
+        // Line Art: an outline. Colour Art: the paint inside it.
+        Icon::ArtLine => g.circle(p, 8.0, 8.0, 5.0),
+        Icon::ArtColour => {
+            g.dot(p, 8.0, 8.0, 5.0);
         }
         Icon::Plus => {
             g.line(p, &[(8.0, 3.0), (8.0, 13.0)]);

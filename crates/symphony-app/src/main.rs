@@ -51,6 +51,9 @@ struct Saved {
     pressure_gamma: Option<f32>,
     #[serde(default)]
     brush_size_cursor: bool,
+    /// Harmony's Support Overlay and Underlay Arts preference.
+    #[serde(default)]
+    overlay_underlay: bool,
     /// Use Cisco's OpenH264 for movies (Cisco requires the user can turn it off).
     #[serde(default = "yes")]
     use_openh264: bool,
@@ -193,6 +196,7 @@ impl SymphonyApp {
         let interface_animations = saved.as_ref().is_none_or(|s| s.interface_animations);
         theme::set_motion(&cc.egui_ctx, interface_animations);
         let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
+        let overlay_underlay = saved.as_ref().is_some_and(|s| s.overlay_underlay);
         let use_openh264 = saved.as_ref().is_none_or(|s| s.use_openh264);
         let presets = saved
             .as_ref()
@@ -223,6 +227,7 @@ impl SymphonyApp {
             s.pressure_gamma = g;
         }
         s.brush_size_cursor = brush_size_cursor;
+        s.overlay_underlay = overlay_underlay;
         // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
             layouts = Workspace::ALL.iter().map(|w| (*w, w.preset())).collect();
@@ -350,10 +355,12 @@ impl SymphonyApp {
             r.clear(&self.s.key);
         }
         let (gamma, cursor) = (self.s.pressure_gamma, self.s.brush_size_cursor);
+        let layers = self.s.overlay_underlay;
         let (brush, pencil) = (self.s.brush, self.s.pencil);
         self.s = next;
         self.s.pressure_gamma = gamma;
         self.s.brush_size_cursor = cursor;
+        self.s.overlay_underlay = layers;
         // Tool settings belong to the artist, not the scene.
         self.s.brush = brush;
         self.s.pencil = pencil;
@@ -722,6 +729,13 @@ impl SymphonyApp {
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
                     Action::ShowStrokes => s.show_strokes = !s.show_strokes,
                     Action::RespectProtectedColours => s.toggle_respect_protected(),
+                    Action::SwitchLineColourArt => s.switch_line_colour_art(),
+                    Action::SwitchOverlayUnderlay => s.switch_overlay_underlay(),
+                    Action::PreviewArtLayers => s.art_preview = !s.art_preview,
+                    Action::CreateColourArt => {
+                        let (layer, frame) = (s.selected, s.frame);
+                        s.create_colour_art(layer, frame);
+                    }
                     Action::ToolPaint
                     | Action::ToolPaintUnpainted
                     | Action::ToolRepaint
@@ -868,6 +882,15 @@ impl SymphonyApp {
             }
         });
         ui.menu_button("Drawing", |ui| {
+            self.menu_action(ui, Action::CreateColourArt);
+            ui.separator();
+            self.menu_action(ui, Action::SwitchLineColourArt);
+            if self.s.overlay_underlay {
+                self.menu_action(ui, Action::SwitchOverlayUnderlay);
+            }
+            let on = self.s.art_preview;
+            self.menu_toggle(ui, Action::PreviewArtLayers, on);
+            ui.separator();
             ui.menu_button("Colour Protection", |ui| {
                 let on = self.s.respect_protected;
                 self.menu_toggle(ui, Action::RespectProtectedColours, on);
@@ -1059,7 +1082,11 @@ impl SymphonyApp {
             );
             dense(
                 ui,
-                format!("Tool {}", tool_action(s.tool).name()),
+                format!(
+                    "Tool {}, {}",
+                    tool_action(s.tool).name(),
+                    session::art_name(s.art)
+                ),
                 theme::TEXT_SECONDARY,
             );
             if s.animate {
@@ -1610,6 +1637,7 @@ impl eframe::App for SymphonyApp {
                             &mut self.profile,
                             &mut self.use_no_ai,
                             &mut self.s.brush_size_cursor,
+                            &mut self.s.overlay_underlay,
                         );
                         self.video_preferences(ui);
                     })
@@ -1712,6 +1740,7 @@ impl eframe::App for SymphonyApp {
             use_no_ai: self.use_no_ai,
             pressure_gamma: Some(self.s.pressure_gamma),
             brush_size_cursor: self.s.brush_size_cursor,
+            overlay_underlay: self.s.overlay_underlay,
             use_openh264: self.use_openh264,
             presets: Some(self.presets.clone()),
         };

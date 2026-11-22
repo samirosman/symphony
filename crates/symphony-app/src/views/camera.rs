@@ -245,6 +245,7 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                     }
                     ui.add_space(10.0);
                 }
+                art_layer_toolbar(ui, s, profile);
                 if drawing_only {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         dense_label(ui, "Selected drawing only, without pegs");
@@ -252,6 +253,45 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 }
             });
         });
+}
+
+/// Harmony's Art Layer toolbar: preview all, then the art layers back to
+/// front as Harmony lists them (Overlay and Underlay only when enabled).
+fn art_layer_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
+    use crate::session::art_name;
+    // Turning the preference off leaves nothing on a hidden art layer.
+    if !s.overlay_underlay && matches!(s.art, ArtLayer::Overlay | ArtLayer::Underlay) {
+        s.set_art(ArtLayer::LineArt);
+    }
+    ui.separator();
+    let tip = keymap::tooltip(profile, Action::PreviewArtLayers);
+    if icons::button(ui, Icon::ArtPreview, s.art_preview, true, &tip).clicked() {
+        s.art_preview = !s.art_preview;
+    }
+    let mut layers = vec![
+        (ArtLayer::LineArt, Icon::ArtLine),
+        (ArtLayer::ColourArt, Icon::ArtColour),
+    ];
+    if s.overlay_underlay {
+        layers.insert(0, (ArtLayer::Overlay, Icon::ArtOverlay));
+        layers.push((ArtLayer::Underlay, Icon::ArtUnderlay));
+    }
+    for (art, icon) in layers {
+        let key = match art {
+            ArtLayer::LineArt | ArtLayer::ColourArt => Action::SwitchLineColourArt,
+            _ => Action::SwitchOverlayUnderlay,
+        };
+        let shortcut = keymap::label(profile, key);
+        let tip = if shortcut.is_empty() {
+            art_name(art).to_owned()
+        } else {
+            format!("{} ({shortcut} switches)", art_name(art))
+        };
+        if icons::button(ui, icon, s.art == art, true, &tip).clicked() {
+            s.set_art(art);
+        }
+    }
+    ui.add_space(10.0);
 }
 
 /// Bottom toolbar (D3.5a): navigation.
@@ -480,6 +520,11 @@ pub fn ui(
             let moving = preview.is_some() && s.selection.drawing == Some(*d);
             // Art layers back to front; within each, paint under ink.
             for art in ArtLayer::STACK {
+                // The Drawing view shows only the current art layer unless
+                // Preview All Art Layers (P) is on, as in Harmony.
+                if drawing_only && !s.art_preview && art != s.art {
+                    continue;
+                }
                 for f in dr.fills.iter().filter(|f| f.art == art) {
                     paint_mesh(
                         &painter,
@@ -650,7 +695,7 @@ pub fn ui(
                         stroke: Stroke {
                             id: s.doc.ids.fresh(),
                             kind,
-                            art: Default::default(),
+                            art: s.art,
                             swatch: s.swatch,
                             min_width: settings.min_width * k,
                             max_width: settings.max_width * k,
@@ -781,7 +826,7 @@ fn erase_at(s: &mut Session, state: &CanvasState, scene_pt: (f32, f32), radius: 
         .map(|dr| {
             dr.strokes
                 .iter()
-                .filter(|st| hits(st, x, y, radius))
+                .filter(|st| st.art == s.art && hits(st, x, y, radius))
                 .map(|st| st.id)
                 .collect()
         })

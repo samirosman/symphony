@@ -91,13 +91,17 @@ pub enum Action {
     ToolCloseGap,
     ShowStrokes,
     RespectProtectedColours,
+    SwitchLineColourArt,
+    SwitchOverlayUnderlay,
+    PreviewArtLayers,
+    CreateColourArt,
     ToolDropper,
     ToolHand,
     ToolZoom,
 }
 
 impl Action {
-    pub const ALL: [Action; 60] = [
+    pub const ALL: [Action; 64] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -155,6 +159,10 @@ impl Action {
         Action::ToolCloseGap,
         Action::ShowStrokes,
         Action::RespectProtectedColours,
+        Action::SwitchLineColourArt,
+        Action::SwitchOverlayUnderlay,
+        Action::PreviewArtLayers,
+        Action::CreateColourArt,
         Action::ToolDropper,
         Action::ToolHand,
         Action::ToolZoom,
@@ -220,6 +228,10 @@ impl Action {
             Action::ToolCloseGap => "tool.close_gap",
             Action::ShowStrokes => "view.show_strokes",
             Action::RespectProtectedColours => "drawing.respect_protected_colours",
+            Action::SwitchLineColourArt => "drawing.switch_line_colour_art",
+            Action::SwitchOverlayUnderlay => "drawing.switch_overlay_underlay",
+            Action::PreviewArtLayers => "drawing.preview_art_layers",
+            Action::CreateColourArt => "drawing.create_colour_art",
             Action::ToolDropper => "tool.dropper",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
@@ -285,6 +297,10 @@ impl Action {
             Action::ToolCloseGap => "Close Gap",
             Action::ShowStrokes => "Show Strokes",
             Action::RespectProtectedColours => "Respect Protected Colours",
+            Action::SwitchLineColourArt => "Switch to Line Art/Colour Art",
+            Action::SwitchOverlayUnderlay => "Switch to Overlay/Underlay Art",
+            Action::PreviewArtLayers => "Preview All Art Layers",
+            Action::CreateColourArt => "Create Colour Art from Line Art",
             Action::ToolDropper => "Dropper",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
@@ -390,6 +406,12 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolCloseGap => b(Key::C, ALT),
         Action::ShowStrokes => b(Key::K, NONE),
         Action::RespectProtectedColours => b(Key::S, SHIFT),
+        Action::SwitchLineColourArt => b(Key::L, NONE),
+        Action::SwitchOverlayUnderlay => b(Key::Colon, NONE),
+        Action::PreviewArtLayers => b(Key::P, NONE),
+        // "*" has no key of its own on many layouts: matched by the typed
+        // character instead (see `pressed`).
+        Action::CreateColourArt => None,
         Action::ToolDropper => b(Key::D, ALT),
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),
@@ -416,12 +438,25 @@ pub fn binding(profile: Profile, action: Action) -> Option<Binding> {
 /// Did the user just trigger `action`? Modifiers must match exactly, so
 /// Alt+E (Eraser) never fires on plain E.
 pub fn pressed(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
+    if action == Action::CreateColourArt {
+        // Harmony's "*", wherever the layout puts it.
+        return ctx.input(|i| {
+            !i.modifiers.command
+                && !i.modifiers.alt
+                && i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Text(t) if t == "*"))
+        });
+    }
     let Some(bind) = binding(profile, action) else {
         return false;
     };
     ctx.input(|i| {
         // + and - are typed with Shift on some layouts, so ignore Shift there.
-        let mods_ok = if matches!(bind.key, Key::Plus | Key::Minus | Key::Exclamationmark) {
+        let mods_ok = if matches!(
+            bind.key,
+            Key::Plus | Key::Minus | Key::Exclamationmark | Key::Colon
+        ) {
             i.modifiers.matches_logically(bind.mods)
         } else {
             i.modifiers.matches_exact(bind.mods)
@@ -432,6 +467,9 @@ pub fn pressed(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
 
 /// Shortcut text for menus and tooltips, such as "Alt+B" or "Cmd+Z".
 pub fn label(profile: Profile, action: Action) -> String {
+    if action == Action::CreateColourArt {
+        return "*".into();
+    }
     let Some(bind) = binding(profile, action) else {
         return String::new();
     };

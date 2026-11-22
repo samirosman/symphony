@@ -778,12 +778,18 @@ pub fn preferences(
     profile: &mut Profile,
     use_no_ai: &mut bool,
     brush_size_cursor: &mut bool,
+    overlay_underlay: &mut bool,
 ) {
     ui.heading("Tools");
     widgets::checkbox(ui, brush_size_cursor, "Brush size cursor");
     hint(
         ui,
         "Shows the brush size as a circle around the cursor, as in Harmony.",
+    );
+    widgets::checkbox(ui, overlay_underlay, "Support Overlay and Underlay Arts");
+    hint(
+        ui,
+        "Adds the Overlay and Underlay art layers to Line Art and Colour Art, as in Harmony's Advanced preferences.",
     );
     ui.separator();
     ui.heading("AI");

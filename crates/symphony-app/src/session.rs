@@ -11,7 +11,7 @@ use symphony_core::graph::PegParams;
 use symphony_core::history::{Edit, History};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
-use symphony_core::stroke::{Point, Stroke, StrokeKind, Tips};
+use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind, Tips};
 
 /// Drawing tools, in Tools-toolbar order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +101,16 @@ pub struct BrushSettings {
     /// Textured Vector Brush (tip, grain, spacing, opacity).
     #[serde(default)]
     pub texture: Option<symphony_core::stroke::StrokeTexture>,
+}
+
+/// Harmony's names for the art layers.
+pub fn art_name(art: ArtLayer) -> &'static str {
+    match art {
+        ArtLayer::Overlay => "Overlay Art",
+        ArtLayer::LineArt => "Line Art",
+        ArtLayer::ColourArt => "Colour Art",
+        ArtLayer::Underlay => "Underlay Art",
+    }
 }
 
 /// A thickness profile sampled evenly from start to end of a line.
@@ -216,6 +226,13 @@ pub struct Session {
     pub show_strokes: bool,
     /// Harmony's Respect Protected Colours (Shift+S), on by default.
     pub respect_protected: bool,
+    /// The art layer tools draw and edit on (Harmony's Art Layer toolbar).
+    pub art: ArtLayer,
+    /// Preview All Enabled Art Layers (P): show the other art layers as
+    /// reference in the Drawing view. The Camera view always shows all.
+    pub art_preview: bool,
+    /// Preference: Support Overlay and Underlay Arts (off, as in Harmony).
+    pub overlay_underlay: bool,
     /// Select tool options, as in Harmony: Marquee instead of Lasso, and
     /// Easy Drag (drag from anywhere inside the box).
     pub marquee_mode: bool,
@@ -284,6 +301,9 @@ impl Session {
             paint_mode: PaintMode::Paint,
             show_strokes: false,
             respect_protected: true,
+            art: ArtLayer::LineArt,
+            art_preview: true,
+            overlay_underlay: false,
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),
@@ -557,13 +577,14 @@ impl Session {
         };
         let mode = self.paint_mode;
         let swatch = self.swatch;
-        // Topmost existing zone under the point.
+        let art = self.art;
+        // Topmost existing zone under the point, on the current art layer.
         let existing = d
             .fills
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, f)| f.contains(x, y))
+            .find(|(_, f)| f.art == art && f.contains(x, y))
             .map(|(i, f)| (i, f.clone()));
         if let Some((_, fill)) = &existing {
             let changes = match mode {
@@ -607,13 +628,15 @@ impl Session {
                 // Harmony leaves these alone.
             }
             (PaintMode::Paint | PaintMode::PaintUnpainted, None) => {
-                let strokes: Vec<&Stroke> = d.strokes.iter().collect();
+                // Zones are closed by the current art layer's own lines, as
+                // in Harmony (Colour Art uses strokes made from Line Art).
+                let strokes: Vec<&Stroke> = d.strokes.iter().filter(|st| st.art == art).collect();
                 match find_zone(&strokes, x, y, cell) {
                     Ok(contours) => {
                         let fill = symphony_core::stroke::Fill {
                             id: self.doc.ids.fresh(),
                             swatch,
-                            art: Default::default(),
+                            art,
                             contours,
                         };
                         self.history.apply(
@@ -637,8 +660,11 @@ impl Session {
         let Some(d) = self.doc.drawings.get(&drawing) else {
             return;
         };
+        let art = self.art;
         let Some(st) = d.strokes.iter().rev().find(|st| {
-            st.kind != StrokeKind::Invisible && symphony_vector::hits(st, x, y, cell * 2.0)
+            st.art == art
+                && st.kind != StrokeKind::Invisible
+                && symphony_vector::hits(st, x, y, cell * 2.0)
         }) else {
             return;
         };
@@ -681,12 +707,16 @@ impl Session {
                 .map(|r| (r.x - p.x).hypot(r.y - p.y))
                 .fold(f32::MAX, f32::min)
         };
-        // Line ends close to the rough stroke.
+        // Line ends close to the rough stroke, on the current art layer.
+        // Colour Art lines are invisible strokes made from Line Art, so
+        // they count there.
+        let art = self.art;
         let ends: Vec<(usize, Point)> = d
             .strokes
             .iter()
             .enumerate()
-            .filter(|(_, st)| st.kind != StrokeKind::Invisible)
+            .filter(|(_, st)| st.art == art)
+            .filter(|(_, st)| art != ArtLayer::LineArt || st.kind != StrokeKind::Invisible)
             .flat_map(|(i, st)| {
                 st.points
                     .first()
@@ -713,7 +743,7 @@ impl Session {
         let stroke = Stroke {
             id: self.doc.ids.fresh(),
             kind: StrokeKind::Invisible,
-            art: Default::default(),
+            art,
             swatch: self.swatch,
             min_width: 0.0,
             max_width: 0.0,
@@ -804,7 +834,13 @@ impl Session {
             .drawing
             .and_then(|d| self.doc.drawings.get(&d))
         {
-            self.selection.strokes = d.strokes.iter().map(|st| st.id).collect();
+            let art = self.art;
+            self.selection.strokes = d
+                .strokes
+                .iter()
+                .filter(|st| st.art == art)
+                .map(|st| st.id)
+                .collect();
         }
     }
 
@@ -1293,6 +1329,87 @@ impl Session {
         }
     }
 
+    /// Harmony's L: switch between Line Art and Colour Art.
+    pub fn switch_line_colour_art(&mut self) {
+        self.art = match self.art {
+            ArtLayer::LineArt => ArtLayer::ColourArt,
+            _ => ArtLayer::LineArt,
+        };
+        self.after_art_change();
+    }
+
+    /// Harmony's colon: switch between Overlay and Underlay (when enabled).
+    pub fn switch_overlay_underlay(&mut self) {
+        if !self.overlay_underlay {
+            self.note("Overlay and Underlay are off. Turn on Support Overlay and Underlay Arts in Preferences.");
+            return;
+        }
+        self.art = match self.art {
+            ArtLayer::Overlay => ArtLayer::Underlay,
+            _ => ArtLayer::Overlay,
+        };
+        self.after_art_change();
+    }
+
+    pub fn set_art(&mut self, art: ArtLayer) {
+        if self.art != art {
+            self.art = art;
+            self.after_art_change();
+        }
+    }
+
+    /// Tools work on one art layer, so a selection on another is dropped.
+    fn after_art_change(&mut self) {
+        self.selection.strokes.clear();
+        self.note(format!("Drawing on {}", art_name(self.art)));
+    }
+
+    /// Harmony's Create Colour Art from Line Art (*): copy the selected
+    /// Line Art lines, or all of them, into Colour Art as invisible strokes
+    /// that close paint zones there. One undo step.
+    pub fn create_colour_art(&mut self, layer: usize, frame: u32) {
+        let Some(drawing) = self.doc.exposed(layer, frame) else {
+            self.note("There's no drawing here");
+            return;
+        };
+        let Some(d) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let chosen: Vec<Stroke> = d
+            .strokes
+            .iter()
+            .filter(|st| st.art == ArtLayer::LineArt)
+            .filter(|st| {
+                self.selection.drawing != Some(drawing)
+                    || self.selection.strokes.is_empty()
+                    || self.selection.strokes.contains(&st.id)
+            })
+            .cloned()
+            .collect();
+        if chosen.is_empty() {
+            self.note("There's no Line Art to create Colour Art from");
+            return;
+        }
+        let n = chosen.len();
+        let mut edits = Vec::with_capacity(n);
+        for mut st in chosen {
+            st.id = self.doc.ids.fresh();
+            st.art = ArtLayer::ColourArt;
+            st.kind = StrokeKind::Invisible;
+            st.texture = None;
+            edits.push(Edit::AddStroke {
+                drawing,
+                stroke: st,
+            });
+        }
+        self.history
+            .apply(&mut self.doc, "Create Colour Art from Line Art", edits);
+        self.note(format!(
+            "Created {n} Colour Art stroke{} from Line Art",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
     /// The thickness profile of the one selected pencil line, for Harmony's
     /// New Thickness Stencil.
     pub fn selected_stencil(&self) -> Option<Stencil> {
@@ -1576,6 +1693,63 @@ mod tests {
             ..line(|_| 1.0)
         })
         .is_none());
+    }
+
+    #[test]
+    fn art_layers_keep_line_and_colour_apart() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        let fill_swatch = s.doc.palette.swatches[1].id;
+        s.swatch = fill_swatch;
+        s.paint_mode = PaintMode::Paint;
+
+        // Colour Art has no lines yet, so there's no zone to paint.
+        s.switch_line_colour_art();
+        assert_eq!(s.art, ArtLayer::ColourArt);
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert!(fills(&s).is_empty());
+
+        // Create Colour Art from Line Art, then paint: the fill is Colour Art.
+        s.create_colour_art(0, 1);
+        let d = s.doc.exposed(0, 1).unwrap();
+        let colour_lines: Vec<_> = s.doc.drawings[&d]
+            .strokes
+            .iter()
+            .filter(|st| st.art == ArtLayer::ColourArt)
+            .collect();
+        assert_eq!(colour_lines.len(), 1);
+        assert_eq!(colour_lines[0].kind, StrokeKind::Invisible);
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s).len(), 1);
+        assert_eq!(fills(&s)[0].art, ArtLayer::ColourArt);
+
+        // Tools only see the current art layer.
+        s.select_all();
+        assert_eq!(s.selection.strokes.len(), 1);
+        s.switch_line_colour_art();
+        assert_eq!(s.art, ArtLayer::LineArt);
+        assert!(
+            s.selection.strokes.is_empty(),
+            "switching drops the selection"
+        );
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        assert_eq!(fills(&s).len(), 2, "Line Art gets its own zone");
+
+        // One undo removes the whole Create Colour Art step.
+        s.undo();
+        s.undo();
+        s.undo();
+        assert!(s.doc.drawings[&d]
+            .strokes
+            .iter()
+            .all(|st| st.art == ArtLayer::LineArt));
+
+        // Overlay and Underlay need the preference.
+        s.switch_overlay_underlay();
+        assert_eq!(s.art, ArtLayer::LineArt);
+        s.overlay_underlay = true;
+        s.switch_overlay_underlay();
+        assert_eq!(s.art, ArtLayer::Overlay);
     }
 
     #[test]

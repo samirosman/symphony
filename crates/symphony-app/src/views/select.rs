@@ -495,7 +495,7 @@ fn pick(
         .strokes
         .iter()
         .rev()
-        .find(|st| hits(st, x, y, r))?
+        .find(|st| st.art == s.art && hits(st, x, y, r))?
         .id;
     if shift {
         if let Some(i) = s.selection.strokes.iter().position(|id| *id == hit) {
@@ -528,6 +528,7 @@ fn select_area(
     let inside: Vec<Id> = dr
         .strokes
         .iter()
+        .filter(|st| st.art == s.art)
         .filter(|st| {
             symphony_vector::bounds(st).is_some_and(|(lo, hi)| {
                 let (x, y) = m.apply((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);

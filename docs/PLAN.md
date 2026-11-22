@@ -173,9 +173,9 @@ continues.
 - ⬜ Auto-flatten, auto-merge, draw behind, and "Draw on Colour Art" options
 - ⬜ Auto close gap
 - ⬜ Snap to contour, snap to grid, snap to alignment guides
-- ⬜ Art layers: Overlay, Line Art, Colour Art, Underlay
+- ✅ Art layers: Overlay, Line Art, Colour Art, Underlay (toolbar, L, :, P, preference)
 - ⬜ Art Layer Manager (25.2) *(verify)*
-- ⬜ Create Colour Art from Line Art
+- ✅ Create Colour Art from Line Art (*)
 - ✅ Onion skin (previous and next drawings, colours, opacity, range)
 - ⬜ Reposition All Drawings
 - ⬜ Rotary table
