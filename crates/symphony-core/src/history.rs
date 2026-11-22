@@ -5,6 +5,7 @@
 use crate::doc::{LayerSnapshot, Scene};
 use crate::graph::{Link, Node, NodeId, NodeKey, NodeKind, PegParams};
 use crate::id::Id;
+use crate::sound::SoundTrack;
 use crate::stroke::{Drawing, Fill, Stroke};
 use std::collections::BTreeMap;
 
@@ -149,6 +150,20 @@ pub enum Edit {
     },
     AddLayer(Box<LayerSnapshot>),
     RemoveLayer(Box<LayerSnapshot>),
+    /// Put a sound track at `index` of `Scene::sounds`.
+    AddSound {
+        index: usize,
+        track: SoundTrack,
+    },
+    RemoveSound {
+        index: usize,
+        track: SoundTrack,
+    },
+    /// Replace a sound track, matched by ID (rename, mute).
+    SetSound {
+        before: SoundTrack,
+        after: SoundTrack,
+    },
 }
 
 impl Edit {
@@ -433,6 +448,20 @@ impl Edit {
                     s.insert_layer(snap);
                 } else if let Some(i) = s.layer_of(snap.layer.column) {
                     s.take_layer(i);
+                }
+            }
+            Edit::AddSound { index, track } | Edit::RemoveSound { index, track } => {
+                let adding = matches!(self, Edit::AddSound { .. }) == forward;
+                if adding {
+                    s.sounds.insert((*index).min(s.sounds.len()), track.clone());
+                } else {
+                    s.sounds.retain(|t| t.id != track.id);
+                }
+            }
+            Edit::SetSound { before, after } => {
+                let want = if forward { after } else { before };
+                if let Some(t) = s.sounds.iter_mut().find(|t| t.id == want.id) {
+                    *t = want.clone();
                 }
             }
         }
