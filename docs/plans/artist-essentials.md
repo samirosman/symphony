@@ -111,6 +111,30 @@ toggle so effects can be seen while working, as in Harmony):
 5. ⬜ Colour-Override, after palette lists exist.
 6. ⬜ Node view: add effects from the Node Library and connect matte ports.
 
+## Later: brush fidelity checkup (parked by Tristan, 2026-11-21)
+
+Tristan tested Krita brushes: they import and work, but don't look like
+they do in Krita. The edges are too hard, and pen pressure should also
+change softness. He parked this: the Harmony base comes first, and
+Harmony's own brushes weren't its strength, so this is a bonus. When we
+come back, compare side by side with each app and check:
+
+- **Softness and hardness.** Krita auto brushes have `hfade`/`vfade` (edge
+  softness) and a Softness sensor driven by pressure. We read only the
+  diameter. Harmony also has a Hardness setting for textured tips.
+- **Pressure on opacity and flow.** Krita's Opacity and Flow sensors, and
+  Procreate's `dynamicsPressureOpacity`, aren't mapped. Every stamp lands
+  at full strength.
+- **Flow vs opacity.** We cap the whole stroke at one opacity. Krita and
+  Harmony also build up per stamp (flow), which softens overlaps.
+- **Tip polarity and greyscale.** Check each app's convention (Krita
+  greyscale vs colour tips, ColorAsMask, Procreate white-on-black) against
+  its docs or source.
+- **Size scale.** Procreate and Clip Studio sizes are best-match guesses.
+- **Random size, angle and spacing, scatter, and dual tips.**
+- Then Harmony's own Brush Properties tabs (Tip, Transparency, Dual Tip,
+  Paper Texture) as the target UI.
+
 ## Who does what
 
 - **Claude**: section 1 (presets, tips, joins, stencils), then section 2.
