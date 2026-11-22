@@ -571,3 +571,43 @@ fn line_editor_pushes_lines_and_moves_shift_picked_points() {
     assert!(y_near(&moved, 200.0) > 40.0, "the picked end moved");
     assert!(y_near(&moved, -200.0).abs() < 0.5, "the other end didn't");
 }
+
+/// Cost of Line Editor pushes on a busy page. Not pass/fail:
+/// `cargo test --release -p symphony-app line_edit_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn line_edit_cost() {
+    use symphony_core::stroke::{Point, Stroke};
+    let mut s = crate::session::Session::new_scene();
+    let swatch = s.swatch;
+    for i in 0..600 {
+        let y = -400.0 + (i % 60) as f32 * 13.0;
+        let x0 = -700.0 + (i / 60) as f32 * 140.0;
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: 2.0,
+            points: (0..60)
+                .map(|k| Point {
+                    x: x0 + k as f32 * 2.0,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, 1, st);
+    }
+    let d = s.doc.exposed(0, 1).unwrap();
+    let start = std::time::Instant::now();
+    for k in 0..60 {
+        s.line_push(d, [-650.0 + k as f32, -400.0], 30.0, [1.0, 0.5]);
+    }
+    s.line_edit_finish(d, 0.5);
+    println!("line_edit_cost: {:?} per push step", start.elapsed() / 60);
+}

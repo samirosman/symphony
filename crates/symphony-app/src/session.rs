@@ -330,6 +330,8 @@ pub struct Session {
     pub line_edit_radius: f32,
     pub line_edit_strength: f32,
     pub line_points: Vec<(Id, usize)>,
+    /// Lines pushed during the current drag, slimmed again on release.
+    line_touched: Vec<Id>,
     pub swatch: Id,
     /// Pressure response, as a gamma (E4.1). 1 = linear.
     pub pressure_gamma: f32,
@@ -431,6 +433,7 @@ impl Session {
             line_edit_radius: 40.0,
             line_edit_strength: 1.0,
             line_points: Vec::new(),
+            line_touched: Vec::new(),
             swatch,
             pressure_gamma: 1.0,
             onion: Onion {
@@ -1846,15 +1849,23 @@ impl Session {
 
     /// Strokes of `drawing` the Line Editor can change: vector lines on the
     /// current art layer (not erased outlines).
-    fn editable(&self, drawing: Id) -> Vec<Stroke> {
+    /// Only strokes whose bounds come within `reach` of `near` (when given)
+    /// are copied, so a drag stays fast on busy drawings.
+    fn editable(&self, drawing: Id, near: Option<([f32; 2], f32)>) -> Vec<Stroke> {
         let art = self.art;
+        let close = |st: &Stroke| {
+            let Some((c, r)) = near else { return true };
+            symphony_vector::bounds(st).is_some_and(|(lo, hi)| {
+                c[0] + r >= lo[0] && c[0] - r <= hi[0] && c[1] + r >= lo[1] && c[1] - r <= hi[1]
+            })
+        };
         self.doc
             .drawings
             .get(&drawing)
             .map(|d| {
                 d.strokes
                     .iter()
-                    .filter(|st| st.art == art && st.shape.is_empty())
+                    .filter(|st| st.art == art && st.shape.is_empty() && close(st))
                     .cloned()
                     .collect()
             })
@@ -1894,7 +1905,7 @@ impl Session {
         };
         let mut before = Vec::new();
         let mut after = Vec::new();
-        for st in self.editable(drawing) {
+        for st in self.editable(drawing, Some((at, r))) {
             if !st.points.iter().any(|p| weight(p) > 0.0)
                 && !st.points.windows(2).any(|w| {
                     // A long segment can pass through the brush with both
@@ -1916,6 +1927,9 @@ impl Session {
                 p.x += delta[0] * w;
                 p.y += delta[1] * w;
             }
+            if !self.line_touched.contains(&st.id) {
+                self.line_touched.push(st.id);
+            }
             before.push(st);
             after.push(moved);
         }
@@ -1925,7 +1939,7 @@ impl Session {
     /// Shift-paint: add the points within `radius` of `at` to the
     /// Line Editor's selection.
     pub fn line_select(&mut self, drawing: Id, at: [f32; 2], radius: f32) {
-        for st in self.editable(drawing) {
+        for st in self.editable(drawing, Some((at, radius))) {
             for (i, p) in st.points.iter().enumerate() {
                 if (p.x - at[0]).hypot(p.y - at[1]) <= radius
                     && !self.line_points.contains(&(st.id, i))
@@ -1940,7 +1954,12 @@ impl Session {
     pub fn line_move_selected(&mut self, drawing: Id, delta: [f32; 2]) {
         let mut before = Vec::new();
         let mut after = Vec::new();
-        for st in self.editable(drawing) {
+        let picked_ids: Vec<Id> = self.line_points.iter().map(|(id, _)| *id).collect();
+        for st in self
+            .editable(drawing, None)
+            .into_iter()
+            .filter(|st| picked_ids.contains(&st.id))
+        {
             let picked: Vec<usize> = self
                 .line_points
                 .iter()
@@ -1968,7 +1987,12 @@ impl Session {
     pub fn line_edit_finish(&mut self, drawing: Id, tolerance: f32) {
         let mut before = Vec::new();
         let mut after = Vec::new();
-        for st in self.editable(drawing) {
+        let touched = std::mem::take(&mut self.line_touched);
+        for st in self
+            .editable(drawing, None)
+            .into_iter()
+            .filter(|st| touched.contains(&st.id))
+        {
             let span = st.max_width - st.min_width;
             let slim = symphony_vector::curve::simplify(&st.points, tolerance, span);
             if slim.len() < st.points.len() {

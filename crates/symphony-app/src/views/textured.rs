@@ -283,11 +283,12 @@ impl Cache {
         let tip = self.texture(textures, tex.tip);
         let grain = self.texture(textures, tex.grain);
         let stale = self.last.get_mut(&stroke.id);
-        // First sight of a small stroke: stamp now, so it never pops in.
         let cost = stroke.points.len() as f32
             * (stroke.max_width * symphony_vector::scale_of(px)).powi(2)
             / (tex.spacing.max(0.01) * 4.0);
-        if stale.is_none() && cost < SYNC_BUDGET {
+        // Small strokes are stamped now, whether new or just edited (the
+        // Line Editor reshaping a line), so they never lag behind.
+        if cost < SYNC_BUDGET {
             let c = symphony_vector::stamp::rasterize(
                 stroke,
                 tex,

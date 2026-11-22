@@ -373,6 +373,32 @@ impl Edit {
                 *after = *a2;
                 true
             }
+            // A gesture that edits strokes again and again (the Line
+            // Editor, a drag) keeps one entry: each stroke's first "before"
+            // and latest "after", instead of a copy per frame.
+            (
+                Edit::SetStrokes {
+                    drawing,
+                    before,
+                    after,
+                },
+                Edit::SetStrokes {
+                    drawing: d2,
+                    before: b2,
+                    after: a2,
+                },
+            ) if drawing == d2 => {
+                for (old, new) in b2.iter().zip(a2) {
+                    match after.iter_mut().find(|s| s.id == new.id) {
+                        Some(slot) => *slot = new.clone(),
+                        None => {
+                            before.push(old.clone());
+                            after.push(new.clone());
+                        }
+                    }
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -648,6 +674,62 @@ mod tests {
         assert_eq!(s.drawings[&did].strokes[0].points[0].x, 10.0);
         h.undo(&mut s);
         assert_eq!(s.drawings[&did].strokes[0].points[0].x, 0.0);
+    }
+
+    #[test]
+    fn repeated_stroke_edits_in_one_gesture_fold_into_one_entry() {
+        let mut s = Scene::new(Settings::default());
+        let mut h = History::default();
+        let snap = s.make_layer("A", 0);
+        h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        let d = s.make_drawing(s.layers[0].column);
+        let did = d.id;
+        h.apply(&mut s, "Draw", vec![Edit::AddDrawing { drawing: d }]);
+        let st = Stroke {
+            id: s.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: 1.0,
+            max_width: 1.0,
+            points: vec![Point {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+            }],
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        h.apply(
+            &mut s,
+            "Draw",
+            vec![Edit::AddStroke {
+                drawing: did,
+                stroke: st.clone(),
+            }],
+        );
+        let mut cur = st.clone();
+        for i in 1..=50 {
+            let mut next = cur.clone();
+            next.points[0].x = i as f32;
+            h.apply_merged(
+                &mut s,
+                "Edit lines",
+                "line-edit",
+                Edit::SetStrokes {
+                    drawing: did,
+                    before: vec![cur.clone()],
+                    after: vec![next.clone()],
+                },
+            );
+            cur = next;
+        }
+        assert_eq!(s.drawings[&did].strokes[0].points[0].x, 50.0);
+        let step = h.undo.last().unwrap();
+        assert_eq!(step.edits.len(), 1, "one entry for the whole drag");
+        h.undo(&mut s);
+        assert_eq!(s.drawings[&did].strokes[0], st, "undo restores the start");
     }
 
     #[test]
