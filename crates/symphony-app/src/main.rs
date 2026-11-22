@@ -3101,6 +3101,9 @@ impl eframe::App for SymphonyApp {
     }
 
     fn on_exit(&mut self) {
+        // Stop pen input while the window's display connection is still
+        // open; the Wayland backend reads it from its own thread.
+        self.pen = None;
         // A clean exit with nothing unsaved needs no recovery file (E7.5).
         if !self.s.dirty() {
             if let Some(r) = &self.recovery {

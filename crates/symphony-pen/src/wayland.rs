@@ -187,6 +187,8 @@ struct ToolState {
     kind: Tool,
     /// In proximity over our window's surface.
     ours: bool,
+    /// A position arrived since proximity in; frames before it have none.
+    has_pos: bool,
     down: bool,
     went_down: bool,
     went_up: bool,
@@ -207,6 +209,7 @@ impl Default for ToolState {
         ToolState {
             kind: Tool::Pen,
             ours: false,
+            has_pos: false,
             down: false,
             went_down: false,
             went_up: false,
@@ -572,6 +575,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
                     state.device_changed = true;
                 }
                 t.ours = false;
+                t.has_pos = false;
                 t.down = false;
             }
             E::Down { .. } => {
@@ -587,6 +591,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
             E::Motion { x, y } => {
                 t.x = x;
                 t.y = y;
+                t.has_pos = true;
             }
             E::Pressure { pressure } => t.pressure = pressure as f32 / 65535.0,
             // Degrees, positive when the top of the pen leans toward +x or
@@ -616,31 +621,39 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
                 }
             }
             E::Frame { time } => {
-                let phase = if t.went_down {
-                    Phase::Down
-                } else if t.went_up {
-                    Phase::Up
-                } else if t.down {
-                    Phase::Move
-                } else {
-                    Phase::Hover
+                // A quick tap can put down and up in one frame; send both
+                // so the stroke still ends.
+                let phases: &[Phase] = match (t.went_down, t.went_up) {
+                    (true, true) => &[Phase::Down, Phase::Up],
+                    (true, false) => &[Phase::Down],
+                    (false, true) => &[Phase::Up],
+                    (false, false) if t.down => &[Phase::Move],
+                    (false, false) => &[Phase::Hover],
                 };
-                // The pen can leave our window mid-stroke; still end it.
-                let send = t.ours || phase == Phase::Up;
                 t.went_down = false;
                 t.went_up = false;
-                if send {
+                for &phase in phases {
+                    let up = phase == Phase::Up;
+                    // The pen can leave our window mid-stroke; still end it.
+                    if !up && !(t.ours && t.has_pos) {
+                        continue;
+                    }
                     state.pending.push(PenSample {
                         x: t.x,
                         y: t.y,
-                        pressure: if phase == Phase::Up { 0.0 } else { t.pressure },
+                        pressure: if up { 0.0 } else { t.pressure },
                         tilt_x: t.tilt_x,
                         tilt_y: t.tilt_y,
                         rotation: t.rotation,
                         tangential: t.tangential,
                         phase,
                         tool: t.kind,
-                        buttons: t.buttons,
+                        // A tap's up already cleared the tip bit.
+                        buttons: if phase == Phase::Down {
+                            t.buttons | TIP
+                        } else {
+                            t.buttons
+                        },
                         time: f64::from(time) / 1000.0,
                     });
                 }
