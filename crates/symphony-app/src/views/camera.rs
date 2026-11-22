@@ -25,7 +25,12 @@ const MAX_ZOOM: f32 = 32.0;
 
 pub struct CanvasState {
     pan: Vec2,
+    /// Screen points per scene unit: absolute, as in Harmony, so 100% is
+    /// actual size and resizing the view keeps the drawing's scale (and
+    /// re-stamps nothing). Fitted to the view when first shown and on Fit.
     zoom: f32,
+    /// Fit the stage to the view on the next frame.
+    fit_pending: bool,
     /// Degrees, clockwise.
     rotation: f32,
     active: Option<Active>,
@@ -43,6 +48,7 @@ impl Default for CanvasState {
         CanvasState {
             pan: Vec2::ZERO,
             zoom: 1.0,
+            fit_pending: true,
             rotation: 0.0,
             active: None,
             erasing: None,
@@ -92,9 +98,10 @@ impl CanvasState {
         self.active.is_some() || self.erasing.is_some() || self.select.busy()
     }
 
+    /// Harmony's Reset View: centred, upright, and the stage fitted to the view.
     pub fn reset_view(&mut self) {
         self.pan = Vec2::ZERO;
-        self.zoom = 1.0;
+        self.fit_pending = true;
         self.rotation = 0.0;
     }
 
@@ -109,6 +116,7 @@ impl CanvasState {
             Action::ZoomOut => self.zoom = (self.zoom / 1.25).max(MIN_ZOOM),
             Action::RotateCw => self.rotate_by(ROTATE_STEP),
             Action::RotateCcw => self.rotate_by(-ROTATE_STEP),
+            // 100%: one scene unit per screen point.
             Action::ResetZoom => self.zoom = 1.0,
             Action::ResetRotation => self.rotation = 0.0,
             Action::ResetPan => self.pan = Vec2::ZERO,
@@ -118,15 +126,20 @@ impl CanvasState {
     }
 }
 
-/// Scene units -> screen points for this canvas rect.
-fn view_transform(state: &CanvasState, rect: Rect, w: f32, h: f32) -> Affine {
-    let fit = ((rect.width() - 64.0) / w)
+/// The zoom that fits a `w` x `h` stage in `rect`, with a margin.
+fn fit_zoom(rect: Rect, w: f32, h: f32) -> f32 {
+    ((rect.width() - 64.0) / w)
         .min((rect.height() - 64.0) / h)
-        .max(0.01);
+        .clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
+/// Scene units -> screen points for this canvas rect. The zoom is
+/// absolute: the rect only places the centre.
+fn view_transform(state: &CanvasState, rect: Rect) -> Affine {
     let c = rect.center() + state.pan;
     Affine::translate(c.x, c.y)
         .compose(Affine::rotate_deg(state.rotation))
-        .compose(Affine::scale(fit * state.zoom, fit * state.zoom))
+        .compose(Affine::scale(state.zoom, state.zoom))
 }
 
 fn to_pos((x, y): (f32, f32)) -> Pos2 {
@@ -421,7 +434,7 @@ pub fn ui(
     if response.hovered() || response.dragged() {
         if let Some(p) = response.hover_pos() {
             if zoom_delta != 1.0 {
-                zoom_at(state, rect, w, h, p, zoom_delta);
+                zoom_at(state, rect, p, zoom_delta);
             }
         }
         if scroll != Vec2::ZERO && zoom_delta == 1.0 {
@@ -442,11 +455,15 @@ pub fn ui(
     }
     if s.tool == Tool::Zoom && response.clicked() {
         if let Some(p) = response.interact_pointer_pos() {
-            zoom_at(state, rect, w, h, p, if alt { 0.8 } else { 1.25 });
+            zoom_at(state, rect, p, if alt { 0.8 } else { 1.25 });
         }
     }
 
-    let view = view_transform(state, rect, w, h);
+    if state.fit_pending && rect.width() > 80.0 && rect.height() > 80.0 {
+        state.zoom = fit_zoom(rect, w, h);
+        state.fit_pending = false;
+    }
+    let view = view_transform(state, rect);
     state.last_view = view.inverse().unwrap_or(Affine::IDENTITY);
     let px = 1.0 / scale_of(view).max(1e-6);
 
@@ -842,13 +859,13 @@ pub fn ui(
     bottom_toolbar(ui, state, profile);
 }
 
-fn zoom_at(state: &mut CanvasState, rect: Rect, w: f32, h: f32, p: Pos2, factor: f32) {
-    let before = view_transform(state, rect, w, h)
+fn zoom_at(state: &mut CanvasState, rect: Rect, p: Pos2, factor: f32) {
+    let before = view_transform(state, rect)
         .inverse()
         .map(|inv| inv.apply(p.x, p.y));
     state.zoom = (state.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
     if let Some((x, y)) = before {
-        let after = view_transform(state, rect, w, h).apply(x, y);
+        let after = view_transform(state, rect).apply(x, y);
         state.pan += p - to_pos(after);
     }
 }

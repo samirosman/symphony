@@ -187,7 +187,7 @@ fn brush_size_is_fixed_to_the_drawing_by_default() {
     h.run_steps(2);
     drag(
         &mut h,
-        &line((-50.0, 80.0), (50.0, 80.0), 10),
+        &line((-30.0, 10.0), (30.0, 10.0), 10),
         1.0,
         PenTool::Pen,
     );
@@ -329,4 +329,91 @@ fn erased_line_look() {
     let s = &h.state().s;
     let img = symphony_render::render_frame(&s.doc, 1, 960, 540).unwrap();
     img.save(path).unwrap();
+}
+
+#[test]
+fn resizing_the_view_keeps_the_drawing_scale() {
+    let mut h = rig();
+    let scale = |h: &Harness<'static, Rig>| {
+        let c = &h.state().canvas;
+        c.to_screen(100.0, 0.0).distance(c.to_screen(0.0, 0.0)) / 100.0
+    };
+    let fitted = scale(&h);
+    assert!(
+        fitted > 0.0 && fitted < 1.0,
+        "the 1920-wide stage was fitted into 1000 px: {fitted}"
+    );
+    // Dragging a panel edge: the view shrinks, the drawing doesn't.
+    for w in [900.0, 760.0, 640.0] {
+        h.set_size(Vec2::new(w, 700.0));
+        h.run_steps(2);
+        assert!(
+            (scale(&h) - fitted).abs() < 1e-4,
+            "scale changed at width {w}"
+        );
+    }
+    // 100% is actual size: one scene unit per screen point.
+    h.state_mut().canvas.apply(crate::keymap::Action::ResetZoom);
+    h.run_steps(2);
+    assert!((scale(&h) - 1.0).abs() < 1e-4);
+    // Reset View fits the stage to the (now smaller) view again.
+    h.state_mut().canvas.apply(crate::keymap::Action::ResetView);
+    h.run_steps(2);
+    assert!(scale(&h) < fitted, "refitted to the narrower view");
+}
+
+/// Frame cost of a busy scene, still and while the view is being resized.
+/// Not a pass/fail test: `cargo test --release -p symphony-app
+/// frame_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn frame_cost() {
+    use symphony_core::stroke::{Point, Stroke};
+    let mut h = rig();
+    // 600 pressure strokes of 60 points each, like a dense character page.
+    {
+        let s = &mut h.state_mut().s;
+        let swatch = s.swatch;
+        for i in 0..600 {
+            let y = -400.0 + (i % 60) as f32 * 13.0;
+            let x0 = -700.0 + (i / 60) as f32 * 140.0;
+            let st = Stroke {
+                id: s.doc.ids.fresh(),
+                kind: StrokeKind::Brush,
+                art: Default::default(),
+                swatch,
+                min_width: 1.0,
+                max_width: 6.0,
+                points: (0..60)
+                    .map(|k| {
+                        let t = k as f32 / 59.0;
+                        Point {
+                            x: x0 + t * 120.0,
+                            y: y + (t * 9.0).sin() * 5.0,
+                            pressure: (t * 3.1).sin(),
+                        }
+                    })
+                    .collect(),
+                tips: Default::default(),
+                texture: None,
+                shape: Vec::new(),
+            };
+            s.commit_stroke(0, 1, st);
+        }
+    }
+    h.run_steps(3);
+    let time = |h: &mut Harness<'static, Rig>, resize: bool| {
+        let n = 30;
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            if resize {
+                h.set_size(Vec2::new(1000.0 - (i % 15) as f32 * 8.0, 700.0));
+            }
+            h.step();
+        }
+        start.elapsed() / n
+    };
+    let still = time(&mut h, false);
+    let resizing = time(&mut h, true);
+    println!("frame_cost: still {still:?} per frame, resizing {resizing:?} per frame");
 }
