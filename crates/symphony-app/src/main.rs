@@ -1460,6 +1460,12 @@ impl SymphonyApp {
                         ui.close();
                     }
                 }
+                ui.separator();
+                if ui.button("Custom...").clicked() {
+                    let id = egui::Id::unique(TIMING_MENU_FPS);
+                    symphony_ui::widgets::ask_custom_frame_rate(ui.ctx(), id, fps);
+                    ui.close();
+                }
             });
             ui.menu_button("Insert in-betweens", |ui| {
                 let remaining = 100_000u32.saturating_sub(self.s.length());
@@ -3552,6 +3558,11 @@ impl SymphonyApp {
         self.show_licences = open;
         self.file_drops(&ctx);
         self.sound.update(&mut self.s, &ctx);
+        let mut fps = self.s.doc.settings.fps;
+        let id = egui::Id::unique(TIMING_MENU_FPS);
+        if symphony_ui::widgets::custom_frame_rate(&ctx, id, &mut fps) {
+            self.s.set_frame_rate(fps);
+        }
         // Screenshot mode: SYMPHONY_SHOT_SEARCH="query" opens search typed.
         if let (Some(_), Ok(q)) = (&self.shot, std::env::var("SYMPHONY_SHOT_SEARCH")) {
             if !self.shot_search_opened {
@@ -3580,6 +3591,9 @@ impl SymphonyApp {
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
     }
 }
+
+/// The Custom frame rate dialog opened from Timing > Scene frame rate.
+const TIMING_MENU_FPS: &str = "timing-menu-fps";
 
 /// On macOS the top bar becomes the title bar: content runs under it and
 /// the window buttons float at its left (D3.1, D12.2).

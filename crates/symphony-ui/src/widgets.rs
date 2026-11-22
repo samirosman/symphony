@@ -40,16 +40,79 @@ pub fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response
 
 pub const FRAME_RATES: [f32; 4] = [12.0, 24.0, 30.0, 48.0];
 
-/// Common film and video rates. An imported scene's custom rate stays
-/// visible until the artist explicitly selects a preset.
+/// The rates a scene may have, presets or custom.
+pub const FRAME_RATE_RANGE: std::ops::RangeInclusive<f32> = 1.0..=120.0;
+
+/// Common film and video rates, and Custom... for any other. An imported
+/// scene's custom rate stays visible until the artist selects another.
 pub fn frame_rate(ui: &mut egui::Ui, id: &str, fps: &mut f32) {
+    let id = egui::Id::unique(id);
     egui::ComboBox::from_id_salt(id)
         .selected_text(format!("{fps} fps"))
         .show_ui(ui, |ui| {
             for rate in FRAME_RATES {
                 ui.selectable_value(fps, rate, format!("{rate:.0} fps"));
             }
+            ui.separator();
+            if ui.button("Custom...").clicked() {
+                ask_custom_frame_rate(ui.ctx(), id, *fps);
+            }
         });
+    custom_frame_rate(ui.ctx(), id, fps);
+}
+
+/// Open the Custom frame rate dialog that belongs to `id`, starting at
+/// `current`. [`custom_frame_rate`] shows it.
+pub fn ask_custom_frame_rate(ctx: &egui::Context, id: egui::Id, current: f32) {
+    ctx.data_mut(|d| d.insert_temp(id.with("custom"), current));
+}
+
+/// While the dialog of `id` is open, show it. Set Frame Rate writes the
+/// value to `fps` and returns `true`; Cancel, Escape or a click outside
+/// close it unchanged. Call it every frame.
+pub fn custom_frame_rate(ctx: &egui::Context, id: egui::Id, fps: &mut f32) -> bool {
+    let key = id.with("custom");
+    let Some(mut value) = ctx.data(|d| d.get_temp::<f32>(key)) else {
+        return false;
+    };
+    let mut done = None;
+    let modal = egui::Modal::new(key).show(ctx, |ui| {
+        ui.heading("Custom frame rate");
+        ui.add_space(8.0);
+        let field = ui.add(
+            egui::DragValue::new(&mut value)
+                .range(FRAME_RATE_RANGE)
+                .speed(0.1)
+                .max_decimals(3)
+                .suffix(" fps"),
+        );
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if primary_button(ui, "Set frame rate", true).clicked() || enter {
+                done = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                done = Some(false);
+            }
+        });
+    });
+    if done.is_none() && modal.should_close() {
+        done = Some(false);
+    }
+    match done {
+        Some(set) => {
+            ctx.data_mut(|d| d.remove::<f32>(key));
+            if set {
+                *fps = value.clamp(*FRAME_RATE_RANGE.start(), *FRAME_RATE_RANGE.end());
+            }
+            set
+        }
+        None => {
+            ctx.data_mut(|d| d.insert_temp(key, value));
+            false
+        }
+    }
 }
 
 fn row(ui: &mut egui::Ui, label: &str) -> (Response, Rect) {
