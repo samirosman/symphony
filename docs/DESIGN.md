@@ -152,6 +152,23 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
 | `canvas.surround` | `#464749` | Area around the stage. A neutral mid grey. |
 | `canvas.stage` | `#D4D5D7` | The empty stage: light neutral grey, not white (Tristan). Exports still render on white. |
 
+### Workspace glass
+
+The wallpaper sits behind the editor chrome. Black is the default, with
+Plain, Studio, Dusk and a custom PNG or JPEG available under Preferences → Interface.
+Each docked panel and the tool strip have one 12 px outer contour, one
+graphite fill and a 1 px inner rim. The top highlight follows that rim.
+Inset corners use the outer radius minus the inset, so nested contours
+share a centre. Rectangular view content sits inside the outside corners. The menu and status
+bars use a slightly more transparent tint. The Camera and Drawing surfaces,
+including the stage, stay opaque so the wallpaper cannot tint artwork.
+
+Custom images are decoded, downsized, softened and darkened off the UI
+thread. The editor uploads the result once and stretches the cached texture
+when resized. Plain is shown while the picture loads or if reading fails.
+Built-in coloured wallpapers use a single shaded mesh. Use solid surfaces
+for controls that require reliable contrast over any wallpaper.
+
 ### 4.2 Rules
 
 Use neutral graphite surfaces around artwork to limit perceived colour casts.
@@ -225,9 +242,9 @@ and animation state.
   - Minimum pen target: 24 px.
   - Card inner padding: 12 px. Gutter between cards: 6 px.
 - **D6.3 Corner radius.**
-  - Controls, rows and exposure blocks: 4 px.
-  - Cards (docked views and the Tools toolbar): 8 px.
-  - Popups, menus and floating windows: 8 px.
+  - Controls, rows and exposure blocks: 4 px. Tool-strip buttons: 6 px.
+  - Docked glass panels and the Tools toolbar: 12 px.
+  - Popups and menus: 8 px. Floating windows: 12 px.
   - The stage: 0, because paper has square corners.
 - **D6.4 Shadows** only on things that float above the dock (menus,
   popups, floating windows), and on the stage (D3.10). Cards are flat:
