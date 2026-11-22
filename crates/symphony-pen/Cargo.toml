@@ -21,3 +21,5 @@ wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 # "staging" and "unstable" add the cursor-shape protocol, which sets the
 # pen's cursor (its bindings need both). No new crates.
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# Pure Rust X11 protocol, already in the tree through winit.
+x11rb = { version = "0.13", features = ["xinput"] }

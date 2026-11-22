@@ -8,7 +8,10 @@
 //! - Linux on Wayland: the `tablet-v2` protocol for pens and `wl_pointer`
 //!   for the mouse, on the toolkit's own connection (any tablet libinput
 //!   supports: Wacom, Huion, XP-Pen, Gaomon…).
-//! - Windows (Windows Ink + Wintab), Linux on X11 (XInput2): planned.
+//! - Linux on X11: XInput2 events from the tablet and mouse devices, on a
+//!   connection of our own (XWayland, and Xorg with the Wacom or libinput
+//!   driver).
+//! - Windows (Windows Ink + Wintab): planned.
 
 #[cfg(target_os = "linux")]
 use raw_window_handle::RawDisplayHandle;
@@ -20,6 +23,8 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 mod macos;
 #[cfg(target_os = "linux")]
 mod wayland;
+#[cfg(target_os = "linux")]
+mod x11;
 
 /// Where the pointer is in the stroke lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,12 +145,18 @@ impl std::fmt::Display for PenError {
 
 impl std::error::Error for PenError {}
 
+#[cfg(target_os = "linux")]
+enum Linux {
+    Wayland(wayland::Backend),
+    X11(x11::Backend),
+}
+
 /// Collects pen samples for one window. Drop it to stop listening.
 pub struct PenInput {
     #[cfg(target_os = "macos")]
     backend: macos::Backend,
     #[cfg(target_os = "linux")]
-    backend: wayland::Backend,
+    backend: Linux,
 }
 
 impl PenInput {
@@ -164,16 +175,22 @@ impl PenInput {
             let display = window
                 .display_handle()
                 .map_err(|_| PenError::NoNativeView)?;
-            if let (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(w)) =
-                (display.as_raw(), handle.as_raw())
-            {
-                return Ok(PenInput {
-                    backend: wayland::Backend::attach(d.display, w.surface)?,
-                });
-            }
+            let backend = match (display.as_raw(), handle.as_raw()) {
+                (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(w)) => {
+                    Linux::Wayland(wayland::Backend::attach(d.display, w.surface)?)
+                }
+                // X window IDs are 29 bits, so the cast never truncates.
+                (_, RawWindowHandle::Xlib(w)) => Linux::X11(x11::Backend::attach(w.window as u32)?),
+                (_, RawWindowHandle::Xcb(w)) => Linux::X11(x11::Backend::attach(w.window.get())?),
+                _ => return Err(PenError::Unsupported),
+            };
+            return Ok(PenInput { backend });
         }
-        let _ = handle;
-        Err(PenError::Unsupported)
+        #[allow(unreachable_code)]
+        {
+            let _ = handle;
+            Err(PenError::Unsupported)
+        }
     }
 
     /// Call `wake` from any thread whenever new samples arrive. Backends
@@ -181,18 +198,36 @@ impl PenInput {
     /// the app won't repaint until something else wakes it.
     pub fn set_waker(&self, wake: impl Fn() + Send + Sync + 'static) {
         #[cfg(target_os = "linux")]
-        self.backend.set_waker(Box::new(wake));
+        match &self.backend {
+            Linux::Wayland(b) => b.set_waker(Box::new(wake)),
+            Linux::X11(b) => b.set_waker(Box::new(wake)),
+        }
         #[cfg(not(target_os = "linux"))]
         let _ = wake;
     }
 
+    /// Tell the backend the window's scale factor (physical pixels per
+    /// logical point), and again whenever it changes. Only X11 needs it:
+    /// its events come in pixels, the other backends' in points.
+    pub fn set_scale_factor(&self, scale: f64) {
+        #[cfg(target_os = "linux")]
+        if let Linux::X11(b) = &self.backend {
+            b.set_scale_factor(scale);
+        }
+        let _ = scale;
+    }
+
     /// Whether the window toolkit also receives the pen as a mouse. True on
-    /// macOS, where AppKit sends mouse events for tablet input. False on
-    /// Wayland: once the app reads tablet-v2, the compositor stops sending
-    /// pointer events for the pen, so the UI only sees it if the app passes
-    /// pen samples on as pointer events.
+    /// macOS, where AppKit sends mouse events for tablet input, and on X11,
+    /// where the pen moves the core pointer. False on Wayland: once the app
+    /// reads tablet-v2, the compositor stops sending pointer events for the
+    /// pen, so the UI only sees it if the app passes pen samples on as
+    /// pointer events.
     pub fn toolkit_sees_pen(&self) -> bool {
-        !cfg!(target_os = "linux")
+        #[cfg(target_os = "linux")]
+        return matches!(self.backend, Linux::X11(_));
+        #[cfg(not(target_os = "linux"))]
+        true
     }
 
     /// Show `cursor` for a pen over the window; call it each frame with
@@ -200,30 +235,48 @@ impl PenInput {
     /// pen's cursor itself, and without a call the pen has none. Elsewhere
     /// the toolkit sets it, because it sees the pen as a mouse.
     pub fn set_cursor(&self, cursor: Cursor) {
+        // On X11 the pen moves the core pointer, whose cursor the toolkit
+        // sets.
         #[cfg(target_os = "linux")]
-        self.backend.set_cursor(cursor);
-        #[cfg(not(target_os = "linux"))]
+        if let Linux::Wayland(b) = &self.backend {
+            b.set_cursor(cursor);
+        }
         let _ = cursor;
     }
 
     /// Take every sample received since the last call, oldest first.
     pub fn drain(&self) -> Vec<PenSample> {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         return self.backend.drain();
+        #[cfg(target_os = "linux")]
+        return match &self.backend {
+            Linux::Wayland(b) => b.drain(),
+            Linux::X11(b) => b.drain(),
+        };
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         Vec::new()
     }
 
     pub fn has_pending(&self) -> bool {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         return self.backend.has_pending();
+        #[cfg(target_os = "linux")]
+        return match &self.backend {
+            Linux::Wayland(b) => b.has_pending(),
+            Linux::X11(b) => b.has_pending(),
+        };
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         false
     }
 
     pub fn device(&self) -> DeviceInfo {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         return self.backend.device();
+        #[cfg(target_os = "linux")]
+        return match &self.backend {
+            Linux::Wayland(b) => b.device(),
+            Linux::X11(b) => b.device(),
+        };
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         DeviceInfo::default()
     }

@@ -3110,6 +3110,14 @@ impl eframe::App for SymphonyApp {
         let Some(pen) = &self.pen else {
             return;
         };
+        // X11 reports the pen in pixels; the backend turns them into points.
+        if let Some(ppp) = raw
+            .viewports
+            .get(&raw.viewport_id)
+            .and_then(|v| v.native_pixels_per_point)
+        {
+            pen.set_scale_factor(f64::from(ppp));
+        }
         if pen.toolkit_sees_pen() {
             return;
         }
