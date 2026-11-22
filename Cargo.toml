@@ -5,6 +5,7 @@ members = [
     "crates/symphony-core",
     "crates/symphony-vector",
     "crates/symphony-io",
+    "crates/symphony-audio",
     "crates/symphony-render",
     "crates/symphony-pen",
     "crates/symphony-pentest",
