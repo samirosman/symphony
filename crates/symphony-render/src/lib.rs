@@ -4,6 +4,7 @@
 //! Export runs on a background thread with progress and cancel (E5.2).
 
 pub mod bitmap;
+pub mod deform;
 mod effects;
 #[cfg(test)]
 mod golden;

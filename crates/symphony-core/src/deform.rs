@@ -313,7 +313,7 @@ impl ChainPose {
 
     /// Move a point of the drawing from the rest pose to the animated pose.
     pub fn map(&self, p: V) -> V {
-        if self.influence == Influence::Zero || self.rest.is_empty() {
+        if self.moves_nothing() {
             return p;
         }
         // The bone that owns `p`: walk the joints from the root while the
@@ -381,6 +381,23 @@ impl ChainPose {
             t
         };
         add(add(a.p, mul(a.u, t2)), mul(perp(a.u), s))
+    }
+
+    /// Does [`Self::map`] leave every point where it is? True for Zero
+    /// influence and for an empty chain, not for an unmoved chain.
+    pub fn moves_nothing(&self) -> bool {
+        self.influence == Influence::Zero || self.rest.is_empty()
+    }
+
+    /// The smallest joint radius above zero, after clamping. Art must be
+    /// sampled finer than this to bend smoothly at the joints. None when
+    /// no joint blends (one bone, or hard hinges only).
+    pub fn smallest_radius(&self) -> Option<f32> {
+        self.joints
+            .iter()
+            .map(|j| j.radius)
+            .filter(|r| *r > 0.0)
+            .reduce(f32::min)
     }
 
     /// Kinematic Output: how the end of bone `i` moves from the rest pose
