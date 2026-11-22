@@ -32,7 +32,10 @@ pub const ACCENT_TIME: Color32 = hex(0xF0A63A);
 pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
 pub const CANVAS_SURROUND: Color32 = hex(0x464749);
-pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
+/// The empty stage: a light neutral grey, not white (Tristan, 2026-11-22),
+/// so a blank scene doesn't glare and white artwork still shows. Black
+/// ink on it is 11:1. Exports still render on white paper.
+pub const CANVAS_STAGE: Color32 = hex(0xD4D5D7);
 /// Onion skin tints for previous and next drawings (DESIGN §4.3). Defaults
 /// follow the red-before, green-after convention; to verify against Harmony 27.
 pub const ONION_BEFORE: Color32 = hex(0xE0483E);

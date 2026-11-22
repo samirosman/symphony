@@ -161,7 +161,7 @@ fn draw_box(painter: &egui::Painter, lo: [f32; 2], hi: [f32; 2], m: Affine) {
     ));
     for p in pts {
         let r = Rect::from_center_size(p, Vec2::splat(HANDLE));
-        painter.rect_filled(r, 1.0, theme::CANVAS_STAGE);
+        painter.rect_filled(r, 1.0, theme::ON_ACCENT);
         painter.rect_stroke(
             r,
             1.0,

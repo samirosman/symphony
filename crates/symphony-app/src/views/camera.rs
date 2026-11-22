@@ -1000,7 +1000,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
         ))
         .with_clip_rect(rect);
     let dark = theme::BG_BASE;
-    let light = theme::CANVAS_STAGE;
+    let light = theme::ON_ACCENT;
 
     // A navigation cursor replaces the crosshair: the icon itself is the pointer.
     let nav = if m.space && m.shift {
