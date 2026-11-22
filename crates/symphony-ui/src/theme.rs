@@ -13,25 +13,25 @@ const fn hex(rgb: u32) -> Color32 {
 }
 
 // §4.1 colour tokens.
-pub const BG_BASE: Color32 = hex(0x12161B);
-pub const BG_PANEL: Color32 = hex(0x22282F);
-pub const BG_RAISED: Color32 = hex(0x303944);
-pub const BG_HOVER: Color32 = hex(0x3D4855);
-pub const BG_INPUT: Color32 = hex(0x191E24);
-pub const LINE_SUBTLE: Color32 = hex(0x37414C);
-pub const LINE_STRONG: Color32 = hex(0x556575);
+pub const BG_BASE: Color32 = hex(0x17181A);
+pub const BG_PANEL: Color32 = hex(0x242628);
+pub const BG_RAISED: Color32 = hex(0x303336);
+pub const BG_HOVER: Color32 = hex(0x3C4044);
+pub const BG_INPUT: Color32 = hex(0x1D1F21);
+pub const LINE_SUBTLE: Color32 = hex(0x393C40);
+pub const LINE_STRONG: Color32 = hex(0x595F66);
 /// Edges of controls that would otherwise vanish (checkbox, radio): 3:1 or more on every surface (D4.4).
-pub const LINE_CONTROL: Color32 = hex(0x94A1AE);
-pub const TEXT_PRIMARY: Color32 = hex(0xE7EBEF);
-pub const TEXT_SECONDARY: Color32 = hex(0xB1BEC9);
-pub const TEXT_DISABLED: Color32 = hex(0x686D77);
+pub const LINE_CONTROL: Color32 = hex(0x949CA4);
+pub const TEXT_PRIMARY: Color32 = hex(0xE8EAEC);
+pub const TEXT_SECONDARY: Color32 = hex(0xB5BAC0);
+pub const TEXT_DISABLED: Color32 = hex(0x747980);
 pub const ON_ACCENT: Color32 = hex(0xFFFFFF);
 pub const ACCENT_SELECT: Color32 = hex(0x81B4F8);
 pub const ACCENT_SELECT_FILL: Color32 = hex(0x3D63B8);
 pub const ACCENT_TIME: Color32 = hex(0xF0A63A);
 pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
-pub const CANVAS_SURROUND: Color32 = hex(0x484B4F);
+pub const CANVAS_SURROUND: Color32 = hex(0x464749);
 pub const CANVAS_STAGE: Color32 = hex(0xFFFFFF);
 /// Onion skin tints for previous and next drawings (DESIGN §4.3). Defaults
 /// follow the red-before, green-after convention; to verify against Harmony 27.
@@ -164,14 +164,14 @@ pub fn apply(ctx: &egui::Context) {
         v.panel_fill = BG_PANEL;
         v.window_fill = BG_PANEL;
         v.window_shadow = egui::epaint::Shadow {
-            offset: [0, 8],
-            blur: 24,
+            offset: [0, 5],
+            blur: 16,
             spread: 0,
             color: hex(0).gamma_multiply(0.40),
         };
         v.popup_shadow = egui::epaint::Shadow {
-            offset: [0, 4],
-            blur: 12,
+            offset: [0, 3],
+            blur: 10,
             spread: 0,
             color: hex(0).gamma_multiply(0.32),
         };
@@ -189,11 +189,7 @@ pub fn apply(ctx: &egui::Context) {
         v.widgets.noninteractive = widget(BG_PANEL, TEXT_PRIMARY, Stroke::new(1.0, LINE_SUBTLE));
         v.widgets.inactive = widget(BG_RAISED, TEXT_PRIMARY, Stroke::NONE);
         v.widgets.hovered = widget(BG_HOVER, TEXT_PRIMARY, Stroke::new(1.0, LINE_STRONG));
-        v.widgets.active = widget(
-            ACCENT_SELECT_FILL,
-            ON_ACCENT,
-            Stroke::new(1.0, ACCENT_SELECT),
-        );
+        v.widgets.active = widget(BG_HOVER, TEXT_PRIMARY, Stroke::new(1.0, ACCENT_SELECT));
         v.widgets.open = widget(BG_HOVER, TEXT_PRIMARY, Stroke::new(1.0, LINE_STRONG));
         // Sliders: the filled part shows the value at a glance, and the handle is a round knob.
         v.slider_trailing_fill = true;
