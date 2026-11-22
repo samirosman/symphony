@@ -3,15 +3,21 @@
 //! Drag the background to pan. Click a peg or drawing to select its layer.
 //! Editing connections comes in M6.
 
+use std::collections::BTreeMap;
+
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
 
 use crate::session::Session;
-use symphony_ui::{theme, widgets};
+use symphony_ui::{
+    icons::{self, Icon},
+    theme, widgets,
+};
 
 #[derive(Default)]
 pub struct NodeViewState {
     pan: Vec2,
+    zoom: Option<f32>,
     library_search: String,
 }
 
@@ -32,81 +38,127 @@ fn kind_label(kind: &NodeKind) -> &'static str {
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
+    let width = (s.doc.layers.len().max(1) - 1) as f32 * (W + 24.0) + W;
+    let height = 272.0 + H;
+    let mut fit = false;
+    let mut step = 1.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        fit = icons::button(ui, Icon::Fit, false, true, "Fit graph").clicked();
+        if icons::button(ui, Icon::ZoomOut, false, true, "Zoom out").clicked() {
+            step = 0.8;
+        }
+        if icons::button(ui, Icon::Zoom, false, true, "Zoom in").clicked() {
+            step = 1.25;
+        }
+        if let Some(zoom) = state.zoom {
+            ui.colored_label(theme::TEXT_SECONDARY, format!("{:.0}%", zoom * 100.0));
+        }
+    });
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
-    painter.rect_filled(resp.rect, 0.0, theme::BG_PANEL);
+    let r = resp.rect;
+    painter.rect_filled(r, 0.0, theme::BG_INPUT);
+    let fit_zoom = ((r.width() - 32.0) / width)
+        .min((r.height() - 24.0) / height)
+        .clamp(0.25, 1.0);
+    if fit {
+        state.zoom = None;
+        state.pan = Vec2::ZERO;
+    }
+    if step != 1.0 {
+        state.zoom = Some((state.zoom.unwrap_or(fit_zoom) * step).clamp(0.25, 2.5));
+    }
     if resp.dragged() {
         state.pan += resp.drag_delta();
     }
-    let r = resp.rect;
-    let start = r.min + Vec2::new(state.pan.x.rem_euclid(GRID), state.pan.y.rem_euclid(GRID));
+    let zoom = state.zoom.unwrap_or(fit_zoom);
+    let node_size = Vec2::new(W, H) * zoom;
+    let grid = (GRID * zoom).max(12.0);
+    let midpoint = r.center() + state.pan;
+    let start = r.min
+        + Vec2::new(
+            (midpoint.x - r.min.x).rem_euclid(grid),
+            (midpoint.y - r.min.y).rem_euclid(grid),
+        );
     let mut y = start.y;
     while y < r.max.y {
         let mut x = start.x;
         while x < r.max.x {
-            painter.circle_filled(Pos2::new(x, y), 1.0, theme::LINE_SUBTLE);
-            x += GRID;
+            painter.circle_filled(Pos2::new(x, y), 0.65, theme::LINE_SUBTLE);
+            x += grid;
         }
-        y += GRID;
+        y += grid;
     }
-    let n = s.doc.layers.len().max(1) as f32;
-    let top = resp.rect.center_top() + Vec2::new(0.0, 32.0) + state.pan;
-    let col_x = |i: usize| top.x + (i as f32 - (n - 1.0) / 2.0) * (W + 24.0);
+    let top = midpoint - Vec2::new(0.0, 136.0 * zoom);
+    let col_x = |i: usize| top.x + (i as f32 * (W + 24.0) + (W - width) / 2.0) * zoom;
 
     // Layer i's peg and drawing sit in column i (front layer on the left,
     // matching composite port order). Composite and display are centred.
-    let mut pos: Vec<(NodeId, Pos2)> = Vec::new();
+    let mut pos = BTreeMap::<NodeId, Pos2>::new();
     for (i, l) in s.doc.layers.iter().enumerate() {
-        pos.push((l.peg, Pos2::new(col_x(i), top.y)));
-        pos.push((l.node, Pos2::new(col_x(i), top.y + 88.0)));
+        pos.insert(l.peg, Pos2::new(col_x(i), top.y));
+        pos.insert(l.node, Pos2::new(col_x(i), top.y + 88.0 * zoom));
     }
-    pos.push((s.doc.composite, Pos2::new(top.x, top.y + 184.0)));
-    pos.push((s.doc.display, Pos2::new(top.x, top.y + 272.0)));
-    let at = |id: NodeId| pos.iter().find(|(n, _)| *n == id).map(|(_, p)| *p);
-
+    pos.insert(s.doc.composite, Pos2::new(top.x, top.y + 184.0 * zoom));
+    pos.insert(s.doc.display, Pos2::new(top.x, top.y + 272.0 * zoom));
+    let selected = s.doc.layers.get(s.selected);
+    let is_selected = |id| selected.is_some_and(|layer| id == layer.peg || id == layer.node);
+    let mut inputs = BTreeMap::<_, Vec<_>>::new();
     for link in s.doc.graph.links() {
-        let (Some(a), Some(b)) = (at(link.from), at(link.to)) else {
-            continue;
-        };
-        let inputs = s
-            .doc
-            .graph
-            .links()
-            .iter()
-            .filter(|l| l.to == link.to)
-            .count()
-            .max(1) as f32;
-        let port_x = b.x - W / 2.0 + W * (link.port as f32 + 0.5) / inputs;
-        let from = a + Vec2::new(0.0, H / 2.0);
-        let to = Pos2::new(port_x, b.y - H / 2.0);
-        let mid = (to.y - from.y) / 2.0;
-        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-            [
-                from,
-                from + Vec2::new(0.0, mid),
-                to - Vec2::new(0.0, mid),
-                to,
-            ],
-            false,
-            egui::Color32::TRANSPARENT,
-            Stroke::new(1.5, theme::TEXT_SECONDARY),
-        ));
-        painter.circle_filled(to, 3.0, theme::TEXT_PRIMARY);
+        if pos.contains_key(&link.from) && pos.contains_key(&link.to) {
+            inputs.entry(link.to).or_default().push(link);
+        }
+    }
+    let mut ports = Vec::new();
+    for (target, links) in &mut inputs {
+        links.sort_by_key(|link| link.port);
+        let b = pos[target];
+        for (index, link) in links.iter().enumerate() {
+            let a = pos[&link.from];
+            let port_x =
+                b.x + node_size.x * 0.72 * ((index as f32 + 0.5) / links.len() as f32 - 0.5);
+            let from = a + Vec2::new(0.0, node_size.y / 2.0);
+            let to = Pos2::new(port_x, b.y - node_size.y / 2.0);
+            let colour = if is_selected(link.from) {
+                theme::ACCENT_SELECT
+            } else {
+                theme::LINE_CONTROL
+            };
+            ports.push((from, colour));
+            ports.push((to, colour));
+            let mid = (to.y - from.y) / 2.0;
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    from,
+                    from + Vec2::new(0.0, mid),
+                    to - Vec2::new(0.0, mid),
+                    to,
+                ],
+                false,
+                egui::Color32::TRANSPARENT,
+                Stroke::new(1.5, colour),
+            ));
+        }
     }
 
-    let selected = &s.doc.layers[s.selected];
-    let (sel_peg, sel_node) = (selected.peg, selected.node);
     let mut clicked_layer = None;
     for (id, p) in &pos {
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
-        let r = Rect::from_center_size(*p, Vec2::new(W, H));
-        let sel = *id == sel_peg || *id == sel_node;
-        painter.rect_filled(r, theme::RADIUS_CONTROL as f32, theme::BG_RAISED);
-        let outline = if sel {
-            Stroke::new(2.0, theme::ACCENT_SELECT)
+        let r = Rect::from_center_size(*p, node_size);
+        let sel = is_selected(*id);
+        let hovered = resp.hovered() && resp.hover_pos().is_some_and(|point| r.contains(point));
+        let surface = if hovered {
+            theme::BG_HOVER
         } else {
-            Stroke::new(1.0, theme::LINE_STRONG)
+            theme::BG_PANEL
+        };
+        painter.rect_filled(r, theme::RADIUS_CONTROL, surface);
+        let outline = if sel {
+            Stroke::new(1.0, theme::ACCENT_SELECT)
+        } else {
+            Stroke::new(1.0, theme::LINE_SUBTLE)
         };
         painter.rect_stroke(r, theme::RADIUS_CONTROL as f32, outline, StrokeKind::Inside);
         let name_col = if node.enabled {
@@ -114,37 +166,35 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
         } else {
             theme::TEXT_DISABLED
         };
-        // Show the type under the name only when it adds information.
         let kind = kind_label(&node.kind);
-        if node.name == kind {
+        if zoom >= 0.48 {
+            let inset = 10.0 * zoom;
+            let x = r.left() + inset;
+            let show_kind = node.name != kind && zoom >= 0.7;
+            let y = r.center().y - if show_kind { 7.0 * zoom } else { 0.0 };
+            let mut font = theme::body();
+            font.size *= zoom.clamp(0.72, 1.25);
             widgets::fitted_text(
                 ui,
                 &painter,
-                r.center(),
-                Align2::CENTER_CENTER,
+                Pos2::new(x, y),
+                Align2::LEFT_CENTER,
                 &node.name,
-                theme::body(),
+                font,
                 name_col,
-                r.width() - 10.0,
+                r.width() - inset * 2.0,
             );
-        } else {
-            widgets::fitted_text(
-                ui,
-                &painter,
-                r.center() - Vec2::new(0.0, 7.0),
-                Align2::CENTER_CENTER,
-                &node.name,
-                theme::body(),
-                name_col,
-                r.width() - 10.0,
-            );
-            painter.text(
-                r.center() + Vec2::new(0.0, 9.0),
-                Align2::CENTER_CENTER,
-                kind,
-                theme::dense(),
-                theme::TEXT_SECONDARY,
-            );
+            if show_kind {
+                let mut font = theme::dense();
+                font.size *= zoom.clamp(0.72, 1.25);
+                painter.text(
+                    Pos2::new(x, r.center().y + 8.0 * zoom),
+                    Align2::LEFT_CENTER,
+                    kind,
+                    font,
+                    theme::TEXT_SECONDARY,
+                );
+            }
         }
         if resp.clicked() && resp.interact_pointer_pos().is_some_and(|q| r.contains(q)) {
             clicked_layer = s
@@ -153,6 +203,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                 .iter()
                 .position(|l| l.peg == *id || l.node == *id);
         }
+    }
+    for (point, colour) in ports {
+        painter.circle_filled(point, (2.5 * zoom).max(1.5), colour);
     }
     if let Some(i) = clicked_layer {
         s.selected = i;
