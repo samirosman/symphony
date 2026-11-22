@@ -34,6 +34,8 @@ pub struct CanvasState {
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
     pub select: SelectState,
+    /// Stamped textured strokes, reused while only panning.
+    strokes: super::textured::Cache,
 }
 
 impl Default for CanvasState {
@@ -46,6 +48,7 @@ impl Default for CanvasState {
             erasing: None,
             last_view: Affine::IDENTITY,
             select: SelectState::default(),
+            strokes: Default::default(),
         }
     }
 }
@@ -60,6 +63,8 @@ struct Active {
     stroke: Stroke,
     /// Pencil thickness stencil, if the preset has one.
     stencil: Option<Stencil>,
+    /// Stamping state while a textured brush stroke is being drawn.
+    live: Option<super::textured::Live>,
 }
 
 impl CanvasState {
@@ -120,7 +125,18 @@ fn paint_mesh(painter: &egui::Painter, mesh: symphony_vector::Mesh, colour: Colo
     painter.add(egui::Shape::mesh(out));
 }
 
-fn paint_stroke(painter: &egui::Painter, stroke: &Stroke, colour: Color32, m: Affine) {
+fn paint_stroke(
+    painter: &egui::Painter,
+    cache: &mut super::textured::Cache,
+    textures: &std::collections::BTreeMap<u64, symphony_core::stroke::Texture>,
+    stroke: &Stroke,
+    colour: Color32,
+    m: Affine,
+) {
+    if let Some(tex) = &stroke.texture {
+        cache.paint(painter.ctx(), painter, textures, stroke, tex, colour, m);
+        return;
+    }
     let mesh = tessellate(stroke, m, 0.6);
     if mesh.indices.is_empty() {
         return;
@@ -325,6 +341,7 @@ pub fn ui(
     let (response, painter) = ui.allocate_painter(canvas_size, Sense::click_and_drag());
     let rect = response.rect;
     let painter = painter.with_clip_rect(rect);
+    state.strokes.begin_frame(ui.ctx());
     let (w, h) = (s.doc.settings.width as f32, s.doc.settings.height as f32);
 
     // Navigation (before drawing, so this frame already shows the result).
@@ -421,6 +438,8 @@ pub fn ui(
                     for st in &dr.strokes {
                         paint_stroke(
                             &painter,
+                            &mut state.strokes,
+                            &s.doc.textures,
                             st,
                             tint.gamma_multiply(alpha),
                             view.compose(layer_world),
@@ -490,7 +509,14 @@ pub fn ui(
                         }
                         continue;
                     }
-                    paint_stroke(&painter, st, colour(s, st.swatch), m);
+                    paint_stroke(
+                        &painter,
+                        &mut state.strokes,
+                        &s.doc.textures,
+                        st,
+                        colour(s, st.swatch),
+                        m,
+                    );
                 }
             }
         }
@@ -521,16 +547,33 @@ pub fn ui(
     }
     if let Some(a) = state
         .active
-        .as_ref()
+        .as_mut()
         .filter(|a| a.stroke.kind != StrokeKind::Invisible)
     {
         if let Some(back) = a.to_local.inverse() {
-            paint_stroke(
-                &painter,
-                &a.stroke,
-                colour(s, a.stroke.swatch),
-                view.compose(back),
-            );
+            let m = view.compose(back);
+            let ink = colour(s, a.stroke.swatch);
+            match a.stroke.texture {
+                // Textured: stamp only the new part each frame.
+                Some(tex) => super::textured::Live::paint(
+                    &mut a.live,
+                    ui.ctx(),
+                    &painter,
+                    &s.doc.textures,
+                    &a.stroke,
+                    &tex,
+                    ink,
+                    m,
+                ),
+                None => paint_stroke(
+                    &painter,
+                    &mut state.strokes,
+                    &s.doc.textures,
+                    &a.stroke,
+                    ink,
+                    m,
+                ),
+            }
         }
     }
 
@@ -581,6 +624,13 @@ pub fn ui(
                         Tool::CloseGap => StrokeKind::Invisible,
                         _ => StrokeKind::Brush,
                     };
+                    // A textured brush brings its tip and grain into the
+                    // scene, so the scene keeps working on any machine.
+                    if let (Some(tex), StrokeKind::Brush) = (settings.texture, kind) {
+                        for k in [tex.tip, tex.grain].into_iter().flatten() {
+                            crate::brush_import::ensure_texture(&mut s.doc, k);
+                        }
+                    }
                     let (x, y) = to_local.apply(sx, sy);
                     let p = Point {
                         x,
@@ -611,8 +661,10 @@ pub fn ui(
                             } else {
                                 Default::default()
                             },
+                            texture: settings.texture.filter(|_| kind == StrokeKind::Brush),
                         },
                         stencil: settings.stencil.filter(|_| kind == StrokeKind::Pencil),
+                        live: None,
                     });
                 }
             }
@@ -649,6 +701,11 @@ pub fn ui(
                         let reach = 40.0 * a.min_step / 0.5;
                         s.close_gap(a.layer, a.frame, &a.stroke.points, reach);
                     } else {
+                        // The live image stands in until the committed
+                        // stroke is stamped, so it never flickers.
+                        if let Some(live) = a.live.take() {
+                            state.strokes.adopt(a.stroke.id, live);
+                        }
                         s.commit_stroke(a.layer, a.frame, a.stroke);
                     }
                 }

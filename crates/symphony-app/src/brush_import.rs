@@ -7,13 +7,17 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
 use symphony_brushes::Brush;
-use symphony_core::stroke::Tips;
+use symphony_core::stroke::{StrokeTexture, Tips};
 
 use crate::presets::Preset;
 use crate::session::BrushSettings;
 
 /// Where imported tip and grain textures are kept.
 pub fn library_dir() -> Option<PathBuf> {
+    // Screenshot runs never touch the real library.
+    if std::env::var_os("SYMPHONY_SCREENSHOT").is_some() {
+        return Some(std::env::temp_dir().join("symphony-shot-brushes"));
+    }
     dirs::data_dir().map(|d| d.join("Symphony").join("brushes"))
 }
 
@@ -49,9 +53,7 @@ impl BrushImport {
     pub fn finished(paths: Vec<PathBuf>) -> Self {
         let (tx, rx) = channel();
         let files = paths.len();
-        // Never touch the real brush library from a screenshot run.
-        let scratch = std::env::temp_dir().join("symphony-shot-brushes");
-        let _ = tx.send(run(&paths, Some(&scratch)));
+        let _ = tx.send(run(&paths, library_dir().as_deref()));
         BrushImport { rx, files }
     }
 }
@@ -59,7 +61,7 @@ impl BrushImport {
 /// Symphony's tools take sizes up to 60 points; bigger stamps are capped.
 const MAX_WIDTH: f32 = 60.0;
 
-fn settings(b: &Brush) -> BrushSettings {
+fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
     let max = b.diameter.clamp(0.5, MAX_WIDTH);
     BrushSettings {
         min_width: (max * b.min_fraction).min(max),
@@ -67,6 +69,57 @@ fn settings(b: &Brush) -> BrushSettings {
         smoothing: b.smoothing.clamp(0.0, 0.95),
         tips: Tips::default(),
         stencil: None,
+        // Imported brushes are textured vector brushes, as in Harmony:
+        // vector lines drawn with the original tip and grain.
+        texture: Some(StrokeTexture {
+            tip,
+            grain,
+            spacing: b.spacing.clamp(0.01, 10.0),
+            opacity: b.opacity.clamp(0.0, 1.0),
+            angle: b.angle,
+            follow: false,
+            grain_scale: 1.0,
+        }),
+    }
+}
+
+/// The library key of a texture file name ("0123abcd....png").
+pub fn key_of(file: &str) -> Option<u64> {
+    u64::from_str_radix(file.strip_suffix(".png")?, 16).ok()
+}
+
+thread_local! {
+    static LOADED: std::cell::RefCell<std::collections::HashMap<u64, Option<std::sync::Arc<symphony_core::stroke::Texture>>>> =
+        Default::default();
+}
+
+/// A texture from the brush library, decoded once per run (for previews).
+pub fn library_texture(key: u64) -> Option<std::sync::Arc<symphony_core::stroke::Texture>> {
+    LOADED.with(|m| {
+        m.borrow_mut()
+            .entry(key)
+            .or_insert_with(|| {
+                let path = library_dir()?.join(format!("{key:016x}.png"));
+                let g = image::open(path).ok()?.to_luma8();
+                let t = symphony_core::stroke::Texture {
+                    width: g.width(),
+                    height: g.height(),
+                    pixels: g.into_raw(),
+                };
+                t.is_valid().then(|| std::sync::Arc::new(t))
+            })
+            .clone()
+    })
+}
+
+/// Load a library texture into the scene's store if it isn't there yet,
+/// so the scene carries every texture its strokes use.
+pub fn ensure_texture(scene: &mut symphony_core::doc::Scene, key: u64) {
+    if scene.textures.contains_key(&key) {
+        return;
+    }
+    if let Some(t) = library_texture(key) {
+        scene.textures.insert(key, (*t).clone());
     }
 }
 
@@ -106,12 +159,18 @@ fn run(paths: &[PathBuf], library: Option<&Path>) -> Outcome {
                         continue;
                     }
                     source = Some(b.source.title());
+                    let tip = b.tip.as_ref().zip(library).and_then(|(t, d)| save(t, d));
+                    let grain = b.grain.as_ref().zip(library).and_then(|(g, d)| save(g, d));
+                    let keys = (
+                        tip.as_deref().and_then(key_of),
+                        grain.as_deref().and_then(key_of),
+                    );
                     out.presets.push(Preset {
                         name: b.name.clone(),
-                        settings: settings(b),
+                        settings: settings(b, keys.0, keys.1),
                         source: Some(b.source.title().to_owned()),
-                        tip: b.tip.as_ref().zip(library).and_then(|(t, d)| save(t, d)),
-                        grain: b.grain.as_ref().zip(library).and_then(|(g, d)| save(g, d)),
+                        tip,
+                        grain,
                     });
                     added += 1;
                 }
@@ -152,7 +211,7 @@ mod tests {
         .brushes
         .remove(0);
         b.min_fraction = 0.25;
-        let s = settings(&b);
+        let s = settings(&b, None, None);
         assert_eq!(s.max_width, MAX_WIDTH);
         assert_eq!(s.min_width, 15.0);
     }

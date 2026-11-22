@@ -66,7 +66,20 @@ Symphony plan:
   edited. Docs: `drawing/create-textured-brush`.
 
 Symphony plan: ⬜ texture palettes beside colour palettes, ⬜ pencil
-texture rendering along the centreline, ⬜ textured vector brush.
+texture rendering along the centreline, ✅ textured vector brush.
+
+Textured vector brush, as built (2026-11-21): a stroke keeps its vector
+centreline, pressure and widths plus a `StrokeTexture` (tip, grain, spacing,
+opacity, angle, turn with stroke, grain scale). `symphony_vector::stamp`
+stamps the tip along the line and multiplies by the grain in drawing space,
+fresh for each transform, so moving, scaling or reshaping a line re-samples
+the texture. The scene stores the tip and grain images it uses, so it opens
+the same on any machine. Export and the canvas use the same stamping. The
+canvas stamps the line being drawn a piece at a time, and re-stamps finished
+lines on a background thread, showing the last image moved into place
+meanwhile (DESIGN §17). Imported brushes become textured vector brushes.
+Still to do: Harmony's dual tip, random size/angle/spacing, count, and
+bitmap layers.
 
 ## 3. Effect nodes and mattes
 

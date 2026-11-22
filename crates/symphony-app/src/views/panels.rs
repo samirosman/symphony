@@ -62,6 +62,10 @@ fn paint_sample(
     gamma: f32,
     pencil: bool,
 ) {
+    if let (Some(tex), false) = (&b.texture, pencil) {
+        super::textured::sample(p, rect, tex, b.min_width, b.max_width, ink);
+        return;
+    }
     let n = 48;
     let (minw, maxw) = (b.min_width, b.max_width.min(rect.height() - 8.0).max(0.5));
     let minw = minw.min(maxw);
@@ -216,17 +220,30 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                 );
                 p.rect_filled(sample, 3.0, theme::CANVAS_STAGE);
                 paint_sample(p, sample, ink, &preset.settings, 1.0, pencil);
-                p.text(
-                    egui::pos2(sample.right() + 8.0, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    &preset.name,
-                    theme::body(),
-                    if selected {
-                        theme::ON_ACCENT
-                    } else {
-                        theme::TEXT_PRIMARY
-                    },
+                // Long names end in an ellipsis instead of running off.
+                let tag = if preset.settings.stencil.is_some() && pencil {
+                    56.0
+                } else {
+                    0.0
+                };
+                let left = sample.right() + 8.0;
+                let mut job = egui::text::LayoutJob::single_section(
+                    preset.name.clone(),
+                    egui::TextFormat::simple(
+                        theme::body(),
+                        if selected {
+                            theme::ON_ACCENT
+                        } else {
+                            theme::TEXT_PRIMARY
+                        },
+                    ),
                 );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(
+                    (rect.right() - 6.0 - tag - left).max(8.0),
+                );
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                let top = rect.center().y - galley.size().y * 0.5;
+                p.galley(egui::pos2(left, top), galley, theme::TEXT_PRIMARY);
                 if preset.settings.stencil.is_some() && pencil {
                     p.text(
                         egui::pos2(rect.right() - 6.0, rect.center().y),
@@ -240,11 +257,16 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                         },
                     );
                 }
-                let row = row.on_hover_text(if pencil && preset.settings.stencil.is_some() {
-                    "Thickness stencil: ignores pen pressure"
+                let mut tip = preset.name.clone();
+                if let Some(src) = &preset.source {
+                    tip.push_str(&format!("\nImported from {src}"));
+                }
+                tip.push_str(if pencil && preset.settings.stencil.is_some() {
+                    "\nThickness stencil: ignores pen pressure"
                 } else {
-                    "Click to use. Double-click to rename."
+                    "\nClick to use. Double-click to rename."
                 });
+                let row = row.on_hover_text(tip);
                 if row.clicked() {
                     if pencil {
                         s.pencil = preset.settings;
@@ -356,6 +378,39 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
             "Pen pressure sets the size between minimum and maximum. Smoothing steadies the line as you draw."
         },
     );
+    if !pencil {
+        // Harmony's Brush Type.
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let mut textured = b.texture.is_some();
+            ui.selectable_value(&mut textured, false, "Solid vector");
+            ui.selectable_value(&mut textured, true, "Textured vector");
+            if textured != b.texture.is_some() {
+                b.texture = textured.then_some(symphony_core::stroke::StrokeTexture {
+                    tip: None,
+                    grain: None,
+                    spacing: 0.1,
+                    opacity: 1.0,
+                    angle: 0.0,
+                    follow: false,
+                    grain_scale: 1.0,
+                });
+            }
+        });
+        if let Some(t) = &mut b.texture {
+            slider(ui, "Spacing", &mut t.spacing, 0.01..=3.0);
+            slider(ui, "Opacity", &mut t.opacity, 0.0..=1.0);
+            slider(ui, "Tip angle", &mut t.angle, -180.0..=180.0);
+            widgets::checkbox(ui, &mut t.follow, "Turn tip with the stroke");
+            if t.grain.is_some() {
+                slider(ui, "Paper grain scale", &mut t.grain_scale, 0.1..=8.0);
+            }
+            hint(
+                ui,
+                "Strokes stay vector lines: move, scale or reshape them and the texture is redrawn, not stretched.",
+            );
+        }
+    }
     if pencil {
         ui.add_space(4.0);
         egui::Grid::new("pencil-tips")

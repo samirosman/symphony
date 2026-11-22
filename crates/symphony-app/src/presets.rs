@@ -77,6 +77,7 @@ fn settings(min: f32, max: f32, smoothing: f32) -> BrushSettings {
         smoothing,
         tips: Tips::default(),
         stencil: None,
+        texture: None,
     }
 }
 
@@ -277,6 +278,12 @@ fn sanitised(mut s: BrushSettings) -> BrushSettings {
     s.max_width = clean(s.max_width, 0.5, 60.0, 4.0);
     s.min_width = clean(s.min_width, 0.0, s.max_width, 0.0);
     s.smoothing = clean(s.smoothing, 0.0, 0.95, 0.3);
+    if let Some(t) = &mut s.texture {
+        t.spacing = clean(t.spacing, 0.01, 10.0, 0.1);
+        t.opacity = clean(t.opacity, 0.0, 1.0, 1.0);
+        t.angle = clean(t.angle, -360.0, 360.0, 0.0);
+        t.grain_scale = clean(t.grain_scale, 0.01, 100.0, 1.0);
+    }
     if let Some(st) = &mut s.stencil {
         for v in st.iter_mut() {
             *v = clean(*v, 0.0, 1.0, 1.0);

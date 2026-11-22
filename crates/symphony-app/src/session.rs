@@ -97,6 +97,10 @@ pub struct BrushSettings {
     /// (0..=1 between minimum and maximum size) that ignores pen pressure.
     #[serde(default)]
     pub stencil: Option<Stencil>,
+    /// Harmony's Brush Type: `None` is a Solid Vector Brush, `Some` a
+    /// Textured Vector Brush (tip, grain, spacing, opacity).
+    #[serde(default)]
+    pub texture: Option<symphony_core::stroke::StrokeTexture>,
 }
 
 /// A thickness profile sampled evenly from start to end of a line.
@@ -258,6 +262,7 @@ impl Session {
                 smoothing: 0.4,
                 tips: Tips::default(),
                 stencil: None,
+                texture: None,
             },
             pencil: BrushSettings {
                 min_width: 2.0,
@@ -265,6 +270,7 @@ impl Session {
                 smoothing: 0.3,
                 tips: Tips::default(),
                 stencil: None,
+                texture: None,
             },
             swatch,
             pressure_gamma: 1.0,
@@ -360,6 +366,7 @@ impl Session {
                     max_width: 9.0,
                     points,
                     tips: Default::default(),
+                    texture: None,
                 };
                 s.commit_stroke(layer, 1, st);
             }
@@ -712,6 +719,7 @@ impl Session {
             max_width: 0.0,
             points: vec![Point { pressure: 1.0, ..a }, Point { pressure: 1.0, ..b }],
             tips: Default::default(),
+            texture: None,
         };
         self.history.apply(
             &mut self.doc,
@@ -1383,6 +1391,7 @@ mod tests {
                 },
             ],
             tips: Default::default(),
+            texture: None,
         }
     }
 
@@ -1460,6 +1469,7 @@ mod tests {
                 })
                 .collect(),
             tips: Default::default(),
+            texture: None,
         };
         s.commit_stroke(0, 1, st);
     }
@@ -1550,6 +1560,7 @@ mod tests {
                 })
                 .collect(),
             tips: Default::default(),
+            texture: None,
         };
         // A line thick in the middle gives a stencil thick in the middle.
         let swell = stencil_from(&line(|t| (t * std::f32::consts::PI).sin())).unwrap();
@@ -1620,6 +1631,7 @@ mod tests {
                 })
                 .collect(),
             tips: Default::default(),
+            texture: None,
         };
         s.commit_stroke(0, 1, open);
         s.paint_at(0, 1, 50.0, 50.0, 1.0);

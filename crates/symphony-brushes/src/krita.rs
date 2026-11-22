@@ -119,6 +119,8 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         let brush = d.root_element();
         let attr = |k: &str| brush.attribute(k).and_then(|v| v.parse::<f32>().ok());
         b.spacing = attr("spacing").unwrap_or(0.1);
+        // Krita stores the tip angle in radians.
+        b.angle = attr("angle").unwrap_or(0.0).to_degrees();
         let scale = attr("scale").unwrap_or(1.0);
         match brush.attribute("type") {
             Some("auto_brush") => {

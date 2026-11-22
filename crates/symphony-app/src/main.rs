@@ -1152,6 +1152,52 @@ impl SymphonyApp {
         });
     }
 
+    /// Screenshot mode: draw sample strokes with the first imported
+    /// brushes, to review textured strokes on the canvas.
+    fn shot_strokes(&mut self) {
+        use symphony_core::stroke::{Point, Stroke, StrokeKind};
+        let imported: Vec<_> = self
+            .presets
+            .brush
+            .iter()
+            .filter(|p| p.source.is_some())
+            .take(6)
+            .cloned()
+            .collect();
+        for (row, p) in imported.iter().enumerate() {
+            let b = p.settings;
+            if let Some(tex) = b.texture {
+                for k in [tex.tip, tex.grain].into_iter().flatten() {
+                    brush_import::ensure_texture(&mut self.s.doc, k);
+                }
+            }
+            let y = -170.0 + row as f32 * 60.0;
+            let points = (0..=60)
+                .map(|i| {
+                    let t = i as f32 / 60.0;
+                    Point {
+                        x: -420.0 + t * 380.0,
+                        y: y + (t * std::f32::consts::TAU).sin() * 14.0,
+                        pressure: (t * std::f32::consts::PI).sin(),
+                    }
+                })
+                .collect();
+            let st = Stroke {
+                id: self.s.doc.ids.fresh(),
+                kind: StrokeKind::Brush,
+                art: Default::default(),
+                swatch: self.s.swatch,
+                min_width: b.min_width.min(40.0),
+                max_width: b.max_width.min(40.0),
+                points,
+                tips: Default::default(),
+                texture: b.texture,
+            };
+            let layer = self.s.doc.layers.len().saturating_sub(1);
+            self.s.commit_stroke(layer, 1, st);
+        }
+    }
+
     /// Brush and preset files dropped anywhere on the window import as
     /// Brush presets; while files hover, say what dropping will do.
     fn file_drops(&mut self, ctx: &egui::Context) {
@@ -1180,6 +1226,9 @@ impl SymphonyApp {
                 }
                 if n > 0 {
                     self.s.tool = Tool::Brush;
+                }
+                if self.shot.is_some() && n > 0 {
+                    self.shot_strokes();
                 }
                 self.s.notice = Some(text);
             }

@@ -67,6 +67,8 @@ pub struct Brush {
     pub spacing: f32,
     /// Stroke stabilisation, 0..=1.
     pub smoothing: f32,
+    /// Tip rotation in degrees, counter-clockwise.
+    pub angle: f32,
     /// Is it an eraser preset?
     pub eraser: bool,
     /// Tip shape (white = paint), at most [`MAX_IMAGE`] pixels a side.
@@ -86,6 +88,7 @@ impl Brush {
             opacity: 1.0,
             spacing: 0.1,
             smoothing: 0.0,
+            angle: 0.0,
             eraser: false,
             tip: None,
             grain: None,
@@ -110,6 +113,7 @@ impl Brush {
         self.opacity = fix(self.opacity, 0.0, 1.0, 1.0);
         self.spacing = fix(self.spacing, 0.001, 10.0, 0.1);
         self.smoothing = fix(self.smoothing, 0.0, 1.0, 0.0);
+        self.angle = fix(self.angle, -360.0, 360.0, 0.0);
         self.size_curve
             .retain(|p| p[0].is_finite() && p[1].is_finite());
         self.size_curve.truncate(64);
