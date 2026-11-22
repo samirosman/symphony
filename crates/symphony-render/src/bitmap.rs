@@ -60,7 +60,13 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
     reader.limits(limits);
     let decoded = reader.decode().ok()?;
     if file.format == ImageFormat::Exr {
-        return linear_to_pixmap(decoded.into_rgba32f(), alpha);
+        let (w, h) = (decoded.width(), decoded.height());
+        return match decoded {
+            // No alpha channel: read the RGB samples as they are, rather
+            // than copy them into a second, four-channel buffer.
+            image::DynamicImage::ImageRgb32F(img) => linear_to_pixmap(w, h, &img, 3, alpha),
+            other => linear_to_pixmap(w, h, &other.into_rgba32f(), 4, alpha),
+        };
     }
     let rgba = decoded.into_rgba8();
     let (w, h) = rgba.dimensions();
@@ -83,50 +89,95 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
 }
 
 /// Linear-light float pixels (OpenEXR) to premultiplied sRGB bytes, the
-/// same form [`decode`] gives for PNG and JPEG. The premultiplication is
-/// undone in linear light, where it was made. Values above 1.0 are
-/// clipped (no tone mapping); NaN reads as 0.
-fn linear_to_pixmap(img: image::Rgba32FImage, alpha: Alpha) -> Option<Pixmap> {
-    let (w, h) = img.dimensions();
-    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
-    for p in img.pixels() {
-        // Not `clamp`, which keeps NaN; a NaN alpha reads as 0.
-        let a = if p[3] > 0.0 { p[3].min(1.0) } else { 0.0 };
-        let a8 = (a * 255.0).round() as u8;
-        for &c in &p.0[..3] {
-            // Colour premultiplied with black, in linear light.
-            let black = match alpha {
-                Alpha::Straight => c * a,
-                Alpha::PremultipliedBlack => c,
-                Alpha::PremultipliedWhite => c - (1.0 - a),
-            };
-            let straight = if a > 0.0 { black / a } else { 0.0 };
-            let s = srgb8(straight) as u16;
-            out.push(((s * a8 as u16 + 127) / 255) as u8);
-        }
-        out.push(a8);
+/// same form [`decode`] gives for PNG and JPEG. `samples` holds RGB (an
+/// opaque image) or RGBA, per `channels`. The premultiplication is undone
+/// in linear light, where it was made. Values above 1.0 are clipped (no
+/// tone mapping); NaN reads as 0.
+fn linear_to_pixmap(
+    w: u32,
+    h: u32,
+    samples: &[f32],
+    channels: usize,
+    alpha: Alpha,
+) -> Option<Pixmap> {
+    let mut out = vec![0; w as usize * h as usize * 4];
+    for (p, o) in samples
+        .chunks_exact(channels)
+        .zip(out.as_chunks_mut::<4>().0)
+    {
+        linear_pixel(p, o, alpha);
     }
     Pixmap::from_vec(out, IntSize::from_wh(w, h)?)
 }
 
+fn linear_pixel(p: &[f32], out: &mut [u8; 4], alpha: Alpha) {
+    // Not `clamp`, which keeps NaN; a NaN alpha reads as 0.
+    let a = match p.get(3) {
+        None => 1.0,
+        Some(&a) if a > 0.0 => a.min(1.0),
+        Some(_) => 0.0,
+    };
+    let a8 = (a * 255.0).round() as u8;
+    for (o, &c) in out.iter_mut().zip(&p[..3]) {
+        // Colour premultiplied with black, in linear light.
+        let black = match alpha {
+            Alpha::Straight => c * a,
+            Alpha::PremultipliedBlack => c,
+            Alpha::PremultipliedWhite => c - (1.0 - a),
+        };
+        let straight = if a > 0.0 { black / a } else { 0.0 };
+        let s = srgb8(straight) as u16;
+        *o = ((s * a8 as u16 + 127) / 255) as u8;
+    }
+    out[3] = a8;
+}
+
+/// Buckets over linear [0, 1) for [`srgb8`]. A bucket (1/8192 wide) is
+/// narrower than the closest two thresholds (1/3295 apart, in the linear
+/// segment near black), so a bucket holds at most one threshold.
+const BUCKETS: usize = 8192;
+
+struct SrgbTable {
+    /// The linear value where each code ends: halfway to the next code in
+    /// sRGB (IEC 61966-2-1).
+    upper: [f32; 255],
+    /// The code at the start of each bucket.
+    first: Vec<u8>,
+}
+
 /// The sRGB code for a linear value: the first code whose upper threshold
 /// is above it. The thresholds sit halfway between codes in sRGB, so this
-/// matches rounding the exact curve (IEC 61966-2-1).
+/// matches rounding the exact curve. A table look-up gives the code at the
+/// start of the value's bucket; at most one threshold follows inside it.
 fn srgb8(linear: f32) -> u8 {
-    static UPPER: OnceLock<[f32; 255]> = OnceLock::new();
-    let upper = UPPER.get_or_init(|| {
-        std::array::from_fn(|i| {
+    static TABLE: OnceLock<SrgbTable> = OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+        let upper = std::array::from_fn(|i| {
             let s = (i as f32 + 0.5) / 255.0;
             if s <= 0.04045 {
                 s / 12.92
             } else {
                 ((s + 0.055) / 1.055).powf(2.4)
             }
-        })
+        });
+        let first = (0..BUCKETS)
+            .map(|b| {
+                let x = b as f32 / BUCKETS as f32;
+                upper.partition_point(|&t| t <= x) as u8
+            })
+            .collect();
+        SrgbTable { upper, first }
     });
-    // `max` maps NaN to 0.
+    // `max` maps NaN to 0. Every threshold is below 1.0.
     let x = linear.max(0.0);
-    upper.partition_point(|&t| t <= x) as u8
+    if x >= 1.0 {
+        return 255;
+    }
+    let mut code = t.first[(x * BUCKETS as f32) as usize];
+    while code < 255 && t.upper[code as usize] <= x {
+        code += 1;
+    }
+    code
 }
 
 fn cached(scene: &Scene, r: ImageRef) -> Option<Arc<Pixmap>> {
@@ -305,6 +356,37 @@ mod tests {
             assert_eq!(srgb8(lin), code);
         }
         assert_eq!(srgb8(f32::INFINITY), 255);
+    }
+
+    #[test]
+    fn srgb_table_matches_a_search_of_the_thresholds() {
+        let upper: [f32; 255] = std::array::from_fn(|i| {
+            let s = (i as f32 + 0.5) / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        let search = |x: f32| upper.partition_point(|&t| t <= x) as u8;
+        // Every value a half-float file can hold in [0, 1], then each
+        // threshold and its neighbours.
+        for bits in 0..=0x3c00u16 {
+            let x = exr::prelude::f16::from_bits(bits).to_f32();
+            assert_eq!(srgb8(x), search(x), "{x}");
+        }
+        for &t in &upper {
+            for x in [t.next_down(), t, t.next_up()] {
+                assert_eq!(srgb8(x), search(x), "{x}");
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_rgb_exr_reads_like_rgba() {
+        let rgb = linear_to_pixmap(1, 1, &[0.2158, 0.0, 1.0], 3, Alpha::PremultipliedBlack);
+        let rgba = linear_to_pixmap(1, 1, &[0.2158, 0.0, 1.0, 1.0], 4, Alpha::PremultipliedBlack);
+        assert_eq!(rgb.unwrap().data(), rgba.unwrap().data());
     }
 
     #[test]
