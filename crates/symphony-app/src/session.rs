@@ -103,6 +103,33 @@ pub struct BrushSettings {
     pub texture: Option<symphony_core::stroke::StrokeTexture>,
 }
 
+/// Compare names with runs of digits as numbers, so "2" < "10".
+pub fn natural(a: &str, b: &str) -> std::cmp::Ordering {
+    let key = |s: &str| -> Vec<(bool, u64, String)> {
+        let mut out = Vec::new();
+        let mut chars = s.chars().peekable();
+        while let Some(&c) = chars.peek() {
+            let digit = c.is_ascii_digit();
+            let mut part = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() != digit {
+                    break;
+                }
+                part.push(c);
+                chars.next();
+            }
+            let n = if digit {
+                part.parse().unwrap_or(u64::MAX)
+            } else {
+                0
+            };
+            out.push((!digit, n, part.to_lowercase()));
+        }
+        out
+    };
+    key(a).cmp(&key(b)).then_with(|| a.cmp(b))
+}
+
 /// Harmony's names for the art layers.
 pub fn art_name(art: ArtLayer) -> &'static str {
     match art {
@@ -1106,6 +1133,114 @@ impl Session {
         }
     }
 
+    /// The selected layer's drawings (its element), in Harmony's order:
+    /// by name, with numbers compared as numbers ("2" before "10").
+    pub fn element_drawings(&self, layer: usize) -> Vec<(Id, String)> {
+        let Some(col) = self.doc.layers.get(layer).map(|l| l.column) else {
+            return Vec::new();
+        };
+        let mut list: Vec<(Id, String)> = self
+            .doc
+            .drawings
+            .values()
+            .filter(|d| d.column == col)
+            .map(|d| (d.id, d.name.clone()))
+            .collect();
+        list.sort_by(|a, b| natural(&a.1, &b.1));
+        list
+    }
+
+    /// Harmony's drawing substitution: expose `drawing` from the current
+    /// frame to the end of the current exposure (splitting it if the frame
+    /// is mid-way through).
+    pub fn swap_drawing(&mut self, layer: usize, frame: u32, drawing: Id) {
+        let Some(col_id) = self.doc.layers.get(layer).map(|l| l.column) else {
+            return;
+        };
+        let Some(col) = self.doc.xsheet.column(col_id) else {
+            return;
+        };
+        let Some(current) = col.get(frame) else {
+            self.note("There's no drawing in this cell to swap");
+            return;
+        };
+        if current == drawing {
+            return;
+        }
+        let end = col.run_end(frame);
+        let before: Vec<Option<Id>> = (frame..=end).map(|f| col.get(f)).collect();
+        let after = vec![Some(drawing); before.len()];
+        self.history.apply_merged(
+            &mut self.doc,
+            "Swap drawing",
+            &format!("swap-{}-{frame}", col_id.0),
+            Edit::SetCells {
+                column: col_id,
+                from: frame,
+                before,
+                after,
+            },
+        );
+    }
+
+    /// Substitute Drawing Next (]) or Previous ([).
+    pub fn substitute(&mut self, delta: i32) {
+        let (layer, frame) = (self.selected, self.frame);
+        let Some(current) = self.doc.exposed(layer, frame) else {
+            self.note("There's no drawing in this cell to swap");
+            return;
+        };
+        let list = self.element_drawings(layer);
+        let Some(i) = list.iter().position(|(id, _)| *id == current) else {
+            return;
+        };
+        let Some((next, name)) = i
+            .checked_add_signed(delta as isize)
+            .and_then(|j| list.get(j))
+            .cloned()
+        else {
+            self.note(if delta > 0 {
+                "This is the layer's last drawing"
+            } else {
+                "This is the layer's first drawing"
+            });
+            return;
+        };
+        self.swap_drawing(layer, frame, next);
+        self.end_gesture();
+        self.note(format!("Drawing {name}"));
+    }
+
+    /// Go to Next Drawing (G) or Previous Drawing (F): jump to the start of
+    /// the next or previous exposure on the selected layer.
+    pub fn go_to_drawing(&mut self, forward: bool) {
+        let Some(col) = self.doc.column(self.selected) else {
+            return;
+        };
+        let start = col.run_start(self.frame);
+        let target = if forward {
+            let mut f = col.run_end(self.frame) + 1;
+            while f <= col.len() && col.get(f).is_none() {
+                f += 1;
+            }
+            (f <= col.len()).then_some(f)
+        } else {
+            let mut f = start.saturating_sub(1);
+            while f >= 1 && col.get(f).is_none() {
+                f -= 1;
+            }
+            (f >= 1).then(|| col.run_start(f))
+        };
+        match target {
+            Some(f) => self.frame = f,
+            None => self.note(if forward {
+                "No more drawings after this one"
+            } else {
+                "No drawings before this one"
+            }),
+        }
+    }
+
     pub fn set_length(&mut self, length: u32) {
         let before = self.doc.settings.length;
         if before != length {
@@ -1731,6 +1866,55 @@ mod tests {
             ..line(|_| 1.0)
         })
         .is_none());
+    }
+
+    #[test]
+    fn substitution_swaps_to_the_end_of_the_exposure() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s); // drawing 1 on frame 1
+        let one = s.doc.exposed(0, 1).unwrap();
+        // Hold drawing 1 for frames 1-4, then add drawings 2 and 10 to the element.
+        for _ in 0..3 {
+            s.change_exposure(1);
+        }
+        let col = s.doc.layers[0].column;
+        let two = s.doc.make_drawing(col);
+        let mut ten = s.doc.make_drawing(col);
+        ten.name = "10".into();
+        let (two_id, ten_id) = (two.id, ten.id);
+        s.history.apply(
+            &mut s.doc,
+            "Add",
+            vec![
+                Edit::AddDrawing { drawing: two },
+                Edit::AddDrawing { drawing: ten },
+            ],
+        );
+        let names: Vec<String> = s.element_drawings(0).into_iter().map(|d| d.1).collect();
+        assert_eq!(names, ["1", "2", "10"], "numbers sort as numbers");
+
+        // ] on frame 3 swaps frames 3-4 only, splitting the exposure.
+        s.frame = 3;
+        s.substitute(1);
+        let cells: Vec<_> = (1..=4).map(|f| s.doc.exposed(0, f)).collect();
+        assert_eq!(cells, [Some(one), Some(one), Some(two_id), Some(two_id)]);
+        s.substitute(1);
+        assert_eq!(s.doc.exposed(0, 4), Some(ten_id));
+        s.substitute(1);
+        assert_eq!(
+            s.doc.exposed(0, 4),
+            Some(ten_id),
+            "stops at the last drawing"
+        );
+        s.undo();
+        assert_eq!(s.doc.exposed(0, 3), Some(two_id));
+
+        // G and F jump between exposures.
+        s.frame = 1;
+        s.go_to_drawing(true);
+        assert_eq!(s.frame, 3);
+        s.go_to_drawing(false);
+        assert_eq!(s.frame, 1);
     }
 
     #[test]

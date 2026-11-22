@@ -736,6 +736,10 @@ impl SymphonyApp {
                     Action::SwitchLineColourArt => s.switch_line_colour_art(),
                     Action::SwitchOverlayUnderlay => s.switch_overlay_underlay(),
                     Action::PreviewArtLayers => s.art_preview = !s.art_preview,
+                    Action::SubstituteNext => s.substitute(1),
+                    Action::SubstitutePrevious => s.substitute(-1),
+                    Action::GoToNextDrawing => s.go_to_drawing(true),
+                    Action::GoToPreviousDrawing => s.go_to_drawing(false),
                     Action::CreateColourArt => {
                         let (layer, frame) = (s.selected, s.frame);
                         s.create_colour_art(layer, frame);
@@ -903,6 +907,11 @@ impl SymphonyApp {
         ui.menu_button("Timing", |ui| {
             self.menu_action(ui, Action::IncreaseExposure);
             self.menu_action(ui, Action::DecreaseExposure);
+            ui.separator();
+            self.menu_action(ui, Action::SubstitutePrevious);
+            self.menu_action(ui, Action::SubstituteNext);
+            self.menu_action(ui, Action::GoToPreviousDrawing);
+            self.menu_action(ui, Action::GoToNextDrawing);
             ui.separator();
             self.menu_action(ui, Action::CreateEmptyDrawing);
             self.menu_action(ui, Action::AddLayer);

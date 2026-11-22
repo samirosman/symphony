@@ -95,13 +95,17 @@ pub enum Action {
     SwitchOverlayUnderlay,
     PreviewArtLayers,
     CreateColourArt,
+    SubstituteNext,
+    SubstitutePrevious,
+    GoToNextDrawing,
+    GoToPreviousDrawing,
     ToolDropper,
     ToolHand,
     ToolZoom,
 }
 
 impl Action {
-    pub const ALL: [Action; 64] = [
+    pub const ALL: [Action; 68] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -163,6 +167,10 @@ impl Action {
         Action::SwitchOverlayUnderlay,
         Action::PreviewArtLayers,
         Action::CreateColourArt,
+        Action::SubstituteNext,
+        Action::SubstitutePrevious,
+        Action::GoToNextDrawing,
+        Action::GoToPreviousDrawing,
         Action::ToolDropper,
         Action::ToolHand,
         Action::ToolZoom,
@@ -232,6 +240,10 @@ impl Action {
             Action::SwitchOverlayUnderlay => "drawing.switch_overlay_underlay",
             Action::PreviewArtLayers => "drawing.preview_art_layers",
             Action::CreateColourArt => "drawing.create_colour_art",
+            Action::SubstituteNext => "timing.substitute_next",
+            Action::SubstitutePrevious => "timing.substitute_previous",
+            Action::GoToNextDrawing => "timing.next_drawing",
+            Action::GoToPreviousDrawing => "timing.previous_drawing",
             Action::ToolDropper => "tool.dropper",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
@@ -301,6 +313,10 @@ impl Action {
             Action::SwitchOverlayUnderlay => "Switch to Overlay/Underlay Art",
             Action::PreviewArtLayers => "Preview All Art Layers",
             Action::CreateColourArt => "Create Colour Art from Line Art",
+            Action::SubstituteNext => "Substitute Drawing Next",
+            Action::SubstitutePrevious => "Substitute Drawing Previous",
+            Action::GoToNextDrawing => "Go to Next Drawing",
+            Action::GoToPreviousDrawing => "Go to Previous Drawing",
             Action::ToolDropper => "Dropper",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
@@ -412,6 +428,10 @@ fn harmony(action: Action) -> Option<Binding> {
         // "*" has no key of its own on many layouts: matched by the typed
         // character instead (see `pressed`).
         Action::CreateColourArt => None,
+        Action::SubstituteNext => b(Key::CloseBracket, NONE),
+        Action::SubstitutePrevious => b(Key::OpenBracket, NONE),
+        Action::GoToNextDrawing => b(Key::G, NONE),
+        Action::GoToPreviousDrawing => b(Key::F, NONE),
         Action::ToolDropper => b(Key::D, ALT),
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),

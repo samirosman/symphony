@@ -205,7 +205,7 @@ continues.
 - ⬜ **Xsheet**: columns, cells with drawing names, Increase/Decrease
   Exposure, Fill Empty Cells, Sequence Fill, holds, keyframe markers
 - ✅ Timeline and Xsheet editing the same data, live
-- ⬜ Drawing substitution (swap the exposed drawing, substitution browser)
+- 🟡 Drawing substitution: [ and ], Go to Next/Previous Drawing (G, F), Timeline Parameters field (drag or type) done. Still to do: the Drawing Picker and Library substitution panels, range selections.
 - ⬜ Annotation column (notes and drawings in the Xsheet)
 - ⬜ Function columns in the Xsheet (Bézier, Ease, Expression, 3D Path, Quaternion)
 - ⬜ Timing column (drawings from another element)

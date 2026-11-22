@@ -14,7 +14,16 @@ use crate::session::Session;
 pub struct TimingState {
     renaming: Option<(usize, String)>,
     menu_row: Option<usize>,
+    /// Parameters column: drawing name being typed, per row.
+    swap_text: Option<(usize, String)>,
+    /// Parameters column drag: row, starting drawing index, pixels dragged.
+    swap_drag: Option<(usize, usize, f32)>,
 }
+
+/// Width of the Timeline's Parameters field (the exposed drawing's name).
+const PARAM_W: f32 = 48.0;
+/// Pixels of drag per drawing when scrubbing the Parameters field.
+const PARAM_STEP: f32 = 12.0;
 
 /// View header: transport, timing fields and layer buttons (D3.2).
 pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
@@ -174,6 +183,110 @@ fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usiz
 
 /// Inline rename field over a layer name. Enter or clicking away keeps it,
 /// Escape cancels (D8.6).
+/// Harmony's Timeline Parameters column for a drawing layer: the drawing
+/// exposed at the current frame. Drag sideways to cycle through the
+/// layer's drawings, or double-click to type a drawing's name.
+fn parameters_field(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    s: &mut Session,
+    t: &mut TimingState,
+    row: usize,
+    rect: Rect,
+) {
+    let frame = s.frame;
+    if let Some((_, text)) = t.swap_text.as_mut().filter(|(r, _)| *r == row) {
+        let resp = ui.put(rect, egui::TextEdit::singleline(text).font(theme::dense()));
+        resp.request_focus();
+        let (enter, esc) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if esc {
+            t.swap_text = None;
+        } else if enter || resp.lost_focus() {
+            let wanted = text.trim().to_lowercase();
+            t.swap_text = None;
+            let found = s
+                .element_drawings(row)
+                .into_iter()
+                .find(|(_, n)| n.to_lowercase() == wanted);
+            match found {
+                Some((id, _)) => {
+                    s.swap_drawing(row, frame, id);
+                    s.end_gesture();
+                }
+                None if !wanted.is_empty() => {
+                    s.notice = Some(format!("This layer has no drawing called {wanted}"));
+                }
+                None => {}
+            }
+        }
+        return;
+    }
+    let exposed = s.doc.exposed(row, frame);
+    let name = exposed
+        .and_then(|d| s.doc.drawings.get(&d))
+        .map(|d| d.name.clone());
+    painter.rect_filled(rect, theme::RADIUS_CONTROL as f32, theme::BG_INPUT);
+    widgets::fitted_text(
+        ui,
+        painter,
+        rect.center(),
+        Align2::CENTER_CENTER,
+        name.as_deref().unwrap_or(""),
+        theme::dense(),
+        theme::TEXT_PRIMARY,
+        rect.width() - 6.0,
+    );
+    if exposed.is_none() {
+        return;
+    }
+    let resp = ui
+        .interact(
+            rect,
+            ui.scope_id().with(("swap", row)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text(
+            "Drawing at this frame. Drag sideways to swap it, or double-click to type a name.",
+        );
+    if resp.drag_started() || resp.clicked() {
+        s.selected = row;
+    }
+    if resp.double_clicked() {
+        t.swap_text = Some((row, name.unwrap_or_default()));
+        return;
+    }
+    let list = s.element_drawings(row);
+    if resp.drag_started() {
+        let start = list
+            .iter()
+            .position(|(id, _)| Some(*id) == exposed)
+            .unwrap_or(0);
+        t.swap_drag = Some((row, start, 0.0));
+    }
+    if resp.dragged() {
+        if let Some((_, start, moved)) = t.swap_drag.as_mut().filter(|(r, ..)| *r == row) {
+            *moved += resp.drag_delta().x;
+            let steps = (*moved / PARAM_STEP).round() as isize;
+            let i = start
+                .saturating_add_signed(steps)
+                .min(list.len().saturating_sub(1));
+            if let Some((id, _)) = list.get(i) {
+                s.swap_drawing(row, frame, *id);
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        t.swap_drag = None;
+        s.end_gesture();
+    }
+}
+
 fn rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
     let Some((row, text)) = t.renaming.as_mut() else {
         return;
@@ -293,9 +406,20 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         s.layer_name(i),
                         theme::body(),
                         name_col,
-                        HEAD - 48.0,
+                        HEAD - 56.0 - PARAM_W,
                     );
                 }
+                parameters_field(
+                    ui,
+                    &painter,
+                    s,
+                    t,
+                    i,
+                    Rect::from_min_size(
+                        Pos2::new(o.x + HEAD - PARAM_W - 6.0, y + 4.0),
+                        Vec2::new(PARAM_W, rh - 8.0),
+                    ),
+                );
 
                 if let Some(col) = s.doc.column(i) {
                     let mut f = 1;
@@ -387,7 +511,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         }
                         s.selected = row;
                     }
-                    if resp.double_clicked() && rel.x < HEAD {
+                    if resp.double_clicked() && rel.x < HEAD - PARAM_W - 8.0 {
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
                 }
@@ -410,7 +534,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     t,
                     Rect::from_min_size(
                         Pos2::new(o.x + 36.0, y + 3.0),
-                        Vec2::new(HEAD - 44.0, rh - 6.0),
+                        Vec2::new(HEAD - 52.0 - PARAM_W, rh - 6.0),
                     ),
                 );
             }
