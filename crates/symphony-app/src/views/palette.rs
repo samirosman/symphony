@@ -1,11 +1,10 @@
-//! The search box (Tab): pops up as just a field centred on the mouse, then
-//! grows to show results as you type. Ranking and the plain-language rules
-//! live in `search.rs`; its motion is the app's shared vocabulary
-//! (`symphony_ui::motion`): Appear and Dismiss for opening and closing,
-//! Expand for the results growing.
+//! The search box (Tab): a field centred on the mouse that shows results as
+//! you type. Ranking and the plain-language rules live in `search.rs`. It
+//! only fades in and out (the shared Appear and Dismiss motions, opacity
+//! only): no growing or sliding.
 
 use eframe::egui::{self, Align2, Id, Pos2, Rect, Vec2};
-use symphony_ui::motion::{self, Motion};
+use symphony_ui::motion;
 use symphony_ui::{theme, widgets};
 
 use crate::search::{self, Command, Entry};
@@ -68,11 +67,8 @@ pub enum Outcome {
     Chosen(Command, String),
 }
 
-fn ids() -> (Id, Id) {
-    (
-        Id::unique("symphony-search-presence"),
-        Id::unique("symphony-search-height"),
-    )
+fn presence_id() -> Id {
+    Id::unique("symphony-search-presence")
 }
 
 fn reveal_offset(selected: usize, offset: f32, height: f32) -> f32 {
@@ -95,11 +91,10 @@ pub fn ui(
     entries: &[Entry],
     uses: &dyn Fn(&str) -> u32,
 ) -> Outcome {
-    let (presence_id, height_id) = ids();
+    let presence_id = presence_id();
     if st.first_frame {
-        // Every opening starts from nothing, with no results showing.
+        // Every opening fades in from nothing.
         motion::start(ctx, presence_id, 0.0);
-        motion::start(ctx, height_id, 0.0);
     }
     let shown = motion::presence(ctx, presence_id, !st.closing);
     if st.closing && shown <= 0.0 {
@@ -147,11 +142,12 @@ pub fn ui(
         0
     };
     let target_h = (rows as f32 * ROW_H).min(max_list_h);
-    let list_h = motion::value(ctx, height_id, target_h, Motion::Expand).min(max_list_h);
+    // Results show at their full height at once; only opacity animates.
+    let list_h = target_h;
 
     // Centred on the mouse horizontally, just below it, kept in the window;
-    // it appears with the shared Appear look (fade, grow, rise).
-    let look = motion::look(shown);
+    // it simply fades in and out (Appear and Dismiss, opacity only).
+    let opacity = shown;
     let box_w = WIDTH + 16.0;
     let full_h = FIELD_H + 20.0 + target_h;
     let x =
@@ -160,7 +156,7 @@ pub fn ui(
         screen.top() + 8.0,
         (screen.bottom() - full_h - 8.0).max(8.0),
     );
-    let pos = Pos2::new(st.at.x + (x - st.at.x) * look.scale, y + look.drop);
+    let pos = Pos2::new(x, y);
 
     let mut chosen: Option<usize> = None;
     let area = egui::Area::new(Id::unique("symphony-search"))
@@ -170,7 +166,7 @@ pub fn ui(
         .fade_in(false)
         .interactable(!st.closing)
         .show(ctx, |ui| {
-            ui.multiply_opacity(look.opacity);
+            ui.multiply_opacity(opacity);
             egui::Frame::new()
                 .fill(theme::BG_RAISED)
                 .stroke(egui::Stroke::new(1.0, theme::LINE_STRONG))
