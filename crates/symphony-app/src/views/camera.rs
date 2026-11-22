@@ -999,6 +999,66 @@ struct Mods {
 /// Our canvas cursor (D8.11): a crosshair plus the active tool's icon, or a
 /// navigation cursor while a shortcut is held. Drawn on the foreground
 /// layer, white over a dark outline so it reads on paper and on grey.
+/// Draw a brush tip image as the cursor: `r` is half the diameter in
+/// screen points. False if the tip isn't available (fall back to a circle).
+fn paint_tip_cursor(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    at: Pos2,
+    r: f32,
+    key: u64,
+    angle_deg: f32,
+    colour: Color32,
+) -> bool {
+    let id = egui::Id::unique(("tip-cursor", key));
+    let handle = ui
+        .ctx()
+        .data(|d| d.get_temp::<egui::TextureHandle>(id))
+        .or_else(|| {
+            let t = crate::brush_import::library_texture(key)?;
+            let pixels = t
+                .pixels
+                .iter()
+                .map(|&a| Color32::from_white_alpha(a))
+                .collect();
+            let image = egui::ColorImage {
+                size: [t.width as usize, t.height as usize],
+                source_size: Vec2::new(t.width as f32, t.height as f32),
+                pixels,
+            };
+            let h = ui
+                .ctx()
+                .load_texture("tip-cursor", image, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, h.clone()));
+            Some(h)
+        });
+    let Some(handle) = handle else {
+        return false;
+    };
+    // The tip's longer side spans the diameter, as when stamping.
+    let [w, h] = handle.size();
+    let side = w.max(h).max(1) as f32;
+    let (hw, hh) = (r * w as f32 / side, r * h as f32 / side);
+    let (sin, cos) = (-angle_deg.to_radians()).sin_cos();
+    let corner = |x: f32, y: f32| at + Vec2::new(x * cos - y * sin, x * sin + y * cos);
+    let mut mesh = egui::Mesh::with_texture(handle.id());
+    for (x, y, u, v) in [
+        (-hw, -hh, 0.0, 0.0),
+        (hw, -hh, 1.0, 0.0),
+        (hw, hh, 1.0, 1.0),
+        (-hw, hh, 0.0, 1.0),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: corner(x, y),
+            uv: Pos2::new(u, v),
+            color: colour.gamma_multiply(0.55),
+        });
+    }
+    mesh.indices = vec![0, 1, 2, 0, 2, 3];
+    painter.add(egui::Shape::mesh(mesh));
+    true
+}
+
 fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session, m: Mods) {
     let (pen_eraser, locked, hint) = (m.pen_eraser, m.locked, m.hint);
     let Some(p) = ui
@@ -1072,10 +1132,24 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
     } else {
         None
     };
-    if let Some(r) = radius {
-        painter.circle_stroke(p, r, EStroke::new(3.0, dark.gamma_multiply(0.6)));
-        let ring = if erasing { theme::STATE_DANGER } else { light };
-        painter.circle_stroke(p, r, EStroke::new(1.0, ring));
+    // A textured brush with a tip image shows the tip itself: its shape,
+    // size and angle, faintly, so you see what a stamp will look like.
+    let tip = match (erasing, s.tool) {
+        (false, Tool::Brush) => s.brush.texture.and_then(|t| t.tip.map(|k| (k, t.angle))),
+        _ => None,
+    };
+    match (radius, tip) {
+        (Some(r), Some((key, angle))) => {
+            if !paint_tip_cursor(ui, &painter, p, r, key, angle, light) {
+                painter.circle_stroke(p, r, EStroke::new(1.0, light));
+            }
+        }
+        (Some(r), None) => {
+            painter.circle_stroke(p, r, EStroke::new(3.0, dark.gamma_multiply(0.6)));
+            let ring = if erasing { theme::STATE_DANGER } else { light };
+            painter.circle_stroke(p, r, EStroke::new(1.0, ring));
+        }
+        _ => {}
     }
 
     // Crosshair with a gap at the hotspot.

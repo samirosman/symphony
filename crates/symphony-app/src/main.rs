@@ -93,7 +93,9 @@ struct Saved {
     use_no_ai: bool,
     #[serde(default)]
     pressure_gamma: Option<f32>,
-    #[serde(default)]
+    /// Brush size cursor, on by default (Tristan: the size preview is
+    /// the cursor). A new key, so earlier "off" defaults don't carry over.
+    #[serde(default = "yes", rename = "brush_size_cursor_on")]
     brush_size_cursor: bool,
     /// Harmony's Support Overlay and Underlay Arts preference.
     #[serde(default)]
@@ -295,7 +297,7 @@ impl SymphonyApp {
             .unwrap_or_default();
         let interface_animations = saved.as_ref().is_none_or(|s| s.interface_animations);
         theme::set_motion(&cc.egui_ctx, interface_animations);
-        let brush_size_cursor = saved.as_ref().is_some_and(|s| s.brush_size_cursor);
+        let brush_size_cursor = saved.as_ref().is_none_or(|s| s.brush_size_cursor);
         let overlay_underlay = saved.as_ref().is_some_and(|s| s.overlay_underlay);
         let size_follows_zoom = saved.as_ref().is_some_and(|s| s.size_follows_zoom);
         let stroke_detail = saved.as_ref().and_then(|s| s.stroke_detail);

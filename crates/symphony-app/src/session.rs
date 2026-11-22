@@ -389,7 +389,7 @@ impl Session {
                 before: 1,
                 after: 1,
             },
-            brush_size_cursor: false,
+            brush_size_cursor: true,
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,
             show_strokes: false,
