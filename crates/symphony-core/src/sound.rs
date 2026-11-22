@@ -196,6 +196,38 @@ impl SoundTrack {
     }
 }
 
+impl SoundTrack {
+    /// The track with exactly `samples` left out at the start of the file,
+    /// as the Sound editor trims: the start frame stays where it is, so
+    /// the sound after the cut begins there. At least one frame of sound
+    /// stays.
+    pub fn with_trim_start(&self, file: &SoundFile, fps: f32, samples: u64) -> SoundTrack {
+        let keep = samples_per_frame(file, fps).ceil() as u64;
+        let most = file
+            .samples
+            .saturating_sub(self.trim_end)
+            .saturating_sub(keep);
+        SoundTrack {
+            trim_start: samples.min(most),
+            ..self.clone()
+        }
+    }
+
+    /// The track with exactly `samples` left out at the end of the file.
+    /// At least one frame of sound stays.
+    pub fn with_trim_end(&self, file: &SoundFile, fps: f32, samples: u64) -> SoundTrack {
+        let keep = samples_per_frame(file, fps).ceil() as u64;
+        let most = file
+            .samples
+            .saturating_sub(self.trim_start)
+            .saturating_sub(keep);
+        SoundTrack {
+            trim_end: samples.min(most),
+            ..self.clone()
+        }
+    }
+}
+
 /// Samples of `file` in one scene frame at `fps`.
 fn samples_per_frame(file: &SoundFile, fps: f32) -> f64 {
     f64::from(file.rate.max(1)) / f64::from(fps.max(1.0))
@@ -315,6 +347,21 @@ mod tests {
         assert_eq!(e.trimmed_end(&f, 24.0, 99).trim_end, 0);
         assert_eq!(t.trimmed_end(&f, 24.0, -1_000).played(&f), 2_000);
         assert_eq!(t.moved_to(0).start, 1);
+    }
+
+    #[test]
+    fn exact_trims_keep_the_start_frame() {
+        // 2 s at 24 fps, 2000 samples a frame.
+        let f = file(48_000, 96_000);
+        let t = track(10);
+        let a = t.with_trim_start(&f, 24.0, 2_800);
+        assert_eq!((a.start, a.trim_start), (10, 2_800));
+        assert_eq!(a.with_trim_start(&f, 24.0, 0).trim_start, 0);
+        // At least one frame stays, at both ends.
+        assert_eq!(t.with_trim_start(&f, 24.0, 99_999).played(&f), 2_000);
+        let e = t.with_trim_end(&f, 24.0, 1_234);
+        assert_eq!((e.start, e.trim_end), (10, 1_234));
+        assert_eq!(t.with_trim_end(&f, 24.0, 99_999).played(&f), 2_000);
     }
 
     #[test]

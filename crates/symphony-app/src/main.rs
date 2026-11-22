@@ -3561,6 +3561,12 @@ impl SymphonyApp {
         self.show_licences = open;
         self.file_drops(&ctx);
         self.sound.update(&mut self.s, &ctx);
+        views::sound_editor::show(
+            &ctx,
+            &mut self.timing.sound_editor,
+            &mut self.s,
+            &mut self.sound,
+        );
         let mut fps = self.s.doc.settings.fps;
         let id = egui::Id::unique(TIMING_MENU_FPS);
         if symphony_ui::widgets::custom_frame_rate(&ctx, id, &mut fps) {

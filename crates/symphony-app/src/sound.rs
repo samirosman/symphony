@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use symphony_audio::{decode, prepare, Clip, Command, Peaks, Player, Samples};
+use symphony_core::id::Id;
 use symphony_core::sound::SoundFile;
 
 use crate::session::Session;
@@ -44,6 +45,7 @@ enum Done {
 #[derive(PartialEq)]
 struct Sent {
     fps: u32,
+    solo: Option<Id>,
     /// Key, on, start frame, trims, decoded.
     tracks: Vec<(u64, bool, u32, u64, u64, bool)>,
 }
@@ -70,6 +72,8 @@ pub struct SoundState {
     started: Option<(u32, u32)>,
     /// The frame last shown from the sound, to see the user move it.
     shown: u32,
+    /// The track the Sound editor is playing on its own.
+    solo: Option<Id>,
 }
 
 impl Default for SoundState {
@@ -90,6 +94,7 @@ impl Default for SoundState {
             sent_enabled: None,
             started: None,
             shown: 0,
+            solo: None,
         }
     }
 }
@@ -99,6 +104,51 @@ impl SoundState {
     /// normalizes its drawing (the sound itself plays as it is).
     pub fn peaks(&self, key: u64) -> Option<(&Peaks, f32)> {
         self.ready.get(&key).map(|r| (&r.peaks, r.gain))
+    }
+
+    /// A decoded file's samples, interleaved at the output's rate and
+    /// channel count, with that rate and count. Empty with no output.
+    pub fn samples(&self, key: u64) -> Option<(&[f32], u32, u16)> {
+        let (rate, channels) = self.format();
+        self.ready
+            .get(&key)
+            .map(|r| (r.pcm.as_slice(), rate, channels))
+    }
+
+    /// Play track `id` alone, from the start to the end of its trims, once.
+    /// Muted, it still plays, as the Sound editor asks for it by name.
+    pub fn preview(&mut self, s: &Session, id: Id) {
+        let Some(track) = s.doc.sounds.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let Some(file) = s.doc.sound_files.get(&track.key) else {
+            return;
+        };
+        let fps = f64::from(s.doc.settings.fps.max(1.0));
+        let (at, length) = (f64::from(track.start.max(1) - 1) / fps, track.seconds(file));
+        self.solo = Some(id);
+        self.send_clips(s);
+        if let Some(player) = &mut self.player {
+            player.send(Command::Scrub { at, length });
+        }
+    }
+
+    pub fn stop_preview(&mut self) {
+        if self.solo.take().is_some() {
+            if let Some(player) = &mut self.player {
+                player.send(Command::Stop);
+            }
+        }
+    }
+
+    /// The scene time a preview has reached, in seconds, while it plays.
+    pub fn preview_time(&self) -> Option<f64> {
+        let player = self.player.as_ref()?;
+        (self.solo.is_some() && player.caught_up() && player.is_playing()).then(|| player.time())
+    }
+
+    pub fn previewing(&self) -> bool {
+        self.solo.is_some()
     }
 
     pub fn enabled(&self) -> bool {
@@ -132,6 +182,9 @@ impl SoundState {
         if self.sent_enabled != Some(self.enabled) && player.send(Command::SetEnabled(self.enabled))
         {
             self.sent_enabled = Some(self.enabled);
+        }
+        if s.playing {
+            self.solo = None;
         }
         if !s.playing || s.doc.sounds.is_empty() {
             if self.started.take().is_some() {
@@ -278,6 +331,11 @@ impl SoundState {
         self.decode_missing(s, ctx);
         // Keep only what this scene uses.
         self.ready.retain(|k, _| s.doc.sound_files.contains_key(k));
+        if let Some(p) = &self.player {
+            if self.solo.is_some() && p.caught_up() && !p.is_playing() {
+                self.solo = None;
+            }
+        }
         self.send_clips(s);
         if let Some(p) = &mut self.player {
             p.collect();
@@ -309,6 +367,7 @@ impl SoundState {
         let fps = s.doc.settings.fps.max(1.0);
         let sent = Sent {
             fps: fps.to_bits(),
+            solo: self.solo,
             tracks: s
                 .doc
                 .sounds
@@ -336,11 +395,13 @@ impl SoundState {
             .doc
             .sounds
             .iter()
+            .filter(|t| self.solo.is_none_or(|id| id == t.id))
             .filter_map(|t| {
                 let r = self.ready.get(&t.key)?;
                 let file = s.doc.sound_files.get(&t.key)?;
                 let start = f64::from(t.start.saturating_sub(1)) / f64::from(fps);
-                let clip = Clip::new(Arc::clone(&r.pcm), start, t.enabled, rate);
+                let on = t.enabled || self.solo.is_some();
+                let clip = Clip::new(Arc::clone(&r.pcm), start, on, rate);
                 Some(clip.trimmed(t.offset(file), t.seconds(file), rate))
             })
             .collect();

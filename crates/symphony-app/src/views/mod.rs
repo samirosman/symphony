@@ -7,6 +7,7 @@ pub mod node;
 pub mod palette;
 pub mod panels;
 pub mod select;
+pub mod sound_editor;
 pub mod textured;
 pub mod timing;
 pub mod vector_cache;

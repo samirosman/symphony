@@ -1,6 +1,7 @@
 //! Timeline and Xsheet: two views over the same exposure data.
 //! Click a cell to go to that frame and select that layer (D8.9).
 //! Double-click a layer name to rename it; right-click for layer actions.
+//! Double-click a sound track to open the Sound editor.
 //! The amber playhead and frame tag are Symphony's signature (D3.9).
 
 use eframe::egui::{self, Align2, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
@@ -13,6 +14,7 @@ use symphony_core::sound::{self, SoundTrack};
 use crate::keymap::{self, Action, Profile};
 use crate::session::{InsertExposure, Session};
 use crate::sound::SoundState;
+use crate::views::sound_editor::SoundEditor;
 
 #[derive(Default)]
 pub struct TimingState {
@@ -29,6 +31,8 @@ pub struct TimingState {
     sound_menu: Option<Id>,
     /// A sound track being moved or trimmed.
     sound_drag: Option<SoundDrag>,
+    /// The Sound editor, when open.
+    pub sound_editor: Option<SoundEditor>,
 }
 
 /// Which part of a sound block a drag holds.
@@ -367,6 +371,10 @@ fn sound_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, id: Id) {
         return;
     };
     let (name, on) = (track.name.clone(), track.enabled);
+    if ui.button("Open sound editor").clicked() {
+        t.sound_editor = Some(SoundEditor::new(track));
+        ui.close();
+    }
     if ui.button("Rename sound").clicked() {
         t.renaming_sound = Some((id, name));
         ui.close();
@@ -1023,8 +1031,10 @@ pub fn timeline(
                     if rel.x < 32.0 && resp.clicked() {
                         s.toggle_sound(id);
                     }
-                    if resp.double_clicked() && rel.x < HEAD {
-                        t.renaming_sound = Some((id, s.doc.sounds[j].name.clone()));
+                    // As in Harmony, a double-click opens the Sound editor,
+                    // from the name or from the sound itself.
+                    if resp.double_clicked() && rel.x >= 32.0 {
+                        t.sound_editor = Some(SoundEditor::new(&s.doc.sounds[j]));
                     }
                 } else if let Some(row) = row_at(p) {
                     if resp.clicked() || resp.drag_started() {
