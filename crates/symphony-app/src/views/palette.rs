@@ -15,6 +15,9 @@ pub struct PaletteState {
     pub here: Option<View>,
     selected: usize,
     first_frame: bool,
+    /// When it opened, and when it started closing (for the animation).
+    opened_at: Option<f64>,
+    pub closing_at: Option<f64>,
 }
 
 impl PaletteState {
@@ -25,6 +28,8 @@ impl PaletteState {
             here,
             selected: 0,
             first_frame: true,
+            opened_at: None,
+            closing_at: None,
         }
     }
 }
@@ -34,9 +39,14 @@ const ROWS: usize = 9;
 
 pub enum Outcome {
     Open,
+    /// Fading out; keep calling until `Closed`.
+    Closing,
     Closed,
     Chosen(Command, String),
 }
+
+/// Open and close animation length, seconds.
+const ANIMATE: f64 = 0.14;
 
 /// Draw the palette. `entries` is everything searchable; `uses` how often
 /// each key was chosen.
@@ -54,16 +64,42 @@ pub fn ui(
     results.truncate(ROWS);
     st.selected = st.selected.min(results.len().saturating_sub(1));
 
-    let (up, down, enter, esc) = ctx.input_mut(|i| {
+    let now = ctx.input(|i| i.time);
+    let opened = *st.opened_at.get_or_insert(now);
+    let animated = ctx.global_style().animation_time > 0.0;
+    // Fade and grow in; fade and shrink out (instant when animations are off).
+    let progress = |since: f64| {
+        if animated {
+            ((now - since) / ANIMATE).clamp(0.0, 1.0) as f32
+        } else {
+            1.0
+        }
+    };
+    let ease = |t: f32| 1.0 - (1.0 - t).powi(3);
+    let shown = match st.closing_at {
+        Some(c) => 1.0 - ease(progress(c)),
+        None => ease(progress(opened)),
+    };
+    if st.closing_at.is_some() && shown <= 0.0 {
+        return Outcome::Closed;
+    }
+    if shown < 1.0 {
+        ctx.request_repaint();
+    }
+    let closing = st.closing_at.is_some();
+    // Tab toggles it closed again; Esc closes it too.
+    let (up, down, enter, esc, tab) = ctx.input_mut(|i| {
         (
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
             i.key_pressed(egui::Key::Enter),
             i.key_pressed(egui::Key::Escape),
+            !st.first_frame && i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
         )
     });
-    if esc {
-        return Outcome::Closed;
+    if !closing && (esc || tab) {
+        st.closing_at = Some(now);
+        return Outcome::Closing;
     }
     if up {
         st.selected = st.selected.saturating_sub(1);
@@ -72,21 +108,31 @@ pub fn ui(
         st.selected += 1;
     }
 
-    // Open beside the mouse, kept inside the window.
+    // Centred on the mouse horizontally, just below it, kept in the window.
     let screen = ctx.content_rect();
     let height = 52.0 + results.len().max(1) as f32 * 34.0;
+    let box_w = WIDTH + 16.0;
     let pos = Pos2::new(
-        (st.at.x - 24.0).clamp(screen.left() + 8.0, (screen.right() - WIDTH - 8.0).max(8.0)),
+        (st.at.x - box_w / 2.0).clamp(screen.left() + 8.0, (screen.right() - box_w - 8.0).max(8.0)),
         (st.at.y + 12.0).clamp(
             screen.top() + 8.0,
             (screen.bottom() - height - 8.0).max(8.0),
         ),
     );
+    // Grow from slightly smaller towards the mouse, and fade.
+    let scale = 0.96 + 0.04 * shown;
+    let pos = Pos2::new(
+        st.at.x + (pos.x - st.at.x) * scale,
+        st.at.y + (pos.y - st.at.y) * scale,
+    );
     let mut chosen: Option<usize> = None;
     let area = egui::Area::new(egui::Id::unique("symphony-search"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
+        .fade_in(false)
+        .interactable(!closing)
         .show(ctx, |ui| {
+            ui.multiply_opacity(shown);
             egui::Frame::new()
                 .fill(theme::BG_RAISED)
                 .stroke(egui::Stroke::new(1.0, theme::LINE_STRONG))
@@ -180,6 +226,9 @@ pub fn ui(
                     }
                 });
         });
+    if closing {
+        return Outcome::Closing;
+    }
     if enter && !results.is_empty() {
         chosen = Some(st.selected);
     }
@@ -193,7 +242,8 @@ pub fn ui(
             .input(|i| i.pointer.interact_pos())
             .is_some_and(|p| !area.response.rect.contains(p));
     if clicked_outside {
-        return Outcome::Closed;
+        st.closing_at = Some(now);
+        return Outcome::Closing;
     }
     Outcome::Open
 }

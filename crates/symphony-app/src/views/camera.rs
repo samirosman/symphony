@@ -513,7 +513,12 @@ pub fn ui(
 
     // D4.2: neutral surround. D3.10: the stage is paper with a soft shadow.
     let colours = s.colours;
-    painter.rect_filled(rect, 0.0, CanvasColours::get(colours.surround));
+    // The view's corners are rounded like its panel; the stage stays sharp.
+    painter.rect_filled(
+        rect,
+        f32::from(theme::GLASS_RADIUS) - 4.0,
+        CanvasColours::get(colours.surround),
+    );
     let corners = [
         (-w / 2.0, -h / 2.0),
         (w / 2.0, -h / 2.0),
@@ -1260,30 +1265,45 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
         (false, Tool::Brush) => s.brush.texture.and_then(|t| t.tip.map(|k| (k, t.angle))),
         _ => None,
     };
+    // A soft shadow under a white ring keeps it visible on any surface.
+    let ring_with_shadow = |r: f32, colour: Color32| {
+        for (w, a, dy) in [(4.0, 0.18, 1.0), (2.5, 0.35, 0.5)] {
+            painter.circle_stroke(
+                p + Vec2::new(0.0, dy),
+                r,
+                EStroke::new(w, dark.gamma_multiply(a)),
+            );
+        }
+        painter.circle_stroke(p, r, EStroke::new(1.25, colour));
+    };
     match (radius, tip) {
         (Some(r), Some((key, angle))) => {
             if !paint_tip_cursor(ui, &painter, p, r, key, angle, light) {
-                painter.circle_stroke(p, r, EStroke::new(1.0, light));
+                ring_with_shadow(r, light);
             }
         }
         (Some(r), None) => {
-            painter.circle_stroke(p, r, EStroke::new(3.0, dark.gamma_multiply(0.6)));
-            let ring = if erasing { theme::STATE_DANGER } else { light };
-            painter.circle_stroke(p, r, EStroke::new(1.0, ring));
+            ring_with_shadow(r, if erasing { theme::STATE_DANGER } else { light });
         }
         _ => {}
     }
-
-    // Crosshair with a gap at the hotspot.
-    let (gap, arm) = (3.0, 9.0);
-    for (a, b) in [
-        (Vec2::new(-arm, 0.0), Vec2::new(-gap, 0.0)),
-        (Vec2::new(gap, 0.0), Vec2::new(arm, 0.0)),
-        (Vec2::new(0.0, -arm), Vec2::new(0.0, -gap)),
-        (Vec2::new(0.0, gap), Vec2::new(0.0, arm)),
-    ] {
-        painter.line_segment([p + a, p + b], EStroke::new(3.0, dark));
-        painter.line_segment([p + a, p + b], EStroke::new(1.0, light));
+    if radius.is_some() {
+        // The ring is the cursor (no crosshair); a tiny dot marks the centre
+        // so even a very small brush shows where it lands.
+        painter.circle_filled(p, 2.0, dark.gamma_multiply(0.5));
+        painter.circle_filled(p, 1.0, light);
+    } else {
+        // Tools without a size ring keep a crosshair for aiming.
+        let (gap, arm) = (3.0, 9.0);
+        for (a, b) in [
+            (Vec2::new(-arm, 0.0), Vec2::new(-gap, 0.0)),
+            (Vec2::new(gap, 0.0), Vec2::new(arm, 0.0)),
+            (Vec2::new(0.0, -arm), Vec2::new(0.0, -gap)),
+            (Vec2::new(0.0, gap), Vec2::new(0.0, arm)),
+        ] {
+            painter.line_segment([p + a, p + b], EStroke::new(3.0, dark));
+            painter.line_segment([p + a, p + b], EStroke::new(1.0, light));
+        }
     }
 
     // Tool icon beside the crosshair, so the active tool is always clear.

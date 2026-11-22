@@ -215,6 +215,57 @@ struct SymphonyApp {
     notice_seen: Option<(String, f64)>,
 }
 
+/// The bar between two views, while you point at it: a slim rounded pill
+/// along the gap, replacing the dock's own hard-edged bar. Blue while
+/// dragging.
+fn resize_grip(ui: &egui::Ui, leaves: &[egui::Rect]) {
+    let Some(p) = ui.ctx().pointer_hover_pos() else {
+        return;
+    };
+    let gap = theme::GUTTER * 2.0 + 2.0;
+    let mut bar: Option<egui::Rect> = None;
+    for a in leaves {
+        for b in leaves {
+            // Side by side: a vertical gap between a's right and b's left.
+            let dx = b.left() - a.right();
+            let (top, bottom) = (a.top().max(b.top()), a.bottom().min(b.bottom()));
+            if dx > 0.0 && dx <= gap && bottom > top {
+                let r = egui::Rect::from_x_y_ranges(a.right()..=b.left(), top..=bottom);
+                if r.expand(3.0).contains(p) {
+                    bar = Some(egui::Rect::from_center_size(
+                        r.center(),
+                        egui::vec2(3.0, (r.height() - 24.0).max(12.0)),
+                    ));
+                }
+            }
+            // Stacked: a horizontal gap between a's bottom and b's top.
+            let dy = b.top() - a.bottom();
+            let (left, right) = (a.left().max(b.left()), a.right().min(b.right()));
+            if dy > 0.0 && dy <= gap && right > left {
+                let r = egui::Rect::from_x_y_ranges(left..=right, a.bottom()..=b.top());
+                if r.expand(3.0).contains(p) {
+                    bar = Some(egui::Rect::from_center_size(
+                        r.center(),
+                        egui::vec2((r.width() - 24.0).max(12.0), 3.0),
+                    ));
+                }
+            }
+        }
+    }
+    let Some(bar) = bar else { return };
+    let dragging = ui.input(|i| i.pointer.primary_down());
+    let colour = if dragging {
+        theme::ACCENT_SELECT
+    } else {
+        theme::TEXT_SECONDARY.gamma_multiply(0.7)
+    };
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("symphony-resize-grip"),
+    ));
+    painter.rect_filled(bar, 1.5, colour);
+}
+
 fn tool_icon(t: Tool) -> Icon {
     match t {
         Tool::Select => Icon::Select,
@@ -1179,15 +1230,16 @@ impl SymphonyApp {
                 self.show_icon_sheet = true;
                 ui.close();
             }
+            ui.separator();
+            if ui
+                .button("Update Symphony…")
+                .on_hover_text("Check for a newer Symphony and install it")
+                .clicked()
+            {
+                ui.close();
+                self.guard(ui.ctx(), Pending::Update);
+            }
         });
-        ui.separator();
-        if ui
-            .button("Update")
-            .on_hover_text("Update Symphony")
-            .clicked()
-        {
-            self.guard(ui.ctx(), Pending::Update);
-        }
     }
 
     /// D3.1: menus left, scene name centred, workspace right. On macOS this
@@ -1705,11 +1757,16 @@ impl SymphonyApp {
         match views::palette::ui(ctx, &mut st, &entries, &|k| {
             uses.get(k).copied().unwrap_or(0)
         }) {
-            views::palette::Outcome::Open => self.palette = Some(st),
+            views::palette::Outcome::Open | views::palette::Outcome::Closing => {
+                self.palette = Some(st)
+            }
             views::palette::Outcome::Closed => {}
             views::palette::Outcome::Chosen(cmd, key) => {
                 *self.search_uses.entry(key).or_insert(0) += 1;
                 self.run_command(ctx, cmd);
+                // Fade out after running it.
+                st.closing_at = Some(ctx.input(|i| i.time));
+                self.palette = Some(st);
             }
         }
     }
@@ -1860,17 +1917,39 @@ impl SymphonyApp {
         }
         let (hovered, dropped) =
             ctx.input(|i| (i.raw.hovered_files.len(), i.raw.dropped_files.clone()));
-        if hovered > 0 {
+        // While files hover: a glass panel that fades and grows in, a soft
+        // blue glow around the window, and both fade out again.
+        let shown = ctx.animate_bool_with_time(
+            egui::Id::unique("symphony-drop-hint-shown"),
+            hovered > 0,
+            0.16,
+        );
+        if shown > 0.0 {
+            let screen = ctx.content_rect();
+            ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("symphony-drop-glow"),
+            ))
+            .rect_stroke(
+                screen.shrink(4.0),
+                theme::GLASS_RADIUS,
+                egui::Stroke::new(2.0, theme::ACCENT_SELECT.gamma_multiply(0.6 * shown)),
+                egui::StrokeKind::Inside,
+            );
+            let lift = (1.0 - shown) * 8.0;
             egui::Area::new(egui::Id::unique("symphony-drop-hint"))
                 .order(egui::Order::Foreground)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, lift))
                 .interactable(false)
+                .fade_in(false)
                 .show(ctx, |ui| {
+                    ui.multiply_opacity(shown);
                     egui::Frame::new()
-                        .fill(theme::BG_RAISED)
-                        .stroke(egui::Stroke::new(1.0, theme::ACCENT_SELECT))
-                        .corner_radius(theme::RADIUS_FLOATING)
-                        .inner_margin(egui::Margin::same(16))
+                        .fill(theme::GLASS_PANEL)
+                        .stroke(egui::Stroke::new(1.0, theme::ACCENT_SELECT.gamma_multiply(0.55)))
+                        .corner_radius(theme::GLASS_RADIUS)
+                        .shadow(ui.visuals().popup_shadow)
+                        .inner_margin(egui::Margin::same(18))
                         .show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new("Drop to import brushes")
@@ -2090,6 +2169,9 @@ struct Viewer<'a> {
     profile: Profile,
     presets: &'a mut presets::Presets,
     hovered: &'a mut Option<View>,
+    /// For tab animations: the context, and each leaf's open tab.
+    ctx: egui::Context,
+    active: Vec<View>,
 }
 
 impl Viewer<'_> {
@@ -2148,6 +2230,43 @@ impl egui_dock::TabViewer for Viewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut View) {
         self.view(ui, *tab);
+    }
+
+    /// Tabs ease between their open and closed look instead of switching at
+    /// once, and have no keyboard-focus outline (the open tab's own fill
+    /// already marks it).
+    fn tab_style_override(
+        &self,
+        tab: &View,
+        global: &egui_dock::TabStyle,
+    ) -> Option<egui_dock::TabStyle> {
+        let open = self.active.contains(tab);
+        let t = self.ctx.animate_bool_with_time(
+            egui::Id::unique(("symphony-tab-open", *tab)),
+            open,
+            0.16,
+        );
+        let mix = |a: egui::Color32, b: egui::Color32| {
+            let (a, b) = (a.to_srgba_unmultiplied(), b.to_srgba_unmultiplied());
+            let c = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
+            egui::Color32::from_rgba_unmultiplied(c(0), c(1), c(2), c(3))
+        };
+        let bg = mix(global.inactive.bg_fill, global.active.bg_fill);
+        let text = mix(global.inactive.text_color, global.active.text_color);
+        let mut s = global.clone();
+        for st in [
+            &mut s.active,
+            &mut s.inactive,
+            &mut s.focused,
+            &mut s.active_with_kb_focus,
+            &mut s.inactive_with_kb_focus,
+            &mut s.focused_with_kb_focus,
+        ] {
+            st.bg_fill = bg;
+            st.text_color = text;
+            st.outline_color = egui::Color32::TRANSPARENT;
+        }
+        Some(s)
     }
 
     fn scroll_bars(&self, tab: &View) -> [bool; 2] {
@@ -2375,7 +2494,15 @@ impl eframe::App for SymphonyApp {
             .find(|(w, _)| *w == ws)
             .expect("layout")
             .1;
+        let active: Vec<View> = layout
+            .main_surface()
+            .iter()
+            .filter_map(|node| node.get_leaf())
+            .filter_map(|leaf| leaf.tabs.get(leaf.active.0).copied())
+            .collect();
         let mut viewer = Viewer {
+            ctx: ctx.clone(),
+            active,
             workspace: ws,
             s: &mut self.s,
             camera: &mut self.camera,
@@ -2432,6 +2559,14 @@ impl eframe::App for SymphonyApp {
                         }
                     }
                     painter.set(background, egui::Shape::Vec(fills));
+                    let rects: Vec<egui::Rect> = layout
+                        .main_surface()
+                        .iter()
+                        .filter_map(|node| node.get_leaf())
+                        .filter(|leaf| !leaf.tabs.is_empty())
+                        .map(|leaf| leaf.rect())
+                        .collect();
+                    resize_grip(ui, &rects);
                 }
             });
 

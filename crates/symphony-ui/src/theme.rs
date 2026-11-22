@@ -274,8 +274,9 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.separator.width = GUTTER;
     d.separator.extra = 0.0;
     d.separator.color_idle = Color32::TRANSPARENT;
-    d.separator.color_hovered = LINE_STRONG;
-    d.separator.color_dragged = ACCENT_SELECT;
+    // The app draws its own slim rounded grip (main.rs resize_grip).
+    d.separator.color_hovered = Color32::TRANSPARENT;
+    d.separator.color_dragged = Color32::TRANSPARENT;
     d.tab_bar.bg_fill = Color32::TRANSPARENT;
     d.tab_bar.height = TAB_ROW;
     d.tab_bar.corner_radius = CornerRadius::ZERO;
@@ -300,6 +301,18 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
         right: 4,
         top: 0,
     };
-    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.25);
+    // Dragging a view: glass-style drop targets with soft fades.
+    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.22);
+    d.overlay.selection_stroke_width = 1.0;
+    d.overlay.button_color = GLASS_PANEL;
+    d.overlay.button_border_stroke = Stroke::new(1.0, ACCENT_SELECT.gamma_multiply(0.6));
+    d.overlay.surface_fade_opacity = 0.45;
+    d.overlay.hovered_leaf_highlight = egui_dock::LeafHighlighting {
+        color: ACCENT_SELECT.gamma_multiply(0.08),
+        corner_radius: CornerRadius::same(GLASS_RADIUS),
+        stroke: Stroke::new(1.0, ACCENT_SELECT.gamma_multiply(0.55)),
+        expansion: 0.0,
+    };
+    d.overlay.feel.fade_hold_time = 0.25;
     d
 }
