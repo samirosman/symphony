@@ -326,6 +326,9 @@ pub struct Drawing {
     /// Painted colour zones, drawn under the strokes of their art layer.
     #[serde(default)]
     pub fills: Vec<Fill>,
+    /// An imported image shown under the strokes (Keep as Original Bitmap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::bitmap::ImageRef>,
 }
 
 /// A painted zone (Harmony's Paint tool): the closed area found from the

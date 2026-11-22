@@ -6,7 +6,7 @@
 //! Name.symphony/
 //!   project.json          manifest: format version, scenes
 //!   scenes/main/scene.json
-//!   media/                imported sound, named by content (media.rs)
+//!   media/                imported images and sound, named by content (media.rs)
 //!   .backups/             the last 5 saves of each scene file
 //! ```
 //!
@@ -28,9 +28,10 @@ use symphony_core::doc::Scene;
 /// Bump when the on-disk format changes, and add a migration (E7.2).
 ///
 /// - 1: the first format.
-/// - 2: scenes can have sound tracks, and the sound files live in
-///   `media/`. A version 1 file reads unchanged: it has no sound. The bump
-///   keeps an older Symphony from opening a version 2 file, dropping its
+/// - 2: drawings can show an imported image, scenes can have sound
+///   tracks, and the image and sound files live in `media/`. A version 1
+///   file reads unchanged: it has neither. The bump keeps an older
+///   Symphony from opening a version 2 file, dropping its images and
 ///   sound without a word, and saving over it.
 pub const FORMAT_VERSION: u32 = 2;
 pub const EXTENSION: &str = "symphony";
@@ -592,6 +593,104 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn with_image(seed: u8) -> (Scene, u64) {
+        use symphony_core::bitmap::{layer_edits, Alignment, Alpha};
+        let mut s = sample();
+        let (key, img) = media::image_from_bytes(media::png(4, 3, seed)).unwrap();
+        s.images.insert(key, img);
+        let edits = layer_edits(&mut s, "BG", 1, &[key], 1, Alignment::Fit, Alpha::Straight);
+        History::default().apply(&mut s, "Import image", edits);
+        (s, key)
+    }
+
+    #[test]
+    fn images_are_copied_to_media_and_read_back() {
+        let dir = temp("media");
+        let path = dir.join("M.symphony");
+        let (mut s, key) = with_image(1);
+        // An image left over from an undone import isn't saved.
+        let (spare, img) = media::image_from_bytes(media::png(2, 2, 9)).unwrap();
+        s.images.insert(spare, img);
+        save(&s, &path).unwrap();
+        let file = path.join("media").join(s.images[&key].file_name(key));
+        assert_eq!(fs::read(&file).unwrap(), *s.images[&key].bytes);
+        assert_eq!(fs::read_dir(path.join("media")).unwrap().count(), 1);
+        let json = fs::read_to_string(path.join("scenes/main/scene.json")).unwrap();
+        assert!(!json.contains(&format!("{spare}")));
+        let (back, dropped) = open_with_report(&path).unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(back.images[&key].bytes, s.images[&key].bytes);
+        assert_eq!((back.images[&key].width, back.images[&key].height), (4, 3));
+        assert!(!back.images.contains_key(&spare));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_or_missing_image_is_dropped_and_reported() {
+        let dir = temp("media-bad");
+        let path = dir.join("D.symphony");
+        let (s, key) = with_image(2);
+        save(&s, &path).unwrap();
+        let name = s.images[&key].file_name(key);
+        let file = path.join("media").join(&name);
+        // Another valid PNG under this name: the content key doesn't match.
+        fs::write(&file, media::png(4, 3, 3)).unwrap();
+        let (back, dropped) = open_with_report(&path).unwrap();
+        assert_eq!(dropped, std::slice::from_ref(&name));
+        assert!(back.images.is_empty());
+        assert_eq!(back.layers.len(), 2);
+        fs::remove_file(&file).unwrap();
+        assert_eq!(open_with_report(&path).unwrap().1, [name]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_an_image_link_outside_the_project() {
+        let dir = temp("media-link");
+        let path = dir.join("L.symphony");
+        let (s, key) = with_image(4);
+        save(&s, &path).unwrap();
+        let file = path.join("media").join(s.images[&key].file_name(key));
+        let outside = dir.join("outside.png");
+        fs::rename(&file, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &file).unwrap();
+        assert!(open(&path).unwrap().images.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_keeps_images_of_unsaved_scenes() {
+        let dir = temp("recovery-media");
+        let r = Recovery::new(dir.clone());
+        let (s, key) = with_image(5);
+        r.write("k", &s, None).unwrap();
+        let pending = r.pending();
+        assert_eq!(pending[0].2.images[&key].bytes, s.images[&key].bytes);
+        r.clear("k");
+        assert!(!dir.join("k.media").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn images_and_sound_share_the_media_folder() {
+        let dir = temp("media-both");
+        let path = dir.join("B.symphony");
+        let (mut s, image) = with_image(6);
+        let (t, sound) = with_sound(600);
+        s.sounds = t.sounds;
+        s.sound_files = t.sound_files;
+        save(&s, &path).unwrap();
+        assert_eq!(fs::read_dir(path.join("media")).unwrap().count(), 2);
+        let image_file = path.join("media").join(s.images[&image].file_name(image));
+        fs::remove_file(&image_file).unwrap();
+        // A lost image leaves the sound alone.
+        let (back, dropped) = open_with_report(&path).unwrap();
+        assert_eq!(dropped, [s.images[&image].file_name(image)]);
+        assert!(back.images.is_empty());
+        assert_eq!(back.sound_files[&sound].bytes, s.sound_files[&sound].bytes);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn version_1_files_still_open() {
         let dir = temp("v1");
@@ -606,6 +705,7 @@ mod tests {
         let back = open(&path).unwrap();
         assert_eq!(back.layers.len(), 1);
         assert!(back.sounds.is_empty());
+        assert!(back.images.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }
