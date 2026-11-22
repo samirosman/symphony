@@ -98,7 +98,7 @@ fn catmull(p0: &Point, p1: &Point, p2: &Point, p3: &Point, u: f32) -> Point {
 /// A smooth curve through `points`, with steps no longer than `step`
 /// (drawing units). Passes exactly through every point.
 pub fn spline(points: &[Point], step: f32) -> Vec<Point> {
-    if points.len() < 3 || !(step > 0.0) {
+    if points.len() < 3 || step.is_nan() || step <= 0.0 {
         return points.to_vec();
     }
     let n = points.len();
