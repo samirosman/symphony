@@ -128,6 +128,8 @@ struct Saved {
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
     wallpaper: wallpaper::Choice,
+    #[serde(default)]
+    wallpaper_blur: u8,
     #[serde(default = "yes")]
     interface_animations: bool,
     workspace: Workspace,
@@ -160,6 +162,22 @@ struct Saved {
     /// How often each search result was chosen, to rank favourites first.
     #[serde(default)]
     search_uses: std::collections::HashMap<String, u32>,
+}
+
+fn preferences_window(ctx: &egui::Context, id: egui::Id) -> egui::Window<'static> {
+    egui::Window::new("Preferences")
+        .id(id)
+        .resizable(false)
+        .collapsible(false)
+        .movable(true)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+        .frame(
+            egui::Frame::window(&ctx.global_style())
+                .fill(theme::GLASS_PANEL)
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(theme::GLASS_RADIUS),
+        )
 }
 
 fn yes() -> bool {
@@ -376,6 +394,7 @@ impl SymphonyApp {
         let saved: Option<Saved> = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
+        let wallpaper_blur = saved.as_ref().map_or(0, |saved| saved.wallpaper_blur);
         let mut wallpaper_choice = saved
             .as_ref()
             .map(|s| s.wallpaper.clone())
@@ -512,7 +531,7 @@ impl SymphonyApp {
             welcome,
             recent_projects,
             recovery_scan,
-            wallpaper: wallpaper::Wallpaper::new(&cc.egui_ctx, wallpaper_choice),
+            wallpaper: wallpaper::Wallpaper::new(&cc.egui_ctx, wallpaper_choice, wallpaper_blur),
             interface_animations,
             s,
             workspace,
@@ -2828,22 +2847,37 @@ impl eframe::App for SymphonyApp {
         self.tools_panel(ui);
 
         if self.tool_options_open {
-            egui::Window::new("Tool Properties")
-                .id(egui::Id::unique("floating-tool-properties"))
+            let id = egui::Id::unique("floating-tool-properties");
+            let glass = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, id));
+            let background = glass.add(egui::Shape::Noop);
+            let window = egui::Window::new("Tool Properties")
+                .id(id)
+                .frame(
+                    egui::Frame::window(&ctx.global_style())
+                        .fill(theme::GLASS_PANEL)
+                        .stroke(egui::Stroke::NONE),
+                )
                 .open(&mut self.tool_options_open)
                 .default_width(310.0)
                 .default_height(380.0)
                 .show(&ctx, |ui| {
                     panels::tool_properties(ui, &mut self.s, &mut self.presets, device.as_ref())
                 });
+            if let Some(window) = window {
+                let rect = window.response.rect;
+                if let Some(mask) = self.wallpaper.glass(rect) {
+                    glass.set(background, mask);
+                }
+                theme::glass_rim(&glass, rect);
+            }
         }
 
         let mut open = self.show_preferences;
-        egui::Window::new("Preferences")
+        let prefs_id = egui::Id::unique("symphony-preferences");
+        let glass = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, prefs_id));
+        let background = glass.add(egui::Shape::Noop);
+        let preferences = preferences_window(&ctx, prefs_id)
             .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(&ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     // Pages, like Harmony's Preferences tabs.
@@ -2908,6 +2942,13 @@ impl eframe::App for SymphonyApp {
                         });
                 });
             });
+        if let Some(window) = preferences {
+            let rect = window.response.rect;
+            if let Some(mask) = self.wallpaper.glass(rect) {
+                glass.set(background, mask);
+            }
+            theme::glass_rim(&glass, rect);
+        }
         self.show_preferences = open;
         let mut open = self.show_icon_sheet;
         egui::Window::new("Icon sheet")
@@ -2960,13 +3001,19 @@ impl eframe::App for SymphonyApp {
             .frame(central)
             .show(ui, |ui| match maximised {
                 Some(v) => {
+                    let painter = ui.painter().clone();
+                    let background = painter.add(egui::Shape::Noop);
                     let card = egui::Frame::new()
                         .fill(theme::GLASS_PANEL)
                         .corner_radius(theme::GLASS_RADIUS)
                         .outer_margin(egui::Margin::same(theme::GUTTER as i8))
                         .inner_margin(egui::Margin::same(4))
                         .show(ui, |ui| viewer.view(ui, v));
-                    theme::glass_rim(ui.painter(), card.response.rect.shrink(theme::GUTTER));
+                    let rect = card.response.rect.shrink(theme::GUTTER);
+                    if let Some(mask) = self.wallpaper.glass(rect) {
+                        painter.set(background, mask);
+                    }
+                    theme::glass_rim(&painter, rect);
                 }
 
                 None => {
@@ -2997,6 +3044,7 @@ impl eframe::App for SymphonyApp {
                     {
                         let rect = leaf.rect();
                         if rect.is_positive() && !leaf.tabs.is_empty() {
+                            fills.extend(self.wallpaper.glass(rect));
                             fills.push(egui::Shape::rect_filled(
                                 rect,
                                 theme::GLASS_RADIUS,
@@ -3081,6 +3129,7 @@ impl eframe::App for SymphonyApp {
             tool_dock: self.tool_dock,
             recent_projects: self.recent_projects.clone(),
             wallpaper: self.wallpaper.choice.clone(),
+            wallpaper_blur: self.wallpaper.blur,
             interface_animations: self.interface_animations,
             workspace: self.workspace,
             layouts: self.layouts.clone(),
@@ -3162,6 +3211,54 @@ fn main() -> eframe::Result {
 mod workspace_control_tests {
     use super::*;
     use egui_kittest::Harness;
+
+    #[test]
+    fn preferences_title_bar_moves_the_window() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(760.0, 520.0))
+            .build_ui_state(
+                |ui, rect| {
+                    *rect = preferences_window(ui.ctx(), egui::Id::unique("test-preferences"))
+                        .show(ui.ctx(), |ui| {
+                            ui.set_min_size(egui::vec2(300.0, 180.0));
+                            ui.label("Settings");
+                        })
+                        .unwrap()
+                        .response
+                        .rect;
+                },
+                egui::Rect::NOTHING,
+            );
+        harness.run_steps(3);
+        let before = *harness.state();
+        let start = egui::pos2(before.center().x, before.top() + 11.0);
+        let end = start + egui::vec2(62.0, 30.0);
+        for (pos, pressed) in [
+            (start, None),
+            (start, Some(true)),
+            (end, None),
+            (end, Some(false)),
+        ] {
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run_steps(1);
+        }
+        let delta = harness.state().center() - before.center();
+        assert!(
+            (delta.x - 62.0).abs() < 2.0 && (delta.y - 30.0).abs() < 2.0,
+            "{delta:?}"
+        );
+    }
 
     #[test]
     fn slider_click_keeps_the_rail_focused_for_precise_arrow_steps() {
