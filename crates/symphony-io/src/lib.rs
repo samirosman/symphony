@@ -136,6 +136,20 @@ fn backup(project: &Path, file: &Path) {
 /// Save `scene` as the project at `path` (a `.symphony` folder).
 pub fn save(scene: &Scene, path: &Path) -> Result<(), IoError> {
     let path = with_extension(path);
+    // Imported files travel with the project: copy any the project's
+    // media folder doesn't have yet (from wherever the scene found them).
+    let media_dir = path.join("media");
+    for key in scene.media.keys() {
+        let m = &scene.media[key];
+        let dest = media_dir.join(&m.file);
+        if dest.is_file() {
+            continue;
+        }
+        if let Some(src) = scene.media_path(*key) {
+            fs::create_dir_all(&media_dir).map_err(|e| err("save", &media_dir, e))?;
+            fs::copy(&src, &dest).map_err(|e| err("save", &dest, e))?;
+        }
+    }
     let scene_path = path.join("scenes").join("main").join("scene.json");
     backup(&path, &scene_path);
     let file = SceneFile {
@@ -181,7 +195,10 @@ pub fn open(path: &Path) -> Result<Scene, IoError> {
         ));
     }
     let scene_path = path.join("scenes").join(scene_name).join("scene.json");
-    read_scene(path, &scene_path)
+    let mut scene = read_scene(path, &scene_path)?;
+    // Media files live beside the scene, in the project's media folder.
+    scene.media_dirs = vec![path.join("media")];
+    Ok(scene)
 }
 
 /// Resolve links before reading so a project can only reference its own files.
@@ -211,6 +228,10 @@ fn read_scene(project: &Path, path: &Path) -> Result<Scene, IoError> {
 
 /// Reject scenes whose references don't line up, instead of crashing later.
 fn validate(mut scene: Scene) -> Result<Scene, IoError> {
+    // A media file name is a plain name inside the media folder.
+    scene.media.retain(|_, m| {
+        !m.file.is_empty() && !m.file.contains(['/', '\\']) && !m.file.starts_with('.')
+    });
     // A damaged brush texture only loses its texture: its strokes draw
     // with a plain round tip instead of refusing the whole scene.
     scene.textures.retain(|_, t| t.is_valid());
@@ -324,6 +345,44 @@ mod tests {
         assert_eq!(back.layers, s.layers);
         assert_eq!(project_name(&p), "Walk");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn imported_media_is_copied_into_the_project_and_found_again() {
+        let dir = temp("media");
+        let cache = dir.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("abc.png"), b"png bytes").unwrap();
+        let mut s = Scene::new(Settings::default());
+        s.media.insert(
+            7,
+            symphony_core::doc::Media {
+                kind: symphony_core::doc::MediaKind::Image,
+                file: "abc.png".into(),
+                name: "Background".into(),
+                size: [4, 3],
+            },
+        );
+        // A hostile name is dropped on open.
+        s.media.insert(
+            8,
+            symphony_core::doc::Media {
+                kind: symphony_core::doc::MediaKind::Image,
+                file: "../escape.png".into(),
+                name: "x".into(),
+                size: [1, 1],
+            },
+        );
+        s.media_dirs = vec![cache.clone()];
+        let project = dir.join("Walk.symphony");
+        save(&s, &project).unwrap();
+        assert!(project.join("media").join("abc.png").is_file(), "copied in");
+        let back = open(&project).unwrap();
+        assert_eq!(
+            back.media_path(7),
+            Some(project.join("media").join("abc.png"))
+        );
+        assert!(!back.media.contains_key(&8));
     }
 
     #[test]

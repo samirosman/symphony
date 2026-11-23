@@ -930,3 +930,64 @@ fn each_gesture_is_one_undo_step() {
     );
     assert!(steps(&h) <= before + 1, "a Line Editor drag");
 }
+
+/// Importing images end to end: a picture becomes its own layer held for
+/// the scene and shows in the render; numbered pictures become one layer,
+/// a frame each; one undo takes an import away.
+#[test]
+fn imported_images_become_layers_that_render() {
+    let dir = std::env::temp_dir().join(format!("symphony-import-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = |name: &str, rgb: [u8; 3]| {
+        let p = dir.join(name);
+        image::RgbImage::from_pixel(64, 36, image::Rgb(rgb))
+            .save(&p)
+            .unwrap();
+        p
+    };
+    let bg = save("bg.png", [220, 30, 30]);
+    let seq: Vec<_> = (1..=3)
+        .map(|i| save(&format!("walk_{i:03}.png"), [30, 30, 220]))
+        .collect();
+
+    let mut s = crate::session::Session::new_scene();
+    s.doc.media_dirs = vec![cache.clone()];
+    let layers = s.layer_count();
+    let steps = s.history.undo_len();
+
+    let out = crate::import::stage_images_into(&[bg], &cache);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(s.import_images(out.groups), 1);
+    assert_eq!(s.layer_count(), layers + 1);
+    assert_eq!(s.history.undo_len(), steps + 1, "one undo step");
+    let i = (0..s.layer_count())
+        .find(|&i| s.layer_name(i) == "bg")
+        .expect("named after the file");
+    assert_eq!(
+        i,
+        s.layer_count() - 1,
+        "a full-frame picture is a background: at the bottom"
+    );
+    let len = s.length();
+    let d = s.doc.exposed(i, len).expect("held to the end of the scene");
+    assert!(s.doc.drawings[&d].image.is_some());
+    // It renders: the middle of the frame is the picture's red.
+    let pix = symphony_render::render_camera(&s.doc, 1, 192, 108, None).unwrap();
+    let mid = pix.pixel(96, 54).unwrap();
+    assert!(mid.red() > 150 && mid.blue() < 100, "{mid:?}");
+
+    // A numbered sequence: one layer, one frame each, from the current frame.
+    s.frame = 5;
+    let out = crate::import::stage_images_into(&seq, &cache);
+    assert_eq!(s.import_images(out.groups), 3);
+    let w = (0..s.layer_count())
+        .find(|&i| s.layer_name(i) == "walk")
+        .expect("one layer");
+    let frames: Vec<_> = (5..=7).map(|f| s.doc.exposed(w, f).unwrap()).collect();
+    assert!(frames[0] != frames[1] && frames[1] != frames[2]);
+
+    s.undo();
+    assert!((0..s.layer_count()).all(|i| s.layer_name(i) != "walk"));
+    std::fs::remove_dir_all(&dir).ok();
+}

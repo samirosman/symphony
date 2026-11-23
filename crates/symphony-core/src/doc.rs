@@ -111,6 +111,16 @@ pub struct Scene {
     /// key, so a scene carries its brushes with it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub textures: BTreeMap<u64, crate::stroke::Texture>,
+    /// Imported files (images, sound), by content key. The files live in
+    /// the project's `media/` folder (or the app's media cache before the
+    /// first save); see `media_dirs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub media: BTreeMap<u64, Media>,
+    /// Where to look for media files, in order (the project's `media/`
+    /// folder, then the app's cache). Set when a scene is opened or
+    /// created; not saved.
+    #[serde(skip)]
+    pub media_dirs: Vec<std::path::PathBuf>,
     pub composite: NodeId,
     pub display: NodeId,
     #[serde(default = "default_camera_fov")]
@@ -123,7 +133,35 @@ pub struct Scene {
     pub version: u64,
 }
 
+/// An imported file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Media {
+    pub kind: MediaKind,
+    /// File name inside the media folders ("<content key>.<ext>").
+    pub file: String,
+    /// The name it was imported under, for display.
+    pub name: String,
+    /// Pixel size (images).
+    #[serde(default)]
+    pub size: [u32; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKind {
+    Image,
+    Sound,
+}
+
 impl Scene {
+    /// Where an imported file is on disk, if it's anywhere we know.
+    pub fn media_path(&self, key: u64) -> Option<std::path::PathBuf> {
+        let m = self.media.get(&key)?;
+        self.media_dirs
+            .iter()
+            .map(|d| d.join(&m.file))
+            .find(|p| p.is_file())
+    }
+
     /// Horizontal framing for the 2D camera. The original framing is 60°.
     pub fn camera_scale(&self, frame: u32) -> f32 {
         let fov = self.camera_fov.at(frame);
@@ -202,6 +240,8 @@ impl Scene {
             drawings: BTreeMap::new(),
             palette,
             textures: BTreeMap::new(),
+            media: BTreeMap::new(),
+            media_dirs: Vec::new(),
             composite,
             display,
             camera_fov: default_camera_fov(),
@@ -389,6 +429,7 @@ impl Scene {
             name: self.next_drawing_name(column),
             strokes: Vec::new(),
             fills: Vec::new(),
+            image: None,
         }
     }
 

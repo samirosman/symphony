@@ -1886,6 +1886,91 @@ impl Session {
         );
     }
 
+    /// Place imported images: each group becomes a layer above the
+    /// selected one. A single image is a drawing held for the whole scene
+    /// (a background or reference); a sequence is a drawing per frame from
+    /// the current frame, lengthening the scene if needed. Pictures fit the
+    /// camera frame, centred. One undo step for everything.
+    pub fn import_images(&mut self, groups: Vec<crate::import::ImageGroup>) -> usize {
+        use symphony_core::doc::{Media, MediaKind};
+        use symphony_core::stroke::PlacedImage;
+        let (sw, sh) = (
+            self.doc.settings.width.max(1) as f32,
+            self.doc.settings.height.max(1) as f32,
+        );
+        let mut edits = Vec::new();
+        let mut placed = 0;
+        let mut length = self.length();
+        let index = self.selected.min(self.layer_count());
+        for g in &groups {
+            if g.frames.is_empty() {
+                continue;
+            }
+            // A single picture filling most of the frame is a background:
+            // it goes to the bottom. Anything else goes above the
+            // selected layer.
+            let fills_frame = g.frames.len() == 1 && {
+                let [iw, ih] = g.frames[0].size;
+                let (iw, ih) = (iw as f32, ih as f32);
+                let k = (sw / iw).min(sh / ih);
+                iw * k * ih * k >= 0.9 * sw * sh
+            };
+            // (Insertion clamps, so "past the end" is the bottom.)
+            let at = if fills_frame { usize::MAX } else { index };
+            let snap = self.doc.make_layer(&g.name, at);
+            let column = snap.layer.column;
+            edits.push(Edit::AddLayer(Box::new(snap)));
+            let single = g.frames.len() == 1;
+            let start = if single { 1 } else { self.frame };
+            let mut cells: Vec<Option<Id>> = Vec::new();
+            for f in &g.frames {
+                self.doc.media.entry(f.key).or_insert(Media {
+                    kind: MediaKind::Image,
+                    file: f.file.clone(),
+                    name: f.name.clone(),
+                    size: f.size,
+                });
+                let (iw, ih) = (f.size[0] as f32, f.size[1] as f32);
+                let k = (sw / iw).min(sh / ih);
+                let (w, h) = (iw * k, ih * k);
+                let mut d = self.doc.make_drawing(column);
+                d.image = Some(PlacedImage {
+                    media: f.key,
+                    rect: [-w / 2.0, -h / 2.0, w, h],
+                });
+                cells.push(Some(d.id));
+                edits.push(Edit::AddDrawing { drawing: d });
+                placed += 1;
+            }
+            if single {
+                cells = vec![cells[0]; length.max(1) as usize];
+            }
+            let end = start + cells.len() as u32 - 1;
+            if end > length {
+                edits.push(Edit::SetLength {
+                    before: length,
+                    after: end,
+                });
+                length = end;
+            }
+            edits.push(Edit::SetCells {
+                column,
+                from: start,
+                before: vec![None; cells.len()],
+                after: cells,
+            });
+        }
+        if !edits.is_empty() {
+            let name = if placed == 1 {
+                "Import image"
+            } else {
+                "Import images"
+            };
+            self.history.apply(&mut self.doc, name, edits);
+        }
+        placed
+    }
+
     /// Add a layer above the selected one, like Harmony's Add Drawing Layer.
     pub fn add_layer(&mut self) {
         let n = (1..)

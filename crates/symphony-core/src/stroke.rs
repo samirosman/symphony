@@ -326,6 +326,19 @@ pub struct Drawing {
     /// Painted colour zones, drawn under the strokes of their art layer.
     #[serde(default)]
     pub fills: Vec<Fill>,
+    /// An imported picture (or one frame of a sequence or video), under the
+    /// fills and lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<PlacedImage>,
+}
+
+/// An imported image placed in a drawing.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlacedImage {
+    /// Key into `Scene::media`.
+    pub media: u64,
+    /// Where it sits, in drawing units: left, top, width, height.
+    pub rect: [f32; 4],
 }
 
 /// A painted zone (Harmony's Paint tool): the closed area found from the

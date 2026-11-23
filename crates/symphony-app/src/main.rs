@@ -8,6 +8,7 @@ mod backdrop;
 mod brush_import;
 mod codec;
 mod crash;
+mod import;
 mod keymap;
 mod presets;
 mod save_dialog;
@@ -297,6 +298,10 @@ struct SymphonyApp {
     codec_download: Option<CodecDownload>,
     /// Brush files dropped on the window, being read in the background.
     brush_import: Option<brush_import::BrushImport>,
+    /// Images being read and copied in the background.
+    image_import: Option<import::ImageImport>,
+    /// Screenshot runs import their file once.
+    shot_imported: bool,
     show_licences: bool,
     /// A crash report from last time, offered once (path, text).
     crash_report: Option<(PathBuf, String)>,
@@ -793,6 +798,8 @@ impl SymphonyApp {
             presets,
             codec_download: None,
             brush_import: None,
+            image_import: None,
+            shot_imported: false,
             show_licences: false,
             crash_report: crash_offer,
             opening: None,
@@ -1207,6 +1214,7 @@ impl SymphonyApp {
             Action::Open => self.guard(ctx, Pending::Open),
             Action::Save => self.save(false),
             Action::SaveAs => self.save(true),
+            Action::Import => self.import_dialog(ctx),
             Action::ZoomIn
             | Action::ZoomOut
             | Action::RotateCw
@@ -1438,6 +1446,8 @@ impl SymphonyApp {
             self.menu_action(ui, Action::Save);
             self.menu_item(ui, Action::SaveAs, "Save as...".into());
             ui.separator();
+            self.menu_item(ui, Action::Import, "Import…".into());
+            ui.separator();
             ui.menu_button("Export", |ui| {
                 if ui.button("Animated GIF...").clicked() {
                     self.export
@@ -1661,6 +1671,19 @@ impl SymphonyApp {
                         self.maximised = None;
                     }
                     ui.colored_label(theme::TEXT_SECONDARY, "Workspace");
+                    ui.add_space(14.0);
+                    // One import for everything (images, sequences, sound,
+                    // video, brushes, scenes); dropping files works too.
+                    if ui
+                        .button("Import…")
+                        .on_hover_text(
+                            "Images, image sequences, sound, video, brushes and scenes. You can also drop files on the window.",
+                        )
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.import_dialog(&ctx);
+                    }
                     let space = ui
                         .available_rect_before_wrap()
                         .shrink2(egui::vec2(6.0, 0.0));
@@ -2031,6 +2054,16 @@ impl SymphonyApp {
                     jobs.push((
                         "Downloading OpenH264".into(),
                         d.total.map(|t| d.done as f32 / t.max(1) as f32),
+                    ));
+                }
+                if let Some(i) = &self.image_import {
+                    jobs.push((
+                        if i.files == 1 {
+                            "Importing an image".into()
+                        } else {
+                            format!("Importing {} images", i.files)
+                        },
+                        None,
                     ));
                 }
                 if let Some(b) = &self.brush_import {
@@ -2694,7 +2727,122 @@ impl SymphonyApp {
         self.s.notice = Some(format!("Tool size {new:.1}"));
     }
 
+    /// File > Import…: pick any files Symphony can bring in.
+    fn import_dialog(&mut self, ctx: &egui::Context) {
+        let files = rfd::FileDialog::new()
+            .set_title("Import")
+            .add_filter("Everything Symphony can import", &import::extensions())
+            .pick_files();
+        if let Some(paths) = files {
+            self.import_paths(ctx, paths);
+        }
+    }
+
+    /// Bring in any files, from Import… or dropped on the window: each goes
+    /// to the importer for its kind.
+    fn import_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        use import::Kind;
+        let mut by_kind: std::collections::BTreeMap<u8, Vec<PathBuf>> = Default::default();
+        let mut notes = Vec::new();
+        for p in paths {
+            let slot = match import::classify(&p) {
+                Kind::Image => 0,
+                Kind::Brush => 1,
+                Kind::Preset => 2,
+                Kind::Project => 3,
+                Kind::HarmonyScene => 4,
+                Kind::Sound => 5,
+                Kind::Video => 6,
+                Kind::Unknown => 7,
+            };
+            by_kind.entry(slot).or_default().push(p);
+        }
+        let name = |p: &PathBuf| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        for (slot, paths) in by_kind {
+            match slot {
+                0 => {
+                    if self.image_import.is_some() {
+                        notes.push(
+                            "Still importing the last images. Try these again in a moment.".into(),
+                        );
+                    } else if self.shot.is_some() {
+                        self.image_import = Some(import::ImageImport::finished(paths));
+                    } else {
+                        self.image_import = Some(import::ImageImport::start(paths, ctx));
+                    }
+                }
+                1 => {
+                    if self.brush_import.is_some() {
+                        notes.push(
+                            "Still importing the last brushes. Try these again in a moment.".into(),
+                        );
+                    } else {
+                        self.brush_import = Some(brush_import::BrushImport::start(paths, ctx));
+                    }
+                }
+                2 => {
+                    for p in paths {
+                        notes.push(match self.presets.import(&p) {
+                            Ok(n) => format!("Imported {n} presets from {}.", name(&p)),
+                            Err(e) => format!("{}: {e}", name(&p)),
+                        });
+                    }
+                }
+                3 | 4 => {
+                    // Opening replaces the scene: never over unsaved work.
+                    if let Some(p) = paths.into_iter().next() {
+                        if self.s.dirty() {
+                            notes.push(format!(
+                                "Save or close this scene first, then import {} again.",
+                                name(&p)
+                            ));
+                        } else {
+                            self.open_path(p, slot == 4, ctx);
+                        }
+                    }
+                }
+                5 | 6 => {
+                    let what = if slot == 5 { "Sound" } else { "Video" };
+                    for p in paths {
+                        notes.push(format!("{}: {what} import is coming soon.", name(&p)));
+                    }
+                }
+                _ => {
+                    for p in paths {
+                        notes.push(format!("{} isn't something Symphony can import.", name(&p)));
+                    }
+                }
+            }
+        }
+        if !notes.is_empty() {
+            self.s.notice = Some(notes.join(" "));
+        }
+    }
+
     fn file_drops(&mut self, ctx: &egui::Context) {
+        // Images finished reading in the background: place them.
+        if let Some(job) = &self.image_import {
+            if let Some(done) = job.poll() {
+                self.image_import = None;
+                let placed = self.s.import_images(done.groups);
+                let mut text = match placed {
+                    0 => String::new(),
+                    1 => "Imported an image.".to_owned(),
+                    n => format!("Imported {n} images."),
+                };
+                if !done.problems.is_empty() {
+                    text.push(' ');
+                    text.push_str(&done.problems.join(". "));
+                }
+                if !text.is_empty() {
+                    self.s.notice = Some(text.trim().to_owned());
+                }
+            }
+        }
         if let Some(job) = &self.brush_import {
             if let Some(done) = job.poll() {
                 self.brush_import = None;
@@ -2783,13 +2931,13 @@ impl SymphonyApp {
                         .inner_margin(egui::Margin::same(18))
                         .show(ui, |ui| {
                             ui.label(
-                                egui::RichText::new("Drop to import brushes")
+                                egui::RichText::new("Drop to import")
                                     .font(egui::FontId::proportional(theme::SIZE_HEADING))
                                     .color(theme::TEXT_PRIMARY),
                             );
                             ui.label(
                                 egui::RichText::new(
-                                    "Photoshop, Krita, MyPaint, Procreate, Clip Studio and GIMP brushes, or Symphony presets",
+                                    "Images and image sequences, sound, video, brushes from other apps, Symphony presets and projects, Harmony scenes",
                                 )
                                 .font(theme::dense())
                                 .color(theme::TEXT_SECONDARY),
@@ -2813,38 +2961,7 @@ impl SymphonyApp {
         if paths.is_empty() {
             return;
         }
-        let (brushes, rest): (Vec<_>, Vec<_>) = paths
-            .into_iter()
-            .partition(|p| symphony_brushes::is_brush_file(p));
-        let mut notes = Vec::new();
-        for p in rest {
-            let is_preset = p
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case(presets::EXTENSION));
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            notes.push(if is_preset {
-                match self.presets.import(&p) {
-                    Ok(n) => format!("Imported {n} presets from {name}."),
-                    Err(e) => format!("{name}: {e}"),
-                }
-            } else {
-                format!("{name} isn't a brush file Symphony can import.")
-            });
-        }
-        if !notes.is_empty() {
-            self.s.notice = Some(notes.join(" "));
-        }
-        if !brushes.is_empty() {
-            if self.brush_import.is_some() {
-                self.s.notice =
-                    Some("Still importing the last brushes. Drop these again in a moment.".into());
-            } else {
-                self.brush_import = Some(brush_import::BrushImport::start(brushes, ctx));
-            }
-        }
+        self.import_paths(ctx, paths);
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -3363,6 +3480,14 @@ impl SymphonyApp {
         if self.shot.is_some() && std::env::var_os("SYMPHONY_SHOT_GRID").is_some() {
             self.presets.grid = true;
         }
+        // SYMPHONY_SHOT_IMPORT=<file>: import any file as if dropped.
+        if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_IMPORT")) {
+            if !self.shot_imported {
+                self.shot_imported = true;
+                let ctx = ui.ctx().clone();
+                self.import_paths(&ctx, vec![p.into()]);
+            }
+        }
         if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_DROP")) {
             if self.brush_import.is_none() && !self.presets.brush.iter().any(|p| p.source.is_some())
             {
@@ -3482,6 +3607,12 @@ impl SymphonyApp {
         );
 
         self.cursor_feedback(&ctx);
+        // Unsaved and recovered scenes find imported files in the cache.
+        if let Some(cache) = import::cache_dir() {
+            if !self.s.doc.media_dirs.contains(&cache) {
+                self.s.doc.media_dirs.push(cache);
+            }
+        }
         // Autosave finishing says so; a faded notice is cleared.
         let autosaving = self.autosaving.load(Ordering::SeqCst);
         if self.was_autosaving && !autosaving {

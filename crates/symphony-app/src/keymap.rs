@@ -38,6 +38,8 @@ pub enum Action {
     Open,
     Save,
     SaveAs,
+    /// Import anything: images, sequences, sound, video, brushes, scenes.
+    Import,
     Undo,
     Redo,
     SelectAll,
@@ -114,11 +116,12 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 75] = [
+    pub const ALL: [Action; 76] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
         Action::SaveAs,
+        Action::Import,
         Action::Undo,
         Action::Redo,
         Action::SelectAll,
@@ -199,6 +202,7 @@ impl Action {
             Action::Open => "file.open",
             Action::Save => "file.save",
             Action::SaveAs => "file.save_as",
+            Action::Import => "file.import",
             Action::Undo => "edit.undo",
             Action::Redo => "edit.redo",
             Action::SelectAll => "edit.select_all",
@@ -279,6 +283,7 @@ impl Action {
             Action::Open => "Open",
             Action::Save => "Save",
             Action::SaveAs => "Save as",
+            Action::Import => "Import…",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::SelectAll => "Select all",
@@ -384,6 +389,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::Open => b(Key::O, CMD),
         Action::Save => b(Key::S, CMD),
         Action::SaveAs => None, // Harmony's Ctrl+Shift+S is Advanced Save
+        // Not bound until checked against Harmony 27.1's shortcut list.
+        Action::Import => None,
         Action::Undo => b(Key::Z, CMD),
         // Harmony 27 documents Redo as Ctrl+Shift+Z on macOS too.
         Action::Redo => b(

@@ -36,6 +36,8 @@ pub struct VectorMeshes {
     entries: HashMap<Id, Entry>,
     /// Paint fills: triangulated once (a polygon needs no zoom detail).
     fills: HashMap<Id, Entry>,
+    /// Imported images on the GPU, by media key.
+    images: HashMap<u64, egui::TextureHandle>,
     frame: u64,
     /// Time spent rebuilding this frame; past the budget, lines that
     /// only need a finer zoom level wait a frame (drawing their slightly
@@ -90,6 +92,56 @@ impl VectorMeshes {
     /// for changes when it moves.
     pub fn set_version(&mut self, version: u64) {
         self.version = version;
+    }
+
+    /// Draw an imported image under `m` (uploaded to the GPU once).
+    pub fn paint_image(
+        &mut self,
+        painter: &egui::Painter,
+        scene: &symphony_core::doc::Scene,
+        img: symphony_core::stroke::PlacedImage,
+        m: Affine,
+    ) {
+        let [x, y, w, h] = img.rect;
+        let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)].map(|(px, py)| {
+            let (sx, sy) = m.apply(px, py);
+            Pos2::new(sx, sy)
+        });
+        if !Rect::from_points(&corners).intersects(painter.clip_rect()) {
+            return;
+        }
+        let texture = match self.images.entry(img.media) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let Some(pix) = symphony_render::decoded_image(scene, img.media) else {
+                    return;
+                };
+                e.insert(painter.ctx().load_texture(
+                    format!("imported-{:x}", img.media),
+                    egui::ColorImage::from_rgba_premultiplied(
+                        [pix.width() as usize, pix.height() as usize],
+                        pix.data(),
+                    ),
+                    egui::TextureOptions::LINEAR,
+                ))
+            }
+        };
+        let mut mesh = egui::Mesh::with_texture(texture.id());
+        let uv = [
+            Pos2::new(0.0, 0.0),
+            Pos2::new(1.0, 0.0),
+            Pos2::new(1.0, 1.0),
+            Pos2::new(0.0, 1.0),
+        ];
+        for (pos, uv) in corners.into_iter().zip(uv) {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos,
+                uv,
+                color: Color32::WHITE,
+            });
+        }
+        mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+        painter.add(egui::Shape::mesh(mesh));
     }
 
     /// Draw a paint fill under `m`, triangulated once per shape.

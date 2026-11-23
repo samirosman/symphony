@@ -170,6 +170,66 @@ fn render_display(
     layers.pop()
 }
 
+/// Decoded imported images, by file, shared by every render (premultiplied,
+/// ready to draw). Kept to a memory budget; least recently used go first.
+static IMAGES: std::sync::Mutex<Vec<(std::path::PathBuf, std::sync::Arc<Pixmap>)>> =
+    std::sync::Mutex::new(Vec::new());
+const IMAGE_BUDGET: usize = 768 * 1024 * 1024;
+
+/// An imported image, decoded once (premultiplied RGBA).
+pub fn decoded_image(scene: &Scene, key: u64) -> Option<std::sync::Arc<Pixmap>> {
+    let path = scene.media_path(key)?;
+    if let Ok(mut cache) = IMAGES.lock() {
+        if let Some(i) = cache.iter().position(|(p, _)| *p == path) {
+            let hit = cache.remove(i);
+            let pix = hit.1.clone();
+            cache.push(hit);
+            return Some(pix);
+        }
+    }
+    let rgba = image::open(&path).ok()?.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let mut pix = Pixmap::new(w, h)?;
+    for (dst, src) in pix.pixels_mut().iter_mut().zip(rgba.pixels()) {
+        let [r, g, b, a] = src.0;
+        *dst = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+    }
+    let pix = std::sync::Arc::new(pix);
+    if let Ok(mut cache) = IMAGES.lock() {
+        cache.push((path, pix.clone()));
+        let mut total: usize = cache.iter().map(|(_, p)| p.data().len()).sum();
+        while total > IMAGE_BUDGET && cache.len() > 1 {
+            total -= cache.remove(0).1.data().len();
+        }
+    }
+    Some(pix)
+}
+
+fn paint_image(
+    pix: &mut Pixmap,
+    scene: &Scene,
+    img: symphony_core::stroke::PlacedImage,
+    m: Affine,
+) {
+    let Some(src) = decoded_image(scene, img.media) else {
+        return;
+    };
+    let [x, y, w, h] = img.rect;
+    let (sx, sy) = (
+        w / src.width().max(1) as f32,
+        h / src.height().max(1) as f32,
+    );
+    let place = m
+        .compose(Affine::translate(x, y))
+        .compose(Affine::scale(sx, sy));
+    let t = Transform::from_row(place.a, place.b, place.c, place.d, place.tx, place.ty);
+    let paint = PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..PixmapPaint::default()
+    };
+    pix.draw_pixmap(0, 0, src.as_ref().as_ref(), &paint, t, None);
+}
+
 fn paint_drawing(
     pix: &mut Pixmap,
     scene: &Scene,
@@ -185,6 +245,10 @@ fn paint_drawing(
         return;
     };
     let m = view.compose(project).compose(item.transform);
+    // An imported image sits under everything else in the drawing.
+    if let Some(img) = d.image {
+        paint_image(pix, scene, img, m);
+    }
     // Art layers back to front; within each, paint under ink.
     for art in ArtLayer::STACK {
         for fill in d.fills.iter().filter(|f| f.art == art) {

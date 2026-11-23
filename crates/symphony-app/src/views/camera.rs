@@ -749,6 +749,13 @@ pub fn ui(
     for (_, d, m) in items.iter().filter(|_| gpu || s.show_strokes) {
         if let Some(dr) = s.doc.drawings.get(d) {
             let moving = preview.is_some() && s.selection.drawing == Some(*d);
+            // An imported image, under the drawing's paint and lines.
+            if let (true, Some(img)) = (gpu, dr.image) {
+                state
+                    .strokes
+                    .vectors
+                    .paint_image(&painter, &s.doc, img, view.compose(*m));
+            }
             // Art layers back to front; within each, paint under ink.
             for art in ArtLayer::STACK {
                 // The Drawing view shows only the current art layer unless
