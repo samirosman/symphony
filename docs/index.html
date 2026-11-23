@@ -18,137 +18,123 @@
       color-scheme: dark;
       --background: #17181a;
       --panel: #242628;
-      --raised: #303336;
       --ink: #e8eaec;
       --muted: #b5bac0;
       --focus: #81b4f8;
       --selection: #3d63b8;
       --glass-radius: 12px;
       --inset: 6px;
-      font: 15px/1.5 system-ui, sans-serif;
+      font: 16px/1.55 system-ui, sans-serif;
       color: var(--ink);
       background: var(--background);
     }
     * { box-sizing: border-box; }
     body { margin: 0; }
     a { color: var(--focus); text-underline-offset: .25em; }
-    a:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+    a:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
     img { display: block; }
-    .wrap { width: min(1440px, 100% - 32px); margin-inline: auto; }
-    .menu-bar {
-      background: linear-gradient(#0e0f11 75%, var(--background));
-    }
+    .wrap { width: min(1120px, 100% - 40px); margin-inline: auto; }
     nav, footer {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 6px 12px;
+      gap: 12px;
       flex-wrap: wrap;
-      min-height: 48px;
-      padding-block: 6px;
+      padding-block: 16px;
     }
-    nav a {
-      color: var(--muted);
-      padding: 6px 8px;
-      border-radius: 4px;
-      text-decoration: none;
-    }
-    nav a:hover { background: var(--raised); color: var(--ink); }
+    nav a { color: var(--muted); font-size: .9rem; }
     .brand {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 7px;
       color: var(--ink);
-      font: 600 1rem Bricolage, system-ui, sans-serif;
+      font: 600 1.05rem Bricolage, system-ui, sans-serif;
+      text-decoration: none;
     }
-    .brand img { width: 24px; height: 24px; }
-    .workspace {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) clamp(270px, 24vw, 340px);
-      grid-template-areas: "preview intro" "preview features";
-      grid-template-rows: auto 1fr;
-      align-items: start;
-      gap: 6px;
-      margin-block: clamp(12px, 3vw, 38px) 6px;
+    .brand img { width: 25px; height: 25px; }
+    .intro {
+      text-align: center;
+      padding-block: clamp(32px, 7vw, 84px) clamp(28px, 4vw, 48px);
     }
-    .panel {
-      background: var(--panel);
-      border-radius: var(--glass-radius);
-      box-shadow: inset 0 0 0 1px rgb(255 255 255 / 7%), inset 0 1px rgb(255 255 255 / 8%);
+    h1, h2, dt {
+      font-family: Bricolage, system-ui, sans-serif;
+      font-weight: 600;
     }
-    .intro { grid-area: intro; padding: 16px; }
     h1 {
       margin: 0;
-      font: 600 clamp(2.1rem, 3vw, 2.8rem)/1.1 Bricolage, system-ui, sans-serif;
-      letter-spacing: -.045em;
+      font-size: clamp(3rem, 8.5vw, 6.9rem);
+      letter-spacing: -.055em;
+      line-height: 1;
     }
-    .intro p { margin: 8px 0 14px; max-width: 36ch; }
+    .intro p {
+      margin: 14px auto 20px;
+      max-width: 42ch;
+      font-size: clamp(1rem, 2vw, 1.25rem);
+    }
     p, dd, figcaption, footer { color: var(--muted); }
     .download {
       display: inline-block;
-      padding: 7px 11px;
-      border-radius: 4px;
+      padding: 8px 14px;
+      border-radius: 6px;
       background: var(--selection);
       color: #fff;
       font-weight: 600;
       text-decoration: none;
     }
     .download:hover { background: #3659a5; }
-    figure { grid-area: preview; margin: 0; padding: var(--inset); }
-    figure img {
+    figure { margin: 0; }
+    .preview {
+      padding: var(--inset);
+      border-radius: var(--glass-radius);
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px rgb(255 255 255 / 8%), inset 0 1px rgb(255 255 255 / 8%);
+    }
+    .preview img {
       width: 100%;
       height: auto;
       border-radius: calc(var(--glass-radius) - var(--inset));
-      background: #0e0f11;
     }
-    figcaption { padding: 6px 6px 2px; font-size: .85rem; }
-    section { grid-area: features; padding: 6px 12px 12px; }
+    figcaption { margin-top: 8px; font-size: .85rem; }
+    section { padding-block: clamp(42px, 7vw, 80px); }
     h2 {
-      display: inline-block;
-      margin: 0 0 10px -6px;
-      padding: 3px 8px;
-      border-radius: 7px;
-      background: var(--raised);
-      font-size: .9rem;
-      font-weight: 600;
+      margin: 0 0 18px;
+      font-size: clamp(1.6rem, 3.5vw, 2.35rem);
+      letter-spacing: -.025em;
     }
-    dl { margin: 0; display: grid; gap: 12px; }
-    dt { font-weight: 600; }
-    dd { margin: 2px 0 0; font-size: .9rem; }
-    footer { padding-inline: 6px; font-size: .85rem; }
-    @media (max-width: 800px) {
-      .workspace {
-        grid-template-columns: minmax(0, 1fr);
-        grid-template-areas: "intro" "preview" "features";
-        grid-template-rows: auto;
-      }
-      dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 25px;
     }
-    @media (max-width: 480px) {
-      .wrap { width: calc(100% - 20px); }
-      dl { grid-template-columns: 1fr; }
+    dt { font-size: 1.14rem; }
+    dd { margin: 4px 0 0; max-width: 38ch; }
+    footer { border-top: 1px solid #303336; font-size: .85rem; }
+    @media (max-width: 640px) {
+      .wrap { width: calc(100% - 28px); }
+      dl { grid-template-columns: 1fr; gap: 18px; }
     }
   </style>
 </head>
 <body id="top">
-  <div class="menu-bar">
-    <nav class="wrap" aria-label="Main">
-      <a class="brand" href="#top"><img src="presentation/symphony.png" width="24" height="24" alt="">Symphony</a>
-      <a href="https://github.com/tdemers218/symphony">GitHub repository</a>
-    </nav>
-  </div>
-  <main class="wrap workspace">
-    <header class="intro panel">
+  <nav class="wrap" aria-label="Main">
+    <a class="brand" href="#top"><img src="presentation/symphony.png" width="25" height="25" alt="">Symphony</a>
+    <a href="https://github.com/tdemers218/symphony">GitHub repository</a>
+  </nav>
+  <main class="wrap">
+    <header class="intro">
       <h1>Symphony</h1>
-      <p>A free, open-source 2D animation workspace for drawing, timing, and node-based compositing.</p>
+      <p>Free, open-source 2D animation software.</p>
       <a class="download" href="https://github.com/tdemers218/symphony/releases">Get the preview build</a>
     </header>
-    <figure class="panel">
-      <img src="presentation/workspace.png" width="2880" height="1800" alt="Symphony’s empty Camera view, with drawing tools and color controls beside it and the Timeline below.">
+    <figure>
+      <div class="preview">
+        <img src="presentation/workspace.png" width="2880" height="1800" alt="Symphony’s empty Camera view, with drawing tools and colour controls beside it and the Timeline below.">
+      </div>
       <figcaption>A new scene in Symphony’s default workspace.</figcaption>
     </figure>
-    <section class="panel" aria-labelledby="features">
-      <h2 id="features">Features</h2>
+    <section aria-labelledby="features">
+      <h2 id="features">Key features</h2>
       <dl>
         <div><dt>Make room for in-betweens</dt><dd>Insert frames after the playhead. Current exposures hold through the gap, and later exposures and peg keys shift together.</dd></div>
         <div><dt>Turn a drawing into an editable matte</dt><dd>Switch a drawing to a mask and back while keeping its artwork, exposures, and node connections.</dd></div>
