@@ -19,6 +19,8 @@ const BLUR_LEVELS: [f32; 5] = [0.0, 3.0, 8.0, 15.0, 26.0];
 const GLASS_BLUR: u8 = 32;
 const CAMERA_REFRESH: f64 = 1.0 / 6.0;
 const CAMERA_PREVIEW_EDGE: u32 = 384;
+/// A new Camera frame crossfades over the last one in this long, seconds.
+const CAMERA_FADE: f64 = 0.25;
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Choice {
@@ -39,7 +41,7 @@ impl Choice {
             Self::Studio => "Studio",
             Self::Dusk => "Dusk",
             Self::Custom(_) => "Custom picture…",
-            Self::Camera => "Current Camera View",
+            Self::Camera => "Current frame",
         }
     }
 }
@@ -69,6 +71,11 @@ pub struct Wallpaper {
     pub blur: u8,
     pending: Option<Receiver<Result<Vec<RgbImage>, String>>>,
     textures: Vec<egui::TextureHandle>,
+    /// The Camera frame being faded out, and when the fade began.
+    previous: Vec<egui::TextureHandle>,
+    fade_start: f64,
+    now: f64,
+    uploads: u64,
     backdrop: Rect,
     error: Option<String>,
     camera: CameraRefresh,
@@ -81,6 +88,10 @@ impl Wallpaper {
             pending: None,
             blur: blur.min(100),
             textures: Vec::new(),
+            previous: Vec::new(),
+            fade_start: 0.0,
+            now: 0.0,
+            uploads: 0,
             backdrop: Rect::NOTHING,
             error: None,
             camera: CameraRefresh::default(),
@@ -91,6 +102,7 @@ impl Wallpaper {
 
     fn select(&mut self, ctx: &egui::Context, choice: Choice) {
         self.textures.clear();
+        self.previous.clear();
         self.pending = None;
         self.error = None;
         self.camera = CameraRefresh::default();
@@ -136,6 +148,11 @@ impl Wallpaper {
         let paper = CanvasColours::get(session.colours.stage);
         let paper = [paper.r(), paper.g(), paper.b()];
         let stamp = (session.doc.version, session.frame, paper);
+        // Hold still during playback: re-rendering every frame costs time
+        // and flickers behind the panels. It catches up when playback stops.
+        if session.playing && !self.textures.is_empty() {
+            return;
+        }
         if self.pending.is_some() || self.camera.requested == Some(stamp) {
             return;
         }
@@ -181,6 +198,25 @@ impl Wallpaper {
     pub fn paint(&mut self, ui: &egui::Ui) {
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
+                Ok(Ok(images)) if self.uses_camera() && !self.textures.is_empty() => {
+                    // A new Camera frame: keep the old one and crossfade.
+                    self.uploads += 1;
+                    let fresh = images
+                        .into_iter()
+                        .enumerate()
+                        .map(|(level, image)| {
+                            let size = [image.width() as usize, image.height() as usize];
+                            ui.ctx().load_texture(
+                                format!("workspace-wallpaper-{}-{level}", self.uploads),
+                                egui::ColorImage::from_rgb(size, image.as_raw()),
+                                egui::TextureOptions::LINEAR,
+                            )
+                        })
+                        .collect();
+                    self.previous = std::mem::replace(&mut self.textures, fresh);
+                    self.fade_start = ui.input(|i| i.time);
+                    self.pending = None;
+                }
                 Ok(Ok(images)) => {
                     for (level, image) in images.into_iter().enumerate() {
                         let size = [image.width() as usize, image.height() as usize];
@@ -206,6 +242,14 @@ impl Wallpaper {
                     self.pending = None;
                 }
                 Err(TryRecvError::Empty) => {}
+            }
+        }
+        self.now = ui.input(|i| i.time);
+        if !self.previous.is_empty() {
+            if self.fade() >= 1.0 {
+                self.previous.clear();
+            } else {
+                ui.ctx().request_repaint();
             }
         }
         let rect = ui.max_rect();
@@ -263,14 +307,22 @@ impl Wallpaper {
     pub fn chrome(&self, rect: Rect, side: ChromeSide) -> egui::Shape {
         let mut layers = Vec::new();
         if !self.textures.is_empty() && self.backdrop.is_positive() {
-            // The bars use the strongest cached blur, so their edge reads soft.
-            let level = self.textures.len() - 1;
-            layers.push(egui::Shape::mesh(chrome_mesh(
-                rect,
-                side,
-                Some((self.textures[level].id(), self.backdrop)),
-                Color32::from_gray(204),
-            )));
+            // The bars use the strongest cached blur, so their edge reads
+            // soft; during a Camera crossfade, both frames.
+            let fade = self.fade();
+            let mut sets = vec![(&self.textures, fade)];
+            if fade < 1.0 {
+                sets.insert(0, (&self.previous, 1.0));
+            }
+            for (textures, alpha) in sets {
+                let level = textures.len() - 1;
+                layers.push(egui::Shape::mesh(chrome_mesh(
+                    rect,
+                    side,
+                    Some((textures[level].id(), self.backdrop)),
+                    Color32::from_gray(204).gamma_multiply(alpha),
+                )));
+            }
         }
         layers.push(egui::Shape::mesh(chrome_mesh(
             rect,
@@ -281,14 +333,49 @@ impl Wallpaper {
         egui::Shape::Vec(layers)
     }
 
+    /// How far the Camera crossfade has gone, 0..=1 (1 when not fading).
+    fn fade(&self) -> f32 {
+        if self.previous.is_empty() {
+            return 1.0;
+        }
+        let t = ((self.now - self.fade_start) / CAMERA_FADE).clamp(0.0, 1.0) as f32;
+        symphony_ui::motion::Motion::Select.ease(t)
+    }
+
     fn sample(&self, rect: Rect, radius: f32, amount: u8, tint: Color32) -> Option<egui::Shape> {
         if !rect.is_positive() || !self.backdrop.is_positive() || self.textures.is_empty() {
             return None;
         }
+        let current = self.sample_from(&self.textures, rect, radius, amount, tint);
+        let fade = self.fade();
+        if fade >= 1.0 {
+            return Some(current);
+        }
+        // The old frame underneath, the new one fading in over it.
+        let old = self.sample_from(&self.previous, rect, radius, amount, tint);
+        let new = self.sample_from(
+            &self.textures,
+            rect,
+            radius,
+            amount,
+            tint.gamma_multiply(fade),
+        );
+        Some(egui::Shape::Vec(vec![old, new]))
+    }
+
+    fn sample_from(
+        &self,
+        textures: &[egui::TextureHandle],
+        rect: Rect,
+        radius: f32,
+        amount: u8,
+        tint: Color32,
+    ) -> egui::Shape {
         let (lower, upper, blend) = blur_mix(amount);
+        let max = textures.len() - 1;
         let shape = |level: usize, tint| {
             egui::Shape::mesh(mask_mesh(
-                self.textures[level].id(),
+                textures[level.min(max)].id(),
                 rect,
                 self.backdrop,
                 radius,
@@ -297,12 +384,9 @@ impl Wallpaper {
         };
         let lower = shape(lower, tint);
         if blend == 0.0 {
-            Some(lower)
+            lower
         } else {
-            Some(egui::Shape::Vec(vec![
-                lower,
-                shape(upper, tint.gamma_multiply(blend)),
-            ]))
+            egui::Shape::Vec(vec![lower, shape(upper, tint.gamma_multiply(blend))])
         }
     }
 

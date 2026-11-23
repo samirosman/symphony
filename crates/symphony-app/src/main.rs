@@ -2960,6 +2960,7 @@ impl eframe::App for SymphonyApp {
                     &self.recent_projects,
                     self.recovery_scan.is_some(),
                     self.opening.is_some(),
+                    &|rect| self.wallpaper.glass(rect),
                 ) {
                     Some(welcome::Action::Open) => self.open_dialog(false, &ctx),
                     Some(welcome::Action::Recent(path)) => self.open_path(path, false, &ctx),

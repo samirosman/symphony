@@ -105,9 +105,15 @@ pub fn ui(
     // frame 12") first, then ranked entries.
     let typed = !st.query.trim().is_empty();
     let mut results: Vec<Entry> = Vec::new();
+    // How many results are strong: phrase commands, and matches scoring at
+    // least half the best. The box is sized to these; weaker matches are
+    // still there below, by scrolling or the arrow keys.
+    let mut strong = 0;
     if typed {
         results.extend(search::phrase(&st.query));
         let hits = search::rank(entries, &st.query, st.here, uses);
+        let best = hits.first().map_or(0.0, |h| h.score);
+        strong = results.len() + hits.iter().take_while(|h| h.score >= best * 0.5).count();
         results.extend(hits.iter().map(|h| entries[h.index].clone()));
     }
     st.selected = st.selected.min(results.len().saturating_sub(1));
@@ -122,9 +128,10 @@ pub fn ui(
             !st.first_frame && i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
         )
     });
+    // Closing keeps drawing this frame too: returning early here left one
+    // blank frame before the fade-out, which looked like fading twice.
     if !st.closing && (esc || tab) {
         st.closing = true;
-        return Outcome::Closing;
     }
     if up {
         st.selected = st.selected.saturating_sub(1);
@@ -136,11 +143,7 @@ pub fn ui(
     // The results area grows to fit (Expand), from nothing while empty.
     let screen = ctx.content_rect();
     let max_list_h = (screen.height() - FIELD_H - 36.0).max(ROW_H);
-    let rows = if typed {
-        results.len().clamp(1, ROWS)
-    } else {
-        0
-    };
+    let rows = if typed { strong.clamp(1, ROWS) } else { 0 };
     let target_h = (rows as f32 * ROW_H).min(max_list_h);
     // Results show at their full height at once; only opacity animates.
     let list_h = target_h;
