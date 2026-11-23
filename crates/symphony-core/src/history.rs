@@ -514,28 +514,6 @@ impl Edit {
     }
 }
 
-fn step_drawings(edits: &[Edit]) -> Vec<Id> {
-    let mut out: Vec<Id> = Vec::new();
-    for e in edits {
-        let d = match e {
-            Edit::SetStrokeSwatch { drawing, .. }
-            | Edit::AddFill { drawing, .. }
-            | Edit::RemoveFill { drawing, .. }
-            | Edit::SetFillSwatch { drawing, .. }
-            | Edit::SetStrokes { drawing, .. }
-            | Edit::AddStroke { drawing, .. }
-            | Edit::RemoveStroke { drawing, .. }
-            | Edit::ReplaceFill { drawing, .. }
-            | Edit::ReplaceStroke { drawing, .. } => *drawing,
-            _ => continue,
-        };
-        if !out.contains(&d) {
-            out.push(d);
-        }
-    }
-    out
-}
-
 #[derive(Clone, Debug)]
 struct Step {
     name: String,
@@ -544,14 +522,55 @@ struct Step {
     open: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct History {
-    undo: Vec<Step>,
-    redo: Vec<Step>,
+impl Step {
+    fn bytes(&self) -> usize {
+        64 + self.name.len() + self.edits.iter().map(Edit::approx_bytes).sum::<usize>()
+    }
 }
 
-/// Keep memory bounded (E3.4). Oldest steps go first.
-const LIMIT: usize = 500;
+#[derive(Clone, Debug, Default)]
+pub struct History {
+    undo: std::collections::VecDeque<Step>,
+    redo: Vec<Step>,
+    /// Roughly how much memory the undo steps hold, in bytes.
+    bytes: usize,
+}
+
+/// Undo is bounded by memory, not a small count (E3.4): up to this many
+/// steps, as long as they fit in `BUDGET`. Oldest steps go first. A stroke
+/// costs a few kilobytes, so thousands of steps fit; only very large edits
+/// make room by dropping old ones.
+const LIMIT: usize = 10_000;
+const BUDGET: usize = 512 * 1024 * 1024;
+
+fn stroke_bytes(s: &Stroke) -> usize {
+    96 + s.points.len() * 12 + s.shape.iter().map(|c| c.len() * 8 + 24).sum::<usize>()
+}
+
+fn fill_bytes(f: &Fill) -> usize {
+    64 + f.contours.iter().map(|c| c.len() * 8 + 24).sum::<usize>()
+}
+
+impl Edit {
+    /// Rough memory held by this edit, for the undo budget.
+    fn approx_bytes(&self) -> usize {
+        let strokes = |v: &[Stroke]| v.iter().map(stroke_bytes).sum::<usize>();
+        let fills = |v: &[Fill]| v.iter().map(fill_bytes).sum::<usize>();
+        64 + match self {
+            Edit::SetStrokes { before, after, .. } => strokes(before) + strokes(after),
+            Edit::AddStroke { stroke, .. } | Edit::RemoveStroke { stroke, .. } => {
+                stroke_bytes(stroke)
+            }
+            Edit::ReplaceStroke { before, after, .. } => stroke_bytes(before) + strokes(after),
+            Edit::AddFill { fill, .. } | Edit::RemoveFill { fill, .. } => fill_bytes(fill),
+            Edit::ReplaceFill { before, after, .. } => fill_bytes(before) + fills(after),
+            Edit::AddDrawing { drawing } => strokes(&drawing.strokes) + fills(&drawing.fills),
+            Edit::SetCells { before, after, .. } => (before.len() + after.len()) * 16,
+            Edit::Rename { before, after, .. } => before.len() + after.len(),
+            _ => 512,
+        }
+    }
+}
 
 impl History {
     /// Apply `edits` as one undo step called `name`.
@@ -576,12 +595,16 @@ impl History {
         edit.apply(scene, true);
         if let Some(top) = self
             .undo
-            .last_mut()
+            .back_mut()
             .filter(|t| t.open.as_deref() == Some(key))
         {
+            let before = top.bytes();
             if !top.edits.iter_mut().any(|e| e.absorb(&edit)) {
                 top.edits.push(edit);
             }
+            let after = top.bytes();
+            self.bytes = (self.bytes + after).saturating_sub(before);
+            self.trim();
             return;
         }
         self.seal();
@@ -594,39 +617,38 @@ impl History {
 
     /// End the current gesture.
     pub fn seal(&mut self) {
-        if let Some(top) = self.undo.last_mut() {
+        if let Some(top) = self.undo.back_mut() {
             top.open = None;
         }
     }
 
     fn push(&mut self, step: Step) {
-        self.undo.push(step);
+        self.bytes += step.bytes();
+        self.undo.push_back(step);
         self.redo.clear();
-        if self.undo.len() > LIMIT {
-            self.undo.remove(0);
+        self.trim();
+    }
+
+    /// Drop the oldest steps until within the step limit and memory budget
+    /// (always keeping the newest).
+    fn trim(&mut self) {
+        while self.undo.len() > 1 && (self.undo.len() > LIMIT || self.bytes > BUDGET) {
+            if let Some(old) = self.undo.pop_front() {
+                self.bytes = self.bytes.saturating_sub(old.bytes());
+            }
         }
     }
 
+    /// How many steps can be undone.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
     /// Undo the last step. Returns its name.
-    /// The drawings the next undo would touch (for showing where it lands).
-    pub fn undo_drawings(&self) -> Vec<Id> {
-        self.undo
-            .last()
-            .map(|s| step_drawings(&s.edits))
-            .unwrap_or_default()
-    }
-
-    /// The drawings the next redo would touch.
-    pub fn redo_drawings(&self) -> Vec<Id> {
-        self.redo
-            .last()
-            .map(|s| step_drawings(&s.edits))
-            .unwrap_or_default()
-    }
-
     pub fn undo(&mut self, scene: &mut Scene) -> Option<String> {
         self.seal();
-        let step = self.undo.pop()?;
+        let step = self.undo.pop_back()?;
+        self.bytes = self.bytes.saturating_sub(step.bytes());
         for e in step.edits.iter().rev() {
             e.apply(scene, false);
         }
@@ -641,12 +663,14 @@ impl History {
             e.apply(scene, true);
         }
         let name = step.name.clone();
-        self.undo.push(step);
+        self.bytes += step.bytes();
+        self.undo.push_back(step);
+        self.trim();
         Some(name)
     }
 
     pub fn undo_name(&self) -> Option<&str> {
-        self.undo.last().map(|s| s.name.as_str())
+        self.undo.back().map(|s| s.name.as_str())
     }
 
     pub fn redo_name(&self) -> Option<&str> {
@@ -656,6 +680,7 @@ impl History {
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.bytes = 0;
     }
 }
 
@@ -825,6 +850,55 @@ mod tests {
     }
 
     #[test]
+    fn undo_keeps_thousands_of_strokes_within_a_memory_budget() {
+        let mut s = Scene::new(Settings::default());
+        let mut h = History::default();
+        let snap = s.make_layer("A", 0);
+        h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        let d = s.make_drawing(s.layers[0].column);
+        let did = d.id;
+        h.apply(&mut s, "Draw", vec![Edit::AddDrawing { drawing: d }]);
+        let stroke = |id| Stroke {
+            id,
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: 1.0,
+            max_width: 4.0,
+            points: (0..80)
+                .map(|k| Point {
+                    x: k as f32,
+                    y: 0.0,
+                    pressure: 1.0,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        for _ in 0..3000 {
+            let st = stroke(s.ids.fresh());
+            h.apply(
+                &mut s,
+                "Draw",
+                vec![Edit::AddStroke {
+                    drawing: did,
+                    stroke: st,
+                }],
+            );
+        }
+        // The old 500-step limit would have kept 500; all 3000 fit now.
+        assert!(h.undo_len() >= 3000, "{}", h.undo_len());
+        assert!(h.bytes < BUDGET);
+        // Undo and redo keep the count of held memory in step.
+        let held = h.bytes;
+        h.undo(&mut s);
+        assert!(h.bytes < held);
+        h.redo(&mut s);
+        assert_eq!(h.bytes, held);
+    }
+
+    #[test]
     fn repeated_stroke_edits_in_one_gesture_fold_into_one_entry() {
         let mut s = Scene::new(Settings::default());
         let mut h = History::default();
@@ -874,7 +948,7 @@ mod tests {
             cur = next;
         }
         assert_eq!(s.drawings[&did].strokes[0].points[0].x, 50.0);
-        let step = h.undo.last().unwrap();
+        let step = h.undo.back().unwrap();
         assert_eq!(step.edits.len(), 1, "one entry for the whole drag");
         h.undo(&mut s);
         assert_eq!(s.drawings[&did].strokes[0], st, "undo restores the start");

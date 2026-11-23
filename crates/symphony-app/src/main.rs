@@ -3475,36 +3475,6 @@ impl SymphonyApp {
         );
 
         self.cursor_feedback(&ctx);
-        // SYMPHONY_SHOT_FLASH: draw a line and undo it just before the
-        // screenshot, so the undo flash shows.
-        if self.shot.is_some()
-            && std::env::var_os("SYMPHONY_SHOT_FLASH").is_some()
-            && ctx.input(|i| i.time) > 0.35
-            && self.s.flash.is_none()
-        {
-            use symphony_core::stroke::{Point, Stroke, StrokeKind};
-            let st = Stroke {
-                id: self.s.doc.ids.fresh(),
-                kind: StrokeKind::Pencil,
-                art: Default::default(),
-                swatch: self.s.swatch,
-                min_width: 6.0,
-                max_width: 6.0,
-                points: (0..20)
-                    .map(|k| Point {
-                        x: 120.0 + k as f32 * 12.0,
-                        y: -120.0 + (k as f32 * 0.5).sin() * 30.0,
-                        pressure: 1.0,
-                    })
-                    .collect(),
-                tips: Default::default(),
-                texture: None,
-                shape: Vec::new(),
-            };
-            let layer = self.s.selected;
-            self.s.commit_stroke(layer, self.s.frame, st);
-            self.s.undo();
-        }
         // Autosave finishing says so; a faded notice is cleared.
         let autosaving = self.autosaving.load(Ordering::SeqCst);
         if self.was_autosaving && !autosaving {

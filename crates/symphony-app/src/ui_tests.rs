@@ -867,34 +867,6 @@ fn busy_frame_cost() {
     println!("busy_frame_cost idle {idle:?}, zoom {zoom:?}, drawing {draw:?} per frame");
 }
 
-/// Undo and redo flash the area they changed, so an undo never happens
-/// unseen.
-#[test]
-fn undo_and_redo_flash_what_they_changed() {
-    let mut h = rig();
-    h.state_mut().s.tool = Tool::Pencil;
-    drag(
-        &mut h,
-        &line((-100.0, 20.0), (60.0, 40.0), 12),
-        0.8,
-        PenTool::Pen,
-    );
-    assert_eq!(strokes(&h, 0).len(), 1);
-    let st = strokes(&h, 0)[0].clone();
-    let (lo, hi) = symphony_vector::bounds(&st).unwrap();
-    h.state_mut().s.undo();
-    let s = &h.state().s;
-    let (_, flo, fhi) = s.flash.expect("undo flashes");
-    assert!(
-        flo[0] <= lo[0] + 0.01 && fhi[0] >= hi[0] - 0.01,
-        "covers the undone line"
-    );
-    let first = s.flash_serial;
-    h.state_mut().s.redo();
-    assert!(h.state().s.flash_serial > first, "redo flashes too");
-    h.run_steps(2);
-}
-
 /// Mirror view flips only what you see: drawing still lands under the pen,
 /// at the right scene coordinates.
 #[test]
@@ -922,4 +894,39 @@ fn mirrored_view_draws_where_the_pen_is() {
         (first.x + 100.0).abs() < 2.0 && (last.x - 60.0).abs() < 2.0,
         "{first:?} {last:?}"
     );
+}
+
+/// Each gesture is one undo step, however many frames it lasts, so a long
+/// session doesn't run through the undo history.
+#[test]
+fn each_gesture_is_one_undo_step() {
+    let mut h = rig();
+    let steps = |h: &Harness<'static, Rig>| h.state().s.history.undo_len();
+    h.state_mut().s.tool = Tool::Pencil;
+    let before = steps(&h);
+    drag(
+        &mut h,
+        &line((-150.0, 0.0), (150.0, 30.0), 40),
+        0.8,
+        PenTool::Pen,
+    );
+    assert_eq!(steps(&h), before + 1, "a stroke");
+    h.state_mut().s.tool = Tool::Eraser;
+    let before = steps(&h);
+    drag(
+        &mut h,
+        &line((-100.0, -20.0), (100.0, 40.0), 40),
+        0.8,
+        PenTool::Pen,
+    );
+    assert_eq!(steps(&h), before + 1, "an eraser drag");
+    h.state_mut().s.tool = Tool::LineEditor;
+    let before = steps(&h);
+    drag(
+        &mut h,
+        &line((-120.0, 5.0), (-60.0, 25.0), 30),
+        0.8,
+        PenTool::Pen,
+    );
+    assert!(steps(&h) <= before + 1, "a Line Editor drag");
 }
