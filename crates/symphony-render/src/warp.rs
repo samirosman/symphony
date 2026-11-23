@@ -417,19 +417,64 @@ fn coverage(
         (x.abs() <= MAX_PATH && y.abs() <= MAX_PATH).then_some((x, y))
     };
     let mut pb = PathBuilder::new();
-    for t in tris {
-        let [a, b, c] = [at(t[0])?, at(t[1])?, at(t[2])?];
-        pb.move_to(a.0, a.1);
-        pb.line_to(b.0, b.1);
-        pb.line_to(c.0, c.1);
+    for ring in rings(tris) {
+        let (x, y) = at(ring[0])?;
+        pb.move_to(x, y);
+        for &i in &ring[1..] {
+            let (x, y) = at(i)?;
+            pb.line_to(x, y);
+        }
         pb.close();
     }
     let path = pb.finish()?;
     let mut mask = Mask::new(bw as u32, bh as u32)?;
-    // One path, one winding: the inner edges cancel, so the coverage is
-    // full everywhere inside and partial only on the outline.
+    // One winding over the whole mesh: the coverage is full everywhere
+    // inside and partial only on the outline.
     mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
     Some(mask)
+}
+
+/// The edges of `tris` (all wound one way) that do not cancel, as closed
+/// rings of vertex indices. An inner edge is walked once each way by its
+/// two triangles, so the pair adds nothing to the winding and is left
+/// out; what is left is the outline, plus the edges of folds, where two
+/// triangles walk an edge the same way. The rings give the same winding
+/// as all the triangles, with far fewer edges for tiny-skia to fill.
+fn rings(tris: &[[usize; 3]]) -> Vec<Vec<usize>> {
+    let mut count: HashMap<(usize, usize), u32> = HashMap::new();
+    for t in tris {
+        for (p, q) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            match count.get_mut(&(q, p)) {
+                Some(n) if *n > 0 => *n -= 1,
+                _ => *count.entry((p, q)).or_insert(0) += 1,
+            }
+        }
+    }
+    let mut edges: Vec<(usize, usize)> = count
+        .into_iter()
+        .flat_map(|(e, n)| std::iter::repeat_n(e, n as usize))
+        .collect();
+    // Sorted, so the rings come out the same on every run.
+    edges.sort_unstable();
+    let mut next: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(p, q) in edges.iter().rev() {
+        next.entry(p).or_default().push(q);
+    }
+    // Every vertex has as many edges out as in, so a walk can only end
+    // where it started.
+    let mut rings = Vec::new();
+    for &(start, _) in &edges {
+        let mut ring = Vec::new();
+        let mut at = start;
+        while let Some(q) = next.get_mut(&at).and_then(Vec::pop) {
+            ring.push(at);
+            at = q;
+        }
+        if !ring.is_empty() {
+            rings.push(ring);
+        }
+    }
+    rings
 }
 
 /// Twice the signed area of (a, b, p), in sub-pixel units squared.
@@ -840,5 +885,52 @@ mod tests {
         assert_eq!(alpha(300 - 150, 300), 128);
         let end = to_out(&p)([190.0, 20.0]);
         assert_eq!(alpha(end[0] as u32, end[1] as u32), 128);
+    }
+
+    #[test]
+    fn the_rings_cover_like_all_the_triangles() {
+        // The coverage of the rings left after inner edges cancel must
+        // be the coverage of every triangle filled as one path, at a
+        // plain bend and at a fold. tiny-skia rounds a few outline
+        // pixels one step apart when the edges come in another order.
+        for deg in [30.0, 135.0] {
+            let p = pose(deg);
+            let mesh = build(200, 40, to_out(&p), &MeshDetail::default());
+            let fixed: Vec<[i64; 2]> = mesh
+                .points
+                .iter()
+                .map(|q| q.map(|v| (v * SUB as f32).round() as i64))
+                .collect();
+            let tris: Vec<[usize; 3]> = mesh
+                .triangles
+                .iter()
+                .filter_map(|t| {
+                    let [a, b, c] = t.map(|i| i as usize);
+                    match edge(fixed[a], fixed[b], fixed[c]) {
+                        0 => None,
+                        n if n < 0 => Some([a, c, b]),
+                        _ => Some([a, b, c]),
+                    }
+                })
+                .collect();
+            let edges: usize = rings(&tris).iter().map(Vec::len).sum();
+            assert!(edges * 4 < tris.len() * 3, "{edges} ring edges");
+            let fast = coverage(&fixed, &tris, 0, 0, 600, 600).unwrap();
+            let mut pb = PathBuilder::new();
+            for t in &tris {
+                let [a, b, c] = t.map(|i| fixed[i].map(|v| v as f32 / SUB as f32));
+                pb.move_to(a[0], a[1]);
+                pb.line_to(b[0], b[1]);
+                pb.line_to(c[0], c[1]);
+                pb.close();
+            }
+            let mut all = Mask::new(600, 600).unwrap();
+            let path = pb.finish().unwrap();
+            all.fill_path(&path, FillRule::Winding, true, Transform::identity());
+            let worst = (fast.data().iter().zip(all.data()))
+                .map(|(a, b)| a.abs_diff(*b))
+                .max();
+            assert!(worst <= Some(1), "{worst:?} at {deg} degrees");
+        }
     }
 }
