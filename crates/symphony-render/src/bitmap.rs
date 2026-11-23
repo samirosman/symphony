@@ -572,6 +572,47 @@ mod tests {
         assert_eq!(alpha(&p, 2, 2), 0);
     }
 
+    /// A 16 by 16 opaque checker of 4-pixel red and blue squares.
+    fn checker() -> Pixmap {
+        let mut img = Pixmap::new(16, 16).unwrap();
+        let [red, blue] = [[255, 0, 0, 255], [0, 0, 255, 255]];
+        for (i, px) in img.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i % 16 / 4, i / 16 / 4);
+            *px = if (x + y) % 2 == 0 { red } else { blue };
+        }
+        img
+    }
+
+    /// The checker drawn through `t` onto a clear 32 by 32 pixmap.
+    fn golden(name: &str, t: Transform) {
+        let mut pix = Pixmap::new(32, 32).unwrap();
+        draw(&mut pix, &checker(), t);
+        crate::golden::check(name, &pix);
+    }
+
+    #[test]
+    fn golden_edges_of_a_still_image() {
+        golden("still-on-grid", Transform::from_translate(8.0, 8.0));
+        golden("still-half-pixel", Transform::from_translate(8.5, 8.25));
+        golden(
+            "still-turned-30",
+            Transform::from_rotate_at(30.0, 8.0, 8.0).post_translate(8.0, 8.0),
+        );
+        golden(
+            "still-scaled",
+            Transform::from_scale(1.37, 1.37).post_translate(4.3, 5.6),
+        );
+    }
+
+    #[test]
+    fn golden_hard_edge_at_a_huge_zoom() {
+        // One checker pixel is 1e9 px wide: the frame shows its corner.
+        golden(
+            "still-huge-zoom",
+            Transform::from_row(1e9, 0.0, 0.0, 1e9, 10.3, 10.3),
+        );
+    }
+
     #[test]
     fn garbage_bytes_decode_to_nothing() {
         let mut f = file([0, 0, 0, 255]);

@@ -5,6 +5,8 @@
 
 pub mod bitmap;
 mod effects;
+#[cfg(test)]
+mod golden;
 pub mod movie;
 
 use std::path::{Path, PathBuf};
