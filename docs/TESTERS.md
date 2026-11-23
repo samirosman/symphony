@@ -194,9 +194,18 @@ presets to your brushes and reports entries it could not read.
 | Clip Studio Paint | `.sut` |
 | GIMP | `.gbr` tips and `.gih` image pipes |
 
-Photoshop sampled tips use Symphony’s brush dynamics. Each GIMP image
-pipe cell imports as an individual preset. MyPaint packs import the
-compatible brushes listed in their manifest.
+Photoshop sampled presets can carry their name, tip size, spacing, angle,
+roundness, and supported pressure controls into Symphony. Krita imports
+bitmap tips and recreates generated round and rectangular tips with their
+aspect and edge fades. MyPaint maps pressure to diameter and opacity.
+Each GIMP image pipe cell imports as an individual preset.
+
+Re-import a source file to apply improvements to its presets. Photoshop
+presets previously imported under numbered names may appear alongside
+their newly named versions. Imported brushes use Symphony’s vector
+renderer. Some source behaviours, such as Photoshop dual brushes and
+scatter, Krita smudging, and MyPaint’s time-based dabs, are still outside
+the importer’s mapping.
 
 ## Mask artwork
 

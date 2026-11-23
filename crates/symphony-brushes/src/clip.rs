@@ -45,30 +45,23 @@ fn read(path: &std::path::Path, stem: &str) -> Result<Brush, Error> {
         .unwrap_or_else(|_| stem.to_owned());
     let name = name.split(" - ").next().unwrap_or(&name).trim().to_owned();
     let mut b = Brush::new(name, Source::ClipStudio);
-    let row = db.query_row(
-        "SELECT BrushSize, Opacity, BrushInterval, Stickness, BrushFlow, BrushHardness FROM Variant LIMIT 1",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, Option<f64>>(0)?,
-                r.get::<_, Option<f64>>(1)?,
-                r.get::<_, Option<f64>>(2)?,
-                r.get::<_, Option<f64>>(3)?,
-                r.get::<_, Option<f64>>(4)?,
-                r.get::<_, Option<f64>>(5)?,
-            ))
-        },
-    );
-    if let Ok((size, opacity, interval, stick, flow, hardness)) = row {
-        // Clip Studio stores these as 0..100.
-        b.flow = flow.map_or(1.0, |v| (v / 100.0) as f32);
-        b.hardness = hardness.map_or(1.0, |v| (v / 100.0) as f32);
-        b.diameter = size.unwrap_or(10.0) as f32;
-        // Clip Studio stores opacity as 0..100.
-        b.opacity = opacity.map_or(1.0, |o| (o / 100.0) as f32);
-        b.spacing = interval.map_or(0.1, |i| (i / 100.0) as f32);
-        b.smoothing = stick.map_or(0.0, |s| (s / 100.0) as f32);
-    }
+    // SUT schemas vary by tool and Clip Studio release. A missing
+    // column should only fall back for that setting.
+    let _ = db.query_row("SELECT * FROM Variant LIMIT 1", [], |r| {
+        let number = |key| {
+            r.get::<_, Option<f64>>(key)
+                .ok()
+                .flatten()
+                .map(|v| v as f32)
+        };
+        b.flow = number("BrushFlow").map_or(1.0, |v| v / 100.0);
+        b.hardness = number("BrushHardness").map_or(1.0, |v| v / 100.0);
+        b.diameter = number("BrushSize").unwrap_or(10.0);
+        b.opacity = number("Opacity").map_or(1.0, |v| v / 100.0);
+        b.spacing = number("BrushInterval").map_or(0.1, |v| v / 100.0);
+        b.smoothing = number("Stickness").map_or(0.0, |v| v / 100.0);
+        Ok(())
+    });
     // The pressure graph is a binary blob not read yet: assume pressure
     // sets the size, as most Clip Studio pens do.
     b.min_fraction = 0.0;

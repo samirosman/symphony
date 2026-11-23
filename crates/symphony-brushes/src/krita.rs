@@ -9,7 +9,8 @@ use std::io::Read;
 use base64::Engine;
 
 use crate::{
-    mask, parse_curve, read_entry, smooth_curve, Brush, Error, Imported, Source, Texturing,
+    mask_with_size, parse_curve, read_entry, smooth_curve, Brush, Error, Imported, Source,
+    Texturing,
 };
 
 /// Look up a resource (tip or pattern) by file name.
@@ -101,19 +102,37 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
             "blending brushes (they smear paint instead of laying it down)",
         ));
     }
-    // A curve option's pressure curve, unless "use curve" is off. Krita's
-    // curves are smooth splines through their points.
+    // Modern presets store curves on the sensor. Older Krita files use
+    // the same pressure sensor with a separate Curve* field.
     let curve_of = |prefix: &str| -> Option<Vec<[f32; 2]>> {
-        if flag(&format!("{prefix}UseCurve")) == Some(false) {
+        let enabled = flag(&format!("Pressure{prefix}"));
+        if enabled == Some(false) {
             return None;
         }
-        pressure_curve(
-            params
-                .get(format!("{prefix}Sensor").as_str())
-                .copied()
-                .unwrap_or(""),
-        )
-        .map(|c| smooth_curve(&c))
+        let sensor = params
+            .get(format!("{prefix}Sensor").as_str())
+            .copied()
+            .unwrap_or("");
+        let pressure = parse_with_doctype(sensor).ok().is_some_and(|doc| {
+            doc.descendants()
+                .any(|node| node.attribute("id") == Some("pressure"))
+        });
+        let use_custom = flag(&format!("{prefix}UseCurve")) != Some(false)
+            && flag(&format!("Custom{prefix}")) != Some(false);
+        if use_custom {
+            let curve = pressure_curve(sensor).or_else(|| {
+                pressure
+                    .then(|| params.get(format!("Curve{prefix}").as_str()))
+                    .flatten()
+                    .map(|raw| parse_curve(raw))
+                    .filter(|curve| curve.len() >= 2)
+            });
+            if let Some(curve) = curve {
+                return Some(smooth_curve(&curve));
+            }
+        }
+        (enabled == Some(true) && (pressure || sensor.trim().is_empty()))
+            .then_some(vec![[0.0, 0.0], [1.0, 1.0]])
     };
     b.opacity = num("OpacityValue").unwrap_or(1.0);
     b.flow = num("FlowValue").unwrap_or(1.0);
@@ -129,22 +148,8 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         || params
             .get("CompositeOp")
             .is_some_and(|v| v.trim() == "erase");
-    if params
-        .get("PressureSize")
-        .is_some_and(|v| v.trim() == "true")
-    {
-        let sensor = params.get("SizeSensor").copied().unwrap_or("");
-        if let Some(curve) = parse_with_doctype(sensor).ok().and_then(|d| {
-            d.descendants()
-                .find(|n| n.has_tag_name("curve"))
-                .and_then(|n| n.text().map(str::to_owned))
-        }) {
-            b.size_curve = smooth_curve(&parse_curve(&curve));
-        }
-        if b.size_curve.is_empty() {
-            b.size_curve = vec![[0.0, 0.0], [1.0, 1.0]];
-        }
-    } else {
+    b.size_curve = curve_of("Size").unwrap_or_default();
+    if b.size_curve.is_empty() {
         b.min_fraction = 1.0;
     }
 
@@ -163,33 +168,18 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         match brush.attribute("type") {
             Some("auto_brush") => {
                 if let Some(m) = brush.children().find(|n| n.has_tag_name("MaskGenerator")) {
-                    b.diameter = m
-                        .attribute("diameter")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(10.0);
-                    // Krita's fade: 1 is a hard edge, lower fades in from
-                    // the edge. Gaussian tips are soft.
-                    let fade = m
-                        .attribute("hfade")
-                        .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(1.0);
-                    b.hardness = if m.attribute("id") == Some("gauss") {
-                        fade.min(0.3)
-                    } else {
-                        fade
-                    };
+                    generated_tip(&mut b, m);
+                    b.diameter *= scale;
                 }
             }
             _ => {
-                if let Some(file) = brush.attribute("filename") {
-                    if let Some(img) = find(file).and_then(|data| mask(&data, true)) {
-                        b.diameter = img.width().max(img.height()) as f32 * scale;
+                if let Some(data) = brush.attribute("filename").and_then(find) {
+                    if let Some((img, diameter)) = mask_with_size(&data, true) {
+                        b.diameter = diameter as f32 * scale;
                         b.tip = Some(img);
-                    } else if let Some((w, h)) = find(file)
-                        .and_then(|data| crate::gimp::tip(&data, "").ok())
-                        .and_then(|g| g.tip.map(|t| (t.width(), t.height())))
-                    {
-                        b.diameter = w.max(h) as f32 * scale;
+                    } else if let Ok(gbr) = crate::gimp::tip(&data, "") {
+                        b.diameter = gbr.diameter * scale;
+                        b.tip = gbr.tip;
                     }
                 }
             }
@@ -241,6 +231,56 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
 }
 
 /// Krita's pattern adjustments (KisTextureMaskInfo).
+/// Bake geometry and separate axis fades into a reusable tip mask.
+/// https://github.com/KDE/krita/tree/master/libs/image
+fn generated_tip(b: &mut Brush, mask: roxmltree::Node<'_, '_>) {
+    let number = |key, default| {
+        mask.attribute(key)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    // Older Krita presets called the diameter "radius".
+    let diameter = number("diameter", number("radius", 10.0));
+    let ratio = number("ratio", 1.0).clamp(0.02, 1.0);
+    let fade_x = number("hfade", 1.0).clamp(0.0, 1.0);
+    let fade_y = number("vfade", fade_x).clamp(0.0, 1.0);
+    let gaussian = mask.attribute("id") == Some("gauss");
+    let rectangle = mask.attribute("type") == Some("rectangle");
+    b.diameter = diameter;
+    b.hardness = if gaussian { fade_x.min(0.3) } else { fade_x };
+    // A fixed-resolution mask keeps small imported tips smooth when resized.
+    let width = 128;
+    let height = (width as f32 * ratio).round().max(1.0) as u32;
+    let norm = |x: f32, y: f32| {
+        if rectangle {
+            x.abs().max(y.abs())
+        } else {
+            x.hypot(y)
+        }
+    };
+    let inner = |v: f32, f: f32| v / f.max(0.003);
+    b.tip = Some(image::GrayImage::from_fn(width, height, |x, y| {
+        let x = (x as f32 + 0.5) / width as f32 * 2.0 - 1.0;
+        let y = (y as f32 + 0.5) / height as f32 * 2.0 - 1.0;
+        let radius = norm(x, y);
+        let core = norm(inner(x, fade_x), inner(y, fade_y));
+        let coverage = if radius >= 1.0 {
+            0.0
+        } else if gaussian {
+            let sigma = 0.22 + 0.45 * (fade_x + fade_y) / 2.0;
+            let edge = (-0.5 / (sigma * sigma)).exp();
+            ((-0.5 * (radius / sigma).powi(2)).exp() - edge) / (1.0 - edge)
+        } else if core <= 1.0 {
+            1.0
+        } else {
+            let (r, f) = (radius * radius, core * core);
+            1.0 - r * (f - 1.0) / (f - r)
+        };
+        image::Luma([(coverage.clamp(0.0, 1.0) * 255.0).round() as u8])
+    }));
+}
+
 struct PatternAdjust {
     scale: f32,
     brightness: f32,
@@ -445,6 +485,33 @@ mod tests {
         img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn reads_legacy_diameter_and_separate_pressure_curve() {
+        let xml = r#"<Preset name="Legacy brush" paintopid="paintbrush">
+<param name="PressureSize">true</param>
+<param name="SizeSensor"><![CDATA[<params id="pressure"/>]]></param>
+<param name="CurveSize">0,0.25;1,1;</param>
+<param name="brush_definition"><![CDATA[<Brush type="auto_brush"><MaskGenerator radius="300" hfade="0.25"/></Brush>]]></param>
+</Preset>"#;
+        let b = preset(&kpp(xml), &|_| None).unwrap().sanitise();
+        assert_eq!(b.diameter, 300.0);
+        assert!((b.size_at(0.0) - 0.25).abs() < 1e-5);
+        assert!((b.size_at(1.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn applies_auto_brush_scale_and_preserves_rectangular_tip_shape() {
+        let xml = r#"<Preset name="Chisel" paintopid="paintbrush">
+<param name="brush_definition"><![CDATA[<Brush type="auto_brush" scale="2"><MaskGenerator diameter="40" ratio="0.25" hfade="1" vfade="0.4" id="default" type="rectangle"/></Brush>]]></param>
+</Preset>"#;
+        let b = preset(&kpp(xml), &|_| None).unwrap().sanitise();
+        assert_eq!(b.diameter, 80.0);
+        let tip = b.tip.unwrap();
+        assert_eq!(tip.dimensions(), (128, 32));
+        assert_eq!(tip.get_pixel(3, 16)[0], 255);
+        assert!(tip.get_pixel(64, 1)[0] < tip.get_pixel(64, 16)[0]);
     }
 
     #[test]

@@ -2,6 +2,9 @@
 //! https://github.com/GNOME/gimp/blob/master/app/core/gimpbrush-load.c
 
 use image::GrayImage;
+use std::collections::HashMap;
+
+mod descriptor;
 
 use crate::{Brush, Error, Imported, Source, MAX_BRUSHES, MAX_FILE};
 
@@ -13,13 +16,15 @@ pub fn pack(bytes: &[u8], stem: &str) -> Result<Imported, Error> {
     let mut input = bytes;
     let version = u16::from_be_bytes(take(&mut input).ok_or_else(damaged)?);
     let variant = u16::from_be_bytes(take(&mut input).ok_or_else(damaged)?);
+    let mut metadata = Vec::new();
     let (mut records, limit, prefix) = match version {
         1 | 2 => (input, usize::from(variant), 0),
-        6 | 10 if matches!(variant, 1 | 2) => (
-            sample_section(input).ok_or_else(damaged)?,
-            usize::MAX,
-            if variant == 1 { 47 } else { 301 },
-        ),
+        6 | 10 if matches!(variant, 1 | 2) => {
+            let (samples, desc) = sections(input);
+            metadata = desc.and_then(descriptor::presets).unwrap_or_default();
+            let samples = samples.ok_or_else(damaged)?;
+            (samples, usize::MAX, if variant == 1 { 47 } else { 301 })
+        }
         _ => return Err(Error::NotYet("this Photoshop brush format version")),
     };
 
@@ -27,6 +32,10 @@ pub fn pack(bytes: &[u8], stem: &str) -> Result<Imported, Error> {
         brushes: Vec::new(),
         problems: Vec::new(),
     };
+    let settings: HashMap<_, _> = metadata
+        .iter()
+        .filter_map(|preset| Some((preset.nested(b"Brsh")?.text(b"sampledData")?, preset)))
+        .collect();
     let mut remaining_pixels = MAX_FILE as usize;
     for index in 0..limit.min(MAX_BRUSHES) {
         if records.is_empty() && prefix != 0 {
@@ -43,7 +52,12 @@ pub fn pack(bytes: &[u8], stem: &str) -> Result<Imported, Error> {
                 .push(format!("{name}: only sampled brush tips can be imported."));
             continue;
         }
-        if let Some(brush) = sample(record, version, prefix, &name, &mut remaining_pixels) {
+        if let Some(mut brush) = sample(record, version, prefix, &name, &mut remaining_pixels) {
+            if prefix != 0 {
+                if let Some(preset) = sample_id(record).and_then(|id| settings.get(id)) {
+                    translate(&mut brush, preset);
+                }
+            }
             out.brushes.push(brush);
         } else {
             out.problems
@@ -53,20 +67,94 @@ pub fn pack(bytes: &[u8], stem: &str) -> Result<Imported, Error> {
     Ok(out)
 }
 
-fn sample_section(mut input: &[u8]) -> Option<&[u8]> {
-    while !input.is_empty() {
-        if take::<4>(&mut input)? != *b"8BIM" {
-            return None;
+fn sections(mut input: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
+    let (mut samples, mut descriptor) = (None, None);
+    while let Some((header, tail)) = input.split_at_checked(12) {
+        if &header[..4] != b"8BIM" {
+            break;
         }
-        let tag = take::<4>(&mut input)?;
-        let len = u32::from_be_bytes(take(&mut input)?) as usize;
-        let (data, rest) = input.split_at_checked(len)?;
-        if tag == *b"samp" {
-            return Some(data);
+        let len = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
+        let Some((data, rest)) = tail.split_at_checked(len) else {
+            break;
+        };
+        match &header[4..8] {
+            b"samp" => samples = Some(data),
+            b"desc" => descriptor = Some(data),
+            _ => {}
         }
         input = rest;
     }
-    None
+    (samples, descriptor)
+}
+
+fn sample_id(record: &[u8]) -> Option<&str> {
+    let (&len, id) = record.split_first()?;
+    let len = usize::from(len);
+    if len > 36 {
+        return None;
+    }
+    std::str::from_utf8(id.get(..len)?).ok()
+}
+
+fn translate(brush: &mut Brush, preset: &descriptor::Object<'_>) {
+    let Some(tip) = preset.nested(b"Brsh") else {
+        return;
+    };
+    if let Some(name) = preset.text(b"Nm  ").or_else(|| tip.text(b"Nm  ")) {
+        brush.name = name.to_owned();
+    }
+    brush.diameter = tip.number(b"Dmtr").unwrap_or(brush.diameter);
+    brush.angle = tip.number(b"Angl").unwrap_or_default();
+    if tip.flag(b"Intr") {
+        brush.spacing = tip.number(b"Spcn").map_or(brush.spacing, |v| v / 100.0);
+    } else if tip.number(b"Spcn").is_some() {
+        brush.spacing = 0.01;
+    }
+    if let Some(shape) = &mut brush.tip {
+        let roundness = tip.number(b"Rndn").unwrap_or(100.0).clamp(1.0, 100.0) / 100.0;
+        if roundness < 1.0 {
+            let h = (shape.height() as f32 * roundness).round().max(1.0) as u32;
+            *shape = image::imageops::resize(
+                shape,
+                shape.width(),
+                h,
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        if tip.flag(b"flipX") {
+            image::imageops::flip_horizontal_in_place(shape);
+        }
+        if tip.flag(b"flipY") {
+            image::imageops::flip_vertical_in_place(shape);
+        }
+    }
+    let options = preset.nested(b"toolOptions");
+    if let Some(options) = options {
+        brush.opacity = options.number(b"Opct").unwrap_or(100.0) / 100.0;
+        brush.flow = options.number(b"flow").unwrap_or(100.0) / 100.0;
+    }
+
+    // Photoshop control 2 is pen pressure, and 7 is stroke direction.
+    let control = |key| preset.nested(key).and_then(|option| option.number(b"bVTy"));
+    if preset.flag(b"useTipDynamics") {
+        if control(b"szVr") == Some(2.0) {
+            brush.min_fraction = preset.number(b"minimumDiameter").unwrap_or_default() / 100.0;
+        }
+        brush.follow = control(b"angleDynamics") == Some(7.0);
+    }
+    if preset.flag(b"usePaintDynamics") {
+        let pressure_curve = |key| {
+            let option = preset.nested(key)?;
+            (option.number(b"bVTy") == Some(2.0)).then(|| {
+                vec![
+                    [0.0, option.number(b"Mnm ").unwrap_or_default() / 100.0],
+                    [1.0, 1.0],
+                ]
+            })
+        };
+        brush.opacity_curve = pressure_curve(b"opVr").unwrap_or_default();
+        brush.flow_curve = pressure_curve(b"prVr").unwrap_or_default();
+    }
 }
 
 fn next_record<'a>(input: &mut &'a [u8], modern: bool) -> Option<(u16, &'a [u8])> {
@@ -245,5 +333,71 @@ mod tests {
             assert_eq!(brush.tip.as_ref().unwrap().as_raw(), &[0, 99, 127, 127]);
         }
         assert!(decode_rows(&[0, 2, 254, 7], 2, 1).is_none());
+    }
+
+    fn id(data: &mut Vec<u8>, id: &[u8]) {
+        let size = if id.len() == 4 { 0 } else { id.len() as u32 };
+        data.extend(size.to_be_bytes());
+        data.extend(id);
+    }
+
+    fn object(data: &mut Vec<u8>, class: &[u8], fields: u32) {
+        data.extend(0u32.to_be_bytes());
+        id(data, class);
+        data.extend(fields.to_be_bytes());
+    }
+
+    fn text(data: &mut Vec<u8>, key: &[u8], value: &str) {
+        id(data, key);
+        data.extend(b"TEXT");
+        data.extend((value.encode_utf16().count() as u32).to_be_bytes());
+        data.extend(value.encode_utf16().flat_map(u16::to_be_bytes));
+    }
+
+    fn number(data: &mut Vec<u8>, key: &[u8], value: f64) {
+        id(data, key);
+        data.extend(b"doub");
+        data.extend(value.to_be_bytes());
+    }
+
+    #[test]
+    fn matches_sample_ids_and_applies_descriptor_settings() {
+        let mut desc = vec![0, 0, 0, 16];
+        object(&mut desc, b"null", 1);
+        id(&mut desc, b"Brsh");
+        desc.extend(b"VlLs");
+        desc.extend(1u32.to_be_bytes());
+        desc.extend(b"Objc");
+        object(&mut desc, b"brushPreset", 2);
+        text(&mut desc, b"Nm  ", "Dry ink");
+        id(&mut desc, b"Brsh");
+        desc.extend(b"Objc");
+        object(&mut desc, b"sampledBrush", 5);
+        text(&mut desc, b"sampledData", "ink");
+        number(&mut desc, b"Dmtr", 46.0);
+        number(&mut desc, b"Spcn", 17.0);
+        number(&mut desc, b"Angl", 30.0);
+        id(&mut desc, b"Intr");
+        desc.extend(b"bool");
+        desc.push(1);
+        let mut record = vec![0; 47];
+        record[..4].copy_from_slice(b"\x03ink");
+        record.extend(bounds());
+        record.extend([0, 8, 0, 0, 99, 127, 255]);
+        let mut samples = (record.len() as u32).to_be_bytes().to_vec();
+        samples.extend(record);
+        samples.resize(samples.len().next_multiple_of(4), 0);
+        let mut file = vec![0, 6, 0, 1];
+        for (tag, data) in [(b"8BIMdesc", desc), (b"8BIMsamp", samples)] {
+            file.extend(tag);
+            file.extend((data.len() as u32).to_be_bytes());
+            file.extend(data);
+        }
+        let imported = crate::import_bytes("abr", "Pack", &file).unwrap();
+        let brush = &imported.brushes[0];
+        assert_eq!(brush.name, "Dry ink");
+        assert_eq!(brush.diameter, 46.0);
+        assert_eq!(brush.spacing, 0.17);
+        assert_eq!(brush.angle, 30.0);
     }
 }

@@ -20,52 +20,79 @@ pub fn preset(bytes: &[u8], stem: &str) -> Result<Brush, Error> {
     // Krita prefixes its MyPaint presets like "c)_Pencil_(mypaint)".
     let name = crate::strip_sort_prefix(&stem.replace("_(mypaint)", "").replace('_', " "));
     let mut b = Brush::new(name, Source::MyPaint);
-    // radius_logarithmic: the radius is e^value pixels.
-    let radius = base("radius_logarithmic")
-        .unwrap_or(2.0)
-        .clamp(-2.0, 8.0)
-        .exp();
-    b.diameter = radius * 2.0;
-    b.opacity = base("opaque").unwrap_or(1.0);
-    b.hardness = base("hardness").unwrap_or(1.0);
-    // opaque_multiply with a pressure input: opacity follows the pen.
     let pressure_points = |key: &str| -> Option<Vec<[f32; 2]>> {
-        let pts = settings
+        let points = settings
             .get(key)?
             .get("inputs")?
             .get("pressure")?
             .as_array()?;
-        let c: Vec<[f32; 2]> = pts
+        let mut curve: Vec<_> = points
             .iter()
-            .filter_map(|p| p.as_array())
-            .filter_map(|p| Some([p.first()?.as_f64()? as f32, p.get(1)?.as_f64()? as f32]))
+            .filter_map(|point| {
+                let [x, y, ..] = point.as_array()?.as_slice() else {
+                    return None;
+                };
+                let (x, y) = (x.as_f64()? as f32, y.as_f64()? as f32);
+                (x.is_finite() && y.is_finite()).then_some([x, y])
+            })
+            .take(256)
             .collect();
-        (c.len() >= 2).then_some(c)
+        curve.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        (!curve.is_empty()).then_some(curve)
     };
-    if let Some(c) = pressure_points("opaque_multiply") {
-        b.opacity_curve = c;
+    let radius_curve = pressure_points("radius_logarithmic").unwrap_or_default();
+    let opacity_curve = pressure_points("opaque").unwrap_or_default();
+    let multiplier_curve = pressure_points("opaque_multiply").unwrap_or_default();
+    let offset = |curve: &[[f32; 2]], pressure| crate::curve_at(curve, pressure).unwrap_or(0.0);
+    let nominal_radius = base("radius_logarithmic").unwrap_or(2.0);
+    let nominal_opacity = base("opaque").unwrap_or(1.0);
+    let nominal_multiplier = base("opaque_multiply").unwrap_or(if multiplier_curve.is_empty() {
+        1.0
+    } else {
+        0.0
+    });
+
+    // MyPaint pressure inputs add offsets. Radius is logarithmic, and
+    // opacity combines two independent settings multiplicatively.
+    let mut radius = Vec::new();
+    let mut opacity = Vec::new();
+    for i in 0..=32 {
+        let p = i as f32 / 32.0;
+        radius.push([
+            p,
+            (nominal_radius + offset(&radius_curve, p))
+                .clamp(-2.0, 8.0)
+                .exp(),
+        ]);
+        let alpha = (nominal_opacity + offset(&opacity_curve, p)).max(0.0);
+        let multiplier = nominal_multiplier + offset(&multiplier_curve, p);
+        opacity.push([p, (alpha * multiplier).clamp(0.0, 1.0)]);
     }
+    let max_radius = radius.iter().map(|p| p[1]).fold(0.0, f32::max);
+    b.diameter = max_radius * 2.0;
+    b.min_fraction = 1.0;
+    if !radius_curve.is_empty() && max_radius > 0.0 {
+        b.size_curve = radius
+            .into_iter()
+            .map(|[p, r]| [p, r / max_radius])
+            .collect();
+    }
+    b.opacity = opacity.iter().map(|p| p[1]).fold(0.0, f32::max);
+    if b.opacity > 0.0 && (!opacity_curve.is_empty() || !multiplier_curve.is_empty()) {
+        b.opacity_curve = opacity
+            .into_iter()
+            .map(|[p, o]| [p, o / b.opacity])
+            .collect();
+    }
+    b.hardness = base("hardness").unwrap_or(1.0);
     b.eraser = base("eraser").unwrap_or(0.0) > 0.5;
     b.smoothing = (base("slow_tracking").unwrap_or(0.0) / 10.0).clamp(0.0, 1.0);
-    b.spacing = 1.0 / base("dabs_per_actual_radius").unwrap_or(2.0).max(0.1) / 2.0;
-    // Pressure on the radius: an offset (in log radius) at full pressure.
-    let pressure_radius = settings
-        .get("radius_logarithmic")
-        .and_then(|s| s.get("inputs"))
-        .and_then(|i| i.get("pressure"))
-        .and_then(|p| p.as_array())
-        .and_then(|pts| {
-            pts.iter()
-                .filter_map(|p| p.as_array())
-                .filter_map(|p| Some((p.first()?.as_f64()?, p.get(1)?.as_f64()?)))
-                .map(|(_, y)| y as f32)
-                .reduce(f32::max)
-        });
-    b.min_fraction = match pressure_radius {
-        // Light pressure shrinks the radius by that many log units.
-        Some(dy) if dy > 0.0 => (-dy).exp().clamp(0.0, 1.0),
-        _ => 1.0,
-    };
+
+    // Both density terms contribute to travel-based dabs. Convert to
+    // diameter-relative spacing at the preset's nominal radius.
+    let actual = base("dabs_per_actual_radius").unwrap_or(2.0).max(0.0);
+    let basic = base("dabs_per_basic_radius").unwrap_or(0.0).max(0.0);
+    b.spacing = 0.5 / (actual + basic).max(0.05);
     Ok(b)
 }
 
@@ -130,6 +157,23 @@ pub fn pack(bytes: &[u8]) -> Result<crate::Imported, Error> {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn maps_additive_pressure_offsets_before_converting_radius_and_opacity() {
+        let data = br#"{"settings":{
+            "radius_logarithmic":{"base_value":1,"inputs":{"pressure":[[0,-1],[1,1]]}},
+            "opaque":{"base_value":0.5,"inputs":{"pressure":[[0,0],[1,0.5]]}},
+            "opaque_multiply":{"base_value":0.25,"inputs":{"pressure":[[0,0],[1,0.75]]}},
+            "dabs_per_basic_radius":{"base_value":1},
+            "dabs_per_actual_radius":{"base_value":3}
+        }}"#;
+        let brush = super::preset(data, "Ink").unwrap().sanitise();
+        assert!((brush.diameter - 2.0 * 2.0f32.exp()).abs() < 1e-5);
+        assert!((brush.diameter * brush.size_at(0.5) - 2.0 * 1.0f32.exp()).abs() < 1e-5);
+        assert_eq!(brush.opacity * brush.opacity_at(0.0), 0.125);
+        assert_eq!(brush.opacity * brush.opacity_at(0.5), 0.46875);
+        assert_eq!(brush.spacing, 0.125);
+    }
 
     #[test]
     fn imports_listed_presets_without_duplicates_and_reports_missing_entries() {

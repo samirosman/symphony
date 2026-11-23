@@ -80,6 +80,8 @@ pub struct Brush {
     pub smoothing: f32,
     /// Tip rotation in degrees, counter-clockwise.
     pub angle: f32,
+    /// Rotate the tip with the path tangent.
+    pub follow: bool,
     /// Is it an eraser preset?
     pub eraser: bool,
     /// Tip shape (white = paint), at most [`MAX_IMAGE`] pixels a side.
@@ -129,6 +131,7 @@ impl Brush {
             spacing: 0.1,
             smoothing: 0.0,
             angle: 0.0,
+            follow: false,
             eraser: false,
             tip: None,
             grain: None,
@@ -364,6 +367,10 @@ fn sampled_tip(name: String, source: Source, spacing: f32, mut tip: GrayImage) -
 /// `alpha_is_shape`: the shape is in the alpha channel (Krita, GIMP);
 /// otherwise in brightness (Procreate).
 fn mask(bytes: &[u8], alpha_is_shape: bool) -> Option<GrayImage> {
+    mask_with_size(bytes, alpha_is_shape).map(|(mask, _)| mask)
+}
+
+fn mask_with_size(bytes: &[u8], alpha_is_shape: bool) -> Option<(GrayImage, u32)> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -373,7 +380,8 @@ fn mask(bytes: &[u8], alpha_is_shape: bool) -> Option<GrayImage> {
     limits.max_alloc = Some(512 * 1024 * 1024);
     reader.limits(limits);
     let img = reader.decode().ok()?;
-    let img = if img.width().max(img.height()) > MAX_IMAGE {
+    let diameter = img.width().max(img.height());
+    let img = if diameter > MAX_IMAGE {
         img.thumbnail(MAX_IMAGE, MAX_IMAGE)
     } else {
         img
@@ -390,7 +398,7 @@ fn mask(bytes: &[u8], alpha_is_shape: bool) -> Option<GrayImage> {
         n += 1;
     }
     let light_art = n > 0 && sum / n > 200;
-    Some(GrayImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+    let mask = GrayImage::from_fn(rgba.width(), rgba.height(), |x, y| {
         let p = rgba.get_pixel(x, y);
         let (l, a) = (luma(p), p[3] as u32);
         image::Luma([match (alpha_is_shape, has_alpha) {
@@ -401,7 +409,8 @@ fn mask(bytes: &[u8], alpha_is_shape: bool) -> Option<GrayImage> {
             // Krita and GIMP greyscale tips: black paints.
             (true, false) => 255 - l,
         } as u8])
-    }))
+    });
+    Some((mask, diameter))
 }
 
 /// Read one archive entry, refusing entries that inflate too far.

@@ -101,7 +101,7 @@ fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
             spacing: b.spacing.clamp(0.01, 10.0),
             opacity: b.opacity.clamp(0.0, 1.0),
             angle: b.angle,
-            follow: false,
+            follow: b.follow,
             grain_scale: 1.0,
             flow: b.flow,
             hardness: b.hardness,
