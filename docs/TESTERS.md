@@ -207,6 +207,32 @@ renderer. Some source behaviours, such as Photoshop dual brushes and
 scatter, Krita smudging, and MyPaint’s time-based dabs, are still outside
 the importer’s mapping.
 
+### Compare brush rendering
+
+Generate a repeatable sheet and a tab-separated report for each paint
+preset in a file.
+
+```sh
+SYMPHONY_BRUSH_SHEET_IN=/path/to/brush-pack.abr \
+SYMPHONY_BRUSH_SHEET_OUT=/tmp/symphony-brush-sheets \
+cargo test -p symphony-app brush_sheet -- --ignored
+```
+
+Each 960 × 480 PNG shows a full-pressure tap at pixel (100, 80), a
+full-pressure stroke at y=240, and a 5%–100% pressure ramp at y=400.
+Both strokes run from x=100 to x=800. Nominal diameter is 64 px and
+the imported width ratio, tip, texture and pressure curves are retained.
+The report includes original diameter, spacing, flow, and measured
+coverage on a 0–255 scale.
+
+To compare renders from a source app, align black-on-opaque-white
+960 × 480 PNGs to the same positions and use the generated filenames.
+Set `SYMPHONY_BRUSH_SHEET_REFERENCE` to their directory and run again.
+The report adds mean absolute coverage error separately for the tap,
+steady stroke and ramp, excluding pixels where both sheets are white.
+A zero means identical coverage. A blank comparison means the reference
+or drawn area is missing.
+
 ## Mask artwork
 
 Add **Mask** in Node view or Tab search. Connect the artwork to its
