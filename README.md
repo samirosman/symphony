@@ -10,10 +10,9 @@ node-based compositing.
 
 ## Key features
 
-- **Draw** with pressure-sensitive vector brushes, textured strokes, and separate line and colour art.
-- **Time** the same exposures in the Timeline or Xsheet. Insert in-betweens and choose the movie export frame rate.
-- **Composite** with animated pegs, masks, blur, grain, gradients, and a 2.5D camera.
-- **Find** tools and add nodes through contextual Search. Arrange panels in dockable workspaces.
+- **Make room for in-betweens.** Insert frames after the playhead. Current exposures hold through the gap, and later exposures and peg keys shift together.
+- **Turn a drawing into an editable matte.** Switch a drawing to a mask and back while keeping its artwork, exposures, and node connections.
+- **Bring brushes from Krita.** Import Krita .kpp presets and .bundle files to use their brush tips in Symphony’s vector strokes.
 
 Not affiliated with Toon Boom. Built clean-room from public documentation
 (see [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md)).
