@@ -253,12 +253,43 @@ pub fn paint_image(pix: &mut Pixmap, scene: &Scene, r: ImageRef, m: Affine) {
         return;
     };
     let [x0, y0, x1, y1] = r.rect(file, &scene.settings);
+    let m = cap_zoom(m, [x1 - x0, y1 - y0], pix);
     let place = m.compose(Affine::translate(x0, y0)).compose(Affine::scale(
         (x1 - x0) / img.width() as f32,
         (y1 - y0) / img.height() as f32,
     ));
     let t = Transform::from_row(place.a, place.b, place.c, place.d, place.tx, place.ty);
     draw(pix, &img, t);
+}
+
+/// The largest size, in output pixels, an image may be drawn at. Pegs
+/// can scale without limit, but past this the image's coordinates leave
+/// the range f32 holds to a fraction of a pixel: at 2^20 px an f32 step
+/// is 1/8 px. For the largest image (16384 px a side) that is a zoom of
+/// 64 output pixels to one image pixel.
+pub const MAX_EXTENT: f32 = 1_048_576.0;
+
+/// `m` (drawing space to `pix`) scaled down about the centre of `pix`
+/// so that an image `size` drawing units large is drawn no larger than
+/// [`MAX_EXTENT`] in any direction.
+pub fn cap_zoom(m: Affine, size: [f32; 2], pix: &Pixmap) -> Affine {
+    // The largest stretch of the image's size: the largest singular
+    // value of the image-to-output matrix.
+    let [w, h] = size;
+    let (a, b, c, d) = (m.a * w, m.b * w, m.c * h, m.d * h);
+    let sum = a * a + b * b + c * c + d * d;
+    let det = a * d - b * c;
+    let extent = ((sum + (sum * sum - 4.0 * det * det).max(0.0).sqrt()) / 2.0).sqrt();
+    // A NaN is left for the draw to refuse.
+    if extent.is_nan() || extent <= MAX_EXTENT {
+        return m;
+    }
+    let f = MAX_EXTENT / extent;
+    let (cx, cy) = (pix.width() as f32 / 2.0, pix.height() as f32 / 2.0);
+    Affine::translate(cx, cy)
+        .compose(Affine::scale(f, f))
+        .compose(Affine::translate(-cx, -cy))
+        .compose(m)
 }
 
 /// Larger output coordinates than this leave the edge hard, as the bone
@@ -611,6 +642,49 @@ mod tests {
             "still-huge-zoom",
             Transform::from_row(1e9, 0.0, 0.0, 1e9, 10.3, 10.3),
         );
+    }
+
+    /// The largest size of a `w` by `h` image under `m`, measured on a
+    /// circle of directions.
+    fn extent(m: Affine, [w, h]: [f32; 2]) -> f32 {
+        let (zx, zy) = m.apply(0.0, 0.0);
+        (0..360)
+            .map(|deg| {
+                let r = (deg as f32).to_radians();
+                let (x, y) = m.apply(r.cos() * w, r.sin() * h);
+                (x - zx).hypot(y - zy)
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn the_zoom_is_capped_about_the_frame_centre() {
+        let pix = Pixmap::new(200, 100).unwrap();
+        // Turned and squashed, then zoomed far past the cap.
+        let m = Affine::translate(30.0, 40.0)
+            .compose(Affine::rotate_deg(30.0))
+            .compose(Affine::scale(1e6, 3e5));
+        let size = [40.0, 160.0];
+        let capped = cap_zoom(m, size, &pix);
+        let e = extent(capped, size);
+        assert!((e - MAX_EXTENT).abs() < 0.01 * MAX_EXTENT, "extent {e}");
+        // The frame centre keeps the same drawing point.
+        let inv = |m: Affine| m.inverse().unwrap().apply(100.0, 50.0);
+        let ((ax, ay), (bx, by)) = (inv(m), inv(capped));
+        assert!((ax - bx).abs() < 1e-3 && (ay - by).abs() < 1e-3);
+        // The turn stays.
+        let dir = |m: Affine| m.b.atan2(m.a);
+        assert!((dir(m) - dir(capped)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_zoom_below_the_cap_is_unchanged() {
+        let pix = Pixmap::new(200, 100).unwrap();
+        // A tiny image filling the frame is far below the cap.
+        let m = Affine::translate(3.0, 4.0).compose(Affine::scale(100.0, -100.0));
+        assert_eq!(cap_zoom(m, [2.0, 1.0], &pix), m);
+        let bad = Affine::scale(f32::NAN, 1.0);
+        assert!(cap_zoom(bad, [1.0, 1.0], &pix).a.is_nan());
     }
 
     #[test]
