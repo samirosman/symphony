@@ -3484,6 +3484,20 @@ impl SymphonyApp {
 
         let mut open = self.show_preferences;
         let prefs_id = egui::Id::unique("symphony-preferences");
+        // While Preferences is open, the app behind softly dims, so the
+        // window reads as a focused sheet (fades with Appear/Dismiss).
+        let dim = symphony_ui::motion::presence(&ctx, prefs_id.with("dim"), open);
+        if dim > 0.0 {
+            let scrim = egui::LayerId::new(egui::Order::Middle, prefs_id.with("scrim"));
+            ctx.layer_painter(scrim).rect_filled(
+                ctx.content_rect(),
+                0.0,
+                egui::Color32::from_black_alpha((90.0 * dim) as u8),
+            );
+            // Keep the window above its scrim.
+            ctx.move_to_top(scrim);
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, prefs_id));
+        }
         let glass = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, prefs_id));
         let background = glass.add(egui::Shape::Noop);
         let preferences = preferences_window(&ctx, prefs_id)
