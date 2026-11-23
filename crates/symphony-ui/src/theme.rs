@@ -152,6 +152,41 @@ fn widget(bg: Color32, fg: Color32, stroke: Stroke) -> egui::style::WidgetVisual
     }
 }
 
+static EFFECTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Are interface effects on (blur, glass, shadows, crossfades)? Off for
+/// slower computers.
+pub fn effects() -> bool {
+    EFFECTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn interface effects on or off. Off: no blur or glass sampling, no
+/// shadows; the app also turns animations off (see `set_motion`).
+pub fn set_effects(ctx: &egui::Context, on: bool) {
+    EFFECTS.store(on, std::sync::atomic::Ordering::Relaxed);
+    ctx.all_styles_mut(|style| shadows(&mut style.visuals, on));
+}
+
+fn shadows(v: &mut egui::Visuals, on: bool) {
+    if on {
+        v.window_shadow = egui::epaint::Shadow {
+            offset: [0, 5],
+            blur: 16,
+            spread: 0,
+            color: hex(0).gamma_multiply(0.40),
+        };
+        v.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 3],
+            blur: 10,
+            spread: 0,
+            color: hex(0).gamma_multiply(0.32),
+        };
+    } else {
+        v.window_shadow = egui::epaint::Shadow::NONE;
+        v.popup_shadow = egui::epaint::Shadow::NONE;
+    }
+}
+
 /// Shared duration for controls, menus and windows (DESIGN D9).
 pub fn set_motion(ctx: &egui::Context, enabled: bool) {
     ctx.clear_animations();
@@ -281,18 +316,7 @@ pub fn apply(ctx: &egui::Context) {
         v.override_text_color = None;
         v.panel_fill = BG_PANEL;
         v.window_fill = BG_PANEL;
-        v.window_shadow = egui::epaint::Shadow {
-            offset: [0, 5],
-            blur: 16,
-            spread: 0,
-            color: hex(0).gamma_multiply(0.40),
-        };
-        v.popup_shadow = egui::epaint::Shadow {
-            offset: [0, 3],
-            blur: 10,
-            spread: 0,
-            color: hex(0).gamma_multiply(0.32),
-        };
+        shadows(v, effects());
         v.window_stroke = Stroke::new(1.0, GLASS_EDGE);
         v.window_corner_radius = CornerRadius::same(GLASS_RADIUS);
         v.menu_corner_radius = CornerRadius::same(RADIUS_FLOATING);

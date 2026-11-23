@@ -54,6 +54,7 @@ pub enum Setting {
     SizeFollowsZoom,
     OverlayUnderlay,
     InterfaceAnimations,
+    InterfaceEffects,
     UseNoAi,
     ProfileHarmony,
     ProfileSymphony,

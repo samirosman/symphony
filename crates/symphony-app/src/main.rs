@@ -133,6 +133,9 @@ struct Saved {
     wallpaper_blur: u8,
     #[serde(default = "yes")]
     interface_animations: bool,
+    /// Blur, glass and shadows (off on slower computers).
+    #[serde(default = "yes")]
+    interface_effects: bool,
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
     #[serde(default)]
@@ -245,6 +248,8 @@ struct SymphonyApp {
     recovery_scan: Option<Receiver<Vec<RecoveredScene>>>,
     wallpaper: wallpaper::Wallpaper,
     interface_animations: bool,
+    /// Blur, glass and shadows; off also turns animations off.
+    interface_effects: bool,
     s: Session,
     /// Brush and Pencil presets, kept in preferences like Harmony's.
     presets: presets::Presets,
@@ -590,7 +595,9 @@ impl SymphonyApp {
             .map(|s| s.recent_projects.clone())
             .unwrap_or_default();
         let interface_animations = saved.as_ref().is_none_or(|s| s.interface_animations);
-        theme::set_motion(&cc.egui_ctx, interface_animations);
+        let interface_effects = saved.as_ref().is_none_or(|s| s.interface_effects);
+        theme::set_effects(&cc.egui_ctx, interface_effects);
+        theme::set_motion(&cc.egui_ctx, interface_animations && interface_effects);
         let brush_size_cursor = saved.as_ref().is_none_or(|s| s.brush_size_cursor);
         let overlay_underlay = saved.as_ref().is_some_and(|s| s.overlay_underlay);
         let size_follows_zoom = saved.as_ref().is_some_and(|s| s.size_follows_zoom);
@@ -726,6 +733,7 @@ impl SymphonyApp {
             recovery_scan,
             wallpaper: wallpaper::Wallpaper::new(&cc.egui_ctx, wallpaper_choice, wallpaper_blur),
             interface_animations,
+            interface_effects,
             s,
             workspace,
             layouts,
@@ -2346,7 +2354,7 @@ impl SymphonyApp {
             );
         }
         // Settings.
-        let settings: [(&str, Setting, &str); 9] = [
+        let settings: [(&str, Setting, &str); 10] = [
             (
                 "Brush size cursor",
                 Setting::BrushSizeCursor,
@@ -2366,6 +2374,11 @@ impl SymphonyApp {
                 "Interface animations",
                 Setting::InterfaceAnimations,
                 "motion reduce",
+            ),
+            (
+                "Interface effects (blur, glass, shadows)",
+                Setting::InterfaceEffects,
+                "slow computer performance fast lighter low end blur glass shadow",
             ),
             ("Use no AI", Setting::UseNoAi, "ai machine learning assist"),
             (
@@ -2565,9 +2578,14 @@ impl SymphonyApp {
                         "Overlay and Underlay Arts",
                         notice,
                     ),
+                    Setting::InterfaceEffects => {
+                        self.interface_effects = !self.interface_effects;
+                        theme::set_effects(ctx, self.interface_effects);
+                        theme::set_motion(ctx, self.interface_animations && self.interface_effects);
+                    }
                     Setting::InterfaceAnimations => {
                         self.interface_animations = !self.interface_animations;
-                        theme::set_motion(ctx, self.interface_animations);
+                        theme::set_motion(ctx, self.interface_animations && self.interface_effects);
                     }
                     Setting::UseNoAi => self.use_no_ai = !self.use_no_ai,
                     Setting::ProfileHarmony => self.profile = Profile::Harmony,
@@ -3288,6 +3306,7 @@ impl eframe::App for SymphonyApp {
             wallpaper: self.wallpaper.choice.clone(),
             wallpaper_blur: self.wallpaper.blur,
             interface_animations: self.interface_animations,
+            interface_effects: self.interface_effects,
             workspace: self.workspace,
             layouts: self.layouts.clone(),
             profile: self.profile,
@@ -3577,13 +3596,39 @@ impl SymphonyApp {
                                         self.wallpaper.preferences(ui);
                                         if symphony_ui::widgets::checkbox(
                                             ui,
-                                            &mut self.interface_animations,
-                                            "Animate interface transitions",
+                                            &mut self.interface_effects,
+                                            "Interface effects",
                                         )
+                                        .on_hover_text("Blur, glass and shadows, and animations")
                                         .changed()
                                         {
-                                            theme::set_motion(&ctx, self.interface_animations);
+                                            theme::set_effects(&ctx, self.interface_effects);
+                                            theme::set_motion(
+                                                &ctx,
+                                                self.interface_animations && self.interface_effects,
+                                            );
                                         }
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Turn off on slower computers: no blur, glass, shadows or animations.",
+                                            )
+                                            .font(theme::dense())
+                                            .color(theme::TEXT_SECONDARY),
+                                        );
+                                        ui.add_enabled_ui(self.interface_effects, |ui| {
+                                            if symphony_ui::widgets::checkbox(
+                                                ui,
+                                                &mut self.interface_animations,
+                                                "Animate interface transitions",
+                                            )
+                                            .changed()
+                                            {
+                                                theme::set_motion(
+                                                    &ctx,
+                                                    self.interface_animations && self.interface_effects,
+                                                );
+                                            }
+                                        });
                                         ui.add_space(8.0);
                                         ui.label(
                                             egui::RichText::new(
