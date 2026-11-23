@@ -12,6 +12,7 @@
 use eframe::egui::{self, Pos2, Rect, Stroke as EStroke, Vec2};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
+use symphony_core::stroke::Drawing;
 use symphony_ui::icons::Icon;
 use symphony_ui::theme;
 use symphony_vector::{bounds_of, hits, inside_polygon, scale_of};
@@ -253,7 +254,7 @@ pub fn ui(
             .find(|(l, _, _)| *l == layer)
             .and_then(|(_, d, world)| {
                 let dr = s.doc.drawings.get(d)?;
-                let (lo, hi) = bounds_of(&dr.strokes)?;
+                let (lo, hi) = drawing_bounds(s, dr)?;
                 Some((lo, hi, view.compose(*world)))
             })
     } else {
@@ -344,7 +345,7 @@ pub fn ui(
                         .iter()
                         .find(|(l, _, _)| *l == s.selected)
                         .and_then(|(_, d, w)| {
-                            let (lo, hi) = bounds_of(&s.doc.drawings.get(d)?.strokes)?;
+                            let (lo, hi) = drawing_bounds(s, s.doc.drawings.get(d)?)?;
                             Some((lo, hi, view.compose(*w)))
                         })
                 } else {
@@ -637,11 +638,28 @@ fn layer_at(s: &Session, p: Pos2, view: Affine, items: &[Item]) -> Option<usize>
         let (x, y) = inv.apply(p.x, p.y);
         let r = PICK / scale_of(m).max(1e-6);
         let dr = s.doc.drawings.get(d)?;
-        dr.strokes
-            .iter()
-            .any(|st| hits(st, x, y, r))
-            .then_some(*layer)
+        let on_image = image_rect(s, dr)
+            .is_some_and(|(lo, hi)| (lo[0]..=hi[0]).contains(&x) && (lo[1]..=hi[1]).contains(&y));
+        (on_image || dr.strokes.iter().any(|st| hits(st, x, y, r))).then_some(*layer)
     })
+}
+
+/// A drawing's imported image, as drawing-local bounds.
+fn image_rect(s: &Session, dr: &Drawing) -> Option<([f32; 2], [f32; 2])> {
+    let r = dr.image?;
+    let [x0, y0, x1, y1] = r.rect(s.doc.images.get(&r.key)?, &s.doc.settings);
+    Some(([x0.min(x1), y0.min(y1)], [x0.max(x1), y0.max(y1)]))
+}
+
+/// The Transform tool's box for a drawing: its strokes and its image.
+fn drawing_bounds(s: &Session, dr: &Drawing) -> Option<([f32; 2], [f32; 2])> {
+    match (bounds_of(&dr.strokes), image_rect(s, dr)) {
+        (Some((a0, a1)), Some((b0, b1))) => Some((
+            [a0[0].min(b0[0]), a0[1].min(b0[1])],
+            [a1[0].max(b1[0]), a1[1].max(b1[1])],
+        )),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Click picking. Transform picks a layer; Select picks a stroke in the
@@ -786,5 +804,67 @@ mod tests {
         assert_eq!(anchors[1].at, next);
         assert_eq!(anchors[1].handle, handle);
         assert!(outline(anchors, false).iter().any(|point| point.y < 95.0));
+    }
+
+    #[test]
+    fn the_transform_tool_picks_and_moves_an_image_layer() {
+        let mut session = Session::new_scene();
+        let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let file = symphony_io::media::image_from_bytes(bytes).unwrap();
+        session.import_images("Red", vec![file]);
+        let image_layer = session.selected;
+        let d = session.doc.exposed(image_layer, 1).unwrap();
+        // Start on the other layer: a click on the image must pick it.
+        session.selected = image_layer + 1;
+        session.tool = Tool::Transform;
+        let x0 = session
+            .transform_peg(image_layer)
+            .map_or(0.0, |p| p.x.at(1));
+        // Scene to screen: a fifth of the size, centred in the view.
+        let view = Affine::translate(250.0, 200.0).compose(Affine::scale(0.2, 0.2));
+        let items = vec![(image_layer, d, Affine::IDENTITY)];
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(500.0, 400.0))
+            .build_ui_state(
+                move |ui, (session, state)| {
+                    let (response, painter) =
+                        ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+                    super::ui(ui, &response, &painter, session, state, view, &items);
+                },
+                (session, SelectState::default()),
+            );
+        let mut pointer = |pos: Pos2, pressed: Option<bool>| {
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run_steps(1);
+        };
+        // Inside the image, away from its strokes (it has none).
+        let start = Pos2::new(240.0, 190.0);
+        pointer(start, Some(true));
+        for i in 1..=5 {
+            pointer(start + Vec2::new(10.0 * i as f32, 0.0), None);
+        }
+        pointer(start + Vec2::new(50.0, 0.0), Some(false));
+        let s = &harness.state().0;
+        assert_eq!(s.selected, image_layer);
+        let x1 = s.transform_peg(image_layer).map_or(0.0, |p| p.x.at(1));
+        // 50 screen points at a fifth of the size: 250 scene units.
+        assert!((x1 - x0 - 250.0).abs() < 1.0, "moved {}", x1 - x0);
     }
 }
