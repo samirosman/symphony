@@ -61,6 +61,11 @@ pub enum Action {
     ResetView,
     /// Mirror the view left to right (the artwork isn't changed).
     MirrorView,
+    /// Playback range: start here, end here, the whole scene, loop on/off.
+    SetPlayStart,
+    SetPlayEnd,
+    ClearPlayRange,
+    ToggleLoop,
     ZoomIn,
     ZoomOut,
     RotateCw,
@@ -109,7 +114,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 71] = [
+    pub const ALL: [Action; 75] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -136,6 +141,10 @@ impl Action {
         Action::ToggleOnionSkin,
         Action::ResetView,
         Action::MirrorView,
+        Action::SetPlayStart,
+        Action::SetPlayEnd,
+        Action::ClearPlayRange,
+        Action::ToggleLoop,
         Action::ZoomIn,
         Action::ZoomOut,
         Action::RotateCw,
@@ -212,6 +221,10 @@ impl Action {
             Action::ToggleOnionSkin => "view.onion_skin",
             Action::ResetView => "view.reset",
             Action::MirrorView => "view.mirror",
+            Action::SetPlayStart => "playback.start_here",
+            Action::SetPlayEnd => "playback.end_here",
+            Action::ClearPlayRange => "playback.whole_scene",
+            Action::ToggleLoop => "playback.loop",
             Action::ZoomIn => "view.zoom_in",
             Action::ZoomOut => "view.zoom_out",
             Action::RotateCw => "view.rotate_cw",
@@ -288,6 +301,10 @@ impl Action {
             Action::ToggleOnionSkin => "Onion skin",
             Action::ResetView => "Reset view",
             Action::MirrorView => "Mirror view",
+            Action::SetPlayStart => "Playback starts here",
+            Action::SetPlayEnd => "Playback ends here",
+            Action::ClearPlayRange => "Play the whole scene",
+            Action::ToggleLoop => "Loop playback",
             Action::ZoomIn => "Zoom in",
             Action::ZoomOut => "Zoom out",
             Action::RotateCw => "Rotate view CW",
@@ -405,6 +422,9 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ResetView => b(Key::M, SHIFT),
         // Not bound until checked against Harmony 27.1's shortcut list.
         Action::MirrorView => None,
+        Action::SetPlayStart | Action::SetPlayEnd | Action::ClearPlayRange | Action::ToggleLoop => {
+            None
+        }
         Action::ZoomIn => b(Key::Num2, NONE),
         Action::ZoomOut => b(Key::Num1, NONE),
         Action::ResetZoom => None,

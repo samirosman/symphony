@@ -1156,13 +1156,17 @@ impl SymphonyApp {
         }
         self.frame_clock += dt;
         let step = 1.0 / self.s.doc.settings.fps.max(1.0) as f64;
+        let len = self.s.length().max(1);
         while self.frame_clock >= step {
             self.frame_clock -= step;
-            self.s.frame = if self.s.frame >= self.s.length() {
-                1
-            } else {
-                self.s.frame + 1
-            };
+            match next_play_frame(self.s.frame, self.s.play_range, len, self.s.loop_playback) {
+                Some(f) => self.s.frame = f,
+                None => {
+                    self.s.playing = false;
+                    self.frame_clock = 0.0;
+                    break;
+                }
+            }
         }
         ctx.request_repaint();
     }
@@ -1244,6 +1248,28 @@ impl SymphonyApp {
                     Action::FirstFrame => s.frame = 1,
                     Action::LastFrame => s.frame = s.length(),
                     Action::PlayPause => s.playing = !s.playing,
+                    Action::SetPlayStart => {
+                        let end = s.play_range.map_or(s.length(), |r| r.1);
+                        s.play_range = Some((s.frame, end.max(s.frame)));
+                        s.note(format!("Playback starts at frame {}", s.frame));
+                    }
+                    Action::SetPlayEnd => {
+                        let start = s.play_range.map_or(1, |r| r.0);
+                        s.play_range = Some((start.min(s.frame), s.frame));
+                        s.note(format!("Playback ends at frame {}", s.frame));
+                    }
+                    Action::ClearPlayRange => {
+                        s.play_range = None;
+                        s.note("Playing the whole scene");
+                    }
+                    Action::ToggleLoop => {
+                        s.loop_playback = !s.loop_playback;
+                        s.note(if s.loop_playback {
+                            "Loop on"
+                        } else {
+                            "Loop off"
+                        });
+                    }
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
                     Action::CreateEmptyDrawing => s.new_drawing(),
@@ -1488,6 +1514,11 @@ impl SymphonyApp {
         });
         ui.menu_button("Play", |ui| {
             self.menu_action(ui, Action::PlayPause);
+            ui.separator();
+            self.menu_action(ui, Action::SetPlayStart);
+            self.menu_action(ui, Action::SetPlayEnd);
+            self.menu_action(ui, Action::ClearPlayRange);
+            self.menu_action(ui, Action::ToggleLoop);
             self.menu_action(ui, Action::PrevFrame);
             self.menu_action(ui, Action::NextFrame);
             self.menu_action(ui, Action::FirstFrame);
@@ -3128,6 +3159,37 @@ impl egui_dock::TabViewer for Viewer<'_> {
     }
 }
 
+/// The frame after `frame` during playback: inside the playback range
+/// (or the whole scene), back to its start at the end when looping, or
+/// None to stop there.
+fn next_play_frame(frame: u32, range: Option<(u32, u32)>, len: u32, looping: bool) -> Option<u32> {
+    let len = len.max(1);
+    let (a, b) = range.map_or((1, len), |(a, b)| (a.clamp(1, len), b.clamp(1, len)));
+    let (first, last) = (a.min(b), a.max(b));
+    if frame < first || frame > last {
+        Some(first)
+    } else if frame == last {
+        looping.then_some(first)
+    } else {
+        Some(frame + 1)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn playback_stays_in_its_range() {
+    // Whole scene, looping.
+    assert_eq!(next_play_frame(47, None, 48, true), Some(48));
+    assert_eq!(next_play_frame(48, None, 48, true), Some(1));
+    // A range: loops inside it, and jumps into it from outside.
+    assert_eq!(next_play_frame(20, Some((10, 20)), 48, true), Some(10));
+    assert_eq!(next_play_frame(3, Some((10, 20)), 48, true), Some(10));
+    // Loop off: stops at the end.
+    assert_eq!(next_play_frame(20, Some((10, 20)), 48, false), None);
+    // A range past the end is held to the scene.
+    assert_eq!(next_play_frame(48, Some((40, 90)), 48, true), Some(40));
+}
+
 /// SYMPHONY_PERF=1: add time spent in a named part of the frame.
 fn perf_span(name: &'static str, start: std::time::Instant) {
     if std::env::var_os("SYMPHONY_PERF").is_none() {
@@ -3189,17 +3251,6 @@ impl eframe::App for SymphonyApp {
         let start = std::time::Instant::now();
         self.frame_ui(ui, frame);
         perf_log(start.elapsed());
-        if std::env::var_os("SYMPHONY_DEBUG_LAYERS").is_some() {
-            let order: Vec<String> = ui
-                .ctx()
-                .memory(|m| m.layer_ids().map(|l| format!("{:?}", l)).collect());
-            eprintln!(
-                "layers: {} || prefs={:?} tools={:?}",
-                order.join(" | "),
-                egui::Id::unique("symphony-preferences"),
-                egui::Id::unique("floating-tool-properties")
-            );
-        }
         // SYMPHONY_PERF_SPIN: repaint every frame, for profiling.
         if std::env::var_os("SYMPHONY_PERF_SPIN").is_some() {
             ui.ctx().request_repaint();

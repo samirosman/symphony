@@ -731,6 +731,19 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
+            // The playback range, as a band along the ruler.
+            if let Some((a, b)) = s.play_range {
+                let (a, b) = (a.clamp(1, len), b.clamp(1, len));
+                let band = Rect::from_min_max(
+                    Pos2::new(frame_x(a.min(b)), o.y + 2.0),
+                    Pos2::new(frame_x(a.max(b)) + cw, o.y + RULER - 2.0),
+                );
+                painter.rect_filled(
+                    band,
+                    theme::RADIUS_CONTROL,
+                    theme::ACCENT_TIME.gamma_multiply(0.16),
+                );
+            }
             let cx = frame_x(s.frame.min(len)) + cw / 2.0;
             painter.line_segment(
                 [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],

@@ -360,6 +360,10 @@ pub struct Session {
     /// Light table: the other layers' drawings show faintly behind the
     /// one being drawn, in the Drawing view.
     pub light_table: bool,
+    /// Playback plays only these frames (first, last), when set.
+    pub play_range: Option<(u32, u32)>,
+    /// Playback starts over at the end (else it stops there).
+    pub loop_playback: bool,
     /// The Pen's mode the last time it was used (Brush or Pencil).
     pub last_pen: Tool,
     pub animate: bool,
@@ -473,6 +477,8 @@ impl Session {
             flash: None,
             flash_serial: 0,
             light_table: false,
+            play_range: None,
+            loop_playback: true,
             last_pen: Tool::Brush,
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,
@@ -626,7 +632,7 @@ impl Session {
         self.doc.drawings.get(&id).map(|d| d.name.as_str())
     }
 
-    fn note(&mut self, text: impl Into<String>) {
+    pub fn note(&mut self, text: impl Into<String>) {
         self.notice = Some(text.into());
     }
 
