@@ -9,12 +9,13 @@
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke as EStroke, Vec2};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
-use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind};
+use symphony_core::stroke::{ArtLayer, Drawing, Point, Stroke, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
 use symphony_vector::{pressure_curve, scale_of, Smoother};
 
+use crate::images::ImageState;
 use crate::keymap::{self, Action, Profile};
 use crate::session::{apply_stencil, CanvasColours, Session, Stencil, Tool};
 use crate::views::select::{self, SelectState};
@@ -447,6 +448,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     s: &mut Session,
     state: &mut CanvasState,
+    images: &ImageState,
     samples: &[PenSample],
     drawing_only: bool,
     profile: Profile,
@@ -639,6 +641,10 @@ pub fn ui(
     for (_, d, m) in items.iter().filter(|_| gpu || s.show_strokes) {
         if let Some(dr) = s.doc.drawings.get(d) {
             let moving = preview.is_some() && s.selection.drawing == Some(*d);
+            // An imported image sits under all of the drawing's art layers.
+            if gpu {
+                paint_image(&painter, s, images, dr, view.compose(*m));
+            }
             // Art layers back to front; within each, paint under ink.
             for art in ArtLayer::STACK {
                 // The Drawing view shows only the current art layer unless
@@ -1039,6 +1045,32 @@ pub fn ui(
         camera_render::mask_outside_stage(&painter, rect, corners);
     }
     bottom_toolbar(ui, state, profile);
+}
+
+/// Draw a drawing's imported image, once its texture is ready, as one
+/// textured quad through `m` (scene to screen).
+fn paint_image(painter: &egui::Painter, s: &Session, images: &ImageState, dr: &Drawing, m: Affine) {
+    let Some(r) = dr.image else { return };
+    let (Some(file), Some(tex)) = (s.doc.images.get(&r.key), images.texture(r)) else {
+        return;
+    };
+    let [x0, y0, x1, y1] = r.rect(file, &s.doc.settings);
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    for ((x, y), uv) in [
+        ((x0, y0), (0.0, 0.0)),
+        ((x1, y0), (1.0, 0.0)),
+        ((x1, y1), (1.0, 1.0)),
+        ((x0, y1), (0.0, 1.0)),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: to_pos(m.apply(x, y)),
+            uv: Pos2::new(uv.0, uv.1),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 fn zoom_at(state: &mut CanvasState, rect: Rect, p: Pos2, factor: f32) {

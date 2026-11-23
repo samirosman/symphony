@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use symphony_core::anim::Value;
+use symphony_core::bitmap::{self, ImageFile};
 use symphony_core::doc::{Scene, Settings};
 use symphony_core::graph::{NodeId, NodeKind, PegParams};
 use symphony_core::history::{Edit, History};
@@ -633,6 +634,36 @@ impl Session {
         let edit = sound::add_track(&mut self.doc, name, key);
         self.history
             .apply(&mut self.doc, "Import sound", vec![edit]);
+        self.note(format!("Imported {name}"));
+    }
+
+    // ---- Images ----------------------------------------------------------
+
+    /// Add imported images as a new layer above the selected one, kept as
+    /// the original files and fitted to the stage. One image shows from
+    /// the current frame to the end; several show one a frame from it.
+    /// Undo removes the layer; the files stay until the next save, which
+    /// keeps only the files a drawing shows.
+    pub fn import_images(&mut self, name: &str, files: Vec<(u64, ImageFile)>) {
+        let Some(alpha) = files.first().map(|(_, f)| f.format.usual_alpha()) else {
+            return;
+        };
+        let keys: Vec<u64> = files.iter().map(|(k, _)| *k).collect();
+        for (key, file) in files {
+            self.doc.images.entry(key).or_insert(file);
+        }
+        let index = self.selected.min(self.layer_count());
+        let edits = bitmap::layer_edits(
+            &mut self.doc,
+            name,
+            index,
+            &keys,
+            self.frame,
+            bitmap::Alignment::Fit,
+            alpha,
+        );
+        self.history.apply(&mut self.doc, "Import images", edits);
+        self.selected = index;
         self.note(format!("Imported {name}"));
     }
 
