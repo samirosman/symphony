@@ -9,6 +9,7 @@ mod effects;
 #[cfg(test)]
 mod golden;
 pub mod movie;
+pub mod warp;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

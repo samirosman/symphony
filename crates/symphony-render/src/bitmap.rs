@@ -201,7 +201,7 @@ fn srgb8(linear: f32) -> u8 {
     code
 }
 
-fn cached(scene: &Scene, r: ImageRef) -> Option<Arc<Pixmap>> {
+pub(crate) fn cached(scene: &Scene, r: ImageRef) -> Option<Arc<Pixmap>> {
     let file = scene.images.get(&r.key)?;
     let frame = FRAME.load(Ordering::Relaxed);
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());

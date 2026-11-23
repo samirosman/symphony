@@ -130,6 +130,32 @@ pub enum Influence {
     Zero,
 }
 
+/// How finely an imported image is cut into triangles to be bent.
+///
+/// Cells start at `largest` image pixels a side and split in four while
+/// the bend moves their inside more than `tolerance` output pixels away
+/// from a flat cell, down to `smallest`. Art away from the joints moves
+/// rigidly, so it keeps large cells.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshDetail {
+    /// Largest cell side, image pixels.
+    pub largest: f32,
+    /// Smallest cell side, image pixels.
+    pub smallest: f32,
+    /// Largest error allowed, output pixels.
+    pub tolerance: f32,
+}
+
+impl Default for MeshDetail {
+    fn default() -> Self {
+        MeshDetail {
+            largest: 64.0,
+            smallest: 2.0,
+            tolerance: 0.25,
+        }
+    }
+}
+
 /// A chain of bones, root first.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BoneChain {
