@@ -7,6 +7,7 @@ use eframe::egui::{self, Align2, Id, Pos2, Rect, Vec2};
 use symphony_ui::motion;
 use symphony_ui::{theme, widgets};
 
+use crate::keymap::{self, Action, Profile};
 use crate::search::{self, Command, Entry};
 use crate::workspace::View;
 
@@ -21,6 +22,20 @@ pub struct PaletteState {
     first_frame: bool,
     /// Closing: fading out, no longer taking input.
     pub closing: bool,
+    /// Waiting for a new shortcut for this action (from the right-click
+    /// menu), and the result's title for the prompt.
+    recording: Option<(Action, String)>,
+    /// A short note after a menu choice ("Alt+K now runs Mirror view").
+    note: Option<String>,
+}
+
+/// What a result's right-click menu asked for.
+enum Pick {
+    Run,
+    Record(Action),
+    Unbind(Action),
+    Reset(Action),
+    Copy,
 }
 
 impl PaletteState {
@@ -33,6 +48,8 @@ impl PaletteState {
             scroll_offset: 0.0,
             first_frame: true,
             closing: false,
+            recording: None,
+            note: None,
         }
     }
 }
@@ -90,7 +107,49 @@ pub fn ui(
     st: &mut PaletteState,
     entries: &[Entry],
     uses: &dyn Fn(&str) -> u32,
+    profile: Profile,
 ) -> Outcome {
+    // Recording a new shortcut: the next key press (with its modifiers)
+    // becomes the shortcut, and it doesn't type or close the box. Esc
+    // cancels.
+    if let Some((action, title)) = st.recording.clone() {
+        let pressed = ctx.input_mut(|i| {
+            let found = i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some((*key, *modifiers)),
+                _ => None,
+            });
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            found
+        });
+        if let Some((key, mods)) = pressed {
+            st.recording = None;
+            if key == egui::Key::Escape {
+                st.note = Some("Shortcut unchanged".into());
+            } else {
+                let taken = keymap::remap(profile, action, key, mods);
+                let label = keymap::label(profile, action);
+                let mut note = format!("{label} now runs {title}");
+                if !taken.is_empty() {
+                    let names: Vec<&str> = taken.iter().map(|a| a.name()).collect();
+                    note.push_str(&format!(" (taken from {})", names.join(", ")));
+                }
+                st.note = Some(note);
+            }
+        }
+    }
+    if st.first_frame {
+        ctx.move_to_top(egui::LayerId::new(
+            egui::Order::Foreground,
+            Id::unique("symphony-search"),
+        ));
+    }
     let presence_id = presence_id();
     if st.first_frame {
         // Every opening fades in from nothing.
@@ -162,9 +221,11 @@ pub fn ui(
     let pos = Pos2::new(x, y);
 
     let mut chosen: Option<usize> = None;
+    let mut pick: Option<(usize, Pick)> = None;
     let area = egui::Area::new(Id::unique("symphony-search"))
-        // Above everything else, floating windows and overlays included.
-        .order(egui::Order::Tooltip)
+        // Above panels and floating windows (Foreground, raised when it
+        // opens), with its own right-click menus able to open above it.
+        .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .fade_in(false)
         .interactable(!st.closing)
@@ -190,6 +251,22 @@ pub fn ui(
                     }
                     if edit.changed() {
                         st.selected = 0;
+                        st.note = None;
+                    }
+                    if let Some((_, title)) = &st.recording {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Press the new shortcut for {title}. Esc cancels."
+                            ))
+                            .font(theme::dense())
+                            .color(theme::ACCENT_SELECT),
+                        );
+                    } else if let Some(note) = &st.note {
+                        ui.label(
+                            egui::RichText::new(note)
+                                .font(theme::dense())
+                                .color(theme::TEXT_SECONDARY),
+                        );
                     }
                     if list_h < 0.5 {
                         return;
@@ -278,6 +355,43 @@ pub fn ui(
                                     fg2,
                                 );
                             }
+                            row.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, &e.title)
+                            });
+                            // Right-click: run it, change or remove its
+                            // shortcut, or copy its name.
+                            row.context_menu(|ui| {
+                                if ui.button("Run").clicked() {
+                                    pick = Some((i, Pick::Run));
+                                }
+                                if let Command::Action(a) = e.command {
+                                    ui.separator();
+                                    let label = if e.shortcut.is_empty() {
+                                        "Add shortcut…"
+                                    } else {
+                                        "Change shortcut…"
+                                    };
+                                    if ui.button(label).clicked() {
+                                        pick = Some((i, Pick::Record(a)));
+                                    }
+                                    if !e.shortcut.is_empty()
+                                        && ui.button("Remove shortcut").clicked()
+                                    {
+                                        pick = Some((i, Pick::Unbind(a)));
+                                    }
+                                    if keymap::is_remapped(profile, a)
+                                        && ui
+                                            .button(format!("Reset to {} default", profile.title()))
+                                            .clicked()
+                                    {
+                                        pick = Some((i, Pick::Reset(a)));
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Copy name").clicked() {
+                                    pick = Some((i, Pick::Copy));
+                                }
+                            });
                             if row.clicked() {
                                 chosen = Some(i);
                             }
@@ -303,6 +417,31 @@ pub fn ui(
     if st.closing {
         return Outcome::Closing;
     }
+    if let Some((i, p)) = pick {
+        match p {
+            Pick::Run => chosen = Some(i),
+            Pick::Record(a) => {
+                st.recording = Some((a, results[i].title.clone()));
+                st.note = None;
+            }
+            Pick::Unbind(a) => {
+                keymap::unbind(profile, a);
+                st.note = Some(format!("{} has no shortcut now", results[i].title));
+            }
+            Pick::Reset(a) => {
+                keymap::reset(profile, a);
+                let label = keymap::label(profile, a);
+                st.note = Some(if label.is_empty() {
+                    format!("{} is back to no shortcut", results[i].title)
+                } else {
+                    format!("{} is back to {label}", results[i].title)
+                });
+            }
+            Pick::Copy => ctx.copy_text(results[i].title.clone()),
+        }
+    }
+    // Enter while recording is the new shortcut, not "run".
+    let enter = enter && st.recording.is_none();
     if enter && !results.is_empty() {
         chosen = Some(st.selected);
     }
@@ -328,6 +467,46 @@ mod tests {
     use egui_kittest::Harness;
 
     #[test]
+    fn right_click_a_result_to_give_it_a_shortcut() {
+        use egui_kittest::kittest::Queryable;
+        let profile = Profile::Symphony;
+        keymap::reset(profile, Action::MirrorView);
+        let entries = vec![Entry::new(
+            "Mirror view",
+            search::Kind::Action,
+            Command::Action(Action::MirrorView),
+            "view.mirror",
+        )];
+        let mut state = PaletteState::new(Pos2::new(400.0, 40.0), None);
+        state.query = "mirror".into();
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(800.0, 400.0))
+            .with_context_setup(|ctx| {
+                theme::apply(ctx);
+                theme::set_motion(ctx, false);
+            })
+            .build_ui_state(
+                |ui, (state, entries)| {
+                    super::ui(ui.ctx(), state, entries, &|_| 0, Profile::Symphony);
+                },
+                (state, entries),
+            );
+        harness.run_steps(3);
+        harness.get_by_label("Mirror view").click_secondary();
+        harness.run_steps(2);
+        harness.get_by_label("Add shortcut…").click();
+        harness.run_steps(2);
+        harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::K);
+        harness.run_steps(2);
+        let b = keymap::binding(profile, Action::MirrorView).expect("now bound");
+        assert_eq!(b.key, egui::Key::K);
+        assert!(b.mods.alt);
+        assert!(keymap::is_remapped(profile, Action::MirrorView));
+        keymap::reset(profile, Action::MirrorView);
+        assert!(keymap::binding(profile, Action::MirrorView).is_none());
+    }
+
+    #[test]
     fn search_scrolls_and_reaches_results_beyond_the_first_page() {
         let mut state = PaletteState::new(Pos2::new(390.0, 54.0), Some(View::Timeline));
         state.query = "Drawing".into();
@@ -349,7 +528,7 @@ mod tests {
             })
             .build_ui_state(
                 |ui, (state, entries)| {
-                    super::ui(ui.ctx(), state, entries, &|_| 0);
+                    super::ui(ui.ctx(), state, entries, &|_| 0, Profile::Harmony);
                 },
                 (state, entries),
             );

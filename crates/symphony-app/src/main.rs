@@ -137,6 +137,9 @@ struct Saved {
     layouts: Vec<(Workspace, DockState<View>)>,
     #[serde(default)]
     profile: Profile,
+    /// Shortcuts remapped from search, per profile.
+    #[serde(default)]
+    remaps: Vec<keymap::Remap>,
     /// DESIGN D16.2: on by default.
     #[serde(default = "yes")]
     use_no_ai: bool,
@@ -605,6 +608,7 @@ impl SymphonyApp {
         let tool_dock = saved
             .as_ref()
             .map_or(ToolDock::Left, |saved| saved.tool_dock);
+        keymap::set_remaps(saved.as_ref().map(|s| s.remaps.clone()).unwrap_or_default());
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -2501,9 +2505,13 @@ impl SymphonyApp {
         };
         let entries = self.search_entries();
         let uses = self.search_uses.clone();
-        match views::palette::ui(ctx, &mut st, &entries, &|k| {
-            uses.get(k).copied().unwrap_or(0)
-        }) {
+        match views::palette::ui(
+            ctx,
+            &mut st,
+            &entries,
+            &|k| uses.get(k).copied().unwrap_or(0),
+            self.profile,
+        ) {
             views::palette::Outcome::Open | views::palette::Outcome::Closing => {
                 self.palette = Some(st)
             }
@@ -3265,6 +3273,7 @@ impl eframe::App for SymphonyApp {
             return;
         }
         let saved = Saved {
+            remaps: keymap::remaps(),
             tool_dock: self.tool_dock,
             recent_projects: self.recent_projects.clone(),
             wallpaper: self.wallpaper.choice.clone(),
