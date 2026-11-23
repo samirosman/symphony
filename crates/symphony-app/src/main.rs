@@ -244,6 +244,8 @@ struct SymphonyApp {
     pen: Option<PenInput>,
     /// Pen samples taken early by `raw_input_hook`, for this frame's canvas.
     pen_backlog: Vec<PenSample>,
+    /// The pen's button bits in the last sample `raw_input_hook` passed on.
+    pen_buttons: u32,
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
     function: function::FunctionState,
@@ -721,6 +723,7 @@ impl SymphonyApp {
             use_no_ai,
             pen,
             pen_backlog: Vec::new(),
+            pen_buttons: 0,
             camera: Default::default(),
             drawing: Default::default(),
             function: Default::default(),
@@ -3229,6 +3232,15 @@ impl eframe::App for SymphonyApp {
             }
             let pos = egui::pos2(s.x as f32 / zoom, s.y as f32 / zoom);
             raw.events.push(egui::Event::PointerMoved(pos));
+            for (button, pressed) in pen_side_buttons(self.pen_buttons, s.buttons) {
+                raw.events.push(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers,
+                });
+            }
+            self.pen_buttons = s.buttons;
             let pressed = match s.phase {
                 symphony_pen::Phase::Down => true,
                 symphony_pen::Phase::Up => false,
@@ -3255,6 +3267,21 @@ impl eframe::App for SymphonyApp {
             }
         }
     }
+}
+
+/// The egui button changes between two pen button states. The first side
+/// button (`BTN_STYLUS`) acts as the right mouse button and the second as
+/// the middle one: on the GT1602 that puts right on the upper button and
+/// middle on the lower.
+fn pen_side_buttons(before: u32, now: u32) -> Vec<(egui::PointerButton, bool)> {
+    [
+        (symphony_pen::BUTTON_STYLUS, egui::PointerButton::Secondary),
+        (symphony_pen::BUTTON_STYLUS2, egui::PointerButton::Middle),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| (before ^ now) & bit != 0)
+    .map(|(bit, button)| (button, now & bit != 0))
+    .collect()
 }
 
 impl SymphonyApp {
@@ -3821,6 +3848,27 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(SymphonyApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod pen_button_tests {
+    use super::egui::PointerButton::{Middle, Secondary};
+    use super::pen_side_buttons;
+    use symphony_pen::{BUTTON_STYLUS, BUTTON_STYLUS2, BUTTON_TIP};
+
+    #[test]
+    fn side_buttons_press_and_release_right_and_middle() {
+        assert_eq!(pen_side_buttons(0, BUTTON_STYLUS), vec![(Secondary, true)]);
+        assert_eq!(pen_side_buttons(BUTTON_STYLUS, 0), vec![(Secondary, false)]);
+        assert_eq!(pen_side_buttons(0, BUTTON_STYLUS2), vec![(Middle, true)]);
+        assert_eq!(pen_side_buttons(BUTTON_STYLUS2, 0), vec![(Middle, false)]);
+        // Held buttons and the tip send nothing new.
+        assert!(pen_side_buttons(BUTTON_STYLUS, BUTTON_STYLUS | BUTTON_TIP).is_empty());
+        assert_eq!(
+            pen_side_buttons(BUTTON_STYLUS, BUTTON_STYLUS2),
+            vec![(Secondary, false), (Middle, true)]
+        );
+    }
 }
 
 #[cfg(test)]
