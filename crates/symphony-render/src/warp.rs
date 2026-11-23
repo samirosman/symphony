@@ -54,6 +54,8 @@ pub fn paint_image_bent(
     let file = scene.images.get(&r.key)?;
     let img = bitmap::cached(scene, r)?;
     let [x0, y0, x1, y1] = r.rect(file, &scene.settings);
+    // The same cap as the plain image, so a bend never changes its size.
+    let m = bitmap::cap_zoom(m, [x1 - x0, y1 - y0], pix);
     let (iw, ih) = (img.width(), img.height());
     let (kx, ky) = ((x1 - x0) / iw as f32, (y1 - y0) / ih as f32);
     let mesh = build(
@@ -245,6 +247,13 @@ const MARGIN: i64 = 1;
 /// refuses paths it cannot rasterize exactly.
 const MAX_PATH: f32 = 1e6;
 
+/// The widest or tallest triangle drawn, in output pixels. The edge
+/// maths multiplies two sub-pixel distances in i64, which overflows past
+/// about 8.4 million pixels. The zoom cap keeps an image far below this,
+/// but a stretched bone can still pull a triangle that far; it is
+/// dropped, not drawn wrong.
+const MAX_TRIANGLE: i64 = 1 << 22;
+
 /// Fill each triangle of `mesh` with its piece of `src` (premultiplied),
 /// source-over onto `pix`, with an anti-aliased outer edge.
 pub fn draw(pix: &mut Pixmap, src: &Pixmap, mesh: &Mesh) {
@@ -257,12 +266,19 @@ pub fn draw(pix: &mut Pixmap, src: &Pixmap, mesh: &Mesh) {
             [f(p[0]), f(p[1])]
         })
         .collect();
-    // Triangles wound one way, degenerate ones dropped.
+    // Triangles wound one way; degenerate and oversized ones dropped.
     let tris: Vec<[usize; 3]> = mesh
         .triangles
         .iter()
         .filter_map(|t| {
             let [a, b, c] = t.map(|i| i as usize);
+            let too_big = (0..2).any(|k| {
+                let v = [fixed[a][k], fixed[b][k], fixed[c][k]];
+                v.iter().max().unwrap() - v.iter().min().unwrap() > MAX_TRIANGLE * SUB
+            });
+            if too_big {
+                return None;
+            }
             match edge(fixed[a], fixed[b], fixed[c]) {
                 0 => None,
                 n if n < 0 => Some([a, c, b]),
@@ -767,6 +783,23 @@ mod tests {
         let mut pix = Pixmap::new(64, 64).unwrap();
         draw(&mut pix, &arm_checker(), &mesh);
         crate::golden::check("bent-huge-zoom", &pix);
+    }
+
+    #[test]
+    fn a_triangle_too_large_for_the_edge_maths_is_dropped() {
+        // As a bone stretched 1e7 times would pull it: the i64 edge maths
+        // overflowed here before. Every triangle is too large, so nothing
+        // is drawn.
+        let p = pose(30.0);
+        let f = to_out(&p);
+        let mut mesh = build(200, 40, &f, &MeshDetail::default());
+        let o = f([50.0, 0.0]);
+        for q in &mut mesh.points {
+            *q = [1e7 * (q[0] - o[0]) + 32.3, 1e7 * (q[1] - o[1]) + 32.4];
+        }
+        let mut pix = Pixmap::new(64, 64).unwrap();
+        draw(&mut pix, &arm_checker(), &mesh);
+        assert!(pix.data().iter().all(|&v| v == 0));
     }
 
     #[test]
