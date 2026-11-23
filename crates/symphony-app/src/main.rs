@@ -7,6 +7,7 @@ mod app_icon;
 mod backdrop;
 mod brush_import;
 mod codec;
+mod crash;
 mod keymap;
 mod presets;
 mod save_dialog;
@@ -297,6 +298,8 @@ struct SymphonyApp {
     /// Brush files dropped on the window, being read in the background.
     brush_import: Option<brush_import::BrushImport>,
     show_licences: bool,
+    /// A crash report from last time, offered once (path, text).
+    crash_report: Option<(PathBuf, String)>,
     opening: Option<Opening>,
     notice_seen: Option<(String, f64)>,
 }
@@ -640,6 +643,8 @@ impl SymphonyApp {
             }
         }
         let shot = shot::Shot::from_env();
+        // Screenshot runs never show a crash prompt.
+        let crash_offer = shot.is_none().then(crash::pending).flatten();
         let demo = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_EMPTY").is_none();
         let mut s = if demo || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
             Session::demo()
@@ -789,6 +794,7 @@ impl SymphonyApp {
             codec_download: None,
             brush_import: None,
             show_licences: false,
+            crash_report: crash_offer,
             opening: None,
             notice_seen: None,
         }
@@ -1584,7 +1590,8 @@ impl SymphonyApp {
                 self.show_licences = true;
                 ui.close();
             }
-            if ui.button("Icon sheet").clicked() {
+            // A developer tool, only in debug builds.
+            if cfg!(debug_assertions) && ui.button("Icon sheet").clicked() {
                 self.show_icon_sheet = true;
                 ui.close();
             }
@@ -3786,6 +3793,43 @@ impl SymphonyApp {
         {
             self.start_codec_download(&ctx);
         }
+        // Last session crashed: offer to send the report (the tester sees
+        // it in a pre-filled issue before anything is sent).
+        if let Some((path, report)) = self.crash_report.clone() {
+            let mut done = false;
+            theme::glass_modal(&ctx, "symphony-crash-report").show(&ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading("Symphony closed unexpectedly");
+                ui.add_space(6.0);
+                ui.label(
+                    "Sorry about that. A report of what went wrong was saved. Sending it \
+                     opens a pre-filled bug report in your browser, so you can read it and \
+                     add what you were doing before you submit it.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if symphony_ui::widgets::primary_button(ui, "Send report…", true).clicked() {
+                        ctx.open_url(egui::OpenUrl::new_tab(crash::issue_url(&report)));
+                        done = true;
+                    }
+                    if ui.button("Show report").clicked() {
+                        if let Some(dir) = path.parent() {
+                            ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                "file://{}",
+                                dir.display()
+                            )));
+                        }
+                    }
+                    if ui.button("Don't send").clicked() {
+                        done = true;
+                    }
+                });
+            });
+            if done {
+                crash::handled(&path);
+                self.crash_report = None;
+            }
+        }
         let mut open = self.show_licences;
         egui::Window::new("Licences")
             .open(&mut open)
@@ -3865,6 +3909,7 @@ fn viewport() -> egui::ViewportBuilder {
 }
 
 fn main() -> eframe::Result {
+    crash::install();
     let _version_lock = std::env::current_exe()
         .and_then(|exe| symphony_launcher::editor_lock(&exe))
         .map_err(|e| eframe::Error::AppCreation(Box::new(e)))?;
