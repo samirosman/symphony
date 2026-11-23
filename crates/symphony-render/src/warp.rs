@@ -13,8 +13,10 @@
 //! inside the image would show as a hairline seam where two triangles
 //! meet. Vertices are snapped to 1/256 pixel and edges follow a top-left
 //! rule, so every pixel on a shared edge is drawn exactly once. The outer
-//! edge of a bent image is not anti-aliased; cut-out art makes its edge
-//! with the image's own alpha.
+//! edge is anti-aliased apart from that: the triangles are filled a pixel
+//! past the image's border, and the result is multiplied by the coverage
+//! of the whole mesh, which tiny-skia fills as one path. Inside that path
+//! the coverage is full, so the inner edges keep no seam.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,7 +24,7 @@ use symphony_core::bitmap::ImageRef;
 use symphony_core::deform::{ChainPose, MeshDetail};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
-use tiny_skia::Pixmap;
+use tiny_skia::{FillRule, Mask, PathBuilder, Pixmap, Transform};
 
 use crate::bitmap;
 
@@ -235,8 +237,16 @@ fn bilerp(c: [[f32; 2]; 4], s: f32, t: f32) -> [f32; 2] {
 /// Sub-pixel steps for vertex positions.
 const SUB: i64 = 256;
 
+/// How far past the image's border the fill reaches, in output pixels,
+/// so the anti-aliased edge has colour to fade.
+const MARGIN: i64 = 1;
+
+/// Larger output coordinates than this leave the edge hard: tiny-skia
+/// refuses paths it cannot rasterize exactly.
+const MAX_PATH: f32 = 1e6;
+
 /// Fill each triangle of `mesh` with its piece of `src` (premultiplied),
-/// source-over onto `pix`.
+/// source-over onto `pix`, with an anti-aliased outer edge.
 pub fn draw(pix: &mut Pixmap, src: &Pixmap, mesh: &Mesh) {
     let (pw, ph) = (pix.width() as i64, pix.height() as i64);
     let fixed: Vec<[i64; 2]> = mesh
@@ -247,49 +257,163 @@ pub fn draw(pix: &mut Pixmap, src: &Pixmap, mesh: &Mesh) {
             [f(p[0]), f(p[1])]
         })
         .collect();
+    // Triangles wound one way, degenerate ones dropped.
+    let tris: Vec<[usize; 3]> = mesh
+        .triangles
+        .iter()
+        .filter_map(|t| {
+            let [a, b, c] = t.map(|i| i as usize);
+            match edge(fixed[a], fixed[b], fixed[c]) {
+                0 => None,
+                n if n < 0 => Some([a, c, b]),
+                _ => Some([a, b, c]),
+            }
+        })
+        .collect();
+    if tris.is_empty() {
+        return;
+    }
+    // The pixels any triangle (with its margin) can touch.
+    let reach = (MARGIN + 2) * SUB;
+    let (mut lo, mut hi) = ([i64::MAX; 2], [i64::MIN; 2]);
+    for &i in tris.iter().flatten() {
+        for k in 0..2 {
+            lo[k] = lo[k].min(fixed[i][k]);
+            hi[k] = hi[k].max(fixed[i][k]);
+        }
+    }
+    let bx0 = ((lo[0] - reach).div_euclid(SUB)).max(0);
+    let by0 = ((lo[1] - reach).div_euclid(SUB)).max(0);
+    let bx1 = ((hi[0] + reach).div_euclid(SUB)).min(pw - 1);
+    let by1 = ((hi[1] + reach).div_euclid(SUB)).min(ph - 1);
+    if bx0 > bx1 || by0 > by1 {
+        return;
+    }
+    let (bw, bh) = (bx1 - bx0 + 1, by1 - by0 + 1);
+    let cover = coverage(&fixed, &tris, bx0, by0, bw, bh);
+    // Fully covered pixels go straight to `pix`. The outline's pixels are
+    // gathered here first, then faded by their coverage. Only those are
+    // written, so most of these zeroed pages are never touched.
+    let mut layer = vec![[0u8; 4]; (bw * bh) as usize];
+    // 0: empty, 1: margin past the border, 2: inside a triangle.
+    let mut state = vec![0u8; (bw * bh) as usize];
+    let mut outline: Vec<usize> = Vec::new();
     let data = pix.data_mut();
-    for t in &mesh.triangles {
-        let [ia, mut ib, mut ic] = t.map(|i| i as usize);
-        let area = edge(fixed[ia], fixed[ib], fixed[ic]);
-        if area == 0 {
-            continue;
-        }
-        if area < 0 {
-            std::mem::swap(&mut ib, &mut ic);
-        }
+
+    let (sw, sh) = (src.width() as f32, src.height() as f32);
+    let on_border = |p: [f32; 2], q: [f32; 2]| {
+        (p[0] == q[0] && (p[0] == 0.0 || p[0] == sw))
+            || (p[1] == q[1] && (p[1] == 0.0 || p[1] == sh))
+    };
+    for &[ia, ib, ic] in &tris {
         let (a, b, c) = (fixed[ia], fixed[ib], fixed[ic]);
-        let area = area.abs() as f32;
+        let area = edge(a, b, c) as f32;
         let (ta, tb, tc) = (mesh.uv[ia], mesh.uv[ib], mesh.uv[ic]);
-        let lo = |k: usize| a[k].min(b[k]).min(c[k]);
-        let hi = |k: usize| a[k].max(b[k]).max(c[k]);
-        // Pixels whose centre (x + 0.5) can be inside.
-        let x0 = ((lo(0) - SUB / 2).div_euclid(SUB)).max(0);
-        let x1 = ((hi(0) - SUB / 2).div_euclid(SUB) + 1).min(pw - 1);
-        let y0 = ((lo(1) - SUB / 2).div_euclid(SUB)).max(0);
-        let y1 = ((hi(1) - SUB / 2).div_euclid(SUB) + 1).min(ph - 1);
-        if x0 > x1 || y0 > y1 {
-            continue;
-        }
         let edges = [(b, c), (c, a), (a, b)];
         let bias = edges.map(|(p, q)| i64::from(!top_left(p, q)));
+        // A border edge may be crossed by up to MARGIN pixels.
+        let border = [(tb, tc), (tc, ta), (ta, tb)].map(|(p, q)| on_border(p, q));
+        let slack: [i64; 3] = std::array::from_fn(|k| {
+            if !border[k] {
+                return 0;
+            }
+            let (p, q) = edges[k];
+            let len = ((q[0] - p[0]) as f64).hypot((q[1] - p[1]) as f64);
+            (len * (MARGIN * SUB) as f64) as i64
+        });
+        let pad = if border.contains(&true) {
+            MARGIN * SUB
+        } else {
+            0
+        };
+        let lo = |k: usize| a[k].min(b[k]).min(c[k]) - pad;
+        let hi = |k: usize| a[k].max(b[k]).max(c[k]) + pad;
+        // Pixels whose centre (x + 0.5) can be inside.
+        let x0 = ((lo(0) - SUB / 2).div_euclid(SUB)).max(bx0);
+        let x1 = ((hi(0) - SUB / 2).div_euclid(SUB) + 1).min(bx1);
+        let y0 = ((lo(1) - SUB / 2).div_euclid(SUB)).max(by0);
+        let y1 = ((hi(1) - SUB / 2).div_euclid(SUB) + 1).min(by1);
         for py in y0..=y1 {
             let cy = py * SUB + SUB / 2;
             for px in x0..=x1 {
                 let p = [px * SUB + SUB / 2, cy];
                 let e = edges.map(|(s, q)| edge(s, q, p));
                 // Exactly on an edge counts only for top or left edges.
-                if (0..3).any(|k| e[k] - bias[k] < 0) {
+                let inside = (0..3).all(|k| e[k] - bias[k] >= 0);
+                if !inside && (0..3).any(|k| e[k] - bias[k] < -slack[k]) {
+                    continue;
+                }
+                let i = ((py - by0) * bw + (px - bx0)) as usize;
+                let m = match &cover {
+                    Some(mask) => mask.data()[i],
+                    None if inside => 255,
+                    None => 0,
+                };
+                if m == 0 || (!inside && state[i] != 0) {
                     continue;
                 }
                 let (la, lb, lc) = (e[0] as f32 / area, e[1] as f32 / area, e[2] as f32 / area);
                 let u = la * ta[0] + lb * tb[0] + lc * tc[0];
                 let v = la * ta[1] + lb * tb[1] + lc * tc[1];
                 let s = sample(src, u, v);
-                let i = ((py * pw + px) * 4) as usize;
-                over(&mut data[i..i + 4], s);
+                if m == 255 && inside {
+                    // A fold draws here twice, the image over itself.
+                    let o = ((py * pw + px) * 4) as usize;
+                    over(&mut data[o..o + 4], s);
+                } else if inside && state[i] == 2 {
+                    over(&mut layer[i], s);
+                } else {
+                    if state[i] == 0 {
+                        outline.push(i);
+                    }
+                    layer[i] = s;
+                    state[i] = if inside { 2 } else { 1 };
+                }
             }
         }
     }
+
+    let Some(mask) = cover else {
+        return;
+    };
+    for i in outline {
+        let m = mask.data()[i] as u32;
+        let s = layer[i].map(|c| ((c as u32 * m + 127) / 255) as u8);
+        let (x, y) = (i as i64 % bw, i as i64 / bw);
+        let o = (((by0 + y) * pw + bx0 + x) * 4) as usize;
+        over(&mut data[o..o + 4], s);
+    }
+}
+
+/// How much of each pixel of the `bw` x `bh` box at (`bx0`, `by0`) the
+/// triangles cover together, or `None` if tiny-skia cannot fill them.
+fn coverage(
+    fixed: &[[i64; 2]],
+    tris: &[[usize; 3]],
+    bx0: i64,
+    by0: i64,
+    bw: i64,
+    bh: i64,
+) -> Option<Mask> {
+    let at = |i: usize| {
+        let x = (fixed[i][0] - bx0 * SUB) as f32 / SUB as f32;
+        let y = (fixed[i][1] - by0 * SUB) as f32 / SUB as f32;
+        (x.abs() <= MAX_PATH && y.abs() <= MAX_PATH).then_some((x, y))
+    };
+    let mut pb = PathBuilder::new();
+    for t in tris {
+        let [a, b, c] = [at(t[0])?, at(t[1])?, at(t[2])?];
+        pb.move_to(a.0, a.1);
+        pb.line_to(b.0, b.1);
+        pb.line_to(c.0, c.1);
+        pb.close();
+    }
+    let path = pb.finish()?;
+    let mut mask = Mask::new(bw as u32, bh as u32)?;
+    // One path, one winding: the inner edges cancel, so the coverage is
+    // full everywhere inside and partial only on the outline.
+    mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+    Some(mask)
 }
 
 /// Twice the signed area of (a, b, p), in sub-pixel units squared.
@@ -490,11 +614,75 @@ mod tests {
         assert_eq!(pix.pixel(45, 3).unwrap().alpha(), 0);
     }
 
+    fn white(w: u32, h: u32) -> Pixmap {
+        Pixmap::from_vec(
+            [255u8; 4].repeat((w * h) as usize),
+            IntSize::from_wh(w, h).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_outer_edge_is_anti_aliased() {
+        // A white image from x = 5.5 to 25.5: the pixels at 5 and 25 are
+        // half covered, the ones inside fully, the ones past not at all.
+        let src = white(20, 20);
+        let mesh = build(20, 20, |[u, v]| [u + 5.5, v + 3.0], &MeshDetail::default());
+        let mut pix = Pixmap::new(40, 30).unwrap();
+        draw(&mut pix, &src, &mesh);
+        let at = |x: u32| pix.pixel(x, 10).unwrap();
+        for x in [5, 25] {
+            let p = at(x);
+            assert!((120..=136).contains(&p.alpha()), "pixel {x}: {}", p.alpha());
+            assert_eq!(p.red(), p.alpha(), "pixel {x} is premultiplied white");
+        }
+        for x in 6..25 {
+            assert_eq!(at(x).alpha(), 255, "pixel {x}");
+        }
+        assert_eq!(at(4).alpha(), 0);
+        assert_eq!(at(26).alpha(), 0);
+    }
+
+    #[test]
+    fn a_hard_bend_leaves_no_seam_inside() {
+        // Opaque, bent past the fold: wherever a pixel's neighbours are
+        // all fully covered, so is the pixel.
+        let src = white(200, 40);
+        let p = pose(70.0);
+        let mesh = build(200, 40, to_out(&p), &MeshDetail::default());
+        let mut pix = Pixmap::new(600, 600).unwrap();
+        draw(&mut pix, &src, &mesh);
+        let alpha = |x: u32, y: u32| pix.pixel(x, y).unwrap().alpha();
+        let mut seams = 0;
+        let mut edge = 0;
+        for y in 1..599 {
+            for x in 1..599 {
+                let a = alpha(x, y);
+                if 0 < a && a < 255 {
+                    edge += 1;
+                }
+                let around = [
+                    alpha(x - 1, y),
+                    alpha(x + 1, y),
+                    alpha(x, y - 1),
+                    alpha(x, y + 1),
+                ];
+                if a < 255 && around.iter().all(|&n| n == 255) {
+                    seams += 1;
+                }
+            }
+        }
+        assert_eq!(seams, 0);
+        // The outline is soft.
+        assert!(edge > 500, "{edge} partly covered pixels");
+    }
+
     #[test]
     fn a_bent_image_has_no_holes_or_double_edges() {
         // Grey at 50% alpha: a pixel drawn twice turns darker, a pixel
-        // missed stays clear. A gentle bend, because past about 25 degrees
-        // this arm folds on the inside and the fold is drawn twice.
+        // missed stays clear, and the anti-aliased outline is lighter. A
+        // gentle bend, because past about 25 degrees this arm folds on the
+        // inside and the fold is drawn twice.
         let src = Pixmap::from_vec(
             [128u8, 128, 128, 128].repeat(200 * 40),
             IntSize::from_wh(200, 40).unwrap(),
@@ -509,14 +697,15 @@ mod tests {
         for y in 1..599 {
             for x in 1..599 {
                 let a = alpha(x, y);
-                assert!(a == 0 || a == 128, "pixel ({x}, {y}) drawn twice: {a}");
+                assert!(a <= 128, "pixel ({x}, {y}) drawn twice: {a}");
                 let around = [
                     alpha(x - 1, y),
                     alpha(x + 1, y),
                     alpha(x, y - 1),
                     alpha(x, y + 1),
                 ];
-                if a == 0 && around.iter().all(|&n| n == 128) {
+                // A clear or lighter pixel inside: a hole or a seam.
+                if a < 128 && around.iter().all(|&n| n == 128) {
                     holes += 1;
                 }
             }
