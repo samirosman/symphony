@@ -29,13 +29,20 @@ else
   tar -C "$APP" -czf "dist/$NAME.tar.gz" .
 fi
 
-# Launcher.
+# Launcher. On macOS there's one universal launcher (both chips), packaged
+# by the Apple-chip job as symphony-launcher-macos.zip; the Intel job only
+# packages the app.
 L="symphony-launcher-$TARGET"
-if [[ "$TARGET" == *apple* ]]; then
+if [[ "$TARGET" == x86_64-apple-darwin ]]; then
+  echo "Intel Mac: the universal launcher is packaged by the Apple-chip build."
+elif [[ "$TARGET" == *apple* ]]; then
+  L="symphony-launcher-macos"
+  LBIN="target/universal-apple-darwin/release/symphony-launcher"
+  [[ -f "$LBIN" ]] || LBIN="$BIN/symphony-launcher"
   BUNDLE="$STAGE/Symphony Launcher.app"
   mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
   cp "$WORDMARK_LICENSE" "$BUNDLE/Contents/Resources/OFL-Bricolage-Grotesque.txt"
-  cp "$BIN/symphony-launcher" "$BUNDLE/Contents/MacOS/"
+  cp "$LBIN" "$BUNDLE/Contents/MacOS/symphony-launcher"
   cp crates/symphony-app/assets/Symphony.icns "$BUNDLE/Contents/Resources/"
   cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

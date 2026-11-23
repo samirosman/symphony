@@ -5,15 +5,11 @@ Launcher**. It installs Symphony, keeps it up to date, and can switch back
 to the previous version if an update has a problem.
 
 ## 1. Download the launcher
-Go to the [latest release](https://github.com/tdemers218/symphony/releases)
-and download the launcher for your computer:
-
-| Computer | File |
-|---|---|
-| Mac with Apple chip (M1 or newer) | `symphony-launcher-aarch64-apple-darwin.zip` |
-| Mac with Intel chip | `symphony-launcher-x86_64-apple-darwin.zip` |
-| Windows | `symphony-launcher-x86_64-pc-windows-msvc.zip` |
-| Linux | `symphony-launcher-x86_64-unknown-linux-gnu.tar.gz` |
+Go to [the Symphony site](https://tdemers218.github.io/symphony/) and click
+**Download**. It picks the right file for your computer. (Every file is
+also on the [releases page](https://github.com/tdemers218/symphony/releases):
+`symphony-launcher-macos.zip` for any Mac, and the Windows or Linux
+launcher.)
 
 ## 2. Open it for the first time
 Symphony isn't code-signed yet, so your computer shows a warning the first
