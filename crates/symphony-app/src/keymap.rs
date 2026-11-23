@@ -598,6 +598,39 @@ fn put(profile: Profile, action: Action, key: Option<(String, Mods)>) {
     }
 }
 
+/// Which other actions already use `key` + `mods` in `profile` (nothing
+/// changes).
+pub fn clashes(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec<Action> {
+    let wanted = (key, Mods::of(mods));
+    Action::ALL
+        .into_iter()
+        .filter(|a| *a != action)
+        .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
+        .collect()
+}
+
+/// A readable name for a key combination ("Option+K"), written the same
+/// way as shortcut labels.
+pub fn combo_label(key: Key, mods: Modifiers) -> String {
+    let mac = cfg!(target_os = "macos");
+    let mut parts: Vec<&str> = Vec::new();
+    if mods.command || mods.ctrl || mods.mac_cmd {
+        parts.push(if mac { "Cmd" } else { "Ctrl" });
+    }
+    if mods.alt {
+        parts.push(if mac { "Option" } else { "Alt" });
+    }
+    if mods.shift {
+        parts.push("Shift");
+    }
+    let mut s = parts.join("+");
+    if !s.is_empty() {
+        s.push('+');
+    }
+    s.push_str(key.symbol_or_name());
+    s
+}
+
 /// Give `action` the shortcut `key` + `mods` in `profile`. Any other action
 /// using that shortcut loses it, and is returned so the caller can say so.
 pub fn remap(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec<Action> {
