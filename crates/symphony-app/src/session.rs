@@ -294,6 +294,8 @@ pub struct Onion {
     pub on: bool,
     pub before: u32,
     pub after: u32,
+    /// Opacity of the nearest onion drawing; farther ones fade from it.
+    pub opacity: f32,
 }
 
 /// Strokes picked with the Select tool, in one drawing.
@@ -360,6 +362,17 @@ pub struct Session {
     /// (one toolbar button, a mode switch in Tool Properties). Each mode
     /// keeps its own settings and presets. Set from the profile each frame.
     pub pen_modes: bool,
+    /// The area the last undo or redo changed (drawing, bounds), for the
+    /// canvas to flash; `flash_serial` counts flashes so each one plays.
+    pub flash: Option<(Id, [f32; 2], [f32; 2])>,
+    pub flash_serial: u64,
+    /// Light table: the other layers' drawings show faintly behind the
+    /// one being drawn, in the Drawing view.
+    pub light_table: bool,
+    /// Playback plays only these frames (first, last), when set.
+    pub play_range: Option<(u32, u32)>,
+    /// Playback starts over at the end (else it stops there).
+    pub loop_playback: bool,
     /// The Pen's mode the last time it was used (Brush or Pencil).
     pub last_pen: Tool,
     pub animate: bool,
@@ -468,9 +481,15 @@ impl Session {
                 on: false,
                 before: 1,
                 after: 1,
+                opacity: 0.45,
             },
             brush_size_cursor: true,
             pen_modes: false,
+            flash: None,
+            flash_serial: 0,
+            light_table: false,
+            play_range: None,
+            loop_playback: true,
             last_pen: Tool::Brush,
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,
@@ -624,7 +643,7 @@ impl Session {
         self.doc.drawings.get(&id).map(|d| d.name.as_str())
     }
 
-    fn note(&mut self, text: impl Into<String>) {
+    pub fn note(&mut self, text: impl Into<String>) {
         self.notice = Some(text.into());
     }
 
@@ -739,19 +758,91 @@ impl Session {
 
     // ---- Undo ------------------------------------------------------------
 
-    pub fn undo(&mut self) {
-        match self.history.undo(&mut self.doc) {
-            Some(name) => self.note(format!("Undo {name}")),
-            None => self.note("Nothing to undo"),
+    /// Snapshot `drawings`, run `f`, and flash the area that changed.
+    fn flash_changes(&mut self, drawings: Vec<Id>, f: impl FnOnce(&mut Self)) {
+        let before: Vec<(Id, Option<symphony_core::stroke::Drawing>)> = drawings
+            .iter()
+            .map(|d| (*d, self.doc.drawings.get(d).cloned()))
+            .collect();
+        f(self);
+        let mut lo = [f32::INFINITY; 2];
+        let mut hi = [f32::NEG_INFINITY; 2];
+        let mut grow = |b: Option<([f32; 2], [f32; 2])>| {
+            if let Some((a, c)) = b {
+                lo = [lo[0].min(a[0]), lo[1].min(a[1])];
+                hi = [hi[0].max(c[0]), hi[1].max(c[1])];
+            }
+        };
+        let fill_bounds = |f: &symphony_core::stroke::Fill| {
+            f.contours
+                .iter()
+                .flatten()
+                .fold(None, |acc: Option<([f32; 2], [f32; 2])>, p| {
+                    Some(match acc {
+                        None => (*p, *p),
+                        Some((a, c)) => (
+                            [a[0].min(p[0]), a[1].min(p[1])],
+                            [c[0].max(p[0]), c[1].max(p[1])],
+                        ),
+                    })
+                })
+        };
+        let mut target = None;
+        for (id, old) in &before {
+            let new = self.doc.drawings.get(id);
+            let (os, ns): (&[Stroke], &[Stroke]) = (
+                old.as_ref().map_or(&[], |d| &d.strokes),
+                new.map_or(&[], |d| &d.strokes),
+            );
+            let (of, nf): (
+                &[symphony_core::stroke::Fill],
+                &[symphony_core::stroke::Fill],
+            ) = (
+                old.as_ref().map_or(&[], |d| &d.fills),
+                new.map_or(&[], |d| &d.fills),
+            );
+            let mut changed = false;
+            for st in os.iter().chain(ns) {
+                let in_old = os.iter().find(|s| s.id == st.id);
+                let in_new = ns.iter().find(|s| s.id == st.id);
+                if in_old != in_new {
+                    grow(symphony_vector::bounds(st));
+                    changed = true;
+                }
+            }
+            for fl in of.iter().chain(nf) {
+                let in_old = of.iter().find(|f| f.id == fl.id);
+                let in_new = nf.iter().find(|f| f.id == fl.id);
+                if in_old != in_new {
+                    grow(fill_bounds(fl));
+                    changed = true;
+                }
+            }
+            if changed && target.is_none() {
+                target = Some(*id);
+            }
         }
+        if let (Some(d), true) = (target, lo[0] <= hi[0]) {
+            self.flash_serial += 1;
+            self.flash = Some((d, lo, hi));
+        }
+    }
+
+    pub fn undo(&mut self) {
+        let drawings = self.history.undo_drawings();
+        self.flash_changes(drawings, |s| match s.history.undo(&mut s.doc) {
+            Some(name) => s.note(format!("Undo {name}")),
+            None => s.note("Nothing to undo"),
+        });
         self.clamp_selection();
     }
 
     pub fn redo(&mut self) {
-        match self.history.redo(&mut self.doc) {
-            Some(name) => self.note(format!("Redo {name}")),
-            None => self.note("Nothing to redo"),
-        }
+        let drawings = self.history.redo_drawings();
+        self.flash_changes(drawings, |s| match s.history.redo(&mut s.doc) {
+            Some(name) => s.note(format!("Redo {name}")),
+            None => s.note("Nothing to redo"),
+        });
         self.clamp_selection();
     }
 
@@ -2008,6 +2099,23 @@ impl Session {
         self.selected = index;
     }
 
+    /// Move layer `from` to position `to` in the stack, undoably; the
+    /// selection follows the layer.
+    pub fn move_layer(&mut self, from: usize, to: usize) {
+        let n = self.layer_count();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let name = self.layer_name(from).to_owned();
+        self.history.apply(
+            &mut self.doc,
+            "Move layer",
+            vec![symphony_core::history::Edit::MoveLayer { from, to }],
+        );
+        self.selected = to;
+        self.note(format!("Moved {name}"));
+    }
+
     pub fn delete_layer(&mut self, i: usize) {
         if self.layer_count() <= 1 {
             self.note("A scene needs at least one layer");
@@ -2499,7 +2607,34 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    #[test]
+    fn moving_a_layer_restacks_it_and_undoes_in_one_step() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        s.add_layer();
+        let names = |s: &Session| {
+            (0..s.layer_count())
+                .map(|i| s.layer_name(i).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let before = names(&s);
+        let bottom = s.doc.layers[2];
+        s.move_layer(2, 0);
+        let after = names(&s);
+        assert_eq!(after[0], before[2]);
+        assert_eq!(&after[1..], &before[..2]);
+        // The Composite stacks in the same order (port 0 is in front).
+        assert_eq!(s.doc.graph.input(s.doc.composite, 0), Some(bottom.node));
+        // Xsheet columns follow the layer order.
+        assert_eq!(s.doc.xsheet.columns[0].id, bottom.column);
+        assert_eq!(s.selected, 0, "the selection follows");
+        s.undo();
+        assert_eq!(names(&s), before);
+        assert_eq!(s.doc.graph.input(s.doc.composite, 2), Some(bottom.node));
+    }
 
     #[test]
     fn timeline_duplicate_and_reuse_have_different_drawing_identity() {

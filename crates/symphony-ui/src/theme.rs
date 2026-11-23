@@ -72,6 +72,11 @@ pub const GUTTER: f32 = 6.0;
 
 // Workspace glass surfaces composite over the cached wallpaper.
 pub const GLASS_PANEL: Color32 = Color32::from_rgba_premultiplied(21, 22, 25, 179);
+/// Glass for floating windows (Preferences, floating views and Tool
+/// Properties, the drop panel). They sit over the artwork, not the
+/// wallpaper, so they need a denser tint to keep their text readable.
+/// A very dark grey, not black (Tristan's call), nearly solid.
+pub const GLASS_FLOATING: Color32 = Color32::from_rgba_premultiplied(34, 35, 39, 246);
 pub const GLASS_CHROME: Color32 = Color32::from_rgba_premultiplied(14, 15, 17, 158);
 pub const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(23, 23, 23, 23);
 pub const GLASS_RADIUS: u8 = 12;
@@ -144,6 +149,41 @@ fn widget(bg: Color32, fg: Color32, stroke: Stroke) -> egui::style::WidgetVisual
         corner_radius: CornerRadius::same(RADIUS_CONTROL),
         fg_stroke: Stroke::new(1.0, fg),
         expansion: 0.0,
+    }
+}
+
+static EFFECTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Are interface effects on (blur, glass, shadows, crossfades)? Off for
+/// slower computers.
+pub fn effects() -> bool {
+    EFFECTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn interface effects on or off. Off: no blur or glass sampling, no
+/// shadows; the app also turns animations off (see `set_motion`).
+pub fn set_effects(ctx: &egui::Context, on: bool) {
+    EFFECTS.store(on, std::sync::atomic::Ordering::Relaxed);
+    ctx.all_styles_mut(|style| shadows(&mut style.visuals, on));
+}
+
+fn shadows(v: &mut egui::Visuals, on: bool) {
+    if on {
+        v.window_shadow = egui::epaint::Shadow {
+            offset: [0, 5],
+            blur: 16,
+            spread: 0,
+            color: hex(0).gamma_multiply(0.40),
+        };
+        v.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 3],
+            blur: 10,
+            spread: 0,
+            color: hex(0).gamma_multiply(0.32),
+        };
+    } else {
+        v.window_shadow = egui::epaint::Shadow::NONE;
+        v.popup_shadow = egui::epaint::Shadow::NONE;
     }
 }
 
@@ -276,18 +316,7 @@ pub fn apply(ctx: &egui::Context) {
         v.override_text_color = None;
         v.panel_fill = BG_PANEL;
         v.window_fill = BG_PANEL;
-        v.window_shadow = egui::epaint::Shadow {
-            offset: [0, 5],
-            blur: 16,
-            spread: 0,
-            color: hex(0).gamma_multiply(0.40),
-        };
-        v.popup_shadow = egui::epaint::Shadow {
-            offset: [0, 3],
-            blur: 10,
-            spread: 0,
-            color: hex(0).gamma_multiply(0.32),
-        };
+        shadows(v, effects());
         v.window_stroke = Stroke::new(1.0, GLASS_EDGE);
         v.window_corner_radius = CornerRadius::same(GLASS_RADIUS);
         v.menu_corner_radius = CornerRadius::same(RADIUS_FLOATING);

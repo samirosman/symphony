@@ -48,6 +48,11 @@ pub struct CanvasState {
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
     pub select: SelectState,
+    /// Mirrored left to right, to check a drawing with fresh eyes (view
+    /// only; the artwork isn't changed).
+    pub mirrored: bool,
+    /// The undo/redo flash being shown: its serial and when it started.
+    flash_seen: (u64, f64),
     /// Stamped textured strokes, reused while only panning.
     strokes: super::textured::Cache,
     display: camera_render::Cache,
@@ -56,6 +61,8 @@ pub struct CanvasState {
 impl Default for CanvasState {
     fn default() -> Self {
         CanvasState {
+            flash_seen: (0, 0.0),
+            mirrored: false,
             pan: Vec2::ZERO,
             zoom: 1.0,
             framing: 1.0,
@@ -184,6 +191,7 @@ impl CanvasState {
             Action::ResetRotation => self.rotation = 0.0,
             Action::ResetPan => self.pan = Vec2::ZERO,
             Action::ResetView => self.reset_view(),
+            Action::MirrorView => self.mirrored = !self.mirrored,
             _ => {}
         }
     }
@@ -201,7 +209,9 @@ fn fit_zoom(rect: Rect, w: f32, h: f32) -> f32 {
 fn view_transform(state: &CanvasState, rect: Rect) -> Affine {
     let c = rect.center() + state.pan;
     let scale = state.zoom * state.framing;
+    let mirror = if state.mirrored { -1.0 } else { 1.0 };
     Affine::translate(c.x, c.y)
+        .compose(Affine::scale(mirror, 1.0))
         .compose(Affine::rotate_deg(state.rotation))
         .compose(Affine::scale(scale, scale))
 }
@@ -278,48 +288,88 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 if icons::button(ui, Icon::Onion, s.onion.on, true, &tip).clicked() {
                     s.onion.on = !s.onion.on;
                 }
-                ui.add_space(8.0);
-                let counts: [(&str, Action, Action, bool); 2] = [
-                    (
-                        "Previous",
-                        Action::OnionLessPrevious,
-                        Action::OnionMorePrevious,
-                        true,
-                    ),
-                    ("Next", Action::OnionLessNext, Action::OnionMoreNext, false),
-                ];
-                for (label, less, more, before) in counts {
-                    dense_label(ui, label);
-                    let n = if before {
-                        s.onion.before
-                    } else {
-                        s.onion.after
-                    };
-                    if icons::button(
-                        ui,
-                        Icon::Minus,
-                        false,
-                        n > 0,
-                        &keymap::tooltip(profile, less),
-                    )
-                    .clicked()
-                    {
-                        s.onion_step(before, -1);
+                // The details live in a small menu, so the bar keeps its
+                // room for view and drawing controls.
+                let summary = if s.onion.on {
+                    format!("{} | {}", s.onion.before, s.onion.after)
+                } else {
+                    "Off".to_owned()
+                };
+                ui.menu_button(egui::RichText::new(summary).font(theme::dense()), |ui| {
+                    ui.set_min_width(220.0);
+                    ui.checkbox(&mut s.onion.on, "Onion skin");
+                    let counts: [(&str, Action, Action, bool); 2] = [
+                        (
+                            "Previous drawings",
+                            Action::OnionLessPrevious,
+                            Action::OnionMorePrevious,
+                            true,
+                        ),
+                        (
+                            "Next drawings",
+                            Action::OnionLessNext,
+                            Action::OnionMoreNext,
+                            false,
+                        ),
+                    ];
+                    for (label, less, more, before) in counts {
+                        ui.horizontal(|ui| {
+                            dense_label(ui, label);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let n = if before {
+                                        s.onion.before
+                                    } else {
+                                        s.onion.after
+                                    };
+                                    if icons::button(
+                                        ui,
+                                        Icon::Plus,
+                                        false,
+                                        n < 9,
+                                        &keymap::tooltip(profile, more),
+                                    )
+                                    .clicked()
+                                    {
+                                        s.onion_step(before, 1);
+                                    }
+                                    dense_label(ui, n.to_string());
+                                    if icons::button(
+                                        ui,
+                                        Icon::Minus,
+                                        false,
+                                        n > 0,
+                                        &keymap::tooltip(profile, less),
+                                    )
+                                    .clicked()
+                                    {
+                                        s.onion_step(before, -1);
+                                    }
+                                },
+                            );
+                        });
                     }
-                    dense_label(ui, n.to_string());
-                    if icons::button(
+                    let mut percent = s.onion.opacity * 100.0;
+                    if symphony_ui::widgets::precise_slider(
                         ui,
-                        Icon::Plus,
-                        false,
-                        n < 9,
-                        &keymap::tooltip(profile, more),
+                        egui::Slider::new(&mut percent, 5.0..=100.0)
+                            .step_by(1.0)
+                            .suffix("%")
+                            .text("Opacity"),
                     )
-                    .clicked()
+                    .changed()
                     {
-                        s.onion_step(before, 1);
+                        s.onion.opacity = percent / 100.0;
                     }
-                    ui.add_space(10.0);
-                }
+                    ui.separator();
+                    ui.checkbox(&mut s.light_table, "Light table")
+                        .on_hover_text(
+                            "Show the other layers' drawings faintly behind the one you're drawing",
+                        );
+                    dense_label(ui, "Tints: Preferences, Canvas");
+                });
+                ui.add_space(10.0);
                 art_layer_toolbar(ui, s, profile);
                 if drawing_only {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -437,6 +487,9 @@ fn bottom_toolbar(ui: &mut egui::Ui, state: &mut CanvasState, profile: Profile) 
                     .clicked()
                     {
                         state.apply(Action::RotateCcw);
+                    }
+                    if state.mirrored {
+                        dense_label(ui, "Mirrored".to_owned());
                     }
                     if state.rotation != 0.0 {
                         dense_label(ui, format!("{:.0} deg", state.rotation));
@@ -590,8 +643,17 @@ pub fn ui(
         ];
         for (list, tint) in [(before, tints[0]), (after, tints[1])] {
             for (k, d) in list.iter().enumerate().rev() {
-                let alpha = 0.45 / (k as f32 + 1.0);
+                let alpha = s.onion.opacity.clamp(0.05, 1.0) / (k as f32 + 1.0);
                 if let Some(dr) = s.doc.drawings.get(d) {
+                    // Paint first, faint, so the tinted drawing reads whole.
+                    for f in &dr.fills {
+                        state.strokes.vectors.paint_fill(
+                            &painter,
+                            f,
+                            tint.gamma_multiply(alpha * 0.35),
+                            view.compose(layer_world),
+                        );
+                    }
                     for st in &dr.strokes {
                         paint_stroke(
                             &painter,
@@ -602,6 +664,46 @@ pub fn ui(
                             view.compose(layer_world),
                         );
                     }
+                }
+            }
+        }
+    }
+
+    // Light table (Drawing view): the other layers' drawings at this frame,
+    // washed out behind the one being drawn, placed where they sit
+    // relative to it.
+    if drawing_only && s.light_table {
+        let own = projected_layer.and_then(|m| m.inverse());
+        let wash = theme::TEXT_SECONDARY.gamma_multiply(0.4);
+        for (i, layer) in s.doc.layers.iter().enumerate() {
+            if i == s.selected || !s.layer_visible(i) {
+                continue;
+            }
+            let (Some(d), Some(world)) = (
+                s.doc.exposed(i, s.frame),
+                s.doc.camera_transform(layer.node, s.frame),
+            ) else {
+                continue;
+            };
+            let rel = own.map_or(world, |inv| inv.compose(world));
+            if let Some(dr) = s.doc.drawings.get(&d) {
+                for f in &dr.fills {
+                    state.strokes.vectors.paint_fill(
+                        &painter,
+                        f,
+                        wash.gamma_multiply(0.4),
+                        view.compose(rel),
+                    );
+                }
+                for st in &dr.strokes {
+                    paint_stroke(
+                        &painter,
+                        &mut state.strokes,
+                        &s.doc.textures,
+                        st,
+                        wash,
+                        view.compose(rel),
+                    );
                 }
             }
         }
@@ -629,6 +731,48 @@ pub fn ui(
             })
             .unwrap_or_default()
     };
+    // An empty frame in the Drawing view says what to do next.
+    if drawing_only && items.is_empty() {
+        let name = s.layer_name(s.selected).to_owned();
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            format!("No drawing on {name} at this frame. Draw to start one."),
+            theme::body(),
+            theme::TEXT_SECONDARY,
+        );
+    }
+    // Undo and redo show where they landed: a soft outline around what
+    // changed, fading out.
+    if s.flash_serial != state.flash_seen.0 {
+        state.flash_seen = (s.flash_serial, ui.input(|i| i.time));
+    }
+    if let Some((drawing, lo, hi)) = s.flash {
+        let age = ui.input(|i| i.time) - state.flash_seen.1;
+        const LENGTH: f64 = 0.7;
+        if age < LENGTH {
+            if let Some((_, _, m)) = items.iter().find(|(_, d, _)| *d == drawing) {
+                let m = view.compose(*m);
+                let corners = [
+                    m.apply(lo[0], lo[1]),
+                    m.apply(hi[0], lo[1]),
+                    m.apply(hi[0], hi[1]),
+                    m.apply(lo[0], hi[1]),
+                ];
+                let r = Rect::from_points(&corners.map(|(x, y)| Pos2::new(x, y))).expand(8.0);
+                let t = (age / LENGTH) as f32;
+                let fade = 1.0 - symphony_ui::motion::Motion::Dismiss.ease(t);
+                painter.rect(
+                    r,
+                    theme::RADIUS_CONTROL,
+                    theme::ACCENT_SELECT.gamma_multiply(0.08 * fade),
+                    EStroke::new(1.5, theme::ACCENT_SELECT.gamma_multiply(0.8 * fade)),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            ui.ctx().request_repaint();
+        }
+    }
     // While the Select tool drags, the selected strokes draw through the preview.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
     // Scenes of drawings, pegs and composites (most of them) draw straight

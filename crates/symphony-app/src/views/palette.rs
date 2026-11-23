@@ -7,6 +7,7 @@ use eframe::egui::{self, Align2, Id, Pos2, Rect, Vec2};
 use symphony_ui::motion;
 use symphony_ui::{theme, widgets};
 
+use crate::keymap::{self, Action, Profile};
 use crate::search::{self, Command, Entry};
 use crate::workspace::View;
 
@@ -21,9 +22,45 @@ pub struct PaletteState {
     first_frame: bool,
     /// Closing: fading out, no longer taking input.
     pub closing: bool,
+    /// Waiting for a new shortcut for this action (from the right-click
+    /// menu), and the result's title for the prompt.
+    recording: Option<(Action, String)>,
+    /// The keys just pressed clash with other commands: ask before taking
+    /// them.
+    clash: Option<Clash>,
+    /// While a change displaces other commands' shortcuts: every shortcut
+    /// as it was before (for "Undo all"), the commands still waiting for a
+    /// new shortcut, and the shortcut the current one lost.
+    chain: Option<(Vec<keymap::Remap>, Vec<Action>, String)>,
+    /// A short note after a menu choice ("Alt+K now runs Mirror view").
+    note: Option<String>,
+}
+
+/// A shortcut that clashes, waiting on the user's choice.
+#[derive(Clone)]
+struct Clash {
+    action: Action,
+    title: String,
+    key: egui::Key,
+    mods: egui::Modifiers,
+    others: Vec<Action>,
+}
+
+/// What a result's right-click menu asked for.
+enum Pick {
+    Run,
+    Record(Action),
+    Unbind(Action),
+    Reset(Action),
+    Copy,
 }
 
 impl PaletteState {
+    /// Screenshot review: open on the shortcut prompt.
+    pub fn record_for_review(&mut self, action: Action, title: &str) {
+        self.recording = Some((action, title.to_owned()));
+    }
+
     pub fn new(at: Pos2, here: Option<View>) -> Self {
         PaletteState {
             query: String::new(),
@@ -33,6 +70,10 @@ impl PaletteState {
             scroll_offset: 0.0,
             first_frame: true,
             closing: false,
+            recording: None,
+            clash: None,
+            chain: None,
+            note: None,
         }
     }
 }
@@ -90,7 +131,69 @@ pub fn ui(
     st: &mut PaletteState,
     entries: &[Entry],
     uses: &dyn Fn(&str) -> u32,
+    profile: Profile,
 ) -> Outcome {
+    // Recording a new shortcut: the next key press (with its modifiers)
+    // becomes the shortcut, and it doesn't type or close the box. If those
+    // keys belong to other commands, ask first; taking them means picking
+    // new keys for those commands in turn, until nothing clashes.
+    if st.recording.is_some() || st.clash.is_some() {
+        let pressed = ctx.input_mut(|i| {
+            let found = i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some((*key, *modifiers)),
+                _ => None,
+            });
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            found
+        });
+        match (pressed, st.recording.clone()) {
+            // Esc while asking about a clash: don't take those keys.
+            (Some((egui::Key::Escape, _)), None) => clash_cancel(st),
+            (Some((egui::Key::Escape, _)), Some((_, title))) => {
+                st.recording = None;
+                st.note = Some(if st.chain.is_some() {
+                    format!("{title} has no shortcut now")
+                } else {
+                    "Shortcut unchanged".into()
+                });
+                next_in_chain(st, profile);
+            }
+            (Some((key, mods)), Some((action, title))) => {
+                st.recording = None;
+                let others = keymap::clashes(profile, action, key, mods);
+                if others.is_empty() {
+                    keymap::remap(profile, action, key, mods);
+                    st.note = Some(format!(
+                        "{} now runs {title}",
+                        keymap::label(profile, action)
+                    ));
+                    next_in_chain(st, profile);
+                } else {
+                    st.clash = Some(Clash {
+                        action,
+                        title,
+                        key,
+                        mods,
+                        others,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    if st.first_frame {
+        ctx.move_to_top(egui::LayerId::new(
+            egui::Order::Foreground,
+            Id::unique("symphony-search"),
+        ));
+    }
     let presence_id = presence_id();
     if st.first_frame {
         // Every opening fades in from nothing.
@@ -162,16 +265,20 @@ pub fn ui(
     let pos = Pos2::new(x, y);
 
     let mut chosen: Option<usize> = None;
+    let mut pick: Option<(usize, Pick)> = None;
     let area = egui::Area::new(Id::unique("symphony-search"))
-        // Above everything else, floating windows and overlays included.
-        .order(egui::Order::Tooltip)
+        // Above panels and floating windows (Foreground, raised when it
+        // opens), with its own right-click menus able to open above it.
+        .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .fade_in(false)
         .interactable(!st.closing)
         .show(ctx, |ui| {
             ui.multiply_opacity(opacity);
-            egui::Frame::new()
-                .fill(theme::BG_RAISED)
+            // Live blur behind the box (with interface effects on).
+            let slot = ui.painter().add(egui::Shape::Noop);
+            let frame = egui::Frame::new()
+                .fill(egui::Color32::TRANSPARENT)
                 .stroke(egui::Stroke::new(1.0, theme::LINE_STRONG))
                 .corner_radius(theme::RADIUS_FLOATING)
                 .shadow(ui.visuals().popup_shadow)
@@ -190,6 +297,56 @@ pub fn ui(
                     }
                     if edit.changed() {
                         st.selected = 0;
+                        st.note = None;
+                    }
+                    if let Some(c) = st.clash.clone() {
+                        // A clash: take the keys (and re-pick for the
+                        // others), or don't.
+                        let names: Vec<&str> = c.others.iter().map(|a| a.name()).collect();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} is already used by {}.",
+                                keymap::combo_label(c.key, c.mods),
+                                names.join(", ")
+                            ))
+                            .font(theme::dense())
+                            .color(theme::TEXT_PRIMARY),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .button(format!("Use it for {}, then re-pick for {}", c.title, names.join(", ")))
+                                .clicked()
+                            {
+                                clash_take(st, profile, &c);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                clash_cancel(st);
+                            }
+                            if st.chain.is_some() && ui.button("Undo all").clicked() {
+                                undo_chain(st);
+                            }
+                        });
+                    } else if let Some((_, title)) = &st.recording {
+                        let text = match &st.chain {
+                            Some((_, _, lost)) => format!(
+                                "Now pick a new shortcut for {title} (it lost {lost}). Esc leaves it with none."
+                            ),
+                            None => format!("Press the new shortcut for {title}. Esc cancels."),
+                        };
+                        ui.label(
+                            egui::RichText::new(text)
+                                .font(theme::dense())
+                                .color(theme::ACCENT_SELECT),
+                        );
+                        if st.chain.is_some() && ui.button("Undo all").clicked() {
+                            undo_chain(st);
+                        }
+                    } else if let Some(note) = &st.note {
+                        ui.label(
+                            egui::RichText::new(note)
+                                .font(theme::dense())
+                                .color(theme::TEXT_SECONDARY),
+                        );
                     }
                     if list_h < 0.5 {
                         return;
@@ -278,6 +435,43 @@ pub fn ui(
                                     fg2,
                                 );
                             }
+                            row.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, &e.title)
+                            });
+                            // Right-click: run it, change or remove its
+                            // shortcut, or copy its name.
+                            row.context_menu(|ui| {
+                                if ui.button("Run").clicked() {
+                                    pick = Some((i, Pick::Run));
+                                }
+                                if let Command::Action(a) = e.command {
+                                    ui.separator();
+                                    let label = if e.shortcut.is_empty() {
+                                        "Add shortcut…"
+                                    } else {
+                                        "Change shortcut…"
+                                    };
+                                    if ui.button(label).clicked() {
+                                        pick = Some((i, Pick::Record(a)));
+                                    }
+                                    if !e.shortcut.is_empty()
+                                        && ui.button("Remove shortcut").clicked()
+                                    {
+                                        pick = Some((i, Pick::Unbind(a)));
+                                    }
+                                    if keymap::is_remapped(profile, a)
+                                        && ui
+                                            .button(format!("Reset to {} default", profile.title()))
+                                            .clicked()
+                                    {
+                                        pick = Some((i, Pick::Reset(a)));
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Copy name").clicked() {
+                                    pick = Some((i, Pick::Copy));
+                                }
+                            });
                             if row.clicked() {
                                 chosen = Some(i);
                             }
@@ -299,10 +493,43 @@ pub fn ui(
                         theme::fade_strip(ui.painter(), strip, theme::BG_RAISED, false);
                     }
                 });
+            ui.painter().set(
+                slot,
+                egui::Shape::Vec(crate::backdrop::glass(
+                    ui.ctx(),
+                    frame.response.rect,
+                    f32::from(theme::RADIUS_FLOATING),
+                )),
+            );
         });
     if st.closing {
         return Outcome::Closing;
     }
+    if let Some((i, p)) = pick {
+        match p {
+            Pick::Run => chosen = Some(i),
+            Pick::Record(a) => {
+                st.recording = Some((a, results[i].title.clone()));
+                st.note = None;
+            }
+            Pick::Unbind(a) => {
+                keymap::unbind(profile, a);
+                st.note = Some(format!("{} has no shortcut now", results[i].title));
+            }
+            Pick::Reset(a) => {
+                keymap::reset(profile, a);
+                let label = keymap::label(profile, a);
+                st.note = Some(if label.is_empty() {
+                    format!("{} is back to no shortcut", results[i].title)
+                } else {
+                    format!("{} is back to {label}", results[i].title)
+                });
+            }
+            Pick::Copy => ctx.copy_text(results[i].title.clone()),
+        }
+    }
+    // Enter while recording (or deciding a clash) isn't "run".
+    let enter = enter && st.recording.is_none() && st.clash.is_none();
     if enter && !results.is_empty() {
         chosen = Some(st.selected);
     }
@@ -322,10 +549,182 @@ pub fn ui(
     Outcome::Open
 }
 
+/// Take the clashing keys: the other commands lose them, and each gets
+/// to pick new keys in turn.
+fn clash_take(st: &mut PaletteState, profile: Profile, c: &Clash) {
+    let before = st
+        .chain
+        .as_ref()
+        .map(|(b, _, _)| b.clone())
+        .unwrap_or_else(keymap::remaps);
+    let mut waiting = st.chain.take().map(|(_, w, _)| w).unwrap_or_default();
+    keymap::remap(profile, c.action, c.key, c.mods);
+    waiting.extend(c.others.iter().copied());
+    st.clash = None;
+    st.chain = Some((before, waiting, keymap::combo_label(c.key, c.mods)));
+    next_in_chain(st, profile);
+}
+
+/// Don't take those keys: try different keys for the same command.
+fn clash_cancel(st: &mut PaletteState) {
+    if let Some(c) = st.clash.take() {
+        st.recording = Some((c.action, c.title));
+        st.note = None;
+    }
+}
+
+/// The next command that lost its shortcut picks a new one, or the chain
+/// ends.
+fn next_in_chain(st: &mut PaletteState, _profile: Profile) {
+    let Some((before, mut waiting, lost)) = st.chain.take() else {
+        return;
+    };
+    if waiting.is_empty() {
+        if st.note.is_none() {
+            st.note = Some("No shortcuts clash now".into());
+        }
+        return;
+    }
+    let next = waiting.remove(0);
+    st.recording = Some((next, next.name().to_owned()));
+    st.chain = Some((before, waiting, lost));
+}
+
+/// Put every shortcut back as it was before this chain of changes.
+fn undo_chain(st: &mut PaletteState) {
+    if let Some((before, _, _)) = st.chain.take() {
+        keymap::set_remaps(before);
+    }
+    st.recording = None;
+    st.clash = None;
+    st.note = Some("All shortcut changes undone".into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::Harness;
+
+    #[test]
+    fn clashing_shortcuts_chain_until_nothing_clashes() {
+        use egui_kittest::kittest::Queryable;
+        let profile = Profile::Symphony;
+        let (mine, theirs) = (Action::SetPlayStart, Action::ZoomIn);
+        keymap::reset(profile, mine);
+        keymap::reset(profile, theirs);
+        let zoom_key = keymap::binding(profile, theirs).expect("Zoom in has a key");
+        let entries = vec![Entry::new(
+            "Playback starts here",
+            search::Kind::Action,
+            Command::Action(mine),
+            "playback.start_here",
+        )];
+        let mut state = PaletteState::new(Pos2::new(400.0, 40.0), None);
+        state.query = "playback starts".into();
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(900.0, 400.0))
+            .with_context_setup(|ctx| {
+                theme::apply(ctx);
+                theme::set_motion(ctx, false);
+            })
+            .build_ui_state(
+                |ui, (state, entries)| {
+                    super::ui(ui.ctx(), state, entries, &|_| 0, Profile::Symphony);
+                },
+                (state, entries),
+            );
+        h.run_steps(3);
+        // Ask for Zoom in's keys: it asks first.
+        h.state_mut()
+            .0
+            .record_for_review(mine, "Playback starts here");
+        h.run_steps(1);
+        h.key_press_modifiers(zoom_key.mods, zoom_key.key);
+        h.run_steps(2);
+        assert!(h.state().0.clash.is_some(), "asks before taking them");
+        assert_eq!(
+            keymap::binding(profile, theirs).map(|b| b.key),
+            Some(zoom_key.key),
+            "nothing changed yet"
+        );
+        h.get_by_label("Use it for Playback starts here, then re-pick for Zoom in")
+            .click();
+        h.run_steps(2);
+        assert_eq!(
+            keymap::binding(profile, mine).map(|b| b.key),
+            Some(zoom_key.key)
+        );
+        assert_eq!(
+            h.state().0.recording.as_ref().map(|r| r.0),
+            Some(theirs),
+            "Zoom in re-picks"
+        );
+        // F9 is free: the chain ends.
+        h.key_press(egui::Key::F9);
+        h.run_steps(2);
+        assert_eq!(
+            keymap::binding(profile, theirs).map(|b| b.key),
+            Some(egui::Key::F9)
+        );
+        assert!(h.state().0.chain.is_none() && h.state().0.recording.is_none());
+
+        // Again, then Undo all mid-chain puts everything back.
+        let before = keymap::remaps();
+        h.state_mut()
+            .0
+            .record_for_review(mine, "Playback starts here");
+        h.run_steps(1);
+        h.key_press(egui::Key::F9);
+        h.run_steps(2);
+        h.get_by_label("Use it for Playback starts here, then re-pick for Zoom in")
+            .click();
+        h.run_steps(2);
+        h.get_by_label("Undo all").click();
+        h.run_steps(2);
+        assert_eq!(keymap::remaps(), before);
+        keymap::reset(profile, mine);
+        keymap::reset(profile, theirs);
+    }
+
+    #[test]
+    fn right_click_a_result_to_give_it_a_shortcut() {
+        use egui_kittest::kittest::Queryable;
+        let profile = Profile::Symphony;
+        keymap::reset(profile, Action::MirrorView);
+        let entries = vec![Entry::new(
+            "Mirror view",
+            search::Kind::Action,
+            Command::Action(Action::MirrorView),
+            "view.mirror",
+        )];
+        let mut state = PaletteState::new(Pos2::new(400.0, 40.0), None);
+        state.query = "mirror".into();
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(800.0, 400.0))
+            .with_context_setup(|ctx| {
+                theme::apply(ctx);
+                theme::set_motion(ctx, false);
+            })
+            .build_ui_state(
+                |ui, (state, entries)| {
+                    super::ui(ui.ctx(), state, entries, &|_| 0, Profile::Symphony);
+                },
+                (state, entries),
+            );
+        harness.run_steps(3);
+        harness.get_by_label("Mirror view").click_secondary();
+        harness.run_steps(2);
+        harness.get_by_label("Add shortcut…").click();
+        harness.run_steps(2);
+        harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::K);
+        harness.run_steps(2);
+        let b = keymap::binding(profile, Action::MirrorView).expect("now bound");
+        assert_eq!(b.key, egui::Key::K);
+        assert!(b.mods.alt);
+        assert!(keymap::is_remapped(profile, Action::MirrorView));
+        keymap::reset(profile, Action::MirrorView);
+        assert!(keymap::binding(profile, Action::MirrorView).is_none());
+    }
 
     #[test]
     fn search_scrolls_and_reaches_results_beyond_the_first_page() {
@@ -349,7 +748,7 @@ mod tests {
             })
             .build_ui_state(
                 |ui, (state, entries)| {
-                    super::ui(ui.ctx(), state, entries, &|_| 0);
+                    super::ui(ui.ctx(), state, entries, &|_| 0, Profile::Harmony);
                 },
                 (state, entries),
             );

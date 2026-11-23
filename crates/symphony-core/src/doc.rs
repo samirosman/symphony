@@ -333,6 +333,25 @@ impl Scene {
         })
     }
 
+    /// Move the layer at `from` to `to` (both indices in the layer list),
+    /// keeping the Xsheet columns in the same order and the Composite
+    /// stacking in step.
+    pub(crate) fn move_layer(&mut self, from: usize, to: usize) {
+        if from >= self.layers.len() || to >= self.layers.len() || from == to {
+            return;
+        }
+        let layer = self.layers.remove(from);
+        self.layers.insert(to, layer);
+        let order: Vec<Id> = self.layers.iter().map(|l| l.column).collect();
+        self.xsheet.columns.sort_by_key(|c| {
+            order
+                .iter()
+                .position(|id| *id == c.id)
+                .unwrap_or(usize::MAX)
+        });
+        self.rewire();
+    }
+
     /// Composite inputs follow layer order (port 0 = front).
     pub fn rewire(&mut self) {
         if self.custom_wiring {

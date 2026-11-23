@@ -61,6 +61,13 @@ pub enum Action {
     AddLayer,
     ToggleOnionSkin,
     ResetView,
+    /// Mirror the view left to right (the artwork isn't changed).
+    MirrorView,
+    /// Playback range: start here, end here, the whole scene, loop on/off.
+    SetPlayStart,
+    SetPlayEnd,
+    ClearPlayRange,
+    ToggleLoop,
     ZoomIn,
     ZoomOut,
     RotateCw,
@@ -109,7 +116,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 72] = [
+    pub const ALL: [Action; 77] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -137,6 +144,11 @@ impl Action {
         Action::AddLayer,
         Action::ToggleOnionSkin,
         Action::ResetView,
+        Action::MirrorView,
+        Action::SetPlayStart,
+        Action::SetPlayEnd,
+        Action::ClearPlayRange,
+        Action::ToggleLoop,
         Action::ZoomIn,
         Action::ZoomOut,
         Action::RotateCw,
@@ -214,6 +226,11 @@ impl Action {
             Action::AddLayer => "layer.add",
             Action::ToggleOnionSkin => "view.onion_skin",
             Action::ResetView => "view.reset",
+            Action::MirrorView => "view.mirror",
+            Action::SetPlayStart => "playback.start_here",
+            Action::SetPlayEnd => "playback.end_here",
+            Action::ClearPlayRange => "playback.whole_scene",
+            Action::ToggleLoop => "playback.loop",
             Action::ZoomIn => "view.zoom_in",
             Action::ZoomOut => "view.zoom_out",
             Action::RotateCw => "view.rotate_cw",
@@ -291,6 +308,11 @@ impl Action {
             Action::AddLayer => "Add drawing layer",
             Action::ToggleOnionSkin => "Onion skin",
             Action::ResetView => "Reset view",
+            Action::MirrorView => "Mirror view",
+            Action::SetPlayStart => "Playback starts here",
+            Action::SetPlayEnd => "Playback ends here",
+            Action::ClearPlayRange => "Play the whole scene",
+            Action::ToggleLoop => "Loop playback",
             Action::ZoomIn => "Zoom in",
             Action::ZoomOut => "Zoom out",
             Action::RotateCw => "Rotate view CW",
@@ -408,6 +430,11 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::AddLayer => b(Key::R, CMD),
         Action::ToggleOnionSkin => b(Key::O, ALT),
         Action::ResetView => b(Key::M, SHIFT),
+        // Not bound until checked against Harmony 27.1's shortcut list.
+        Action::MirrorView => None,
+        Action::SetPlayStart | Action::SetPlayEnd | Action::ClearPlayRange | Action::ToggleLoop => {
+            None
+        }
         Action::ZoomIn => b(Key::Num2, NONE),
         Action::ZoomOut => b(Key::Num1, NONE),
         Action::ResetZoom => None,
@@ -472,9 +499,177 @@ fn symphony(action: Action) -> Option<Binding> {
 }
 
 pub fn binding(profile: Profile, action: Action) -> Option<Binding> {
+    if let Some(custom) = custom_binding(profile, action) {
+        return custom;
+    }
+    default_binding(profile, action)
+}
+
+/// The profile's own binding, ignoring anything the user remapped.
+pub fn default_binding(profile: Profile, action: Action) -> Option<Binding> {
     match profile {
         Profile::Harmony => harmony(action),
         Profile::Symphony => symphony(action),
+    }
+}
+
+// ---- Remapping ---------------------------------------------------------
+//
+// Shortcuts the user changed (from search's right-click menu), per profile,
+// on top of the profile's defaults. Saved with the app's settings.
+
+/// One remapped shortcut, as saved: profile, action id, and the key name
+/// plus modifiers (None = no shortcut).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remap {
+    pub profile: Profile,
+    pub action: String,
+    pub key: Option<(String, Mods)>,
+}
+
+/// Modifiers as saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mods {
+    pub alt: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub command: bool,
+}
+
+impl Mods {
+    fn of(m: Modifiers) -> Self {
+        Mods {
+            alt: m.alt,
+            ctrl: m.ctrl && !m.command,
+            shift: m.shift,
+            command: m.command,
+        }
+    }
+
+    fn to_egui(self) -> Modifiers {
+        let mut m = Modifiers::NONE;
+        if self.alt {
+            m = m.plus(Modifiers::ALT);
+        }
+        if self.ctrl {
+            m = m.plus(Modifiers::CTRL);
+        }
+        if self.shift {
+            m = m.plus(Modifiers::SHIFT);
+        }
+        if self.command {
+            m = m.plus(Modifiers::COMMAND);
+        }
+        m
+    }
+}
+
+static REMAPS: std::sync::RwLock<Vec<Remap>> = std::sync::RwLock::new(Vec::new());
+
+fn custom_binding(profile: Profile, action: Action) -> Option<Option<Binding>> {
+    let remaps = REMAPS.read().ok()?;
+    let r = remaps
+        .iter()
+        .find(|r| r.profile == profile && r.action == action.id())?;
+    Some(r.key.as_ref().and_then(|(name, mods)| {
+        Some(Binding {
+            key: Key::from_name(name)?,
+            mods: mods.to_egui(),
+            verified: false,
+        })
+    }))
+}
+
+/// Every remapped shortcut, to save.
+pub fn remaps() -> Vec<Remap> {
+    REMAPS.read().map(|r| r.clone()).unwrap_or_default()
+}
+
+/// Load saved remaps (at start-up).
+pub fn set_remaps(list: Vec<Remap>) {
+    if let Ok(mut r) = REMAPS.write() {
+        *r = list;
+    }
+}
+
+/// Has the user changed this action's shortcut in this profile?
+pub fn is_remapped(profile: Profile, action: Action) -> bool {
+    custom_binding(profile, action).is_some()
+}
+
+fn put(profile: Profile, action: Action, key: Option<(String, Mods)>) {
+    if let Ok(mut r) = REMAPS.write() {
+        r.retain(|x| !(x.profile == profile && x.action == action.id()));
+        r.push(Remap {
+            profile,
+            action: action.id().to_owned(),
+            key,
+        });
+    }
+}
+
+/// Which other actions already use `key` + `mods` in `profile` (nothing
+/// changes).
+pub fn clashes(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec<Action> {
+    let wanted = (key, Mods::of(mods));
+    Action::ALL
+        .into_iter()
+        .filter(|a| *a != action)
+        .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
+        .collect()
+}
+
+/// A readable name for a key combination ("Option+K"), written the same
+/// way as shortcut labels.
+pub fn combo_label(key: Key, mods: Modifiers) -> String {
+    let mac = cfg!(target_os = "macos");
+    let mut parts: Vec<&str> = Vec::new();
+    if mods.command || mods.ctrl || mods.mac_cmd {
+        parts.push(if mac { "Cmd" } else { "Ctrl" });
+    }
+    if mods.alt {
+        parts.push(if mac { "Option" } else { "Alt" });
+    }
+    if mods.shift {
+        parts.push("Shift");
+    }
+    let mut s = parts.join("+");
+    if !s.is_empty() {
+        s.push('+');
+    }
+    s.push_str(key.symbol_or_name());
+    s
+}
+
+/// Give `action` the shortcut `key` + `mods` in `profile`. Any other action
+/// using that shortcut loses it, and is returned so the caller can say so.
+pub fn remap(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec<Action> {
+    let wanted = (key, Mods::of(mods));
+    let taken: Vec<Action> = Action::ALL
+        .into_iter()
+        .filter(|a| *a != action)
+        .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
+        .collect();
+    for other in &taken {
+        put(profile, *other, None);
+    }
+    put(
+        profile,
+        action,
+        Some((key.name().to_owned(), Mods::of(mods))),
+    );
+    taken
+}
+
+/// Remove `action`'s shortcut in `profile`.
+pub fn unbind(profile: Profile, action: Action) {
+    put(profile, action, None);
+}
+
+/// Back to the profile's own shortcut.
+pub fn reset(profile: Profile, action: Action) {
+    if let Ok(mut r) = REMAPS.write() {
+        r.retain(|x| !(x.profile == profile && x.action == action.id()));
     }
 }
 

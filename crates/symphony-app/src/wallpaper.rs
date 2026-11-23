@@ -295,6 +295,10 @@ impl Wallpaper {
 
     /// Sample the same wallpaper in window coordinates, clipped to rounded glass.
     pub fn glass(&self, rect: Rect) -> Option<egui::Shape> {
+        // Interface effects off (slower computers): plain tint, no blur.
+        if !theme::effects() {
+            return None;
+        }
         self.sample(
             rect,
             f32::from(theme::GLASS_RADIUS),
@@ -306,7 +310,7 @@ impl Wallpaper {
     /// Fade both the cached backdrop sample and the chrome tint into the workspace.
     pub fn chrome(&self, rect: Rect, side: ChromeSide) -> egui::Shape {
         let mut layers = Vec::new();
-        if !self.textures.is_empty() && self.backdrop.is_positive() {
+        if theme::effects() && !self.textures.is_empty() && self.backdrop.is_positive() {
             // The bars use the strongest cached blur, so their edge reads
             // soft; during a Camera crossfade, both frames.
             let fade = self.fade();
@@ -335,7 +339,7 @@ impl Wallpaper {
 
     /// How far the Camera crossfade has gone, 0..=1 (1 when not fading).
     fn fade(&self) -> f32 {
-        if self.previous.is_empty() {
+        if self.previous.is_empty() || !theme::effects() {
             return 1.0;
         }
         let t = ((self.now - self.fade_start) / CAMERA_FADE).clamp(0.0, 1.0) as f32;

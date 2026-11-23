@@ -250,6 +250,10 @@ continues.
 - ⬜ Backdrops in the Node view
 
 ### 4.7 Deformation
+- ⬜ **Mesh Warp**. Add a non-destructive grid for a drawing or group. Show
+  draggable points in Camera view when the node is selected, with keyframes
+  for point positions. Start with a simple grid and tuck resolution controls
+  into Node Properties.
 - ⬜ Bone deformer (bias, regions of influence, chains)
 - ⬜ Game Bone deformer (game export, no bias or regions)
 - ⬜ Curve deformer (Bézier chain)
@@ -279,7 +283,12 @@ Every effect is a node in the graph.
 - ⬜ Transparency
 - ⬜ Cutter and Inverse Cutter (matte cutting)
 - ⬜ Matte Composite, Matte Resize
-- ⬜ Glare, Refract, Turbulence *(verify)*
+- ⬜ Glare, Refract *(verify)*
+- ⬜ **Turbulence**. Use one noise generator with two modes. Distort warps
+  connected artwork. Generate Noise outputs a pattern for a texture or
+  matte without an image input. Share Scale, Evolution, and Seed, and show
+  mode-specific controls where relevant. Let Tab Search open the appropriate
+  mode for “Turbulence” or “Turbulent Noise”.
 - ⬜ Motion blur
 - ⬜ Particle system (generators, forces, baking)
 - ⬜ Line Art / Colour Art separation in effects

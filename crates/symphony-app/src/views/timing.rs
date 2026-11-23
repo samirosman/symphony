@@ -33,6 +33,12 @@ pub struct TimingState {
     sound_drag: Option<SoundDrag>,
     /// The Sound editor, when open.
     pub sound_editor: Option<SoundEditor>,
+    /// A layer being dragged to a new place in the stack (its row).
+    layer_drag: Option<usize>,
+    /// Layer order last frame (columns), and layers that just arrived or
+    /// moved with when, so their row glows briefly.
+    last_order: Vec<symphony_core::id::Id>,
+    arrived: Vec<(symphony_core::id::Id, f64)>,
 }
 
 /// Which part of a sound block a drag holds.
@@ -656,7 +662,7 @@ pub fn timeline(
     let track_count = rows + node_tracks.len();
     let width = HEAD + len as f32 * cw + 16.0;
 
-    egui::ScrollArea::both()
+    let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let size = Vec2::new(
@@ -1007,7 +1013,68 @@ pub fn timeline(
                 }
             }
 
-            let cx = frame_x(s.frame.min(len)) + cw / 2.0;
+            // A layer that was just added or moved glows briefly, so the
+            // eye finds it instead of rows simply jumping.
+            let now = ui.input(|i| i.time);
+            let order: Vec<symphony_core::id::Id> = s.doc.layers.iter().map(|l| l.column).collect();
+            if !t.last_order.is_empty() && order != t.last_order {
+                for (i, id) in order.iter().enumerate() {
+                    if t.last_order.get(i) != Some(id) && !t.last_order.is_empty() {
+                        let moved_or_new = t.last_order.iter().position(|c| c == id) != Some(i);
+                        if moved_or_new && s.selected == i {
+                            t.arrived.retain(|(c, _)| c != id);
+                            t.arrived.push((*id, now));
+                        }
+                    }
+                }
+            }
+            t.last_order = order.clone();
+            t.arrived.retain(|(_, at)| now - at < 0.8);
+            for (id, at) in &t.arrived {
+                if let Some(row) = order.iter().position(|c| c == id) {
+                    let k = 1.0 - ((now - at) / 0.8) as f32;
+                    let y = o.y + RULER + row as f32 * rh;
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(o.x + 4.0, y + 1.0),
+                            Vec2::new(width - 8.0, rh - 2.0),
+                        ),
+                        theme::RADIUS_CONTROL,
+                        theme::ACCENT_SELECT.gamma_multiply(0.22 * k * k),
+                    );
+                    ui.ctx().request_repaint();
+                }
+            }
+            // The playback range, as a band along the ruler.
+            if let Some((a, b)) = s.play_range {
+                let (a, b) = (a.clamp(1, len), b.clamp(1, len));
+                let band = Rect::from_min_max(
+                    Pos2::new(frame_x(a.min(b)), o.y + 2.0),
+                    Pos2::new(frame_x(a.max(b)) + cw, o.y + RULER - 2.0),
+                );
+                painter.rect_filled(
+                    band,
+                    theme::RADIUS_CONTROL,
+                    theme::ACCENT_TIME.gamma_multiply(0.16),
+                );
+            }
+            // The playhead glides to a clicked frame (Select motion); while
+            // playing it stays exactly on the frame.
+            let target = s.frame.min(len) as f32;
+            let shown = if s.playing {
+                target
+            } else {
+                symphony_ui::motion::value(
+                    ui.ctx(),
+                    egui::Id::unique("timeline-playhead"),
+                    target,
+                    symphony_ui::motion::Motion::Select,
+                )
+            };
+            let whole = (shown.floor() as u32).clamp(1, len);
+            let cx = frame_x(whole)
+                + (frame_x((whole + 1).min(len)) - frame_x(whole)) * shown.fract()
+                + cw / 2.0;
             painter.line_segment(
                 [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
                 Stroke::new(1.5, theme::ACCENT_TIME),
@@ -1018,9 +1085,41 @@ pub fn timeline(
                 let r = ((p.y - o.y - RULER) / rh).floor();
                 (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
             };
+            // Drag a layer by its name to move it in the stack; a line
+            // shows where it will land.
+            if resp.drag_started() {
+                if let (Some(p), Some(row)) = (
+                    resp.interact_pointer_pos(),
+                    resp.interact_pointer_pos().and_then(row_at),
+                ) {
+                    let x = p.x - o.x;
+                    // Layer rows only: sound rows sit below the layers.
+                    if row < layers && (32.0..HEAD - PARAM_W).contains(&x) {
+                        t.layer_drag = Some(row);
+                    }
+                }
+            }
+            if let (Some(from), Some(p)) = (t.layer_drag, resp.interact_pointer_pos()) {
+                let gap = (((p.y - o.y - RULER) / rh) + 0.5)
+                    .floor()
+                    .clamp(0.0, rows as f32) as usize;
+                let y = o.y + RULER + gap as f32 * rh;
+                painter.line_segment(
+                    [Pos2::new(o.x + 8.0, y), Pos2::new(o.x + width - 8.0, y)],
+                    Stroke::new(2.0, theme::ACCENT_SELECT),
+                );
+                if resp.drag_stopped() {
+                    t.layer_drag = None;
+                    let to = if gap > from { gap - 1 } else { gap };
+                    s.move_layer(from, to.min(layers.saturating_sub(1)));
+                }
+            }
+            if !resp.dragged() && !resp.drag_stopped() {
+                t.layer_drag = None;
+            }
             // A press on a sound block leaves the playhead alone until it
             // turns out to be a click, so a drag never moves it.
-            let scrub = !dragging_sound && (!on_block || resp.clicked());
+            let scrub = !dragging_sound && (!on_block || resp.clicked()) && t.layer_drag.is_none();
             if let Some(p) = resp.interact_pointer_pos().filter(|_| scrub) {
                 let rel = p - o;
                 if rel.x >= HEAD {
@@ -1100,6 +1199,18 @@ pub fn timeline(
                 );
             }
         });
+    // More tracks below (or above): a soft fade at that edge says so.
+    let view = out.inner_rect;
+    let (offset, content) = (out.state.clamped_offset().y, out.content_size.y);
+    let fade = 24.0_f32.min(view.height() * 0.25);
+    if offset + view.height() < content - 1.0 {
+        theme::fade_strip(
+            ui.painter(),
+            Rect::from_min_max(Pos2::new(view.left(), view.bottom() - fade), view.max),
+            theme::GLASS_PANEL,
+            false,
+        );
+    }
 }
 
 pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {

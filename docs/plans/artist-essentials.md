@@ -135,6 +135,15 @@ come back, compare side by side with each app and check:
 - Then Harmony's own Brush Properties tabs (Tip, Transparency, Dual Tip,
   Paper Texture) as the target UI.
 
+### To do (Tristan, 2026-11-23): one Sketch V2 brush better, one worse
+
+After the per-dab texture work (1b35114), Tristan re-imported Sketch V2:
+one brush looks better and another looks worse. Next step: get a
+side-by-side screenshot of the worse one (Symphony and Krita), find which
+setting differs, and compare against Krita 5.0's source (as for the
+texture modes). Still unhandled: masking brush, smudge/blending, scatter,
+ratio, fuzzy rotation, tilt.
+
 ## Who does what
 
 - **Claude**: section 1 (presets, tips, joins, stencils), then section 2.

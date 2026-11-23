@@ -4,6 +4,7 @@
 //! (ENGINEERING E4.3). Saving and autosave run off the main thread (E5.2).
 
 mod app_icon;
+mod backdrop;
 mod brush_import;
 mod codec;
 mod images;
@@ -70,7 +71,8 @@ impl PrefsPage {
             PrefsPage::Canvas => "Canvas",
             PrefsPage::Workflow => "Workflow and shortcuts",
             PrefsPage::Video => "Video",
-            PrefsPage::Ai => "AI",
+            // The page promises no generative AI; "AI" alone read like a feature.
+            PrefsPage::Ai => "AI-free",
         }
     }
 }
@@ -134,10 +136,16 @@ struct Saved {
     wallpaper_blur: u8,
     #[serde(default = "yes")]
     interface_animations: bool,
+    /// Blur, glass and shadows (off on slower computers).
+    #[serde(default = "yes")]
+    interface_effects: bool,
     workspace: Workspace,
     layouts: Vec<(Workspace, DockState<View>)>,
     #[serde(default)]
     profile: Profile,
+    /// Shortcuts remapped from search, per profile.
+    #[serde(default)]
+    remaps: Vec<keymap::Remap>,
     /// DESIGN D16.2: on by default.
     #[serde(default = "yes")]
     use_no_ai: bool,
@@ -176,7 +184,8 @@ fn preferences_window(ctx: &egui::Context, id: egui::Id) -> egui::Window<'static
         .default_pos(ctx.content_rect().center())
         .frame(
             egui::Frame::window(&ctx.global_style())
-                .fill(theme::GLASS_PANEL)
+                // The glass (live blur and tint) is painted underneath.
+                .fill(egui::Color32::TRANSPARENT)
                 .stroke(egui::Stroke::NONE)
                 .corner_radius(theme::GLASS_RADIUS),
         )
@@ -230,10 +239,21 @@ struct SymphonyApp {
     save_dialog: Option<(save_dialog::SaveDialog, Option<Pending>)>,
     inbetween_count: u32,
     welcome: Option<welcome::Welcome>,
+    /// The status notice on show and when it appeared, so notices fade in,
+    /// hold a moment and fade out instead of staying forever.
+    notice_shown: Option<(String, f64)>,
+    /// Autosave was running last frame (to say "Autosaved" when it ends).
+    was_autosaving: bool,
+    /// Last frame's tool and size, and the hint shown beside the cursor
+    /// when either changes over the canvas: text and when it appeared.
+    last_tool_state: (Tool, f32),
+    cursor_hint: Option<(String, f64)>,
     recent_projects: Vec<PathBuf>,
     recovery_scan: Option<Receiver<Vec<RecoveredScene>>>,
     wallpaper: wallpaper::Wallpaper,
     interface_animations: bool,
+    /// Blur, glass and shadows; off also turns animations off.
+    interface_effects: bool,
     s: Session,
     /// Brush and Pencil presets, kept in preferences like Harmony's.
     presets: presets::Presets,
@@ -590,7 +610,9 @@ impl SymphonyApp {
             .map(|s| s.recent_projects.clone())
             .unwrap_or_default();
         let interface_animations = saved.as_ref().is_none_or(|s| s.interface_animations);
-        theme::set_motion(&cc.egui_ctx, interface_animations);
+        let interface_effects = saved.as_ref().is_none_or(|s| s.interface_effects);
+        theme::set_effects(&cc.egui_ctx, interface_effects);
+        theme::set_motion(&cc.egui_ctx, interface_animations && interface_effects);
         let brush_size_cursor = saved.as_ref().is_none_or(|s| s.brush_size_cursor);
         let overlay_underlay = saved.as_ref().is_some_and(|s| s.overlay_underlay);
         let size_follows_zoom = saved.as_ref().is_some_and(|s| s.size_follows_zoom);
@@ -608,6 +630,7 @@ impl SymphonyApp {
         let tool_dock = saved
             .as_ref()
             .map_or(ToolDock::Left, |saved| saved.tool_dock);
+        keymap::set_remaps(saved.as_ref().map(|s| s.remaps.clone()).unwrap_or_default());
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
                 s.workspace,
@@ -671,6 +694,15 @@ impl SymphonyApp {
                     }
                 }
             }
+            // SYMPHONY_SHOT_RANGE: a playback range (frames 10 to 30).
+            if std::env::var_os("SYMPHONY_SHOT_RANGE").is_some() {
+                s.play_range = Some((10, 30));
+            }
+            // SYMPHONY_SHOT_LIGHT: onion skin and light table on, for review.
+            if std::env::var_os("SYMPHONY_SHOT_LIGHT").is_some() {
+                s.onion.on = true;
+                s.light_table = true;
+            }
             // SYMPHONY_SHOT_TOOL=Brush|Pencil: review that tool's properties.
             match std::env::var("SYMPHONY_SHOT_TOOL").as_deref() {
                 Ok("Brush") => s.tool = Tool::Brush,
@@ -716,6 +748,7 @@ impl SymphonyApp {
             recovery_scan,
             wallpaper: wallpaper::Wallpaper::new(&cc.egui_ctx, wallpaper_choice, wallpaper_blur),
             interface_animations,
+            interface_effects,
             s,
             workspace,
             layouts,
@@ -724,7 +757,12 @@ impl SymphonyApp {
             pen,
             pen_backlog: Vec::new(),
             pen_buttons: 0,
-            camera: Default::default(),
+            camera: {
+                // SYMPHONY_SHOT_MIRROR: the Camera view mirrored, for review.
+                let mut c = camera::CanvasState::default();
+                c.mirrored = std::env::var_os("SYMPHONY_SHOT_MIRROR").is_some();
+                c
+            },
             drawing: Default::default(),
             function: Default::default(),
             palette: None,
@@ -747,6 +785,10 @@ impl SymphonyApp {
             show_icon_sheet: std::env::var_os("SYMPHONY_SHOT_ICONS").is_some(),
             last_time: None,
             frame_clock: 0.0,
+            notice_shown: None,
+            was_autosaving: false,
+            last_tool_state: (Tool::Brush, 0.0),
+            cursor_hint: None,
             shot,
             recovery,
             recovered: Vec::new(),
@@ -1161,13 +1203,17 @@ impl SymphonyApp {
         }
         self.frame_clock += dt;
         let step = 1.0 / self.s.doc.settings.fps.max(1.0) as f64;
+        let len = self.s.length().max(1);
         while self.frame_clock >= step {
             self.frame_clock -= step;
-            self.s.frame = if self.s.frame >= self.s.length() {
-                1
-            } else {
-                self.s.frame + 1
-            };
+            match next_play_frame(self.s.frame, self.s.play_range, len, self.s.loop_playback) {
+                Some(f) => self.s.frame = f,
+                None => {
+                    self.s.playing = false;
+                    self.frame_clock = 0.0;
+                    break;
+                }
+            }
         }
         ctx.request_repaint();
     }
@@ -1185,7 +1231,8 @@ impl SymphonyApp {
             | Action::ResetZoom
             | Action::ResetRotation
             | Action::ResetPan
-            | Action::ResetView => {
+            | Action::ResetView
+            | Action::MirrorView => {
                 self.camera.apply(action);
                 self.drawing.apply(action);
             }
@@ -1250,6 +1297,28 @@ impl SymphonyApp {
                     Action::PlayPause => s.playing = !s.playing,
                     Action::EnableSound => self.sound.toggle_enabled(),
                     Action::EnableSoundScrubbing => self.sound.toggle_scrubbing(),
+                    Action::SetPlayStart => {
+                        let end = s.play_range.map_or(s.length(), |r| r.1);
+                        s.play_range = Some((s.frame, end.max(s.frame)));
+                        s.note(format!("Playback starts at frame {}", s.frame));
+                    }
+                    Action::SetPlayEnd => {
+                        let start = s.play_range.map_or(1, |r| r.0);
+                        s.play_range = Some((start.min(s.frame), s.frame));
+                        s.note(format!("Playback ends at frame {}", s.frame));
+                    }
+                    Action::ClearPlayRange => {
+                        s.play_range = None;
+                        s.note("Playing the whole scene");
+                    }
+                    Action::ToggleLoop => {
+                        s.loop_playback = !s.loop_playback;
+                        s.note(if s.loop_playback {
+                            "Loop on"
+                        } else {
+                            "Loop off"
+                        });
+                    }
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
                     Action::CreateEmptyDrawing => s.new_drawing(),
@@ -1528,6 +1597,11 @@ impl SymphonyApp {
         });
         ui.menu_button("Play", |ui| {
             self.menu_action(ui, Action::PlayPause);
+            ui.separator();
+            self.menu_action(ui, Action::SetPlayStart);
+            self.menu_action(ui, Action::SetPlayEnd);
+            self.menu_action(ui, Action::ClearPlayRange);
+            self.menu_action(ui, Action::ToggleLoop);
             self.menu_action(ui, Action::PrevFrame);
             self.menu_action(ui, Action::NextFrame);
             self.menu_action(ui, Action::FirstFrame);
@@ -1552,6 +1626,7 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ResetRotation);
             self.menu_action(ui, Action::ResetPan);
             self.menu_action(ui, Action::ResetView);
+            self.menu_action(ui, Action::MirrorView);
             ui.separator();
             if ui.button("Arrange Nodes").clicked() {
                 views::node::arrange(&mut self.s, &mut self.node_view);
@@ -1780,6 +1855,83 @@ impl SymphonyApp {
         theme::glass_rim(ui.painter(), frame.response.rect);
     }
 
+    /// The current tool and its size (0 for tools without one).
+    fn tool_state(&self) -> (Tool, f32) {
+        let size = match self.s.tool {
+            Tool::Brush => self.s.brush.max_width,
+            Tool::Pencil => self.s.pencil.max_width,
+            Tool::Eraser => self.s.eraser.max_width,
+            _ => 0.0,
+        };
+        (self.s.tool, size)
+    }
+
+    /// Switching tool or changing its size while over the canvas shows the
+    /// tool's name or the new size beside the cursor for a moment: your
+    /// eyes are on the drawing, not the toolbar.
+    fn cursor_feedback(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let state = self.tool_state();
+        let (old_tool, old_size) = self.last_tool_state;
+        self.last_tool_state = state;
+        // Nothing to compare with on the first frames.
+        let over_canvas =
+            now > 0.5 && matches!(self.hovered_view, Some(View::Camera | View::Drawing));
+        if over_canvas && state.0 != old_tool {
+            let name = keymap::Action::ALL
+                .into_iter()
+                .find(|a| tool_action(state.0) == *a)
+                .map_or("Tool", |a| a.name());
+            let name = if self.s.pen_modes && matches!(state.0, Tool::Brush | Tool::Pencil) {
+                format!("Pen: {name}")
+            } else {
+                name.to_owned()
+            };
+            self.cursor_hint = Some((name, now));
+        } else if over_canvas
+            && state.0 == old_tool
+            && state.1 > 0.0
+            && (state.1 - old_size).abs() > 0.01
+        {
+            self.cursor_hint = Some((format!("Size {:.1}", state.1), now));
+        }
+        let Some((text, since)) = self.cursor_hint.clone() else {
+            return;
+        };
+        const HOLD: f64 = 0.8;
+        let age = now - since;
+        if age > HOLD + 0.25 {
+            self.cursor_hint = None;
+            return;
+        }
+        ctx.request_repaint();
+        use symphony_ui::motion::Motion;
+        let opacity = Motion::Appear.ease((age / Motion::Appear.seconds()) as f32)
+            * (1.0 - Motion::Dismiss.ease(((age - HOLD) / 0.25).clamp(0.0, 1.0) as f32));
+        let Some(p) = ctx.pointer_hover_pos() else {
+            return;
+        };
+        egui::Area::new(egui::Id::unique("symphony-cursor-hint"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(p + egui::vec2(18.0, 14.0))
+            .interactable(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
+                egui::Frame::new()
+                    .fill(theme::GLASS_FLOATING)
+                    .corner_radius(theme::RADIUS_CONTROL)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(text)
+                                .font(theme::dense())
+                                .color(theme::TEXT_PRIMARY),
+                        );
+                    });
+            });
+    }
+
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
         const GROUPS: [&[Tool]; 4] = [
             &[Tool::Select, Tool::Transform],
@@ -1889,6 +2041,36 @@ impl SymphonyApp {
                 dense(ui, "Auto-key".into(), theme::ACCENT_TIME);
             }
             let notice = s.notice.clone();
+            // Notices fade in (Appear), hold, then fade out (Dismiss) and
+            // clear, so the bar only ever shows something new.
+            const HOLD: f64 = 3.5;
+            let now = ui.input(|i| i.time);
+            let notice = match (&notice, &self.notice_shown) {
+                (Some(n), Some((shown, _))) if n == shown => notice,
+                (Some(n), _) => {
+                    self.notice_shown = Some((n.clone(), now));
+                    notice
+                }
+                (None, _) => {
+                    self.notice_shown = None;
+                    None
+                }
+            };
+            let notice_opacity = self.notice_shown.as_ref().map_or(1.0, |(_, since)| {
+                use symphony_ui::motion::Motion;
+                let age = now - since;
+                let fade_in = Motion::Appear.ease((age / Motion::Appear.seconds()) as f32);
+                let out = ((age - HOLD) / (Motion::Dismiss.seconds() * 3.0)).clamp(0.0, 1.0) as f32;
+                if age < HOLD + Motion::Dismiss.seconds() * 3.0 {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(30));
+                }
+                (fade_in * (1.0 - Motion::Dismiss.ease(out))).clamp(0.0, 1.0)
+            });
+            let expired = self
+                .notice_shown
+                .as_ref()
+                .is_some_and(|(_, since)| now - since > HOLD + 0.4);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if device.is_some_and(|pen| pen.in_proximity) {
                     dense(ui, "Pen in range".into(), theme::STATE_OK);
@@ -1949,8 +2131,9 @@ impl SymphonyApp {
                 }
                 // The last notice gets whatever room is left, cut short
                 // with an ellipsis (full text on hover), never overlapping.
-                if let Some(n) = notice {
+                if let Some(n) = notice.filter(|_| !expired) {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.multiply_opacity(notice_opacity);
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&n)
@@ -2261,7 +2444,7 @@ impl SymphonyApp {
             .words("sound audio wav music dialogue"),
         );
         // Settings.
-        let settings: [(&str, Setting, &str); 9] = [
+        let settings: [(&str, Setting, &str); 10] = [
             (
                 "Brush size cursor",
                 Setting::BrushSizeCursor,
@@ -2281,6 +2464,11 @@ impl SymphonyApp {
                 "Interface animations",
                 Setting::InterfaceAnimations,
                 "motion reduce",
+            ),
+            (
+                "Interface effects (blur, glass, shadows)",
+                Setting::InterfaceEffects,
+                "slow computer performance fast lighter low end blur glass shadow",
             ),
             ("Use no AI", Setting::UseNoAi, "ai machine learning assist"),
             (
@@ -2429,9 +2617,13 @@ impl SymphonyApp {
         };
         let entries = self.search_entries();
         let uses = self.search_uses.clone();
-        match views::palette::ui(ctx, &mut st, &entries, &|k| {
-            uses.get(k).copied().unwrap_or(0)
-        }) {
+        match views::palette::ui(
+            ctx,
+            &mut st,
+            &entries,
+            &|k| uses.get(k).copied().unwrap_or(0),
+            self.profile,
+        ) {
             views::palette::Outcome::Open | views::palette::Outcome::Closing => {
                 self.palette = Some(st)
             }
@@ -2477,9 +2669,14 @@ impl SymphonyApp {
                         "Overlay and Underlay Arts",
                         notice,
                     ),
+                    Setting::InterfaceEffects => {
+                        self.interface_effects = !self.interface_effects;
+                        theme::set_effects(ctx, self.interface_effects);
+                        theme::set_motion(ctx, self.interface_animations && self.interface_effects);
+                    }
                     Setting::InterfaceAnimations => {
                         self.interface_animations = !self.interface_animations;
-                        theme::set_motion(ctx, self.interface_animations);
+                        theme::set_motion(ctx, self.interface_animations && self.interface_effects);
                     }
                     Setting::UseNoAi => self.use_no_ai = !self.use_no_ai,
                     Setting::ProfileHarmony => self.profile = Profile::Harmony,
@@ -2660,8 +2857,8 @@ impl SymphonyApp {
                 .fade_in(false)
                 .show(ctx, |ui| {
                     ui.multiply_opacity(shown);
-                    egui::Frame::new()
-                        .fill(theme::GLASS_PANEL)
+                    let slot = ui.painter().add(egui::Shape::Noop);
+                    let panel = egui::Frame::new()
                         .stroke(egui::Stroke::new(1.0, theme::ACCENT_SELECT.gamma_multiply(0.55)))
                         .corner_radius(theme::GLASS_RADIUS)
                         .shadow(ui.visuals().popup_shadow)
@@ -2680,6 +2877,14 @@ impl SymphonyApp {
                                 .color(theme::TEXT_SECONDARY),
                             );
                         });
+                    ui.painter().set(
+                        slot,
+                        egui::Shape::Vec(backdrop::glass(
+                            ui.ctx(),
+                            panel.response.rect,
+                            f32::from(theme::GLASS_RADIUS),
+                        )),
+                    );
                 });
         }
         let paths: Vec<std::path::PathBuf> = dropped
@@ -3107,6 +3312,37 @@ impl egui_dock::TabViewer for Viewer<'_> {
     }
 }
 
+/// The frame after `frame` during playback: inside the playback range
+/// (or the whole scene), back to its start at the end when looping, or
+/// None to stop there.
+fn next_play_frame(frame: u32, range: Option<(u32, u32)>, len: u32, looping: bool) -> Option<u32> {
+    let len = len.max(1);
+    let (a, b) = range.map_or((1, len), |(a, b)| (a.clamp(1, len), b.clamp(1, len)));
+    let (first, last) = (a.min(b), a.max(b));
+    if frame < first || frame > last {
+        Some(first)
+    } else if frame == last {
+        looping.then_some(first)
+    } else {
+        Some(frame + 1)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn playback_stays_in_its_range() {
+    // Whole scene, looping.
+    assert_eq!(next_play_frame(47, None, 48, true), Some(48));
+    assert_eq!(next_play_frame(48, None, 48, true), Some(1));
+    // A range: loops inside it, and jumps into it from outside.
+    assert_eq!(next_play_frame(20, Some((10, 20)), 48, true), Some(10));
+    assert_eq!(next_play_frame(3, Some((10, 20)), 48, true), Some(10));
+    // Loop off: stops at the end.
+    assert_eq!(next_play_frame(20, Some((10, 20)), 48, false), None);
+    // A range past the end is held to the scene.
+    assert_eq!(next_play_frame(48, Some((40, 90)), 48, true), Some(40));
+}
+
 /// SYMPHONY_PERF=1: add time spent in a named part of the frame.
 fn perf_span(name: &'static str, start: std::time::Instant) {
     if std::env::var_os("SYMPHONY_PERF").is_none() {
@@ -3181,11 +3417,13 @@ impl eframe::App for SymphonyApp {
             return;
         }
         let saved = Saved {
+            remaps: keymap::remaps(),
             tool_dock: self.tool_dock,
             recent_projects: self.recent_projects.clone(),
             wallpaper: self.wallpaper.choice.clone(),
             wallpaper_blur: self.wallpaper.blur,
             interface_animations: self.interface_animations,
+            interface_effects: self.interface_effects,
             workspace: self.workspace,
             layouts: self.layouts.clone(),
             profile: self.profile,
@@ -3418,6 +3656,50 @@ impl SymphonyApp {
                 .chrome(top.response.rect, wallpaper::ChromeSide::Top),
         );
 
+        self.cursor_feedback(&ctx);
+        // SYMPHONY_SHOT_FLASH: draw a line and undo it just before the
+        // screenshot, so the undo flash shows.
+        if self.shot.is_some()
+            && std::env::var_os("SYMPHONY_SHOT_FLASH").is_some()
+            && ctx.input(|i| i.time) > 0.35
+            && self.s.flash.is_none()
+        {
+            use symphony_core::stroke::{Point, Stroke, StrokeKind};
+            let st = Stroke {
+                id: self.s.doc.ids.fresh(),
+                kind: StrokeKind::Pencil,
+                art: Default::default(),
+                swatch: self.s.swatch,
+                min_width: 6.0,
+                max_width: 6.0,
+                points: (0..20)
+                    .map(|k| Point {
+                        x: 120.0 + k as f32 * 12.0,
+                        y: -120.0 + (k as f32 * 0.5).sin() * 30.0,
+                        pressure: 1.0,
+                    })
+                    .collect(),
+                tips: Default::default(),
+                texture: None,
+                shape: Vec::new(),
+            };
+            let layer = self.s.selected;
+            self.s.commit_stroke(layer, self.s.frame, st);
+            self.s.undo();
+        }
+        // Autosave finishing says so; a faded notice is cleared.
+        let autosaving = self.autosaving.load(Ordering::SeqCst);
+        if self.was_autosaving && !autosaving {
+            self.s.notice = Some("Autosaved".into());
+        }
+        self.was_autosaving = autosaving;
+        let now = ctx.input(|i| i.time);
+        if let Some((shown, since)) = &self.notice_shown {
+            if now - since > 4.0 && self.s.notice.as_deref() == Some(shown.as_str()) {
+                self.s.notice = None;
+                self.notice_shown = None;
+            }
+        }
         let bottom_background = chrome.add(egui::Shape::Noop);
         let bottom = egui::Panel::bottom("status")
             .show_separator_line(false)
@@ -3441,7 +3723,7 @@ impl SymphonyApp {
                 .id(id)
                 .frame(
                     egui::Frame::window(&ctx.global_style())
-                        .fill(theme::GLASS_PANEL)
+                        .fill(egui::Color32::TRANSPARENT)
                         .stroke(egui::Stroke::NONE),
                 )
                 .open(&mut self.tool_options_open)
@@ -3452,15 +3734,30 @@ impl SymphonyApp {
                 });
             if let Some(window) = window {
                 let rect = window.response.rect;
-                if let Some(mask) = self.wallpaper.glass(rect) {
-                    glass.set(background, mask);
-                }
+                glass.set(
+                    background,
+                    egui::Shape::Vec(backdrop::glass(&ctx, rect, f32::from(theme::GLASS_RADIUS))),
+                );
                 theme::glass_rim(&glass, rect);
             }
         }
 
         let mut open = self.show_preferences;
         let prefs_id = egui::Id::unique("symphony-preferences");
+        // While Preferences is open, the app behind softly dims, so the
+        // window reads as a focused sheet (fades with Appear/Dismiss).
+        let dim = symphony_ui::motion::presence(&ctx, prefs_id.with("dim"), open);
+        if dim > 0.0 {
+            let scrim = egui::LayerId::new(egui::Order::Middle, prefs_id.with("scrim"));
+            ctx.layer_painter(scrim).rect_filled(
+                ctx.content_rect(),
+                0.0,
+                egui::Color32::from_black_alpha((90.0 * dim) as u8),
+            );
+            // Keep the window above its scrim.
+            ctx.move_to_top(scrim);
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, prefs_id));
+        }
         let glass = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, prefs_id));
         let background = glass.add(egui::Shape::Noop);
         let preferences = preferences_window(&ctx, prefs_id)
@@ -3492,13 +3789,39 @@ impl SymphonyApp {
                                         self.wallpaper.preferences(ui);
                                         if symphony_ui::widgets::checkbox(
                                             ui,
-                                            &mut self.interface_animations,
-                                            "Animate interface transitions",
+                                            &mut self.interface_effects,
+                                            "Interface effects",
                                         )
+                                        .on_hover_text("Blur, glass and shadows, and animations")
                                         .changed()
                                         {
-                                            theme::set_motion(&ctx, self.interface_animations);
+                                            theme::set_effects(&ctx, self.interface_effects);
+                                            theme::set_motion(
+                                                &ctx,
+                                                self.interface_animations && self.interface_effects,
+                                            );
                                         }
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Turn off on slower computers: no blur, glass, shadows or animations.",
+                                            )
+                                            .font(theme::dense())
+                                            .color(theme::TEXT_SECONDARY),
+                                        );
+                                        ui.add_enabled_ui(self.interface_effects, |ui| {
+                                            if symphony_ui::widgets::checkbox(
+                                                ui,
+                                                &mut self.interface_animations,
+                                                "Animate interface transitions",
+                                            )
+                                            .changed()
+                                            {
+                                                theme::set_motion(
+                                                    &ctx,
+                                                    self.interface_animations && self.interface_effects,
+                                                );
+                                            }
+                                        });
                                         ui.add_space(8.0);
                                         ui.label(
                                             egui::RichText::new(
@@ -3531,9 +3854,10 @@ impl SymphonyApp {
             });
         if let Some(window) = preferences {
             let rect = window.response.rect;
-            if let Some(mask) = self.wallpaper.glass(rect) {
-                glass.set(background, mask);
-            }
+            glass.set(
+                background,
+                egui::Shape::Vec(backdrop::glass(&ctx, rect, f32::from(theme::GLASS_RADIUS))),
+            );
             theme::glass_rim(&glass, rect);
         }
         self.show_preferences = open;
@@ -3613,16 +3937,10 @@ impl SymphonyApp {
                     let background = painter.add(egui::Shape::Noop);
                     // Floating views are glass like every other panel:
                     // the blurred wallpaper under a translucent tint.
-                    let wallpaper = &self.wallpaper;
-                    let backdrop = |rect: egui::Rect| {
-                        let mut shapes: Vec<egui::Shape> =
-                            wallpaper.glass(rect).into_iter().collect();
-                        shapes.push(egui::Shape::rect_filled(
-                            rect,
-                            theme::GLASS_RADIUS,
-                            theme::GLASS_PANEL,
-                        ));
-                        shapes
+                    // Floating views: live blur of what's behind them.
+                    let blur_ctx = ui.ctx().clone();
+                    let backdrop = move |rect: egui::Rect| {
+                        backdrop::glass(&blur_ctx, rect, f32::from(theme::GLASS_RADIUS))
                     };
                     DockArea::new(layout)
                         .style(theme::dock_style(ui.style()))
@@ -3722,6 +4040,10 @@ impl SymphonyApp {
                 let mut st =
                     views::palette::PaletteState::new(egui::pos2(520.0, 260.0), Some(View::Camera));
                 st.query = q;
+                // SYMPHONY_SHOT_RECORD: the "press the new shortcut" prompt.
+                if std::env::var_os("SYMPHONY_SHOT_RECORD").is_some() {
+                    st.record_for_review(keymap::Action::MirrorView, "Mirror view");
+                }
                 self.palette = Some(st);
                 self.shot_search_opened = true;
             }

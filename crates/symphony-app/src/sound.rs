@@ -68,8 +68,9 @@ pub struct SoundState {
     scrubbing: bool,
     /// What the mixer last got for Enable Sound.
     sent_enabled: Option<bool>,
-    /// Scene length and frame rate of the range the mixer is playing.
-    started: Option<(u32, u32)>,
+    /// What the mixer is playing: the first and last frame, the frame
+    /// rate, and whether it loops.
+    started: Option<(u32, u32, u32, bool)>,
     /// The frame last shown from the sound, to see the user move it.
     shown: u32,
     /// The track the Sound editor is playing on its own.
@@ -205,28 +206,35 @@ impl SoundState {
             return false;
         }
         let fps = s.doc.settings.fps.max(1.0);
+        let per = f64::from(fps);
         let len = s.length().max(1);
-        let range = (len, fps.to_bits());
-        // Started, the scene changed length or rate, or the user moved the
-        // playhead: play again from the frame shown, looping to frame 1.
+        let (first, last, at) = play_span(s.frame, s.play_range, len);
+        let range = (first, last, fps.to_bits(), s.loop_playback);
+        // Started, the range, rate or loop changed, or the user moved the
+        // playhead: play again from `at`.
         if self.started != Some(range) || s.frame != self.shown {
-            let per = f64::from(fps);
             let play = Command::Play {
-                from: 0.0,
-                until: f64::from(len) / per,
-                at: f64::from(s.frame.clamp(1, len) - 1) / per,
-                looping: true,
+                from: f64::from(first - 1) / per,
+                until: f64::from(last) / per,
+                at: f64::from(at - 1) / per,
+                looping: s.loop_playback,
             };
             if player.send(play) {
                 self.started = Some(range);
-                self.shown = s.frame;
+                s.frame = at;
+                self.shown = at;
             }
             return true;
         }
         if player.caught_up() {
-            let frame = (player.time() * f64::from(fps)).floor() as u32 + 1;
-            s.frame = frame.clamp(1, len);
+            let time = player.time();
+            let frame = (time * per).floor() as u32 + 1;
+            s.frame = frame.clamp(first, last);
             self.shown = s.frame;
+            // Loop off: the sound holds at the range end, and playback stops.
+            if !s.loop_playback && time >= f64::from(last) / per - 1e-9 {
+                s.playing = false;
+            }
         }
         true
     }
@@ -453,9 +461,37 @@ fn track_name(path: &Path) -> String {
         .unwrap_or_else(|| "Sound".into())
 }
 
+/// The frames sound playback covers, first and last, and the frame to
+/// start from: the playback range (Play menu) held inside the scene, or
+/// the whole scene; the frame shown, or the range's first frame when the
+/// playhead is outside it.
+fn play_span(frame: u32, range: Option<(u32, u32)>, len: u32) -> (u32, u32, u32) {
+    let len = len.max(1);
+    let (a, b) = range.map_or((1, len), |(a, b)| (a.clamp(1, len), b.clamp(1, len)));
+    let (first, last) = (a.min(b), a.max(b));
+    let at = if (first..=last).contains(&frame) {
+        frame
+    } else {
+        first
+    };
+    (first, last, at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_plays_inside_the_playback_range() {
+        // No range: the whole scene, from the frame shown.
+        assert_eq!(play_span(7, None, 75), (1, 75, 7));
+        // A range: from the playhead inside it, else from its first frame.
+        assert_eq!(play_span(12, Some((5, 19)), 75), (5, 19, 12));
+        assert_eq!(play_span(37, Some((5, 19)), 75), (5, 19, 5));
+        assert_eq!(play_span(1, Some((19, 5)), 75), (5, 19, 5));
+        // A range past the scene end is held to the scene.
+        assert_eq!(play_span(1, Some((70, 90)), 75), (70, 75, 70));
+    }
 
     #[test]
     fn the_loudest_peak_fills_the_row() {
