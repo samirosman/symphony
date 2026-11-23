@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Symphony is a free, open-source 2D animation workspace for drawing, timing, and node-based compositing.">
-  <meta name="theme-color" content="#171b27">
+  <meta name="theme-color" content="#17181a">
   <link rel="icon" href="presentation/symphony.png" type="image/png">
   <title>Symphony — 2D animation</title>
   <style>
@@ -16,86 +16,139 @@
     }
     :root {
       color-scheme: dark;
-      --background: #171b27;
-      --ink: #f2f4fc;
-      --muted: #bbc2d3;
-      --accent: #c8d6ff;
-      --rim: #485168;
-      font-family: system-ui, sans-serif;
+      --background: #17181a;
+      --panel: #242628;
+      --raised: #303336;
+      --ink: #e8eaec;
+      --muted: #b5bac0;
+      --focus: #81b4f8;
+      --selection: #3d63b8;
+      --glass-radius: 12px;
+      --inset: 6px;
+      font: 15px/1.5 system-ui, sans-serif;
       color: var(--ink);
       background: var(--background);
     }
     * { box-sizing: border-box; }
     body { margin: 0; }
-    a { color: var(--accent); text-underline-offset: .25em; }
-    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
-    .wrap { width: min(1120px, 100% - 44px); margin-inline: auto; }
-    nav, footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-    nav { padding-block: 1.4rem; }
+    a { color: var(--focus); text-underline-offset: .25em; }
+    a:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+    img { display: block; }
+    .wrap { width: min(1440px, 100% - 32px); margin-inline: auto; }
+    .menu-bar {
+      background: linear-gradient(#0e0f11 75%, var(--background));
+    }
+    nav, footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px 12px;
+      flex-wrap: wrap;
+      min-height: 48px;
+      padding-block: 6px;
+    }
+    nav a {
+      color: var(--muted);
+      padding: 6px 8px;
+      border-radius: 4px;
+      text-decoration: none;
+    }
+    nav a:hover { background: var(--raised); color: var(--ink); }
     .brand {
       display: inline-flex;
       align-items: center;
-      gap: .55rem;
+      gap: 6px;
       color: var(--ink);
-      font: 600 1.18rem Bricolage, system-ui, sans-serif;
-      text-decoration: none;
+      font: 600 1rem Bricolage, system-ui, sans-serif;
     }
-    .brand img { width: 28px; height: 28px; object-fit: contain; }
-    .intro { padding-block: clamp(2rem, 7vw, 5.25rem) clamp(1.5rem, 4vw, 2.75rem); }
-    h1, h2, dt { font-family: Bricolage, system-ui, sans-serif; font-weight: 600; }
-    h1 { margin: 0; font-size: clamp(2.7rem, 7vw, 5.6rem); letter-spacing: -.065em; line-height: 1; }
-    .intro p { max-width: 49ch; margin: 1rem 0 1.6rem; font-size: clamp(1rem, 2.2vw, 1.25rem); }
-    p, dd, figcaption, footer { color: var(--muted); line-height: 1.6; }
+    .brand img { width: 24px; height: 24px; }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) clamp(270px, 24vw, 340px);
+      grid-template-areas: "preview intro" "preview features";
+      grid-template-rows: auto 1fr;
+      align-items: start;
+      gap: 6px;
+      margin-block: clamp(12px, 3vw, 38px) 6px;
+    }
+    .panel {
+      background: var(--panel);
+      border-radius: var(--glass-radius);
+      box-shadow: inset 0 0 0 1px rgb(255 255 255 / 7%), inset 0 1px rgb(255 255 255 / 8%);
+    }
+    .intro { grid-area: intro; padding: 16px; }
+    h1 {
+      margin: 0;
+      font: 600 clamp(2.1rem, 3vw, 2.8rem)/1.1 Bricolage, system-ui, sans-serif;
+      letter-spacing: -.045em;
+    }
+    .intro p { margin: 8px 0 14px; max-width: 36ch; }
+    p, dd, figcaption, footer { color: var(--muted); }
     .download {
       display: inline-block;
-      padding: .65rem 1rem;
-      border-radius: 8px;
-      background: var(--accent);
-      color: var(--background);
-      font-weight: 650;
+      padding: 7px 11px;
+      border-radius: 4px;
+      background: var(--selection);
+      color: #fff;
+      font-weight: 600;
       text-decoration: none;
     }
-    .download:hover { background: var(--ink); }
-    figure { margin: 0; }
+    .download:hover { background: #3659a5; }
+    figure { grid-area: preview; margin: 0; padding: var(--inset); }
     figure img {
-      display: block;
       width: 100%;
       height: auto;
-      padding: 4px;
-      border: 1px solid var(--rim);
-      border-radius: 14px;
-      background: #222838;
+      border-radius: calc(var(--glass-radius) - var(--inset));
+      background: #0e0f11;
     }
-    figcaption { margin-top: .65rem; font-size: .9rem; }
-    section { padding-block: clamp(2.5rem, 6vw, 4.5rem); }
-    h2 { margin: 0 0 1.25rem; font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.035em; }
-    dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem 2rem; margin: 0; }
-    dt { font-size: 1.2rem; margin-bottom: .3rem; }
-    dd { margin: 0; max-width: 45ch; }
-    footer { border-top: 1px solid var(--rim); padding-block: 1.25rem 2rem; font-size: .9rem; }
-    @media (max-width: 560px) {
-      .wrap { width: calc(100% - 32px); }
+    figcaption { padding: 6px 6px 2px; font-size: .85rem; }
+    section { grid-area: features; padding: 6px 12px 12px; }
+    h2 {
+      display: inline-block;
+      margin: 0 0 10px -6px;
+      padding: 3px 8px;
+      border-radius: 7px;
+      background: var(--raised);
+      font-size: .9rem;
+      font-weight: 600;
+    }
+    dl { margin: 0; display: grid; gap: 12px; }
+    dt { font-weight: 600; }
+    dd { margin: 2px 0 0; font-size: .9rem; }
+    footer { padding-inline: 6px; font-size: .85rem; }
+    @media (max-width: 800px) {
+      .workspace {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: "intro" "preview" "features";
+        grid-template-rows: auto;
+      }
+      dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 480px) {
+      .wrap { width: calc(100% - 20px); }
       dl { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body id="top">
-  <nav class="wrap" aria-label="Main">
-    <a class="brand" href="#top"><img src="presentation/symphony.png" width="28" height="28" alt="">Symphony</a>
-    <a href="https://github.com/tdemers218/symphony">GitHub repository</a>
-  </nav>
-  <main class="wrap">
-    <header class="intro">
+  <div class="menu-bar">
+    <nav class="wrap" aria-label="Main">
+      <a class="brand" href="#top"><img src="presentation/symphony.png" width="24" height="24" alt="">Symphony</a>
+      <a href="https://github.com/tdemers218/symphony">GitHub repository</a>
+    </nav>
+  </div>
+  <main class="wrap workspace">
+    <header class="intro panel">
       <h1>Symphony</h1>
       <p>A free, open-source 2D animation workspace for drawing, timing, and node-based compositing.</p>
       <a class="download" href="https://github.com/tdemers218/symphony/releases">Get the preview build</a>
     </header>
-    <figure>
+    <figure class="panel">
       <img src="presentation/workspace.png" width="2880" height="1800" alt="Symphony’s empty Camera view, with drawing tools and color controls beside it and the Timeline below.">
       <figcaption>A new scene in Symphony’s default workspace.</figcaption>
     </figure>
-    <section aria-labelledby="features">
-      <h2 id="features">What you can do</h2>
+    <section class="panel" aria-labelledby="features">
+      <h2 id="features">Features</h2>
       <dl>
         <div><dt>Draw with a pen</dt><dd>Use pressure-sensitive vector brushes and pencils, textured strokes, onion skin, and separate line and colour art.</dd></div>
         <div><dt>Time your drawings</dt><dd>Edit the same exposures in the Timeline or Xsheet. Insert in-betweens and choose the frame rate for movie export.</dd></div>
