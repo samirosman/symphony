@@ -170,6 +170,114 @@ impl<Tab> IndexMut<NodeIndex> for Tree<Tab> {
     }
 }
 
+/// Symphony: a detached subtree, for moving whole branches.
+struct Branch<Tab> {
+    node: Node<Tab>,
+    left: Option<Box<Branch<Tab>>>,
+    right: Option<Box<Branch<Tab>>>,
+}
+
+impl<Tab> Tree<Tab> {
+    fn take_branch(&mut self, i: NodeIndex) -> Option<Box<Branch<Tab>>> {
+        let node = std::mem::replace(self.nodes.get_mut(i.0)?, Node::Empty);
+        if node.is_empty() {
+            return None;
+        }
+        let (left, right) = if node.is_parent() {
+            (self.take_branch(i.left()), self.take_branch(i.right()))
+        } else {
+            (None, None)
+        };
+        Some(Box::new(Branch { node, left, right }))
+    }
+
+    fn put_branch(&mut self, i: NodeIndex, branch: Option<Box<Branch<Tab>>>) {
+        let Some(b) = branch else { return };
+        if self.nodes.len() <= i.0 {
+            // Grow to whole levels, as `split` does.
+            let level = NodeIndex(i.0).level();
+            self.nodes.resize_with((1 << (level + 1)) - 1, || Node::Empty);
+        }
+        self.nodes[i.0] = b.node;
+        self.put_branch(i.left(), b.left);
+        self.put_branch(i.right(), b.right);
+    }
+
+    /// Symphony: re-store a 2x2 grid the other way round. A split whose
+    /// two children are both splits the other way (columns of rows) becomes
+    /// rows of columns, or the reverse, with every fraction kept so nothing
+    /// moves on screen; only which divider is one long line changes. Returns
+    /// false (and changes nothing) when `i` isn't such a grid.
+    pub fn transpose_grid(&mut self, i: NodeIndex) -> bool {
+        let horizontal = match self.nodes.get(i.0) {
+            Some(Node::Horizontal(_)) => true,
+            Some(Node::Vertical(_)) => false,
+            _ => return false,
+        };
+        let other = |n: Option<&Node<Tab>>| match n {
+            Some(Node::Vertical(_)) => horizontal,
+            Some(Node::Horizontal(_)) => !horizontal,
+            _ => false,
+        };
+        if !other(self.nodes.get(i.left().0)) || !other(self.nodes.get(i.right().0)) {
+            return false;
+        }
+        let Some(mut a) = self.take_branch(i.left()) else {
+            return false;
+        };
+        let Some(mut b) = self.take_branch(i.right()) else {
+            self.put_branch(i.left(), Some(a));
+            return false;
+        };
+        let fraction_of = |n: &Node<Tab>| match n {
+            Node::Horizontal(s) | Node::Vertical(s) => s.fraction,
+            _ => 0.5,
+        };
+        let outer = fraction_of(&self.nodes[i.0]);
+        let inner = (fraction_of(&a.node) + fraction_of(&b.node)) / 2.0;
+        // The old outer split becomes the inner one, and the reverse.
+        let flip = |n: &mut Node<Tab>, f: f32| {
+            let mut s = match std::mem::replace(n, Node::Empty) {
+                Node::Horizontal(s) | Node::Vertical(s) => s,
+                other => {
+                    *n = other;
+                    return;
+                }
+            };
+            s.fraction = f;
+            *n = if horizontal {
+                Node::Horizontal(s)
+            } else {
+                Node::Vertical(s)
+            };
+        };
+        flip(&mut a.node, outer);
+        flip(&mut b.node, outer);
+        if let Node::Horizontal(s) | Node::Vertical(s) =
+            std::mem::replace(&mut self.nodes[i.0], Node::Empty)
+        {
+            let mut s = s;
+            s.fraction = inner;
+            self.nodes[i.0] = if horizontal {
+                Node::Vertical(s)
+            } else {
+                Node::Horizontal(s)
+            };
+        }
+        // a = (a.left, a.right), b = (b.left, b.right) become
+        // (a.left, b.left) and (a.right, b.right).
+        let (al, ar, bl, br) = (a.left.take(), a.right.take(), b.left.take(), b.right.take());
+        a.left = al;
+        a.right = bl;
+        b.left = ar;
+        b.right = br;
+        self.put_branch(i.left(), Some(a));
+        self.put_branch(i.right(), Some(b));
+        self.focused_node = None;
+        true
+    }
+}
+
 impl<Tab> Tree<Tab> {
     /// Creates a new [`Tree`] with given `Vec` of `Tab`s in its root node.
     #[inline(always)]

@@ -20,6 +20,76 @@ mod window_surface;
 pub(super) use separator::SeparatorAxis;
 
 impl<Tab> DockArea<'_, Tab> {
+    /// Symphony: where two dividers cross (a 2x2 grid of views), the long
+    /// divider is really two segments. When the pointer rests on one
+    /// segment, away from the crossing and with no button held, the grid
+    /// is re-stored so that segment is its own divider: dragging it then
+    /// moves only the views beside it (a right-hand panel can grow over the
+    /// Timeline without moving the Camera above). Nothing moves on screen.
+    fn transpose_for_pointer(&mut self, ui: &Ui) {
+        let (Some(p), false) = (
+            ui.input(|i| i.pointer.hover_pos()),
+            ui.input(|i| i.pointer.any_down()),
+        ) else {
+            return;
+        };
+        let reach = {
+            let s = &self.style.as_ref().unwrap().separator;
+            s.width * 0.5 + s.extra_interact_width * 0.5 + 1.0
+        };
+        let tree = self.dock_state.main_surface_mut();
+        let mut target = None;
+        for (index, node) in tree.iter().enumerate() {
+            let (split, horizontal) = match node {
+                Node::Horizontal(s) => (s, true),
+                Node::Vertical(s) => (s, false),
+                _ => continue,
+            };
+            let i = crate::NodeIndex(index);
+            let child = |c: crate::NodeIndex| match tree.iter().nth(c.0) {
+                Some(Node::Vertical(s)) if horizontal => Some(s),
+                Some(Node::Horizontal(s)) if !horizontal => Some(s),
+                _ => None,
+            };
+            let (Some(a), Some(b)) = (child(i.left()), child(i.right())) else {
+                continue;
+            };
+            let r = split.rect;
+            if horizontal {
+                // Columns of rows: is the pointer on the long vertical
+                // divider, and are the two row dividers lined up?
+                let x = r.left() + r.width() * split.fraction;
+                let (ya, yb) = (
+                    a.rect.top() + a.rect.height() * a.fraction,
+                    b.rect.top() + b.rect.height() * b.fraction,
+                );
+                if (p.x - x).abs() <= reach
+                    && (r.top()..=r.bottom()).contains(&p.y)
+                    && (ya - yb).abs() <= 1.0
+                    && (p.y - ya).abs() > 12.0
+                {
+                    target = Some(i);
+                }
+            } else {
+                let y = r.top() + r.height() * split.fraction;
+                let (xa, xb) = (
+                    a.rect.left() + a.rect.width() * a.fraction,
+                    b.rect.left() + b.rect.width() * b.fraction,
+                );
+                if (p.y - y).abs() <= reach
+                    && (r.left()..=r.right()).contains(&p.x)
+                    && (xa - xb).abs() <= 1.0
+                    && (p.x - xa).abs() > 12.0
+                {
+                    target = Some(i);
+                }
+            }
+        }
+        if let Some(i) = target {
+            tree.transpose_grid(i);
+        }
+    }
+
     /// Shows the docking hierarchy inside a [`Ui`].
     pub fn show_inside(mut self, ui: &mut Ui, tab_viewer: &mut impl TabViewer<Tab = Tab>) {
         self.style
@@ -27,6 +97,10 @@ impl<Tab> DockArea<'_, Tab> {
         self.window_bounds.get_or_insert(ui.ctx().content_rect());
 
         let mut state = State::load(ui.ctx(), self.id);
+
+        // Symphony: let lined-up dividers move independently (see
+        // `transpose_for_pointer`).
+        self.transpose_for_pointer(ui);
 
         // Delay hover position one frame. On touch screens hover_pos() is None when any_released()
         if !ui.input(|i| i.pointer.any_released()) {

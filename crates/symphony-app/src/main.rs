@@ -3703,6 +3703,94 @@ mod workspace_control_tests {
     }
 
     #[test]
+    fn a_lined_up_divider_segment_moves_alone() {
+        struct TestViewer;
+        impl egui_dock::TabViewer for TestViewer {
+            type Tab = View;
+            fn id(&mut self, tab: &mut View) -> egui::Id {
+                egui::Id::unique(("grid-test-tab", *tab))
+            }
+            fn title(&mut self, tab: &mut View) -> egui::WidgetText {
+                tab.title().into()
+            }
+            fn ui(&mut self, _: &mut egui::Ui, _: &mut View) {}
+        }
+        // Camera over Timeline | Tool Properties over Colour, row
+        // dividers lined up.
+        let mut layout = DockState::new(vec![View::Camera]);
+        let surface = layout.main_surface_mut();
+        let [left, right] = surface.split_right(
+            egui_dock::NodeIndex::root(),
+            0.6,
+            vec![View::ToolProperties],
+        );
+        surface.split_below(left, 0.6, vec![View::Timeline]);
+        surface.split_below(right, 0.6, vec![View::Colour]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(800.0, 500.0))
+            .build_ui_state(
+                |ui, layout| {
+                    DockArea::new(layout)
+                        .style(theme::dock_style(ui.style()))
+                        .show_inside(ui, &mut TestViewer);
+                },
+                layout,
+            );
+        harness.run_steps(3);
+        let rect_of = |layout: &DockState<View>, v: View| {
+            let path = layout.find_tab(&v).unwrap().node_path();
+            layout
+                .iter_leaves()
+                .find(|(p, _)| *p == path)
+                .map(|(_, leaf)| leaf.rect())
+                .unwrap()
+        };
+        let camera = rect_of(harness.state(), View::Camera);
+        let timeline = rect_of(harness.state(), View::Timeline);
+        let colour = rect_of(harness.state(), View::Colour);
+        // The divider segment beside the Timeline.
+        let x = (timeline.right() + colour.left()) / 2.0;
+        let mut at = egui::pos2(x, timeline.center().y);
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(at));
+        harness.run_steps(2);
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        for _ in 0..10 {
+            at.x -= 6.0;
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(at));
+            harness.run_steps(1);
+        }
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        let state = harness.state();
+        assert!(
+            (rect_of(state, View::Camera).right() - camera.right()).abs() < 1.0,
+            "the Camera view didn't move"
+        );
+        assert!(
+            rect_of(state, View::Colour).left() < colour.left() - 40.0,
+            "Colour grew left"
+        );
+        assert!(rect_of(state, View::Timeline).right() < timeline.right() - 40.0);
+    }
+
+    #[test]
     fn add_tab_moves_existing_views_and_adds_missing_views_here() {
         let mut layout = DockState::new(vec![View::Camera, View::Drawing]);
         layout.main_surface_mut().split_right(

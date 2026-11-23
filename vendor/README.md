@@ -25,3 +25,8 @@ changes marked `// Symphony:`.
 - `src/widgets/dock_area/show/leaf.rs`: Close in a tab's right-click
   menu, and middle-click close, depend only on the tab being closeable,
   not on tabs showing a × (Symphony hides it).
+- `src/dock_state/tree/mod.rs` and `show/mod.rs`: `Tree::transpose_grid`
+  re-stores a 2x2 grid of views the other way round (columns of rows <->
+  rows of columns) with the same fractions. `DockArea` calls it when the
+  pointer rests on one segment of a long divider where two dividers
+  cross and line up, so that segment moves on its own.
