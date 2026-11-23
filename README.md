@@ -1,9 +1,19 @@
 # Symphony
 
-A free, open-source 2D animation app that feels familiar to animators coming
-from Toon Boom Harmony: an xsheet and timeline over one shared exposure, a
-peg → drawing → composite node graph, line art and colour art, and paint
-by palette ID.
+Symphony is a free, open-source 2D animation app for drawing, timing, and
+node-based compositing.
+
+[Presentation page](https://tdemers218.github.io/symphony/) ·
+[Preview builds](https://github.com/tdemers218/symphony/releases)
+
+![An empty Symphony scene with the Camera view, drawing tools, colour palette, and Timeline](docs/presentation/workspace.png)
+
+## Key features
+
+- **Draw** with pressure-sensitive vector brushes, textured strokes, and separate line and colour art.
+- **Time** the same exposures in the Timeline or Xsheet. Insert in-betweens and choose the movie export frame rate.
+- **Composite** with animated pegs, masks, blur, grain, gradients, and a 2.5D camera.
+- **Find** tools and add nodes through contextual Search. Arrange panels in dockable workspaces.
 
 Not affiliated with Toon Boom. Built clean-room from public documentation
 (see [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md)).

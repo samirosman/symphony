@@ -617,7 +617,8 @@ impl SymphonyApp {
             }
         }
         let shot = shot::Shot::from_env();
-        let mut s = if shot.is_some() || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
+        let demo = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_EMPTY").is_none();
+        let mut s = if demo || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
             Session::demo()
         } else {
             Session::new_scene()
