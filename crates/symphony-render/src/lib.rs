@@ -3,8 +3,13 @@
 //!
 //! Export runs on a background thread with progress and cancel (E5.2).
 
+pub mod bitmap;
+pub mod deform;
 mod effects;
+#[cfg(test)]
+mod golden;
 pub mod movie;
+pub mod warp;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,6 +117,7 @@ fn render_display(
     if white_paper {
         paper.fill(tiny_skia::Color::WHITE);
     }
+    bitmap::next_frame();
     let k = width as f32 / scene.settings.width.max(1) as f32 * scene.camera_scale(frame);
     // Scene units have their origin at the stage centre, y down.
     let view =
@@ -185,6 +191,10 @@ fn paint_drawing(
         return;
     };
     let m = view.compose(project).compose(item.transform);
+    // An imported image sits under every art layer.
+    if let Some(r) = d.image {
+        bitmap::paint_image(pix, scene, r, m);
+    }
     // Art layers back to front; within each, paint under ink.
     for art in ArtLayer::STACK {
         for fill in d.fills.iter().filter(|f| f.art == art) {
@@ -811,5 +821,35 @@ mod tests {
         cancel.store(true, Ordering::SeqCst);
         assert!(export(&s, &png, &cancel, &|_, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renders_an_imported_image_behind_the_drawing() {
+        use symphony_core::bitmap::{layer_edits, Alignment, Alpha, ImageFile, ImageFormat};
+        let mut s = scene_with_line();
+        let mut bytes = Vec::new();
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([0, 0, 255, 255]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        s.images.insert(
+            5,
+            ImageFile {
+                format: ImageFormat::Png,
+                width: 2,
+                height: 1,
+                bytes: std::sync::Arc::new(bytes),
+            },
+        );
+        // Index 1 is behind the line's layer. Fit: a 2:1 image fills the 2:1 stage.
+        let edits = layer_edits(&mut s, "BG", 1, &[5], 1, Alignment::Fit, Alpha::Straight);
+        History::default().apply(&mut s, "Import image", edits);
+        let img = render_frame(&s, 2, 200, 100).unwrap();
+        assert_eq!(img.get_pixel(10, 10).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(190, 90).0, [0, 0, 255, 255]);
+        // The line stays in front of the image.
+        assert_eq!(img.get_pixel(100, 50).0, [24, 24, 32, 255]);
     }
 }

@@ -155,6 +155,7 @@ fn parse(xml: &str) -> Result<Scene, String> {
                             name: value.into(),
                             strokes: Vec::new(),
                             fills: Vec::new(),
+                            image: None,
                         },
                     );
                     id

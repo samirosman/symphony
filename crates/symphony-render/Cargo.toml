@@ -9,7 +9,11 @@ license.workspace = true
 symphony-core = { path = "../symphony-core" }
 symphony-vector = { path = "../symphony-vector" }
 tiny-skia = "0.11"
-image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "exr"] }
 # Loads Cisco's separately downloaded binary; never builds or ships the codec.
 openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
 mp4 = "0.14"
+# Already built for `image`. Read directly, so an EXR decodes straight to
+# sRGB bytes without the two float copies `image` keeps; `rayon`
+# decompresses its blocks on all cores.
+exr = { version = "1.74.3", default-features = false, features = ["rayon"] }

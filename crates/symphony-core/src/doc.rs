@@ -118,6 +118,10 @@ pub struct Scene {
     /// `media/` folder, not in scene.json.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sound_files: BTreeMap<u64, crate::sound::SoundFile>,
+    /// Imported image files by content key ([`crate::bitmap`]). The bytes
+    /// live in the project's `media/` folder, not in scene.json.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<u64, crate::bitmap::ImageFile>,
     pub composite: NodeId,
     pub display: NodeId,
     #[serde(default = "default_camera_fov")]
@@ -211,6 +215,7 @@ impl Scene {
             textures: BTreeMap::new(),
             sounds: Vec::new(),
             sound_files: BTreeMap::new(),
+            images: BTreeMap::new(),
             composite,
             display,
             camera_fov: default_camera_fov(),
@@ -379,6 +384,7 @@ impl Scene {
             name: self.next_drawing_name(column),
             strokes: Vec::new(),
             fills: Vec::new(),
+            image: None,
         }
     }
 
