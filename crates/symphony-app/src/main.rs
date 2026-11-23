@@ -672,6 +672,10 @@ impl SymphonyApp {
                     }
                 }
             }
+            // SYMPHONY_SHOT_RANGE: a playback range (frames 10 to 30).
+            if std::env::var_os("SYMPHONY_SHOT_RANGE").is_some() {
+                s.play_range = Some((10, 30));
+            }
             // SYMPHONY_SHOT_LIGHT: onion skin and light table on, for review.
             if std::env::var_os("SYMPHONY_SHOT_LIGHT").is_some() {
                 s.onion.on = true;
@@ -728,7 +732,12 @@ impl SymphonyApp {
             profile,
             use_no_ai,
             pen,
-            camera: Default::default(),
+            camera: {
+                // SYMPHONY_SHOT_MIRROR: the Camera view mirrored, for review.
+                let mut c = camera::CanvasState::default();
+                c.mirrored = std::env::var_os("SYMPHONY_SHOT_MIRROR").is_some();
+                c
+            },
             drawing: Default::default(),
             function: Default::default(),
             palette: None,
@@ -3437,6 +3446,36 @@ impl SymphonyApp {
         );
 
         self.cursor_feedback(&ctx);
+        // SYMPHONY_SHOT_FLASH: draw a line and undo it just before the
+        // screenshot, so the undo flash shows.
+        if self.shot.is_some()
+            && std::env::var_os("SYMPHONY_SHOT_FLASH").is_some()
+            && ctx.input(|i| i.time) > 0.35
+            && self.s.flash.is_none()
+        {
+            use symphony_core::stroke::{Point, Stroke, StrokeKind};
+            let st = Stroke {
+                id: self.s.doc.ids.fresh(),
+                kind: StrokeKind::Pencil,
+                art: Default::default(),
+                swatch: self.s.swatch,
+                min_width: 6.0,
+                max_width: 6.0,
+                points: (0..20)
+                    .map(|k| Point {
+                        x: 120.0 + k as f32 * 12.0,
+                        y: -120.0 + (k as f32 * 0.5).sin() * 30.0,
+                        pressure: 1.0,
+                    })
+                    .collect(),
+                tips: Default::default(),
+                texture: None,
+                shape: Vec::new(),
+            };
+            let layer = self.s.selected;
+            self.s.commit_stroke(layer, self.s.frame, st);
+            self.s.undo();
+        }
         // Autosave finishing says so; a faded notice is cleared.
         let autosaving = self.autosaving.load(Ordering::SeqCst);
         if self.was_autosaving && !autosaving {
@@ -3752,6 +3791,10 @@ impl SymphonyApp {
                 let mut st =
                     views::palette::PaletteState::new(egui::pos2(520.0, 260.0), Some(View::Camera));
                 st.query = q;
+                // SYMPHONY_SHOT_RECORD: the "press the new shortcut" prompt.
+                if std::env::var_os("SYMPHONY_SHOT_RECORD").is_some() {
+                    st.record_for_review(keymap::Action::MirrorView, "Mirror view");
+                }
                 self.palette = Some(st);
                 self.shot_search_opened = true;
             }

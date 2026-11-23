@@ -39,6 +39,11 @@ enum Pick {
 }
 
 impl PaletteState {
+    /// Screenshot review: open on the shortcut prompt.
+    pub fn record_for_review(&mut self, action: Action, title: &str) {
+        self.recording = Some((action, title.to_owned()));
+    }
+
     pub fn new(at: Pos2, here: Option<View>) -> Self {
         PaletteState {
             query: String::new(),
