@@ -301,7 +301,7 @@ const MAX_EDGE: f32 = 1e6;
 /// pixels), with an anti-aliased edge. `Pixmap::draw_pixmap` fills the
 /// same rectangle with anti-aliasing off, so a still image had a hard
 /// edge while the same image bent by a bone had a soft one.
-fn draw(pix: &mut Pixmap, img: &Pixmap, t: Transform) {
+pub(crate) fn draw(pix: &mut Pixmap, img: &Pixmap, t: Transform) {
     let Some(rect) = Rect::from_xywh(0.0, 0.0, img.width() as f32, img.height() as f32) else {
         return;
     };

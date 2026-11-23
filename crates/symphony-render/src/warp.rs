@@ -677,6 +677,98 @@ mod tests {
         assert!(edge > 500, "{edge} partly covered pixels");
     }
 
+    /// The 200 x 40 arm image as 20-pixel red and blue squares, opaque.
+    fn arm_checker() -> Pixmap {
+        let mut p = Pixmap::new(200, 40).unwrap();
+        let [red, blue] = [[255, 0, 0, 255], [0, 0, 255, 255]];
+        for (i, px) in p.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i % 200 / 20, i / 200 / 20);
+            *px = if (x + y) % 2 == 0 { red } else { blue };
+        }
+        p
+    }
+
+    /// Golden scale: the arm at a quarter size, the joint at a point off
+    /// the pixel grid in a 64 x 64 frame, so every edge is soft.
+    const GOLDEN_SCALE: f32 = 0.25;
+    const GOLDEN_JOINT: [f32; 2] = [32.3, 32.4];
+
+    fn golden_out(p: &ChainPose) -> impl Fn([f32; 2]) -> [f32; 2] + '_ {
+        move |[u, v]| {
+            let q = p.map([u - 100.0, v - 20.0]);
+            let [jx, jy] = GOLDEN_JOINT;
+            [jx + GOLDEN_SCALE * q[0], jy + GOLDEN_SCALE * q[1]]
+        }
+    }
+
+    /// The arm drawn without the warp, as `paint_image_bent` does when
+    /// the chain moves nothing.
+    fn golden_plain() -> Pixmap {
+        let [jx, jy] = GOLDEN_JOINT;
+        let t = Transform::from_scale(GOLDEN_SCALE, GOLDEN_SCALE)
+            .post_translate(jx - GOLDEN_SCALE * 100.0, jy - GOLDEN_SCALE * 20.0);
+        let mut pix = Pixmap::new(64, 64).unwrap();
+        bitmap::draw(&mut pix, &arm_checker(), t);
+        pix
+    }
+
+    fn golden_bent(deg: f32) -> Pixmap {
+        let p = pose(deg);
+        let mesh = build(200, 40, golden_out(&p), &MeshDetail::default());
+        let mut pix = Pixmap::new(64, 64).unwrap();
+        draw(&mut pix, &arm_checker(), &mesh);
+        pix
+    }
+
+    #[test]
+    fn golden_edges_of_a_bent_image() {
+        crate::golden::check("bent-plain", &golden_plain());
+        crate::golden::check("bent-1", &golden_bent(1.0));
+        crate::golden::check("bent-70-fold", &golden_bent(70.0));
+    }
+
+    #[test]
+    fn a_small_bend_keeps_the_plain_edge() {
+        // Over the root bone, away from the joint, a 1 degree bend moves
+        // nothing: the warp's edge must cover what the plain image's edge
+        // covers. (Colours may differ by a step or two: the warp samples
+        // the image at slightly different points.)
+        let (plain, bent) = (golden_plain(), golden_bent(1.0));
+        let mut worst = 0;
+        let mut soft = 0;
+        for y in 0..64 {
+            for x in 5..22 {
+                let (a, b) = (
+                    plain.pixel(x, y).unwrap().alpha(),
+                    bent.pixel(x, y).unwrap().alpha(),
+                );
+                if 0 < a && a < 255 {
+                    soft += 1;
+                }
+                worst = worst.max(a.abs_diff(b));
+            }
+        }
+        assert!(soft > 20, "{soft} soft edge pixels");
+        assert_eq!(worst, 0, "alpha differs");
+    }
+
+    #[test]
+    fn golden_hard_edge_of_a_bent_image_at_a_huge_zoom() {
+        // A bent mesh, then zoomed 1e4 times about a point on the top
+        // edge of the root bone: vertices land past MAX_PATH, so the edge
+        // is hard. Far larger zooms overflow `edge`.
+        let p = pose(30.0);
+        let f = to_out(&p);
+        let mut mesh = build(200, 40, &f, &MeshDetail::default());
+        let o = f([50.0, 0.0]);
+        for q in &mut mesh.points {
+            *q = [1e4 * (q[0] - o[0]) + 32.3, 1e4 * (q[1] - o[1]) + 32.4];
+        }
+        let mut pix = Pixmap::new(64, 64).unwrap();
+        draw(&mut pix, &arm_checker(), &mesh);
+        crate::golden::check("bent-huge-zoom", &pix);
+    }
+
     #[test]
     fn a_bent_image_has_no_holes_or_double_edges() {
         // Grey at 50% alpha: a pixel drawn twice turns darker, a pixel
