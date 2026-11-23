@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use image::{Delay, Frame, RgbaImage};
 use symphony_core::doc::Scene;
-use symphony_core::graph::{RenderCommand, RenderItem};
+use symphony_core::graph::{Effect, RenderCommand, RenderItem};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
 use symphony_core::stroke::{ArtLayer, StrokeKind};
@@ -80,6 +80,10 @@ fn render_display(
                     return None;
                 }
                 layers.push(Pixmap::new(width, height)?);
+            }
+            RenderCommand::EndEffect(Effect::Blend { mode, amount }) => {
+                let image = layers.pop()?;
+                effects::blend(layers.last_mut()?, &image, mode, amount);
             }
             RenderCommand::EndEffect(effect) => {
                 let mut image = layers.pop()?;

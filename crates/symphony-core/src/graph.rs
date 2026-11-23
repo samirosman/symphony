@@ -78,9 +78,126 @@ pub enum NodeKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-    Blur { radius: f32 },
-    Grain { amount: f32, seed: u32 },
-    Opacity { amount: f32 },
+    Blur {
+        radius: f32,
+    },
+    Grain {
+        amount: f32,
+        seed: u32,
+    },
+    Opacity {
+        amount: f32,
+    },
+    /// Blends its input onto everything behind it with `mode`, at
+    /// `amount` opacity (the Blend Modes node).
+    Blend {
+        mode: BlendMode,
+        amount: f32,
+    },
+}
+
+/// How an image combines with what's behind it. Formulas follow the W3C
+/// Compositing and Blending spec, plus Add, Subtract, Divide and Linear
+/// Burn as painting apps define them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    LinearBurn,
+    Add,
+    Subtract,
+    Divide,
+    Difference,
+    Exclusion,
+    HardLight,
+    SoftLight,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+impl BlendMode {
+    pub const ALL: [BlendMode; 20] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::Add,
+        BlendMode::Subtract,
+        BlendMode::Divide,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "Normal",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::Darken => "Darken",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::ColorDodge => "Color Dodge",
+            BlendMode::ColorBurn => "Color Burn",
+            BlendMode::LinearBurn => "Linear Burn",
+            BlendMode::Add => "Add",
+            BlendMode::Subtract => "Subtract",
+            BlendMode::Divide => "Divide",
+            BlendMode::Difference => "Difference",
+            BlendMode::Exclusion => "Exclusion",
+            BlendMode::HardLight => "Hard Light",
+            BlendMode::SoftLight => "Soft Light",
+            BlendMode::Hue => "Hue",
+            BlendMode::Saturation => "Saturation",
+            BlendMode::Color => "Color",
+            BlendMode::Luminosity => "Luminosity",
+        }
+    }
+
+    /// Plain words people use for what this mode does, for search.
+    pub fn words(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "over regular default",
+            BlendMode::Multiply => "shadow shade darker tint ink",
+            BlendMode::Screen => "light glow brighter lighter",
+            BlendMode::Overlay => "contrast texture light shadow",
+            BlendMode::Darken => "darker min minimum",
+            BlendMode::Lighten => "lighter max maximum",
+            BlendMode::ColorDodge => "glow highlight bright light",
+            BlendMode::ColorBurn => "dark deep shadow contrast",
+            BlendMode::LinearBurn => "dark shadow burn",
+            BlendMode::Add => "plus linear dodge glow light additive",
+            BlendMode::Subtract => "minus remove take away",
+            BlendMode::Divide => "divide brighten remove colour cast",
+            BlendMode::Difference => "invert compare difference",
+            BlendMode::Exclusion => "invert soft difference",
+            BlendMode::HardLight => "contrast strong light",
+            BlendMode::SoftLight => "gentle soft contrast light",
+            BlendMode::Hue => "colour color hue tint recolour",
+            BlendMode::Saturation => "colour color saturation vivid grey",
+            BlendMode::Color => "colour color tint recolour colorize",
+            BlendMode::Luminosity => "brightness light value luminance",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -151,6 +268,13 @@ impl NodeKey {
             }
             (Some(Effect::Opacity { amount: a }), Some(Effect::Opacity { amount: b })) => {
                 Some(Effect::Opacity { amount: lerp(a, b) })
+            }
+            // The mode holds until the next key; its opacity eases.
+            (Some(Effect::Blend { mode, amount: a }), Some(Effect::Blend { amount: b, .. })) => {
+                Some(Effect::Blend {
+                    mode,
+                    amount: lerp(a, b),
+                })
             }
             _ => self.effect,
         };

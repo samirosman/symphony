@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::{
-    graph::{Effect, Link, Node, NodeId, NodeKey, NodeKind},
+    graph::{BlendMode, Effect, Link, Node, NodeId, NodeKey, NodeKind},
     history::Edit,
 };
 
@@ -85,11 +85,12 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Effect(Effect::Blur { .. }) => "Box Blur",
         NodeKind::Effect(Effect::Grain { .. }) => "Grain",
         NodeKind::Effect(Effect::Opacity { .. }) => "Opacity",
+        NodeKind::Effect(Effect::Blend { .. }) => "Blend Modes",
         NodeKind::Gradient(_) => "Gradient",
     }
 }
 
-fn effect_nodes() -> [NodeKind; 4] {
+fn effect_nodes() -> [NodeKind; 5] {
     [
         NodeKind::Effect(Effect::Blur { radius: 12.0 }),
         NodeKind::Effect(Effect::Grain {
@@ -98,6 +99,10 @@ fn effect_nodes() -> [NodeKind; 4] {
         }),
         NodeKind::Gradient(Default::default()),
         NodeKind::Effect(Effect::Opacity { amount: 0.5 }),
+        NodeKind::Effect(Effect::Blend {
+            mode: BlendMode::Multiply,
+            amount: 1.0,
+        }),
     ]
 }
 
@@ -116,6 +121,14 @@ pub(super) fn node_name(node: &Node) -> &str {
 }
 
 pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKind) {
+    // An effect found by search applies to the selected layer straight
+    // away: it goes between that layer's drawing node and where its image
+    // went, so typing "subtract" is enough.
+    if let NodeKind::Effect(_) = kind {
+        if insert_after_selected_layer(s, state, kind.clone()) {
+            return;
+        }
+    }
     let x = (s.doc.layers.len().saturating_sub(1) as f32 / 2.0 + 1.0) * (W + 26.0);
     let mut y = 105.0;
     while s
@@ -128,6 +141,71 @@ pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKin
     }
     add_node(s, kind, [x, y]);
     state.pan = Vec2::new(-x, (105.0 - y).min(0.0));
+}
+
+/// Insert an effect node after the selected layer's drawing node, in one
+/// undo step. False when that layer has no wired drawing node.
+fn insert_after_selected_layer(s: &mut Session, state: &mut NodeViewState, kind: NodeKind) -> bool {
+    let Some((column, drawing)) = s.doc.layers.get(s.selected).map(|l| (l.column, l.node)) else {
+        return false;
+    };
+    let Some(old) = s
+        .doc
+        .graph
+        .links()
+        .iter()
+        .find(|l| l.from == drawing)
+        .copied()
+    else {
+        return false;
+    };
+    let id = s.doc.graph.next_id();
+    let at = s
+        .doc
+        .node_positions
+        .get(&drawing)
+        .copied()
+        .unwrap_or([0.0, 0.0]);
+    let position = [at[0], at[1] + H + 30.0];
+    let before = s.doc.graph.links().to_vec();
+    let mut after: Vec<Link> = before.iter().filter(|l| **l != old).copied().collect();
+    after.push(Link {
+        from: drawing,
+        to: id,
+        port: 0,
+    });
+    after.push(Link { from: id, ..old });
+    let label = kind_label(&kind);
+    let layer = s
+        .doc
+        .xsheet
+        .column(column)
+        .map_or_else(|| "the layer".to_owned(), |c| c.name.clone());
+    let was_custom = s.doc.custom_wiring;
+    s.history.apply(
+        &mut s.doc,
+        "Add node",
+        vec![
+            Edit::AddNode {
+                id,
+                node: Node {
+                    name: label.into(),
+                    kind,
+                    enabled: true,
+                },
+                position,
+            },
+            Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            },
+        ],
+    );
+    s.select_graph_node(id, true);
+    state.pan = Vec2::new(-position[0], (105.0 - position[1]).min(0.0));
+    s.notice = Some(format!("Added {label} to {layer}"));
+    true
 }
 
 fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
@@ -591,6 +669,32 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 ui.label("Seed");
                 ui.add(egui::DragValue::new(seed));
             });
+        }
+        NodeKind::Effect(Effect::Blend { mode, amount }) => {
+            egui::ComboBox::from_label("Mode")
+                .selected_text(mode.title())
+                .show_ui(ui, |ui| {
+                    for m in BlendMode::ALL {
+                        ui.selectable_value(mode, m, m.title());
+                    }
+                });
+            let mut percent = *amount * 100.0;
+            if widgets::precise_slider(
+                ui,
+                egui::Slider::new(&mut percent, 0.0..=100.0)
+                    .step_by(1.0)
+                    .text("Opacity")
+                    .suffix("%"),
+            )
+            .changed()
+            {
+                *amount = percent / 100.0;
+            }
+            ui.label(
+                egui::RichText::new("Blends what's connected above onto everything behind it.")
+                    .font(theme::dense())
+                    .color(theme::TEXT_SECONDARY),
+            );
         }
         NodeKind::Effect(Effect::Opacity { amount }) => {
             let mut percent = *amount * 100.0;

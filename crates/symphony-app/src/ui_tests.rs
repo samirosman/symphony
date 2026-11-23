@@ -647,3 +647,72 @@ fn pen_tool_switches_between_brush_and_pencil_modes() {
     assert_eq!(h.state().0.pencil.max_width, 7.0);
     assert_eq!(h.state().0.brush.max_width, 19.0);
 }
+
+/// Searching a blend mode adds a Blend Modes node straight onto the
+/// selected layer: wired in, visible in the render, one undo removes it.
+#[test]
+fn search_puts_a_blend_mode_on_the_selected_layer() {
+    use symphony_core::graph::{BlendMode, Effect, NodeKind};
+    use symphony_core::stroke::{Point, Stroke};
+    let mut s = Session::new_scene();
+    // The same thick line on two layers, so the top one has something
+    // behind it to blend with.
+    s.add_layer();
+    let swatch = s.swatch;
+    for l in 0..2 {
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch,
+            min_width: 40.0,
+            max_width: 40.0,
+            points: [(-300.0, 0.0), (300.0, 0.0)]
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.commit_stroke(l, s.frame, st);
+    }
+    s.selected = 0;
+    let layer = s.doc.layers[0];
+    let links = s.doc.graph.links().to_vec();
+    let before = symphony_render::render_camera(&s.doc, s.frame, 160, 90, None).unwrap();
+    let mut view = crate::views::node::NodeViewState::default();
+    crate::views::node::add_from_search(
+        &mut s,
+        &mut view,
+        NodeKind::Effect(Effect::Blend {
+            mode: BlendMode::Difference,
+            amount: 1.0,
+        }),
+    );
+    let blend = s
+        .doc
+        .graph
+        .nodes()
+        .find(|(_, n)| matches!(n.kind, NodeKind::Effect(Effect::Blend { .. })))
+        .map(|(id, _)| id)
+        .expect("the node was added");
+    assert_eq!(
+        s.doc.graph.input(blend, 0),
+        Some(layer.node),
+        "fed by the layer"
+    );
+    assert!(
+        s.doc.graph.links().iter().any(|l| l.from == blend),
+        "and feeds where the layer went"
+    );
+    let after = symphony_render::render_camera(&s.doc, s.frame, 160, 90, None).unwrap();
+    assert!(before.data() != after.data(), "the render changes");
+    s.undo();
+    assert_eq!(s.doc.graph.links(), &links[..], "one undo rewires back");
+    assert!(s.doc.graph.node(blend).is_none());
+}

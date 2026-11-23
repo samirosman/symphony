@@ -1,6 +1,6 @@
 //! Raster effects operate on premultiplied RGBA so transparent edges stay clean.
 
-use symphony_core::graph::{Effect, Gradient};
+use symphony_core::graph::{BlendMode, Effect, Gradient};
 use tiny_skia::Pixmap;
 
 pub fn apply(image: &mut Pixmap, effect: Effect, scale: f32) {
@@ -43,7 +43,161 @@ pub fn apply(image: &mut Pixmap, effect: Effect, scale: f32) {
                 *value = (*value as f32 * amount).round() as u8;
             }
         }
+        // Blending happens when the layer lands (`blend`).
+        Effect::Blend { .. } => {}
     }
+}
+
+/// Composite `src` onto `dst` with `mode` at `amount` opacity, both
+/// premultiplied RGBA of the same size. W3C Compositing and Blending:
+/// `co = cs(1-ab) + cb(1-as) + as*ab*B(cb, cs)`, `ao = as + ab - as*ab`.
+pub fn blend(dst: &mut Pixmap, src: &Pixmap, mode: BlendMode, amount: f32) {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    if amount <= 0.0 || dst.width() != src.width() || dst.height() != src.height() {
+        return;
+    }
+    let (d, _) = dst.data_mut().as_chunks_mut::<4>();
+    let (s, _) = src.data().as_chunks::<4>();
+    for (b, sp) in d.iter_mut().zip(s) {
+        let a_s = sp[3] as f32 / 255.0 * amount;
+        if a_s <= 0.0 {
+            continue;
+        }
+        let a_b = b[3] as f32 / 255.0;
+        // Straight (unpremultiplied) colours.
+        let unp = |p: &[u8; 4], a: f32| -> [f32; 3] {
+            if a <= 0.0 {
+                [0.0; 3]
+            } else {
+                let k = 1.0 / (p[3] as f32 / 255.0).max(1e-6) / 255.0;
+                [p[0] as f32 * k, p[1] as f32 * k, p[2] as f32 * k].map(|v| v.clamp(0.0, 1.0))
+            }
+        };
+        let cs = unp(sp, a_s);
+        let cb = unp(b, a_b);
+        let mixed = mix(mode, cb, cs);
+        let a_o = a_s + a_b - a_s * a_b;
+        for i in 0..3 {
+            let co = cs[i] * a_s * (1.0 - a_b) + cb[i] * a_b * (1.0 - a_s) + a_s * a_b * mixed[i];
+            b[i] = (co * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        b[3] = (a_o * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// The blend function B(backdrop, source) on straight colours.
+fn mix(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    let sep = |f: fn(f32, f32) -> f32| [f(cb[0], cs[0]), f(cb[1], cs[1]), f(cb[2], cs[2])];
+    match mode {
+        BlendMode::Normal => cs,
+        BlendMode::Multiply => sep(|b, s| b * s),
+        BlendMode::Screen => sep(screen),
+        BlendMode::Overlay => sep(|b, s| hard_light(s, b)),
+        BlendMode::Darken => sep(f32::min),
+        BlendMode::Lighten => sep(f32::max),
+        BlendMode::ColorDodge => sep(|b, s| {
+            if b <= 0.0 {
+                0.0
+            } else if s >= 1.0 {
+                1.0
+            } else {
+                (b / (1.0 - s)).min(1.0)
+            }
+        }),
+        BlendMode::ColorBurn => sep(|b, s| {
+            if b >= 1.0 {
+                1.0
+            } else if s <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - b) / s).min(1.0)
+            }
+        }),
+        BlendMode::LinearBurn => sep(|b, s| (b + s - 1.0).max(0.0)),
+        BlendMode::Add => sep(|b, s| (b + s).min(1.0)),
+        BlendMode::Subtract => sep(|b, s| (b - s).max(0.0)),
+        BlendMode::Divide => sep(|b, s| {
+            if s <= 0.0 {
+                if b <= 0.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            } else {
+                (b / s).min(1.0)
+            }
+        }),
+        BlendMode::Difference => sep(|b, s| (b - s).abs()),
+        BlendMode::Exclusion => sep(|b, s| b + s - 2.0 * b * s),
+        BlendMode::HardLight => sep(hard_light),
+        BlendMode::SoftLight => sep(|b, s| {
+            if s <= 0.5 {
+                b - (1.0 - 2.0 * s) * b * (1.0 - b)
+            } else {
+                let d = if b <= 0.25 {
+                    ((16.0 * b - 12.0) * b + 4.0) * b
+                } else {
+                    b.sqrt()
+                };
+                b + (2.0 * s - 1.0) * (d - b)
+            }
+        }),
+        BlendMode::Hue => set_lum(set_sat(cs, sat(cb)), lum(cb)),
+        BlendMode::Saturation => set_lum(set_sat(cb, sat(cs)), lum(cb)),
+        BlendMode::Color => set_lum(cs, lum(cb)),
+        BlendMode::Luminosity => set_lum(cb, lum(cs)),
+    }
+}
+
+fn screen(b: f32, s: f32) -> f32 {
+    b + s - b * s
+}
+
+fn hard_light(b: f32, s: f32) -> f32 {
+    if s <= 0.5 {
+        b * 2.0 * s
+    } else {
+        screen(b, 2.0 * s - 1.0)
+    }
+}
+
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut c = c;
+    if n < 0.0 && l - n > 1e-6 {
+        c = c.map(|v| l + (v - l) * l / (l - n));
+    }
+    if x > 1.0 && x - l > 1e-6 {
+        c = c.map(|v| l + (v - l) * (1.0 - l) / (x - l));
+    }
+    c.map(|v| v.clamp(0.0, 1.0))
+}
+
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color(c.map(|v| v + d))
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    if max - min <= 1e-6 {
+        return [0.0; 3];
+    }
+    c.map(|v| (v - min) * s / (max - min))
 }
 
 fn box_pass(
@@ -104,5 +258,72 @@ pub fn gradient(image: &mut Pixmap, gradient: Gradient) {
             *value = (mix(c) * alpha + *value as f32 * (1.0 - alpha)).round() as u8;
         }
         pixel[3] = (mix(3) + pixel[3] as f32 * (1.0 - alpha)).round() as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One opaque pixel of `rgb` (0..=255).
+    fn px(rgb: [u8; 3], a: u8) -> Pixmap {
+        let mut p = Pixmap::new(1, 1).unwrap();
+        let k = a as f32 / 255.0;
+        p.data_mut().copy_from_slice(&[
+            (rgb[0] as f32 * k).round() as u8,
+            (rgb[1] as f32 * k).round() as u8,
+            (rgb[2] as f32 * k).round() as u8,
+            a,
+        ]);
+        p
+    }
+
+    fn blended(back: [u8; 3], front: [u8; 3], mode: BlendMode) -> [u8; 4] {
+        let mut b = px(back, 255);
+        blend(&mut b, &px(front, 255), mode, 1.0);
+        b.data().try_into().unwrap()
+    }
+
+    #[test]
+    fn modes_match_their_formulas() {
+        let (b, s) = ([200, 100, 50], [100, 100, 100]);
+        assert_eq!(blended(b, s, BlendMode::Normal), [100, 100, 100, 255]);
+        // 200*100/255 = 78.4
+        assert_eq!(blended(b, s, BlendMode::Multiply)[0], 78);
+        assert_eq!(blended(b, s, BlendMode::Subtract), [100, 0, 0, 255]);
+        assert_eq!(blended(b, s, BlendMode::Add), [255, 200, 150, 255]);
+        // Divide: 200/100 clips to 255; 100/100 = 255; 50/100 = 127.5.
+        let d = blended(b, s, BlendMode::Divide);
+        assert_eq!(&d[..2], &[255, 255]);
+        assert!((127..=128).contains(&d[2]));
+        assert_eq!(blended(b, s, BlendMode::Difference), [100, 0, 50, 255]);
+        assert_eq!(blended(b, s, BlendMode::Darken), [100, 100, 50, 255]);
+        assert_eq!(blended(b, s, BlendMode::Lighten), [200, 100, 100, 255]);
+        // Screen of white is white; multiply by white changes nothing.
+        assert_eq!(
+            blended(b, [255; 3], BlendMode::Screen),
+            [255, 255, 255, 255]
+        );
+        assert_eq!(
+            blended(b, [255; 3], BlendMode::Multiply),
+            [200, 100, 50, 255]
+        );
+        // Luminosity of grey on a colour keeps no hue difference: grey.
+        let l = blended([255, 0, 0], [128, 128, 128], BlendMode::Saturation);
+        assert!(l[0] == l[1] && l[1] == l[2], "{l:?}");
+    }
+
+    #[test]
+    fn transparency_and_opacity_behave() {
+        // Over nothing, any mode just shows the source.
+        let mut empty = Pixmap::new(1, 1).unwrap();
+        blend(&mut empty, &px([10, 20, 30], 255), BlendMode::Subtract, 1.0);
+        assert_eq!(empty.data(), &[10, 20, 30, 255]);
+        // Opacity 0 changes nothing; half opacity lands halfway.
+        let mut b = px([200, 200, 200], 255);
+        blend(&mut b, &px([100, 100, 100], 255), BlendMode::Subtract, 0.0);
+        assert_eq!(b.data(), &[200, 200, 200, 255]);
+        blend(&mut b, &px([100, 100, 100], 255), BlendMode::Subtract, 0.5);
+        assert_eq!(b.data(), &[150, 150, 150, 255]);
     }
 }

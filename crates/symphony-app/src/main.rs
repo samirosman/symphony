@@ -1910,6 +1910,27 @@ impl SymphonyApp {
             entry.context.clone_from(&node_views);
             out.push(entry);
         }
+        // Every blend mode is its own search result ("subtract", "glow",
+        // "shadow"...), adding a Blend Modes node already set to it.
+        for mode in symphony_core::graph::BlendMode::ALL {
+            let kind =
+                symphony_core::graph::NodeKind::Effect(symphony_core::graph::Effect::Blend {
+                    mode,
+                    amount: 1.0,
+                });
+            let mut entry = Entry::new(
+                &format!("Blend mode: {}", mode.title()),
+                Kind::Node,
+                Command::AddNode(kind),
+                &format!("node.add.blend.{}", mode.title()),
+            )
+            .words(&format!(
+                "blend modes layer mode composite {}",
+                mode.words()
+            ));
+            entry.context.clone_from(&node_views);
+            out.push(entry);
+        }
         let mut drawing = Entry::new(
             "Add Drawing node",
             Kind::Node,
