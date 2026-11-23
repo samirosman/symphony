@@ -625,6 +625,25 @@ impl Session {
         self.doc.settings.length
     }
 
+    /// Play or stop. Play from the playhead, or from the start of the
+    /// playback range (or the scene) when the playhead is at its end or
+    /// outside it, so Play always plays something.
+    pub fn toggle_playback(&mut self) {
+        if self.playing {
+            self.playing = false;
+            return;
+        }
+        let len = self.length().max(1);
+        let (a, b) = self
+            .play_range
+            .map_or((1, len), |(a, b)| (a.clamp(1, len), b.clamp(1, len)));
+        let (first, last) = (a.min(b), a.max(b));
+        if self.frame < first || self.frame >= last {
+            self.frame = first;
+        }
+        self.playing = true;
+    }
+
     pub fn layer_count(&self) -> usize {
         self.doc.layers.len()
     }
@@ -2607,6 +2626,29 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn play_at_the_range_end_starts_from_the_range_start() {
+        let mut s = Session::new_scene();
+        s.doc.settings.length = 75;
+        s.play_range = Some((5, 19));
+        s.loop_playback = false;
+        s.frame = 19;
+        s.toggle_playback();
+        assert!(s.playing);
+        assert_eq!(s.frame, 5);
+        s.toggle_playback();
+        assert!(!s.playing);
+        // Inside the range: play from the playhead.
+        s.frame = 12;
+        s.toggle_playback();
+        assert_eq!(s.frame, 12);
+        // No range: the last scene frame restarts at frame 1.
+        s.playing = false;
+        s.play_range = None;
+        s.frame = 75;
+        s.toggle_playback();
+        assert_eq!(s.frame, 1);
+    }
 
     use super::*;
 

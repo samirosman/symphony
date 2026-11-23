@@ -1294,7 +1294,7 @@ impl SymphonyApp {
                     Action::NextFrame => s.frame = (s.frame + 1).min(s.length()),
                     Action::FirstFrame => s.frame = 1,
                     Action::LastFrame => s.frame = s.length(),
-                    Action::PlayPause => s.playing = !s.playing,
+                    Action::PlayPause => s.toggle_playback(),
                     Action::EnableSound => self.sound.toggle_enabled(),
                     Action::EnableSoundScrubbing => self.sound.toggle_scrubbing(),
                     Action::SetPlayStart => {

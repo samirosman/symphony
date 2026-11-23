@@ -202,7 +202,7 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
                 )
                 .clicked()
                 {
-                    s.playing = !s.playing;
+                    s.toggle_playback();
                 }
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let len = s.length();
