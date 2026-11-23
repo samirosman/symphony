@@ -320,6 +320,13 @@ pub struct Session {
     pub frame: u32,
     pub playing: bool,
     pub selected: usize,
+    /// The layers the Transform tool works on, by layer node, so the list
+    /// survives layers moving. Empty: no box.
+    pub transform_layers: Vec<NodeId>,
+    /// The current layer when `transform_layers` was last set. When the
+    /// current layer changes elsewhere (the Timeline), the Transform tool
+    /// follows it.
+    pub transform_for: Option<NodeId>,
     pub selected_node: Option<NodeId>,
     pub reveal_node_track: Option<NodeId>,
     pub tool: Tool,
@@ -418,6 +425,8 @@ impl Session {
             frame: 1,
             playing: false,
             selected: 0,
+            transform_layers: Vec::new(),
+            transform_for: None,
             selected_node: None,
             reveal_node_track: None,
             tool: Tool::Brush,
@@ -1571,6 +1580,16 @@ impl Session {
     /// Change the selected layer's peg in one gesture step. In Animate mode
     /// values are keyed on the current frame; otherwise constants change.
     pub fn adjust_peg(&mut self, layer: usize, f: impl FnOnce(&mut PegValues)) {
+        self.adjust_peg_in(layer, None, f);
+    }
+
+    /// [`Session::adjust_peg`] for one of several layers moved together:
+    /// every peg of the gesture joins the same undo step.
+    pub fn adjust_group_peg(&mut self, layer: usize, f: impl FnOnce(&mut PegValues)) {
+        self.adjust_peg_in(layer, Some("peg-group"), f);
+    }
+
+    fn adjust_peg_in(&mut self, layer: usize, key: Option<&str>, f: impl FnOnce(&mut PegValues)) {
         let Some(mut p) = self.transform_peg(layer).cloned() else {
             return;
         };
@@ -1605,7 +1624,10 @@ impl Session {
             set(p.scale_y.get_or_insert(Value::Constant(1.0)), v.scale_y);
         }
         if let Some(id) = self.transform_peg_id(layer) {
-            self.set_peg_by_id(id, p);
+            match key {
+                Some(key) => self.set_peg_keyed(id, p, key),
+                None => self.set_peg_by_id(id, p),
+            }
         }
     }
 
@@ -2051,6 +2073,10 @@ impl Session {
     }
 
     fn set_peg_by_id(&mut self, id: NodeId, after: PegParams) {
+        self.set_peg_keyed(id, after, &format!("peg-{}", id.0));
+    }
+
+    fn set_peg_keyed(&mut self, id: NodeId, after: PegParams, key: &str) {
         let Some(NodeKind::Peg(before)) = self.doc.graph.node(id).map(|node| &node.kind) else {
             return;
         };
@@ -2059,7 +2085,7 @@ impl Session {
             self.history.apply_merged(
                 &mut self.doc,
                 "Move peg",
-                &format!("peg-{}", id.0),
+                key,
                 Edit::SetPeg {
                     node: id,
                     before,
