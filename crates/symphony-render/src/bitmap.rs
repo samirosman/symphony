@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use symphony_core::bitmap::{self, Alpha, ImageFile, ImageFormat, ImageRef};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
-use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
+use tiny_skia::{
+    FilterQuality, IntSize, Paint, Pattern, Pixmap, Point, Rect, SpreadMode, Transform,
+};
 
 /// Decoded pixels kept between frames, so export decodes each image once.
 const CACHE_BYTES: usize = 1024 * 1024 * 1024;
@@ -256,11 +258,44 @@ pub fn paint_image(pix: &mut Pixmap, scene: &Scene, r: ImageRef, m: Affine) {
         (y1 - y0) / img.height() as f32,
     ));
     let t = Transform::from_row(place.a, place.b, place.c, place.d, place.tx, place.ty);
-    let paint = PixmapPaint {
-        quality: FilterQuality::Bilinear,
-        ..PixmapPaint::default()
+    draw(pix, &img, t);
+}
+
+/// Larger output coordinates than this leave the edge hard, as the bone
+/// warp does. Anti-aliased, tiny-skia 0.11 drew correctly up to 1e8 and
+/// failed at 1e9: nothing drawn, or a debug assertion in its scanner.
+const MAX_EDGE: f32 = 1e6;
+
+/// Draw `img` source-over onto `pix` through `t` (image pixels to `pix`
+/// pixels), with an anti-aliased edge. `Pixmap::draw_pixmap` fills the
+/// same rectangle with anti-aliasing off, so a still image had a hard
+/// edge while the same image bent by a bone had a soft one.
+fn draw(pix: &mut Pixmap, img: &Pixmap, t: Transform) {
+    let Some(rect) = Rect::from_xywh(0.0, 0.0, img.width() as f32, img.height() as f32) else {
+        return;
     };
-    pix.draw_pixmap(0, 0, (*img).as_ref(), &paint, t, None);
+    let mut corners = [
+        Point::from_xy(rect.left(), rect.top()),
+        Point::from_xy(rect.right(), rect.top()),
+        Point::from_xy(rect.right(), rect.bottom()),
+        Point::from_xy(rect.left(), rect.bottom()),
+    ];
+    t.map_points(&mut corners);
+    let anti_alias = corners
+        .iter()
+        .all(|p| p.x.abs() <= MAX_EDGE && p.y.abs() <= MAX_EDGE);
+    let paint = Paint {
+        shader: Pattern::new(
+            img.as_ref(),
+            SpreadMode::Pad,
+            FilterQuality::Bilinear,
+            1.0,
+            Transform::identity(),
+        ),
+        anti_alias,
+        ..Paint::default()
+    };
+    pix.fill_rect(rect, &paint, t, None);
 }
 
 #[cfg(test)]
@@ -490,6 +525,51 @@ mod tests {
         store(&mut c, key(5), px(1), 4, 12);
         assert!(!c.contains_key(&key(5)));
         assert_eq!(c.len(), 3);
+    }
+
+    /// An opaque red `n` by `n` image, drawn through `t` onto 8 by 8.
+    fn drawn(n: u32, t: Transform) -> Pixmap {
+        let mut img = Pixmap::new(n, n).unwrap();
+        img.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+        let mut pix = Pixmap::new(8, 8).unwrap();
+        draw(&mut pix, &img, t);
+        pix
+    }
+
+    fn alpha(p: &Pixmap, x: u32, y: u32) -> u8 {
+        p.pixel(x, y).unwrap().alpha()
+    }
+
+    #[test]
+    fn the_edge_is_anti_aliased() {
+        // Left and top edges half a pixel into column and row 2.
+        let p = drawn(4, Transform::from_translate(2.5, 2.5));
+        let edge = alpha(&p, 2, 4);
+        assert!((100..=155).contains(&edge), "edge alpha {edge}");
+        assert!(alpha(&p, 2, 2) < edge, "corner is a quarter covered");
+        assert_eq!(alpha(&p, 4, 4), 255);
+        assert_eq!(alpha(&p, 1, 4), 0);
+    }
+
+    #[test]
+    fn an_edge_on_the_pixel_grid_stays_sharp() {
+        let p = drawn(4, Transform::from_translate(2.0, 2.0));
+        for i in 2..6 {
+            assert_eq!(alpha(&p, 2, i), 255);
+            assert_eq!(alpha(&p, 5, i), 255);
+            assert_eq!(alpha(&p, 1, i), 0);
+            assert_eq!(alpha(&p, 6, i), 0);
+        }
+    }
+
+    #[test]
+    fn a_huge_zoom_falls_back_to_a_hard_edge() {
+        // Three corners far past MAX_EDGE. Anti-aliased, tiny-skia 0.11
+        // draws nothing here.
+        let t = Transform::from_row(1e9, 0.0, 0.0, 1e9, 3.3, 3.3);
+        let p = drawn(4, t);
+        assert_eq!(alpha(&p, 4, 4), 255);
+        assert_eq!(alpha(&p, 2, 2), 0);
     }
 
     #[test]
