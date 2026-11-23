@@ -321,7 +321,7 @@ pub fn ui(
 
     let camera_space = st.camera_space;
     // Start a gesture.
-    if response.drag_started() {
+    if response.drag_started_by(egui::PointerButton::Primary) {
         if let Some(p) = view_pointer.or(response.interact_pointer_pos()) {
             let on_box = target.and_then(|(lo, hi, m)| grab(p, lo, hi, m).map(|k| (k, lo, hi, m)));
             let start_drag = |kind: Kind,
@@ -419,7 +419,7 @@ pub fn ui(
     }
 
     // Continue it.
-    if response.dragged() {
+    if response.dragged_by(egui::PointerButton::Primary) {
         if let Some(p) = response.interact_pointer_pos() {
             if let Some(d) = &st.drag {
                 if let Some(l) = drag_transform(d, p, shift) {
@@ -441,7 +441,7 @@ pub fn ui(
     }
 
     // Finish it.
-    if response.drag_stopped() {
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
         if let (Some(d), Some(p)) = (st.drag.take(), response.interact_pointer_pos()) {
             if transform_tool {
                 s.end_gesture();
@@ -1222,6 +1222,38 @@ mod tests {
         let sy = peg.scale_y.as_ref().map_or(1.0, |v| v.at(1));
         assert!(sx > 1.05, "no scale: {sx}");
         assert!((sx - sy).abs() < 1e-3, "not in proportion: {sx} x {sy}");
+    }
+
+    #[test]
+    fn a_middle_drag_does_not_move_the_selection() {
+        let (mut h, layer, _) = image_harness();
+        let none = egui::Modifiers::NONE;
+        let x = |h: &SelectHarness| h.state().0.transform_peg(layer).map_or(0.0, |p| p.x.at(1));
+        click(&mut h, Pos2::new(250.0, 200.0), none);
+        let x0 = x(&h);
+        let middle = egui::PointerButton::Middle;
+        let start = Pos2::new(245.0, 195.0);
+        pointer_by(&mut h, start, middle, Some(true), none);
+        for i in 1..=5 {
+            let at = start + Vec2::new(10.0 * i as f32, 0.0);
+            pointer_by(&mut h, at, middle, None, none);
+        }
+        pointer_by(
+            &mut h,
+            start + Vec2::new(50.0, 0.0),
+            middle,
+            Some(false),
+            none,
+        );
+        assert_eq!(x(&h), x0);
+        assert!(h.state().1.drag.is_none());
+        // The same drag with the primary button moves it.
+        pointer(&mut h, start, Some(true), none);
+        for i in 1..=5 {
+            pointer(&mut h, start + Vec2::new(10.0 * i as f32, 0.0), None, none);
+        }
+        pointer(&mut h, start + Vec2::new(50.0, 0.0), Some(false), none);
+        assert!((x(&h) - x0 - 250.0).abs() < 1.0, "moved {}", x(&h) - x0);
     }
 
     fn click(h: &mut SelectHarness, at: Pos2, m: egui::Modifiers) {

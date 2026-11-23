@@ -26,6 +26,8 @@ mod camera_render;
 /// Eraser radius, in screen points.
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
+/// Space + middle drag: zoom factor e^(rate * points dragged up).
+const MIDDLE_ZOOM_RATE: f32 = 0.006;
 
 pub struct CanvasState {
     pan: Vec2,
@@ -489,7 +491,19 @@ pub fn ui(
             state.pan += scroll;
         }
     }
-    if response.dragged() && navigating {
+    if response.dragged_by(egui::PointerButton::Middle) {
+        // Middle drag pans in every tool; with Space held, dragging up
+        // zooms in and dragging down zooms out, at the press point.
+        let d = response.drag_delta();
+        if space {
+            let at = ui
+                .input(|i| i.pointer.press_origin())
+                .unwrap_or(rect.center());
+            zoom_at(state, rect, at, (-d.y * MIDDLE_ZOOM_RATE).exp());
+        } else {
+            state.pan += d;
+        }
+    } else if response.dragged() && navigating {
         if space && shift {
             // Rotate around the view centre by the angle the pointer swept.
             if let Some(p) = response.interact_pointer_pos() {
