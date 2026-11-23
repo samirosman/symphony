@@ -447,6 +447,30 @@ Speed is part of the design (P1). Budgets are in
 [ENGINEERING.md](ENGINEERING.md) E6. A feature that breaks a budget isn't
 finished.
 
+- **D14.1 Give the artist’s current action priority.** Show fresh ink,
+  the result of a handle drag, or the pose at the new playhead before
+  rendering nearby frames or refreshing thumbnails. Let background jobs
+  yield when drawing, dragging, or scrubbing needs the same resources.
+- **D14.2 Update the part that changed.** Reuse valid render results and
+  recompute only affected regions and their dependencies. Account for
+  effects that extend or move pixels beyond the original edit, including
+  blur and distortion. Prioritize the visible Camera area and the active
+  drawing, handle, or matte.
+- **D14.3 Adapt preview quality during interaction.** A cheaper pass is
+  useful for expensive effects during a drag or scrub when it preserves
+  the cues the artist needs, such as a matte edge they are placing.
+  Give visually important changes priority over refinement. Settle
+  paused previews at full quality and keep them consistent with export.
+- **D14.4 Match work to the hardware.** Keep input and immediate feedback
+  on a short path. Move downloads, disk reads, and decoding off that path.
+  Use the GPU for parallel pixel work where profiling shows an advantage
+  after transfers. Size background work to leave resources for interaction.
+- **D14.5 Review slow cases as well as typical ones.** Measure cold launch
+  to a usable Welcome screen, pen-to-visible-ink latency, and scrub-to-pose
+  latency in a busy shot. Repeat while downloading or exporting to catch
+  hitches that average frame rate can hide.
+
+
 ---
 
 ## 15. Review checklist (every UI change)
@@ -484,7 +508,7 @@ happening and roughly how long is left.
 | > 150 ms | An activity indicator **where the work was triggered**: a spinner on the button, in the view, or in the status bar. Never earlier, so fast actions don't flicker (E5.4). |
 | > 1 s | **What** is happening, in words ("Opening Walk", "Rendering frame 12 of 48"), and determinate progress whenever the work can be counted. |
 | > 3 s | A **Cancel** button, and elapsed time or time remaining. |
-| Startup | The window shows something within 200 ms. A launch that will take longer shows a loading screen with its current step. Never a blank or frozen window. |
+| Startup | Aim to show a usable Welcome screen within 200 ms. If essential work delays it, show the current startup step. |
 
 ### 17.2 Rules
 - **D17.1 Never freeze.** The UI keeps answering while work runs. Slow
@@ -520,6 +544,17 @@ happening and roughly how long is left.
 - **D17.10 Motion here is allowed.** Loading indicators are the one
   continuous motion in the app (an exception to D9.1), because they
   answer the user's action and show it's still alive.
+- **D17.11 Make startup useful in stages.** Enable Create and Open
+  as soon as the Welcome screen can accept input. Use the time an artist
+  spends in Welcome to warm the renderer and load recent-project previews.
+  On opening a scene, give its current frame priority. Load nearby frames,
+  thumbnails, and other secondary content as resources become available.
+  Run optional downloads in the background when possible, with progress
+  available where the artist requested them.
+- **D17.12 Let visible progress reflect real work.** Reveal usable content
+  as it becomes ready and keep its layout stable. For waits that need a
+  dedicated screen, update the step or count as work completes. Keep the
+  feedback calm, legible, and consistent with reduced-motion settings.
 
 ## 16. AI
 
