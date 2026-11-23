@@ -153,6 +153,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
+        NodeKind::Effect(Effect::Mask { .. }) => "Mask",
         NodeKind::Effect(Effect::Blur { .. }) => "Box Blur",
         NodeKind::Effect(Effect::Grain { .. }) => "Grain",
         NodeKind::Effect(Effect::Opacity { .. }) => "Opacity",
@@ -161,8 +162,9 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
     }
 }
 
-fn effect_nodes() -> [NodeKind; 5] {
+fn effect_nodes() -> [NodeKind; 6] {
     [
+        NodeKind::Effect(Effect::Mask { inverted: false }),
         NodeKind::Effect(Effect::Blur { radius: 12.0 }),
         NodeKind::Effect(Effect::Grain {
             amount: 0.16,
@@ -369,7 +371,7 @@ pub fn inspector(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) 
 
 fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: Option<Input>) {
     if let Some(from) = source {
-        if !s.doc.graph.can_connect(from, input.0) {
+        if !s.doc.graph.can_connect_to(from, input.0, input.1) {
             s.notice =
                 Some("These ports can’t connect. Check the data type or look for a loop.".into());
             return;
@@ -518,8 +520,8 @@ fn nearby_wiring(
                     }
                     let distance = near_cable(point, from, to);
                     (distance <= REACH
-                        && graph.can_connect(old.from, moving)
-                        && graph.can_connect(moving, old.to))
+                        && graph.can_connect_to(old.from, moving, *port)
+                        && graph.can_connect_to(moving, old.to, old.port))
                     .then_some((
                         distance,
                         AutoWire::Insert {
@@ -539,15 +541,17 @@ fn nearby_wiring(
     let incoming = free_inputs().flat_map(|(&(_, port), &to)| {
         outputs.iter().filter_map(move |(&from, &at)| {
             let distance = to.distance(at);
-            (distance <= REACH && at.y <= card.center().y && graph.can_connect(from, moving))
-                .then_some((
-                    distance,
-                    AutoWire::Join(Link {
-                        from,
-                        to: moving,
-                        port,
-                    }),
-                ))
+            (distance <= REACH
+                && at.y <= card.center().y
+                && graph.can_connect_to(from, moving, port))
+            .then_some((
+                distance,
+                AutoWire::Join(Link {
+                    from,
+                    to: moving,
+                    port,
+                }),
+            ))
         })
     });
     let outgoing = free_output.into_iter().flat_map(|&at| {
@@ -556,7 +560,7 @@ fn nearby_wiring(
             (distance <= REACH
                 && point.y >= card.center().y
                 && graph.input(to, port).is_none()
-                && graph.can_connect(moving, to))
+                && graph.can_connect_to(moving, to, port))
             .then_some((
                 distance,
                 AutoWire::Join(Link {
@@ -740,6 +744,10 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 ui.label("Seed");
                 ui.add(egui::DragValue::new(seed));
             });
+        }
+        NodeKind::Effect(Effect::Mask { inverted }) => {
+            ui.checkbox(inverted, "Invert matte")
+                .on_hover_text("Cut away pixels covered by the matte.");
         }
         NodeKind::Effect(Effect::Blend { mode, amount }) => {
             egui::ComboBox::from_label("Mode")
@@ -1312,6 +1320,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             used
         } else if matches!(node.kind, NodeKind::Gradient(_)) {
             vec![]
+        } else if matches!(node.kind, NodeKind::Effect(Effect::Mask { .. })) {
+            vec![0, 1]
         } else {
             vec![0]
         };
@@ -1410,7 +1420,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     // first), else the nearest fitting input within reach.
     let drop_target =
         |graph: &symphony_core::graph::Graph, source: NodeId, p: Pos2| -> Option<Input> {
-            let fits = |input: &Input| input.0 != source && graph.can_connect(source, input.0);
+            let fits =
+                |input: &Input| input.0 != source && graph.can_connect_to(source, input.0, input.1);
             if let Some(input) = input_at(p).filter(fits) {
                 return Some(input);
             }
@@ -1729,6 +1740,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         };
         let selected = state.selection.contains(id);
         let peg = peg_colour(&s.doc.graph, *id);
+        let matte = s.doc.graph.is_drawing_matte(*id);
+        let title = if matte {
+            format!("{} · Matte", node_name(node))
+        } else {
+            node_name(node).to_owned()
+        };
         let edge = if selected {
             theme::ACCENT_SELECT
         } else {
@@ -1751,7 +1768,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             &painter,
             card.center(),
             Align2::CENTER_CENTER,
-            node_name(node),
+            &title,
             font,
             theme::TEXT_PRIMARY,
             card.width() - 16.0 * zoom,
@@ -1759,36 +1776,84 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
 
     let hover = resp.hover_pos();
-    let mut menu_input = ui.data(|d| d.get_temp::<Input>(resp.id.with("menu-input")));
+    let menu_id = resp.id.with("menu-target");
     if resp.secondary_clicked() {
-        menu_input = resp.interact_pointer_pos().and_then(input_at);
-        ui.data_mut(|d| {
-            d.remove::<Input>(resp.id.with("menu-input"));
-            if let Some(input) = menu_input {
-                d.insert_temp(resp.id.with("menu-input"), input);
-            }
-        });
+        let targets = resp
+            .interact_pointer_pos()
+            .map(|point| (input_at(point), node_at(point)))
+            .unwrap_or_default();
+        ui.data_mut(|data| data.insert_temp(menu_id, targets));
     }
     let mut disconnect = None;
-    if let Some(input) = menu_input.filter(|&(node, port)| s.doc.graph.input(node, port).is_some())
+    let mut convert = None;
+    if let Some((input, node)) =
+        ui.data(|data| data.get_temp::<(Option<Input>, Option<NodeId>)>(menu_id))
     {
-        resp.context_menu(|ui| {
-            if ui.button("Disconnect input").clicked() {
-                disconnect = Some(input);
-                ui.close();
-            }
+        let input = input.filter(|&(node, port)| s.doc.graph.input(node, port).is_some());
+        let drawing = node.filter(|&id| {
+            s.doc
+                .graph
+                .node(id)
+                .is_some_and(|node| matches!(node.kind, NodeKind::Drawing { .. }))
         });
+        if input.is_some() || drawing.is_some() {
+            resp.context_menu(|ui| {
+                if let Some(input) = input {
+                    if ui.button("Disconnect input").clicked() {
+                        disconnect = Some(input);
+                        ui.close();
+                    }
+                }
+                if let Some(id) = drawing {
+                    let is_matte = s.doc.graph.is_drawing_matte(id);
+                    let label = if is_matte {
+                        "Convert to Drawing"
+                    } else {
+                        "Convert to Mask Drawing"
+                    };
+                    if ui.button(label).clicked() {
+                        convert = Some((id, is_matte, label));
+                        ui.close();
+                    }
+                }
+            });
+        }
     }
     if let Some(input) = disconnect {
         edit_link(s, None, input, None);
     }
+    if let Some((id, before, label)) = convert {
+        s.history.apply(
+            &mut s.doc,
+            label,
+            vec![Edit::SetDrawingMatte {
+                id,
+                before,
+                after: !before,
+            }],
+        );
+        ui.ctx().request_repaint();
+    }
 
     for (&input, &point) in &inputs {
         let node = s.doc.graph.node(input.0);
+        if zoom >= 0.75
+            && node.is_some_and(|node| matches!(node.kind, NodeKind::Effect(Effect::Mask { .. })))
+        {
+            painter.text(
+                point - Vec2::Y * 8.0,
+                Align2::CENTER_BOTTOM,
+                if input.1 == 0 { "Image" } else { "Matte" },
+                theme::dense(),
+                theme::TEXT_SECONDARY,
+            );
+        }
         let transform =
             node.is_some_and(|n| matches!(n.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }));
         let compatible = match state.drag {
-            Some(Drag::Cable { source, .. }) => s.doc.graph.can_connect(source, input.0),
+            Some(Drag::Cable { source, .. }) => {
+                s.doc.graph.can_connect_to(source, input.0, input.1)
+            }
             _ => true,
         };
         let filled = s.doc.graph.input(input.0, input.1).is_some();

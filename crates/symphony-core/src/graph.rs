@@ -78,6 +78,9 @@ pub enum NodeKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
+    Mask {
+        inverted: bool,
+    },
     Blur {
         radius: f32,
     },
@@ -222,6 +225,7 @@ pub enum RenderCommand {
     Gradient(Gradient),
     BeginEffect,
     EndEffect(Effect),
+    EndMask { inverted: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -314,6 +318,8 @@ pub struct Graph {
     links: Vec<Link>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     keys: BTreeMap<NodeId, BTreeMap<u32, NodeKey>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    matte_drawings: std::collections::BTreeSet<NodeId>,
 }
 
 /// Camera-facing artwork keeps a 2D transform and a separate depth.
@@ -340,6 +346,7 @@ pub struct RenderItem {
     pub drawing: Id,
     pub transform: Affine,
     pub depth: f32,
+    pub matte_pass: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -445,6 +452,32 @@ impl Graph {
         self.links = links;
     }
 
+    pub fn is_drawing_matte(&self, id: NodeId) -> bool {
+        self.matte_drawings.contains(&id)
+    }
+
+    pub(crate) fn set_drawing_matte(&mut self, id: NodeId, matte: bool) {
+        if matte {
+            self.matte_drawings.insert(id);
+        } else {
+            self.matte_drawings.remove(&id);
+        }
+    }
+
+    pub fn can_connect_to(&self, from: NodeId, to: NodeId, port: usize) -> bool {
+        let Some(target) = self.node(to) else {
+            return false;
+        };
+        let mask = matches!(target.kind, NodeKind::Effect(Effect::Mask { .. }));
+        if self.is_drawing_matte(from) && !(mask && port == 1) {
+            return false;
+        }
+        if !matches!(target.kind, NodeKind::Composite) && port > usize::from(mask) {
+            return false;
+        }
+        self.can_connect(from, to)
+    }
+
     /// Image and transform ports carry different data. Reject incompatible
     /// endpoints and cycles before committing an interactive connection.
     pub fn can_connect(&self, from: NodeId, to: NodeId) -> bool {
@@ -529,7 +562,7 @@ impl Graph {
             .render_commands(out, xsheet, frame)?
             .into_iter()
             .filter_map(|command| match command {
-                RenderCommand::Drawing(item) => Some(item),
+                RenderCommand::Drawing(item) if !item.matte_pass => Some(item),
                 _ => None,
             })
             .collect())
@@ -542,7 +575,7 @@ impl Graph {
         frame: u32,
     ) -> Result<Vec<RenderCommand>, EvalError> {
         let mut commands = Vec::new();
-        self.eval_image(out, xsheet, frame, 0, &mut commands)?;
+        self.eval_image(out, xsheet, frame, 0, false, &mut commands)?;
         Ok(commands)
     }
 
@@ -571,6 +604,7 @@ impl Graph {
         xs: &Xsheet,
         frame: u32,
         depth: usize,
+        matte_pass: bool,
         out: &mut Vec<RenderCommand>,
     ) -> Result<(), EvalError> {
         let node = self.get(id, depth)?;
@@ -582,24 +616,41 @@ impl Graph {
         match &node.kind {
             NodeKind::Display | NodeKind::Write => {
                 if let Some(src) = self.input(id, 0) {
-                    self.eval_image(src, xs, frame, depth + 1, out)?;
+                    self.eval_image(src, xs, frame, depth + 1, matte_pass, out)?;
                 }
             }
             NodeKind::Composite => {
                 // Highest port is furthest back, so it's emitted first.
                 for (_, src) in self.inputs(id).into_iter().rev() {
-                    self.eval_image(src, xs, frame, depth + 1, out)?;
+                    self.eval_image(src, xs, frame, depth + 1, matte_pass, out)?;
                 }
             }
             NodeKind::Gradient(gradient) => out.push(RenderCommand::Gradient(
                 key.and_then(|key| key.gradient).unwrap_or(*gradient),
             )),
+            NodeKind::Effect(Effect::Mask { inverted }) => {
+                if let Some(image) = self.input(id, 0) {
+                    if let Some(matte) = self.input(id, 1).filter(|_| enabled) {
+                        let inverted = match key.and_then(|key| key.effect) {
+                            Some(Effect::Mask { inverted }) => inverted,
+                            _ => *inverted,
+                        };
+                        out.push(RenderCommand::BeginEffect);
+                        self.eval_image(image, xs, frame, depth + 1, matte_pass, out)?;
+                        out.push(RenderCommand::BeginEffect);
+                        self.eval_image(matte, xs, frame, depth + 1, true, out)?;
+                        out.push(RenderCommand::EndMask { inverted });
+                    } else {
+                        self.eval_image(image, xs, frame, depth + 1, matte_pass, out)?;
+                    }
+                }
+            }
             NodeKind::Effect(effect) => {
                 if let Some(src) = self.input(id, 0) {
                     if enabled {
                         out.push(RenderCommand::BeginEffect);
                     }
-                    self.eval_image(src, xs, frame, depth + 1, out)?;
+                    self.eval_image(src, xs, frame, depth + 1, matte_pass, out)?;
                     if enabled {
                         out.push(RenderCommand::EndEffect(
                             key.and_then(|key| key.effect).unwrap_or(*effect),
@@ -608,6 +659,9 @@ impl Graph {
                 }
             }
             NodeKind::Drawing { column } => {
+                if !matte_pass && self.is_drawing_matte(id) {
+                    return Ok(());
+                }
                 let col = xs.column(*column);
                 if let Some(drawing) = col.filter(|c| c.visible).and_then(|c| c.get(frame)) {
                     let pose = match self.input(id, 0) {
@@ -620,6 +674,7 @@ impl Graph {
                         drawing,
                         transform: pose.transform,
                         depth: pose.depth,
+                        matte_pass,
                     }));
                 }
             }

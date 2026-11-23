@@ -82,6 +82,7 @@ pub fn render_drawing_thumbnail(
         drawing,
         transform: Affine::IDENTITY,
         depth: 0.0,
+        matte_pass: false,
     };
     paint_drawing(&mut pix, scene, frame, view, item, None);
     Some(pix)
@@ -134,6 +135,19 @@ fn render_display(
                     return None;
                 }
                 layers.push(Pixmap::new(width, height)?);
+            }
+            RenderCommand::EndMask { inverted } => {
+                let matte = layers.pop()?;
+                let mut image = layers.pop()?;
+                effects::mask(&mut image, &matte, inverted);
+                layers.last_mut()?.draw_pixmap(
+                    0,
+                    0,
+                    image.as_ref(),
+                    &PixmapPaint::default(),
+                    Transform::identity(),
+                    None,
+                );
             }
             RenderCommand::EndEffect(Effect::Blend { mode, amount }) => {
                 let image = layers.pop()?;
@@ -510,6 +524,71 @@ mod tests {
         let ink = s.palette.swatches[0].rgb[0];
         assert!(row.contains(&255), "paper shows through the grain: {row:?}");
         assert!(row.contains(&ink), "ink where the grain is white: {row:?}");
+    }
+
+    #[test]
+    fn mask_keeps_or_cuts_alpha_and_converted_drawing_stays_hidden_in_composite() {
+        use symphony_core::graph::{Effect, NodeKind};
+        let mut scene = scene_with_line();
+        let image = scene.layers[0].node;
+        let mut stroke = scene.drawings[&scene.exposed(0, 1).unwrap()].strokes[0].clone();
+        stroke.id = scene.ids.fresh();
+        stroke.points[0].x = -8.0;
+        stroke.points[1].x = 8.0;
+        let mut history = History::default();
+        let layer = scene.make_layer("Matte", 1);
+        history.apply(
+            &mut scene,
+            "Add layer",
+            vec![Edit::AddLayer(Box::new(layer))],
+        );
+        let layer = scene.layers[1];
+        let mut drawing = scene.make_drawing(layer.column);
+        drawing.strokes.push(stroke);
+        let cells = Edit::splice(&scene, layer.column, 1, 0, vec![Some(drawing.id)]).unwrap();
+        history.apply(
+            &mut scene,
+            "Draw matte",
+            vec![Edit::AddDrawing { drawing }, cells],
+        );
+        history.apply(
+            &mut scene,
+            "Convert to mask drawing",
+            vec![Edit::SetDrawingMatte {
+                id: layer.node,
+                before: false,
+                after: true,
+            }],
+        );
+        let mask = scene
+            .graph
+            .add("Mask", NodeKind::Effect(Effect::Mask { inverted: false }));
+        assert!(scene.graph.can_connect_to(layer.node, mask, 1));
+        assert!(!scene.graph.can_connect_to(layer.node, mask, 0));
+        scene.graph.connect(image, mask, 0);
+        scene.graph.connect(layer.node, mask, 1);
+        scene.graph.connect(mask, scene.composite, 0);
+
+        let keep = render_camera(&scene, 1, 200, 100, None).unwrap();
+        assert_eq!(keep.pixel(100, 50).unwrap().alpha(), 255);
+        assert_eq!(keep.pixel(140, 50).unwrap().alpha(), 0);
+        scene.graph.node_mut(mask).unwrap().kind =
+            NodeKind::Effect(Effect::Mask { inverted: true });
+        let cut = render_camera(&scene, 1, 200, 100, None).unwrap();
+        assert_eq!(cut.pixel(100, 50).unwrap().alpha(), 0);
+        assert_eq!(cut.pixel(140, 50).unwrap().alpha(), 255);
+
+        history.undo(&mut scene);
+        assert_eq!(scene.graph.input(mask, 1), Some(layer.node));
+        assert!(scene.exposed(1, 1).is_some());
+        assert_eq!(
+            render_camera(&scene, 1, 200, 100, None)
+                .unwrap()
+                .pixel(100, 50)
+                .unwrap()
+                .alpha(),
+            255
+        );
     }
 
     #[test]

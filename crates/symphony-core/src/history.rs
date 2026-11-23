@@ -15,6 +15,11 @@ pub enum Edit {
         node: Node,
         position: [f32; 2],
     },
+    SetDrawingMatte {
+        id: NodeId,
+        before: bool,
+        after: bool,
+    },
     SetNodeProperties {
         id: NodeId,
         before: Node,
@@ -178,6 +183,10 @@ impl Edit {
                     s.graph.remove(*id);
                     s.node_positions.remove(id);
                 }
+            }
+            Edit::SetDrawingMatte { id, before, after } => {
+                s.graph
+                    .set_drawing_matte(*id, if forward { *after } else { *before });
             }
             Edit::SetNodeProperties { id, before, after } => {
                 let properties = if forward { after } else { before };

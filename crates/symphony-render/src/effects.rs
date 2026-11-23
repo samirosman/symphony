@@ -44,7 +44,7 @@ pub fn apply(image: &mut Pixmap, effect: Effect, scale: f32) {
             }
         }
         // Blending happens when the layer lands (`blend`).
-        Effect::Blend { .. } => {}
+        Effect::Blend { .. } | Effect::Mask { .. } => {}
     }
 }
 
@@ -258,6 +258,21 @@ pub fn gradient(image: &mut Pixmap, gradient: Gradient) {
             *value = (mix(c) * alpha + *value as f32 * (1.0 - alpha)).round() as u8;
         }
         pixel[3] = (mix(3) + pixel[3] as f32 * (1.0 - alpha)).round() as u8;
+    }
+}
+
+pub fn mask(image: &mut Pixmap, matte: &Pixmap, inverted: bool) {
+    for (pixel, mask) in image
+        .data_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(matte.data().as_chunks::<4>().0)
+    {
+        let alpha = if inverted { 255 - mask[3] } else { mask[3] };
+        for channel in pixel {
+            *channel = ((u16::from(*channel) * u16::from(alpha) + 127) / 255) as u8;
+        }
     }
 }
 

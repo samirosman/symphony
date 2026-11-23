@@ -180,6 +180,18 @@ Layers** to see the entire drawing while you edit.
 Exports render the same Display graph. From the Node view, **Render
 preview** also lets you check an individual frame.
 
+## Mask artwork
+
+Add **Mask** in Node view or Tab search. Connect the artwork to its
+**Image** port, and a drawing or other image to its **Matte** port.
+Connect the Mask output to your composite. The matte's alpha keeps
+the covered portion of the image. Use **Invert matte** to cut it away.
+
+Right-click a Drawing card and choose **Convert to Mask Drawing**.
+It remains editable in Drawing and retains its exposures and wiring.
+The drawing renders only in matte branches while converted. Choose
+**Convert to Drawing** to restore its ordinary image output.
+
 ## Harmony scene structure
 
 Choose **File → Import Harmony scene structure** and select a standalone
