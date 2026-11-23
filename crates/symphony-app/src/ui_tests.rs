@@ -894,3 +894,32 @@ fn undo_and_redo_flash_what_they_changed() {
     assert!(h.state().s.flash_serial > first, "redo flashes too");
     h.run_steps(2);
 }
+
+/// Mirror view flips only what you see: drawing still lands under the pen,
+/// at the right scene coordinates.
+#[test]
+fn mirrored_view_draws_where_the_pen_is() {
+    let mut h = rig();
+    h.state_mut()
+        .canvas
+        .apply(crate::keymap::Action::MirrorView);
+    h.run_steps(2);
+    let (left, right) = (
+        h.state().canvas.to_screen(-100.0, 0.0),
+        h.state().canvas.to_screen(60.0, 0.0),
+    );
+    assert!(left.x > right.x, "scene left shows on screen right");
+    h.state_mut().s.tool = Tool::Pencil;
+    drag(
+        &mut h,
+        &line((-100.0, 0.0), (60.0, 0.0), 12),
+        0.8,
+        PenTool::Pen,
+    );
+    let st = &strokes(&h, 0)[0];
+    let (first, last) = (st.points[0], *st.points.last().unwrap());
+    assert!(
+        (first.x + 100.0).abs() < 2.0 && (last.x - 60.0).abs() < 2.0,
+        "{first:?} {last:?}"
+    );
+}

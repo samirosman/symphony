@@ -292,6 +292,8 @@ pub struct Onion {
     pub on: bool,
     pub before: u32,
     pub after: u32,
+    /// Opacity of the nearest onion drawing; farther ones fade from it.
+    pub opacity: f32,
 }
 
 /// Strokes picked with the Select tool, in one drawing.
@@ -355,6 +357,9 @@ pub struct Session {
     /// canvas to flash; `flash_serial` counts flashes so each one plays.
     pub flash: Option<(Id, [f32; 2], [f32; 2])>,
     pub flash_serial: u64,
+    /// Light table: the other layers' drawings show faintly behind the
+    /// one being drawn, in the Drawing view.
+    pub light_table: bool,
     /// The Pen's mode the last time it was used (Brush or Pencil).
     pub last_pen: Tool,
     pub animate: bool,
@@ -461,11 +466,13 @@ impl Session {
                 on: false,
                 before: 1,
                 after: 1,
+                opacity: 0.45,
             },
             brush_size_cursor: true,
             pen_modes: false,
             flash: None,
             flash_serial: 0,
+            light_table: false,
             last_pen: Tool::Brush,
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,

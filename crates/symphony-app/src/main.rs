@@ -667,6 +667,11 @@ impl SymphonyApp {
                     }
                 }
             }
+            // SYMPHONY_SHOT_LIGHT: onion skin and light table on, for review.
+            if std::env::var_os("SYMPHONY_SHOT_LIGHT").is_some() {
+                s.onion.on = true;
+                s.light_table = true;
+            }
             // SYMPHONY_SHOT_TOOL=Brush|Pencil: review that tool's properties.
             match std::env::var("SYMPHONY_SHOT_TOOL").as_deref() {
                 Ok("Brush") => s.tool = Tool::Brush,
@@ -1175,7 +1180,8 @@ impl SymphonyApp {
             | Action::ResetZoom
             | Action::ResetRotation
             | Action::ResetPan
-            | Action::ResetView => {
+            | Action::ResetView
+            | Action::MirrorView => {
                 self.camera.apply(action);
                 self.drawing.apply(action);
             }
@@ -1501,6 +1507,7 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ResetRotation);
             self.menu_action(ui, Action::ResetPan);
             self.menu_action(ui, Action::ResetView);
+            self.menu_action(ui, Action::MirrorView);
             ui.separator();
             if ui.button("Arrange Nodes").clicked() {
                 views::node::arrange(&mut self.s, &mut self.node_view);

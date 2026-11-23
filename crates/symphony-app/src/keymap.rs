@@ -59,6 +59,8 @@ pub enum Action {
     AddLayer,
     ToggleOnionSkin,
     ResetView,
+    /// Mirror the view left to right (the artwork isn't changed).
+    MirrorView,
     ZoomIn,
     ZoomOut,
     RotateCw,
@@ -107,7 +109,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 70] = [
+    pub const ALL: [Action; 71] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -133,6 +135,7 @@ impl Action {
         Action::AddLayer,
         Action::ToggleOnionSkin,
         Action::ResetView,
+        Action::MirrorView,
         Action::ZoomIn,
         Action::ZoomOut,
         Action::RotateCw,
@@ -208,6 +211,7 @@ impl Action {
             Action::AddLayer => "layer.add",
             Action::ToggleOnionSkin => "view.onion_skin",
             Action::ResetView => "view.reset",
+            Action::MirrorView => "view.mirror",
             Action::ZoomIn => "view.zoom_in",
             Action::ZoomOut => "view.zoom_out",
             Action::RotateCw => "view.rotate_cw",
@@ -283,6 +287,7 @@ impl Action {
             Action::AddLayer => "Add drawing layer",
             Action::ToggleOnionSkin => "Onion skin",
             Action::ResetView => "Reset view",
+            Action::MirrorView => "Mirror view",
             Action::ZoomIn => "Zoom in",
             Action::ZoomOut => "Zoom out",
             Action::RotateCw => "Rotate view CW",
@@ -398,6 +403,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::AddLayer => b(Key::R, CMD),
         Action::ToggleOnionSkin => b(Key::O, ALT),
         Action::ResetView => b(Key::M, SHIFT),
+        // Not bound until checked against Harmony 27.1's shortcut list.
+        Action::MirrorView => None,
         Action::ZoomIn => b(Key::Num2, NONE),
         Action::ZoomOut => b(Key::Num1, NONE),
         Action::ResetZoom => None,
