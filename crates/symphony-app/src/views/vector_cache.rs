@@ -151,15 +151,36 @@ impl VectorMeshes {
 
     /// Draw `st` under `m` (drawing -> screen points).
     pub fn paint(&mut self, painter: &egui::Painter, st: &Stroke, colour: Color32, m: Affine) {
+        self.paint_line(painter, st, colour, m, true);
+    }
+
+    /// Draw the line being drawn: its points change every frame while the
+    /// scene's edit counter stays the same until pen up, so it is always
+    /// checked for changes.
+    pub fn paint_live(&mut self, painter: &egui::Painter, st: &Stroke, colour: Color32, m: Affine) {
+        self.paint_line(painter, st, colour, m, false);
+    }
+
+    /// `trust_version`: skip the change check for a line already checked
+    /// at this scene version.
+    fn paint_line(
+        &mut self,
+        painter: &egui::Painter,
+        st: &Stroke,
+        colour: Color32,
+        m: Affine,
+        trust_version: bool,
+    ) {
         let k = symphony_vector::scale_of(m);
         if !(k.is_finite() && k > 0.0) {
             return;
         }
         let version = self.version;
-        let unchanged = self
-            .entries
-            .get(&st.id)
-            .is_some_and(|e| e.checked == version && version != 0);
+        let unchanged = trust_version
+            && self
+                .entries
+                .get(&st.id)
+                .is_some_and(|e| e.checked == version && version != 0);
         let fp = if unchanged {
             self.entries[&st.id].fingerprint
         } else {
@@ -355,6 +376,30 @@ mod tests {
                 Affine::translate(1.0e6, 0.0),
             );
             assert!(!cache.entries.contains_key(&strokes[1].id));
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn the_line_being_drawn_grows_while_the_scene_version_stays() {
+        let mut line = sketch().remove(0);
+        line.points.truncate(2);
+        let ctx = egui::Context::default();
+        let mut cache = VectorMeshes::default();
+        // A scene that has been edited: the version is not 0.
+        cache.set_version(5);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui
+                .painter()
+                .with_clip_rect(Rect::from_min_size(Pos2::ZERO, egui::vec2(4000.0, 4000.0)));
+            let m = Affine::translate(2000.0, 2000.0);
+            cache.paint_live(&painter, &line, Color32::BLACK, m);
+            let short = cache.entries[&line.id].hi[0];
+            // More points arrive; no edit has been committed yet.
+            line.points = sketch().remove(0).points;
+            cache.paint_live(&painter, &line, Color32::BLACK, m);
+            let long = cache.entries[&line.id].hi[0];
+            assert!(long > short + 100.0, "{short} -> {long}");
         });
         out.textures_delta.clear();
     }

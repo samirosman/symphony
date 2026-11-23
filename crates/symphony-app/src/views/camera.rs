@@ -928,14 +928,12 @@ pub fn ui(
                     ink,
                     m,
                 ),
-                None => paint_stroke(
-                    &painter,
-                    &mut state.strokes,
-                    &s.doc.textures,
-                    &a.stroke,
-                    ink,
-                    m,
-                ),
+                // Not `paint_stroke`: its cache trusts the scene version,
+                // which only moves at pen up.
+                None => state
+                    .strokes
+                    .vectors
+                    .paint_live(&painter, &a.stroke, ink, m),
             }
         }
     }
