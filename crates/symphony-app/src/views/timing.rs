@@ -362,6 +362,15 @@ fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usiz
         s.toggle_visible(row);
         ui.close();
     }
+    let lock = if s.layer_locked(row) {
+        "Unlock layer"
+    } else {
+        "Lock layer"
+    };
+    if ui.button(lock).clicked() {
+        s.toggle_locked(row);
+        ui.close();
+    }
     ui.separator();
     if ui
         .add_enabled(s.layer_count() > 1, egui::Button::new("Delete layer"))
@@ -603,6 +612,8 @@ pub fn timeline(
     header(ui, s, profile);
     const HEAD: f32 = 176.0;
     const RULER: f32 = 28.0;
+    // The lock switch, just left of the Parameters field.
+    const LOCK: std::ops::Range<f32> = HEAD - PARAM_W - 28.0..HEAD - PARAM_W - 6.0;
     let cw = theme::FRAME_CELL;
     let rh = theme::ROW;
     // Sound tracks come after the drawing layers, as in Harmony.
@@ -737,8 +748,33 @@ pub fn timeline(
                         theme::TEXT_DISABLED
                     },
                 );
+                // Locked: a closed padlock and the name in red, as in Harmony.
+                let locked = s.layer_locked(i);
+                let lock_rect = Rect::from_center_size(
+                    Pos2::new(o.x + (LOCK.start + LOCK.end) / 2.0, y + rh / 2.0),
+                    Vec2::splat(16.0),
+                );
+                icons::paint(
+                    &painter,
+                    lock_rect,
+                    if locked { Icon::Lock } else { Icon::Unlock },
+                    if locked {
+                        theme::TEXT_SECONDARY
+                    } else {
+                        theme::TEXT_DISABLED
+                    },
+                );
+                if resp
+                    .hover_pos()
+                    .is_some_and(|p| LOCK.contains(&(p.x - o.x)) && (y..y + rh).contains(&p.y))
+                {
+                    resp.clone()
+                        .on_hover_text_at_pointer(keymap::tooltip(profile, Action::ToggleLock));
+                }
                 if !matches!(t.renaming, Some((r, _)) if r == i) {
-                    let name_col = if visible {
+                    let name_col = if locked {
+                        theme::STATE_LOCKED
+                    } else if visible {
                         theme::TEXT_PRIMARY
                     } else {
                         theme::TEXT_SECONDARY
@@ -751,7 +787,7 @@ pub fn timeline(
                         s.layer_name(i),
                         theme::body(),
                         name_col,
-                        HEAD - 56.0 - PARAM_W,
+                        HEAD - 68.0 - PARAM_W,
                     );
                 }
                 parameters_field(
@@ -1094,7 +1130,7 @@ pub fn timeline(
                 ) {
                     let x = p.x - o.x;
                     // Layer rows only: sound rows sit below the layers.
-                    if row < layers && (32.0..HEAD - PARAM_W).contains(&x) {
+                    if row < layers && (32.0..LOCK.start).contains(&x) {
                         t.layer_drag = Some(row);
                     }
                 }
@@ -1139,10 +1175,12 @@ pub fn timeline(
                     if resp.clicked() || resp.drag_started() {
                         if rel.x < 32.0 && resp.clicked() {
                             s.toggle_visible(row);
+                        } else if LOCK.contains(&rel.x) && resp.clicked() {
+                            s.toggle_locked(row);
                         }
                         s.select_graph_node(s.doc.layers[row].node, false);
                     }
-                    if resp.double_clicked() && rel.x < HEAD - PARAM_W - 8.0 {
+                    if resp.double_clicked() && rel.x < LOCK.start {
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
                 } else if resp.clicked() || resp.drag_started() {

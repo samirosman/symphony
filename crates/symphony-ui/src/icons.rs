@@ -27,6 +27,8 @@ pub enum Icon {
     LastFrame,
     Eye,
     EyeOff,
+    Lock,
+    Unlock,
     Onion,
     Fit,
     RotateLeft,
@@ -48,7 +50,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 35] = [
+    pub const ALL: [Icon; 37] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -66,6 +68,8 @@ impl Icon {
         Icon::LastFrame,
         Icon::Eye,
         Icon::EyeOff,
+        Icon::Lock,
+        Icon::Unlock,
         Icon::Onion,
         Icon::Fit,
         Icon::RotateLeft,
@@ -350,6 +354,23 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             for (x, y, dx) in [(4.5, 9.9, -1.1), (8.0, 10.8, 0.0), (11.5, 9.9, 1.1)] {
                 g.line(p, &[(x, y), (x + dx, y + 1.8)]);
             }
+        }
+        // A padlock: closed for a locked layer; for an unlocked one the
+        // shackle has no right leg and its arc stops past the top, so a
+        // clear gap opens above the body.
+        Icon::Lock | Icon::Unlock => {
+            g.closed(p, &[(3.5, 7.5), (12.5, 7.5), (12.5, 13.5), (3.5, 13.5)]);
+            let locked = icon == Icon::Lock;
+            let sweep = if locked { 1.0 } else { 0.8 };
+            let mut shackle = vec![(5.5, 7.5)];
+            for i in 0..=8 {
+                let a = PI * sweep * i as f32 / 8.0;
+                shackle.push((8.0 - 2.5 * a.cos(), 5.0 - 2.5 * a.sin()));
+            }
+            if locked {
+                shackle.push((10.5, 7.5));
+            }
+            g.line(p, &shackle);
         }
         // Three overlapping sheets: onion skin.
         Icon::Onion => {

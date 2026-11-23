@@ -1323,6 +1323,7 @@ impl SymphonyApp {
                     Action::DecreaseExposure => s.change_exposure(-1),
                     Action::CreateEmptyDrawing => s.new_drawing(),
                     Action::AddLayer => s.add_layer(),
+                    Action::ToggleLock => s.toggle_locked(s.selected),
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
                     Action::ShowStrokes => s.show_strokes = !s.show_strokes,
                     Action::RespectProtectedColours => s.toggle_respect_protected(),
@@ -1594,6 +1595,12 @@ impl SymphonyApp {
             ui.separator();
             self.menu_action(ui, Action::CreateEmptyDrawing);
             self.menu_action(ui, Action::AddLayer);
+            let lock = if self.s.layer_locked(self.s.selected) {
+                "Unlock layer"
+            } else {
+                "Lock layer"
+            };
+            self.menu_item(ui, Action::ToggleLock, lock.to_owned());
         });
         ui.menu_button("Play", |ui| {
             self.menu_action(ui, Action::PlayPause);

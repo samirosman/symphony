@@ -59,6 +59,7 @@ pub enum Action {
     DecreaseExposure,
     CreateEmptyDrawing,
     AddLayer,
+    ToggleLock,
     ToggleOnionSkin,
     ResetView,
     /// Mirror the view left to right (the artwork isn't changed).
@@ -116,7 +117,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 77] = [
+    pub const ALL: [Action; 78] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -142,6 +143,7 @@ impl Action {
         Action::DecreaseExposure,
         Action::CreateEmptyDrawing,
         Action::AddLayer,
+        Action::ToggleLock,
         Action::ToggleOnionSkin,
         Action::ResetView,
         Action::MirrorView,
@@ -224,6 +226,7 @@ impl Action {
             Action::DecreaseExposure => "timing.decrease_exposure",
             Action::CreateEmptyDrawing => "drawing.create_empty",
             Action::AddLayer => "layer.add",
+            Action::ToggleLock => "layer.lock",
             Action::ToggleOnionSkin => "view.onion_skin",
             Action::ResetView => "view.reset",
             Action::MirrorView => "view.mirror",
@@ -306,6 +309,7 @@ impl Action {
             Action::DecreaseExposure => "Decrease exposure",
             Action::CreateEmptyDrawing => "Create empty drawing",
             Action::AddLayer => "Add drawing layer",
+            Action::ToggleLock => "Lock layer",
             Action::ToggleOnionSkin => "Onion skin",
             Action::ResetView => "Reset view",
             Action::MirrorView => "Mirror view",
@@ -428,6 +432,9 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::DecreaseExposure => b(Key::Minus, NONE),
         Action::CreateEmptyDrawing => b(Key::R, ALT_SHIFT),
         Action::AddLayer => b(Key::R, CMD),
+        // Harmony 27: Animation > Lock > Lock. Here one switch locks and
+        // unlocks the current layer.
+        Action::ToggleLock => b(Key::L, CMD.plus(ALT)),
         Action::ToggleOnionSkin => b(Key::O, ALT),
         Action::ResetView => b(Key::M, SHIFT),
         // Not bound until checked against Harmony 27.1's shortcut list.

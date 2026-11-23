@@ -31,6 +31,9 @@ pub const ACCENT_SELECT_FILL: Color32 = hex(0x3D63B8);
 pub const ACCENT_TIME: Color32 = hex(0xF0A63A);
 pub const STATE_DANGER: Color32 = hex(0xE86A62);
 pub const STATE_OK: Color32 = hex(0x62C484);
+/// A locked layer's name: a lighter red than `STATE_DANGER`, so the text
+/// reads at 5.2:1 on a selected row (`BG_RAISED`) and 6.3:1 on a panel.
+pub const STATE_LOCKED: Color32 = hex(0xF08A82);
 pub const CANVAS_SURROUND: Color32 = hex(0x464749);
 /// The empty stage: a light neutral grey, not white (Tristan, 2026-11-22),
 /// so a blank scene doesn't glare and white artwork still shows. Black
