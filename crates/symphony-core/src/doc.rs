@@ -121,6 +121,9 @@ pub struct Scene {
     /// created; not saved.
     #[serde(skip)]
     pub media_dirs: Vec<std::path::PathBuf>,
+    /// Sound clips on the timeline, in the order they were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<SoundClip>,
     pub composite: NodeId,
     pub display: NodeId,
     #[serde(default = "default_camera_fov")]
@@ -144,6 +147,21 @@ pub struct Media {
     /// Pixel size (images).
     #[serde(default)]
     pub size: [u32; 2],
+    /// Length in seconds (sound).
+    #[serde(default)]
+    pub seconds: f32,
+}
+
+/// A sound placed on the timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoundClip {
+    /// Key into `Scene::media`.
+    pub media: u64,
+    pub name: String,
+    /// The frame its first sample plays on.
+    pub start: u32,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +260,7 @@ impl Scene {
             textures: BTreeMap::new(),
             media: BTreeMap::new(),
             media_dirs: Vec::new(),
+            sounds: Vec::new(),
             composite,
             display,
             camera_fov: default_camera_fov(),

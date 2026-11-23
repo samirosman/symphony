@@ -1929,6 +1929,7 @@ impl Session {
                     file: f.file.clone(),
                     name: f.name.clone(),
                     size: f.size,
+                    seconds: 0.0,
                 });
                 let (iw, ih) = (f.size[0] as f32, f.size[1] as f32);
                 let k = (sw / iw).min(sh / ih);
@@ -1969,6 +1970,50 @@ impl Session {
             self.history.apply(&mut self.doc, name, edits);
         }
         placed
+    }
+
+    /// Place imported sounds on the timeline from the current frame,
+    /// lengthening the scene to fit. One undo step.
+    pub fn import_sounds(&mut self, sounds: Vec<crate::import::StagedSound>) -> usize {
+        use symphony_core::doc::{Media, MediaKind, SoundClip};
+        if sounds.is_empty() {
+            return 0;
+        }
+        let before = self.doc.sounds.clone();
+        let mut after = before.clone();
+        let fps = self.doc.settings.fps.max(1.0);
+        let mut end = self.length();
+        for s in &sounds {
+            self.doc.media.entry(s.key).or_insert(Media {
+                kind: MediaKind::Sound,
+                file: s.file.clone(),
+                name: s.name.clone(),
+                size: [0, 0],
+                seconds: s.seconds,
+            });
+            after.push(SoundClip {
+                media: s.key,
+                name: s.name.clone(),
+                start: self.frame,
+                muted: false,
+            });
+            let last = self.frame + (s.seconds * fps).ceil() as u32;
+            end = end.max(last.saturating_sub(1));
+        }
+        let mut edits = vec![Edit::SetSounds { before, after }];
+        if end > self.length() {
+            edits.push(Edit::SetLength {
+                before: self.length(),
+                after: end,
+            });
+        }
+        let name = if sounds.len() == 1 {
+            "Import sound"
+        } else {
+            "Import sounds"
+        };
+        self.history.apply(&mut self.doc, name, edits);
+        sounds.len()
     }
 
     /// Add a layer above the selected one, like Harmony's Add Drawing Layer.

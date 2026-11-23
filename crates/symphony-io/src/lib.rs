@@ -361,6 +361,7 @@ mod tests {
                 file: "abc.png".into(),
                 name: "Background".into(),
                 size: [4, 3],
+                seconds: 0.0,
             },
         );
         // A hostile name is dropped on open.
@@ -371,6 +372,7 @@ mod tests {
                 file: "../escape.png".into(),
                 name: "x".into(),
                 size: [1, 1],
+                seconds: 0.0,
             },
         );
         s.media_dirs = vec![cache.clone()];

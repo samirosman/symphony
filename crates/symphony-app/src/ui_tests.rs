@@ -991,3 +991,30 @@ fn imported_images_become_layers_that_render() {
     assert!((0..s.layer_count()).all(|i| s.layer_name(i) != "walk"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Importing sound end to end: a clip at the current frame, the scene
+/// lengthened to fit, the waveform ready, one undo removes it.
+#[test]
+fn imported_sound_lands_on_the_timeline() {
+    let dir = std::env::temp_dir().join(format!("symphony-sound-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("line.wav");
+    crate::audio::write_tone(&wav, 3.0);
+    let mut s = crate::session::Session::new_scene();
+    s.doc.media_dirs = vec![cache.clone()];
+    s.doc.settings.fps = 24.0;
+    let len = s.length();
+    let out = crate::import::stage_sounds_into(&[wav], &cache);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(s.import_sounds(out.sounds), 1);
+    assert_eq!(s.doc.sounds.len(), 1);
+    assert_eq!(s.doc.sounds[0].start, 1);
+    assert_eq!(s.doc.sounds[0].name, "line");
+    assert!(s.length() >= 72, "3 s at 24 fps fits: {}", s.length());
+    assert!(s.doc.media_path(s.doc.sounds[0].media).is_some());
+    s.undo();
+    assert!(s.doc.sounds.is_empty());
+    assert_eq!(s.length(), len);
+    std::fs::remove_dir_all(&dir).ok();
+}

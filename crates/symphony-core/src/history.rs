@@ -148,6 +148,11 @@ pub enum Edit {
         after: u32,
     },
     AddLayer(Box<LayerSnapshot>),
+    /// The scene's sound clips, before and after.
+    SetSounds {
+        before: Vec<crate::doc::SoundClip>,
+        after: Vec<crate::doc::SoundClip>,
+    },
     /// Move a layer from one place in the stack to another.
     MoveLayer {
         from: usize,
@@ -431,6 +436,13 @@ impl Edit {
             }
             Edit::SetLength { before, after } => {
                 s.settings.length = if forward { *after } else { *before }
+            }
+            Edit::SetSounds { before, after } => {
+                s.sounds = if forward {
+                    after.clone()
+                } else {
+                    before.clone()
+                };
             }
             Edit::MoveLayer { from, to } => {
                 let (a, b) = if forward { (*from, *to) } else { (*to, *from) };

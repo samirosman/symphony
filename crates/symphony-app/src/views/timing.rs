@@ -533,7 +533,8 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
         .into_iter()
         .map(|(id, name, frames)| (id, name.to_owned(), frames))
         .collect();
-    let track_count = rows + node_tracks.len();
+    let sound_rows = s.doc.sounds.len();
+    let track_count = rows + node_tracks.len() + sound_rows;
     let width = HEAD + len as f32 * cw + 16.0;
 
     let out = egui::ScrollArea::both()
@@ -708,8 +709,60 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
+            // Sound clips: a row each, with the waveform from their frame.
+            let fps = s.doc.settings.fps.max(1.0);
+            for (k, clip) in s.doc.sounds.iter().enumerate() {
+                // Right under the layers, where it's easy to see.
+                let y = o.y + RULER + (rows + k) as f32 * rh;
+                widgets::fitted_text(
+                    ui,
+                    &painter,
+                    Pos2::new(o.x + 18.0, y + rh / 2.0),
+                    Align2::LEFT_CENTER,
+                    &format!("♪ {}", clip.name),
+                    theme::body(),
+                    if clip.muted {
+                        theme::TEXT_DISABLED
+                    } else {
+                        theme::TEXT_SECONDARY
+                    },
+                    HEAD - 30.0,
+                );
+                let wave = s
+                    .doc
+                    .media_path(clip.media)
+                    .and_then(|p| crate::audio::sound(&p, ui.ctx()));
+                let Some(wave) = wave else { continue };
+                let bins_per_frame = crate::audio::PEAKS_PER_SECOND / fps;
+                let ink = if clip.muted {
+                    theme::TEXT_DISABLED
+                } else {
+                    theme::ACCENT_TIME.gamma_multiply(0.75)
+                };
+                let frames = (wave.seconds() * fps).ceil() as u32;
+                for f in 0..frames {
+                    let frame = clip.start + f;
+                    if frame > len {
+                        break;
+                    }
+                    let a = (f as f32 * bins_per_frame) as usize;
+                    let b = (((f + 1) as f32 * bins_per_frame) as usize).max(a + 1);
+                    let peak = wave.peaks[a.min(wave.peaks.len())..b.min(wave.peaks.len())]
+                        .iter()
+                        .fold(0.0f32, |m, p| m.max(*p));
+                    let x = frame_x(frame) + cw / 2.0;
+                    let half = (peak * (rh / 2.0 - 3.0)).max(0.5);
+                    painter.line_segment(
+                        [
+                            Pos2::new(x, y + rh / 2.0 - half),
+                            Pos2::new(x, y + rh / 2.0 + half),
+                        ],
+                        Stroke::new((cw * 0.6).clamp(1.0, 6.0), ink),
+                    );
+                }
+            }
             for (index, (node, name, frames)) in node_tracks.iter().enumerate() {
-                let y = o.y + RULER + (rows + index) as f32 * rh;
+                let y = o.y + RULER + (rows + sound_rows + index) as f32 * rh;
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
                     Vec2::new(width - 8.0, rh - 2.0),
@@ -859,7 +912,8 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
                 } else if resp.clicked() || resp.drag_started() {
-                    let index = ((p.y - o.y - RULER) / rh).floor() as isize - rows as isize;
+                    let index =
+                        ((p.y - o.y - RULER) / rh).floor() as isize - (rows + sound_rows) as isize;
                     if let Some((node, _, _)) =
                         usize::try_from(index).ok().and_then(|i| node_tracks.get(i))
                     {

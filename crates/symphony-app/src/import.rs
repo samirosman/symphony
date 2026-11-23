@@ -266,6 +266,105 @@ fn group(staged: Vec<(PathBuf, Staged)>) -> Vec<ImageGroup> {
         .collect()
 }
 
+/// A sound file, copied into the media cache and decoded.
+pub struct StagedSound {
+    pub key: u64,
+    pub file: String,
+    pub name: String,
+    pub seconds: f32,
+}
+
+pub struct SoundOutcome {
+    pub sounds: Vec<StagedSound>,
+    pub problems: Vec<String>,
+}
+
+pub struct SoundImport {
+    rx: Receiver<SoundOutcome>,
+    pub files: usize,
+}
+
+impl SoundImport {
+    pub fn start(paths: Vec<PathBuf>, ctx: &eframe::egui::Context) -> Self {
+        let (tx, rx) = channel();
+        let files = paths.len();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let out = match cache_dir() {
+                Some(cache) => stage_sounds_into(&paths, &cache),
+                None => SoundOutcome {
+                    sounds: Vec::new(),
+                    problems: vec![
+                        "There's nowhere to keep imported files on this computer.".into()
+                    ],
+                },
+            };
+            let _ = tx.send(out);
+            ctx.request_repaint();
+        });
+        SoundImport { rx, files }
+    }
+
+    pub fn poll(&self) -> Option<SoundOutcome> {
+        self.rx.try_recv().ok()
+    }
+}
+
+/// Copy sound files into `cache` and decode them (to check they play and
+/// to know their length; the decoded sound is kept for playback).
+pub fn stage_sounds_into(paths: &[PathBuf], cache: &Path) -> SoundOutcome {
+    let _ = std::fs::create_dir_all(cache);
+    let mut out = SoundOutcome {
+        sounds: Vec::new(),
+        problems: Vec::new(),
+    };
+    for path in paths {
+        let shown = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                out.problems
+                    .push(format!("{shown}: couldn't read it ({e})"));
+                continue;
+            }
+        };
+        let key = content_key(&bytes);
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| "wav".into());
+        let file = format!("{key:016x}.{ext}");
+        let dest = cache.join(&file);
+        if !dest.is_file() {
+            if let Err(e) = std::fs::write(&dest, &bytes) {
+                out.problems
+                    .push(format!("{shown}: couldn't copy it ({e})"));
+                continue;
+            }
+        }
+        match crate::audio::decode(&dest) {
+            Ok(d) => {
+                let seconds = d.seconds();
+                crate::audio::remember(&dest, std::sync::Arc::new(d));
+                out.sounds.push(StagedSound {
+                    key,
+                    file,
+                    name: path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    seconds,
+                });
+            }
+            Err(e) => out.problems.push(format!("{shown}: {e}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

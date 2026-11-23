@@ -4,6 +4,7 @@
 //! (ENGINEERING E4.3). Saving and autosave run off the main thread (E5.2).
 
 mod app_icon;
+mod audio;
 mod backdrop;
 mod brush_import;
 mod codec;
@@ -300,6 +301,9 @@ struct SymphonyApp {
     brush_import: Option<brush_import::BrushImport>,
     /// Images being read and copied in the background.
     image_import: Option<import::ImageImport>,
+    sound_import: Option<import::SoundImport>,
+    /// The scene's sound, in step with the playhead.
+    player: audio::Player,
     /// Screenshot runs import their file once.
     shot_imported: bool,
     show_licences: bool,
@@ -799,6 +803,8 @@ impl SymphonyApp {
             codec_download: None,
             brush_import: None,
             image_import: None,
+            sound_import: None,
+            player: Default::default(),
             shot_imported: false,
             show_licences: false,
             crash_report: crash_offer,
@@ -2056,6 +2062,16 @@ impl SymphonyApp {
                         d.total.map(|t| d.done as f32 / t.max(1) as f32),
                     ));
                 }
+                if let Some(i) = &self.sound_import {
+                    jobs.push((
+                        if i.files == 1 {
+                            "Importing sound".into()
+                        } else {
+                            format!("Importing {} sounds", i.files)
+                        },
+                        None,
+                    ));
+                }
                 if let Some(i) = &self.image_import {
                     jobs.push((
                         if i.files == 1 {
@@ -2805,10 +2821,18 @@ impl SymphonyApp {
                         }
                     }
                 }
-                5 | 6 => {
-                    let what = if slot == 5 { "Sound" } else { "Video" };
+                5 => {
+                    if self.sound_import.is_some() {
+                        notes.push(
+                            "Still importing the last sound. Try this again in a moment.".into(),
+                        );
+                    } else {
+                        self.sound_import = Some(import::SoundImport::start(paths, ctx));
+                    }
+                }
+                6 => {
                     for p in paths {
-                        notes.push(format!("{}: {what} import is coming soon.", name(&p)));
+                        notes.push(format!("{}: video import is coming soon.", name(&p)));
                     }
                 }
                 _ => {
@@ -2824,6 +2848,26 @@ impl SymphonyApp {
     }
 
     fn file_drops(&mut self, ctx: &egui::Context) {
+        // Sounds finished decoding: put them on the timeline.
+        if let Some(job) = &self.sound_import {
+            if let Some(done) = job.poll() {
+                self.sound_import = None;
+                let names: Vec<String> = done.sounds.iter().map(|s| s.name.clone()).collect();
+                let placed = self.s.import_sounds(done.sounds);
+                let mut text = match placed {
+                    0 => String::new(),
+                    1 => format!("Imported {} at frame {}.", names[0], self.s.frame),
+                    n => format!("Imported {n} sounds at frame {}.", self.s.frame),
+                };
+                if !done.problems.is_empty() {
+                    text.push(' ');
+                    text.push_str(&done.problems.join(". "));
+                }
+                if !text.is_empty() {
+                    self.s.notice = Some(text.trim().to_owned());
+                }
+            }
+        }
         // Images finished reading in the background: place them.
         if let Some(job) = &self.image_import {
             if let Some(done) = job.poll() {
@@ -3607,6 +3651,9 @@ impl SymphonyApp {
         );
 
         self.cursor_feedback(&ctx);
+        // Sound follows the playhead (and plays a slice when scrubbing).
+        self.player
+            .sync(&ctx, &self.s.doc, self.s.frame, self.s.playing);
         // Unsaved and recovered scenes find imported files in the cache.
         if let Some(cache) = import::cache_dir() {
             if !self.s.doc.media_dirs.contains(&cache) {
