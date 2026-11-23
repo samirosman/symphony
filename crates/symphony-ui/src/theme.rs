@@ -72,6 +72,10 @@ pub const GUTTER: f32 = 6.0;
 
 // Workspace glass surfaces composite over the cached wallpaper.
 pub const GLASS_PANEL: Color32 = Color32::from_rgba_premultiplied(21, 22, 25, 179);
+/// Glass for floating windows (Preferences, floating views and Tool
+/// Properties, the drop panel). They sit over the artwork, not the
+/// wallpaper, so they need a denser tint to keep their text readable.
+pub const GLASS_FLOATING: Color32 = Color32::from_rgba_premultiplied(24, 25, 28, 238);
 pub const GLASS_CHROME: Color32 = Color32::from_rgba_premultiplied(14, 15, 17, 158);
 pub const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(23, 23, 23, 23);
 pub const GLASS_RADIUS: u8 = 12;

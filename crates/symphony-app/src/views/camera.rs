@@ -45,6 +45,8 @@ pub struct CanvasState {
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
     pub select: SelectState,
+    /// The undo/redo flash being shown: its serial and when it started.
+    flash_seen: (u64, f64),
     /// Stamped textured strokes, reused while only panning.
     strokes: super::textured::Cache,
     display: camera_render::Cache,
@@ -53,6 +55,7 @@ pub struct CanvasState {
 impl Default for CanvasState {
     fn default() -> Self {
         CanvasState {
+            flash_seen: (0, 0.0),
             pan: Vec2::ZERO,
             zoom: 1.0,
             framing: 1.0,
@@ -613,6 +616,37 @@ pub fn ui(
             })
             .unwrap_or_default()
     };
+    // Undo and redo show where they landed: a soft outline around what
+    // changed, fading out.
+    if s.flash_serial != state.flash_seen.0 {
+        state.flash_seen = (s.flash_serial, ui.input(|i| i.time));
+    }
+    if let Some((drawing, lo, hi)) = s.flash {
+        let age = ui.input(|i| i.time) - state.flash_seen.1;
+        const LENGTH: f64 = 0.7;
+        if age < LENGTH {
+            if let Some((_, _, m)) = items.iter().find(|(_, d, _)| *d == drawing) {
+                let m = view.compose(*m);
+                let corners = [
+                    m.apply(lo[0], lo[1]),
+                    m.apply(hi[0], lo[1]),
+                    m.apply(hi[0], hi[1]),
+                    m.apply(lo[0], hi[1]),
+                ];
+                let r = Rect::from_points(&corners.map(|(x, y)| Pos2::new(x, y))).expand(8.0);
+                let t = (age / LENGTH) as f32;
+                let fade = 1.0 - symphony_ui::motion::Motion::Dismiss.ease(t);
+                painter.rect(
+                    r,
+                    theme::RADIUS_CONTROL,
+                    theme::ACCENT_SELECT.gamma_multiply(0.08 * fade),
+                    EStroke::new(1.5, theme::ACCENT_SELECT.gamma_multiply(0.8 * fade)),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            ui.ctx().request_repaint();
+        }
+    }
     // While the Select tool drags, the selected strokes draw through the preview.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
     // Scenes of drawings, pegs and composites (most of them) draw straight

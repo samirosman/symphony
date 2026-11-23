@@ -505,6 +505,28 @@ impl Edit {
     }
 }
 
+fn step_drawings(edits: &[Edit]) -> Vec<Id> {
+    let mut out: Vec<Id> = Vec::new();
+    for e in edits {
+        let d = match e {
+            Edit::SetStrokeSwatch { drawing, .. }
+            | Edit::AddFill { drawing, .. }
+            | Edit::RemoveFill { drawing, .. }
+            | Edit::SetFillSwatch { drawing, .. }
+            | Edit::SetStrokes { drawing, .. }
+            | Edit::AddStroke { drawing, .. }
+            | Edit::RemoveStroke { drawing, .. }
+            | Edit::ReplaceFill { drawing, .. }
+            | Edit::ReplaceStroke { drawing, .. } => *drawing,
+            _ => continue,
+        };
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug)]
 struct Step {
     name: String,
@@ -577,6 +599,22 @@ impl History {
     }
 
     /// Undo the last step. Returns its name.
+    /// The drawings the next undo would touch (for showing where it lands).
+    pub fn undo_drawings(&self) -> Vec<Id> {
+        self.undo
+            .last()
+            .map(|s| step_drawings(&s.edits))
+            .unwrap_or_default()
+    }
+
+    /// The drawings the next redo would touch.
+    pub fn redo_drawings(&self) -> Vec<Id> {
+        self.redo
+            .last()
+            .map(|s| step_drawings(&s.edits))
+            .unwrap_or_default()
+    }
+
     pub fn undo(&mut self, scene: &mut Scene) -> Option<String> {
         self.seal();
         let step = self.undo.pop()?;

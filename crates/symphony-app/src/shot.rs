@@ -47,8 +47,10 @@ impl Shot {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
             }
         }
-        // A few frames first, so fonts and layout have settled.
-        if self.frames >= 20 && !self.requested {
+        // A few frames and half a second first, so fonts and layout have
+        // settled and opening fades (windows, panels) have finished.
+        let settled = ctx.input(|i| i.time) >= 0.5;
+        if self.frames >= 20 && settled && !self.requested {
             self.requested = true;
             let (path, done, ctx2) = (self.path.clone(), self.done.clone(), ctx.clone());
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(

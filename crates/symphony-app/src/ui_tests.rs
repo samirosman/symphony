@@ -866,3 +866,31 @@ fn busy_frame_cost() {
     h.state_mut().s.tool = tool;
     println!("busy_frame_cost idle {idle:?}, zoom {zoom:?}, drawing {draw:?} per frame");
 }
+
+/// Undo and redo flash the area they changed, so an undo never happens
+/// unseen.
+#[test]
+fn undo_and_redo_flash_what_they_changed() {
+    let mut h = rig();
+    h.state_mut().s.tool = Tool::Pencil;
+    drag(
+        &mut h,
+        &line((-100.0, 20.0), (60.0, 40.0), 12),
+        0.8,
+        PenTool::Pen,
+    );
+    assert_eq!(strokes(&h, 0).len(), 1);
+    let st = strokes(&h, 0)[0].clone();
+    let (lo, hi) = symphony_vector::bounds(&st).unwrap();
+    h.state_mut().s.undo();
+    let s = &h.state().s;
+    let (_, flo, fhi) = s.flash.expect("undo flashes");
+    assert!(
+        flo[0] <= lo[0] + 0.01 && fhi[0] >= hi[0] - 0.01,
+        "covers the undone line"
+    );
+    let first = s.flash_serial;
+    h.state_mut().s.redo();
+    assert!(h.state().s.flash_serial > first, "redo flashes too");
+    h.run_steps(2);
+}

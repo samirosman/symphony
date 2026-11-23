@@ -545,11 +545,32 @@ pub fn tool_properties(
         });
         ui.separator();
     }
-    // Long tool settings scroll instead of being cut off.
-    egui::ScrollArea::vertical()
+    // Long tool settings scroll instead of being cut off, and a soft fade
+    // at an edge says there's more that way.
+    let out = egui::ScrollArea::vertical()
         .id_salt("tool-properties")
         .auto_shrink([false, false])
         .show(ui, |ui| tool_properties_body(ui, s, presets, device));
+    let view = out.inner_rect;
+    let (offset, content) = (out.state.clamped_offset().y, out.content_size.y);
+    let fade = 28.0_f32.min(view.height() * 0.25);
+    let tint = theme::GLASS_PANEL;
+    if offset > 1.0 {
+        theme::fade_strip(
+            ui.painter(),
+            egui::Rect::from_min_size(view.min, egui::vec2(view.width(), fade)),
+            tint,
+            true,
+        );
+    }
+    if offset + view.height() < content - 1.0 {
+        theme::fade_strip(
+            ui.painter(),
+            egui::Rect::from_min_max(egui::pos2(view.left(), view.bottom() - fade), view.max),
+            tint,
+            false,
+        );
+    }
 }
 
 fn tool_properties_body(

@@ -351,6 +351,10 @@ pub struct Session {
     /// (one toolbar button, a mode switch in Tool Properties). Each mode
     /// keeps its own settings and presets. Set from the profile each frame.
     pub pen_modes: bool,
+    /// The area the last undo or redo changed (drawing, bounds), for the
+    /// canvas to flash; `flash_serial` counts flashes so each one plays.
+    pub flash: Option<(Id, [f32; 2], [f32; 2])>,
+    pub flash_serial: u64,
     /// The Pen's mode the last time it was used (Brush or Pencil).
     pub last_pen: Tool,
     pub animate: bool,
@@ -460,6 +464,8 @@ impl Session {
             },
             brush_size_cursor: true,
             pen_modes: false,
+            flash: None,
+            flash_serial: 0,
             last_pen: Tool::Brush,
             selection: Selection::default(),
             paint_mode: PaintMode::Paint,
@@ -619,19 +625,91 @@ impl Session {
 
     // ---- Undo ------------------------------------------------------------
 
-    pub fn undo(&mut self) {
-        match self.history.undo(&mut self.doc) {
-            Some(name) => self.note(format!("Undo {name}")),
-            None => self.note("Nothing to undo"),
+    /// Snapshot `drawings`, run `f`, and flash the area that changed.
+    fn flash_changes(&mut self, drawings: Vec<Id>, f: impl FnOnce(&mut Self)) {
+        let before: Vec<(Id, Option<symphony_core::stroke::Drawing>)> = drawings
+            .iter()
+            .map(|d| (*d, self.doc.drawings.get(d).cloned()))
+            .collect();
+        f(self);
+        let mut lo = [f32::INFINITY; 2];
+        let mut hi = [f32::NEG_INFINITY; 2];
+        let mut grow = |b: Option<([f32; 2], [f32; 2])>| {
+            if let Some((a, c)) = b {
+                lo = [lo[0].min(a[0]), lo[1].min(a[1])];
+                hi = [hi[0].max(c[0]), hi[1].max(c[1])];
+            }
+        };
+        let fill_bounds = |f: &symphony_core::stroke::Fill| {
+            f.contours
+                .iter()
+                .flatten()
+                .fold(None, |acc: Option<([f32; 2], [f32; 2])>, p| {
+                    Some(match acc {
+                        None => (*p, *p),
+                        Some((a, c)) => (
+                            [a[0].min(p[0]), a[1].min(p[1])],
+                            [c[0].max(p[0]), c[1].max(p[1])],
+                        ),
+                    })
+                })
+        };
+        let mut target = None;
+        for (id, old) in &before {
+            let new = self.doc.drawings.get(id);
+            let (os, ns): (&[Stroke], &[Stroke]) = (
+                old.as_ref().map_or(&[], |d| &d.strokes),
+                new.map_or(&[], |d| &d.strokes),
+            );
+            let (of, nf): (
+                &[symphony_core::stroke::Fill],
+                &[symphony_core::stroke::Fill],
+            ) = (
+                old.as_ref().map_or(&[], |d| &d.fills),
+                new.map_or(&[], |d| &d.fills),
+            );
+            let mut changed = false;
+            for st in os.iter().chain(ns) {
+                let in_old = os.iter().find(|s| s.id == st.id);
+                let in_new = ns.iter().find(|s| s.id == st.id);
+                if in_old != in_new {
+                    grow(symphony_vector::bounds(st));
+                    changed = true;
+                }
+            }
+            for fl in of.iter().chain(nf) {
+                let in_old = of.iter().find(|f| f.id == fl.id);
+                let in_new = nf.iter().find(|f| f.id == fl.id);
+                if in_old != in_new {
+                    grow(fill_bounds(fl));
+                    changed = true;
+                }
+            }
+            if changed && target.is_none() {
+                target = Some(*id);
+            }
         }
+        if let (Some(d), true) = (target, lo[0] <= hi[0]) {
+            self.flash_serial += 1;
+            self.flash = Some((d, lo, hi));
+        }
+    }
+
+    pub fn undo(&mut self) {
+        let drawings = self.history.undo_drawings();
+        self.flash_changes(drawings, |s| match s.history.undo(&mut s.doc) {
+            Some(name) => s.note(format!("Undo {name}")),
+            None => s.note("Nothing to undo"),
+        });
         self.clamp_selection();
     }
 
     pub fn redo(&mut self) {
-        match self.history.redo(&mut self.doc) {
-            Some(name) => self.note(format!("Redo {name}")),
-            None => self.note("Nothing to redo"),
-        }
+        let drawings = self.history.redo_drawings();
+        self.flash_changes(drawings, |s| match s.history.redo(&mut s.doc) {
+            Some(name) => s.note(format!("Redo {name}")),
+            None => s.note("Nothing to redo"),
+        });
         self.clamp_selection();
     }
 

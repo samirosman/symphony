@@ -174,7 +174,7 @@ fn preferences_window(ctx: &egui::Context, id: egui::Id) -> egui::Window<'static
         .default_pos(ctx.content_rect().center())
         .frame(
             egui::Frame::window(&ctx.global_style())
-                .fill(theme::GLASS_PANEL)
+                .fill(theme::GLASS_FLOATING)
                 .stroke(egui::Stroke::NONE)
                 .corner_radius(theme::GLASS_RADIUS),
         )
@@ -228,6 +228,15 @@ struct SymphonyApp {
     save_dialog: Option<(save_dialog::SaveDialog, Option<Pending>)>,
     inbetween_count: u32,
     welcome: Option<welcome::Welcome>,
+    /// The status notice on show and when it appeared, so notices fade in,
+    /// hold a moment and fade out instead of staying forever.
+    notice_shown: Option<(String, f64)>,
+    /// Autosave was running last frame (to say "Autosaved" when it ends).
+    was_autosaving: bool,
+    /// Last frame's tool and size, and the hint shown beside the cursor
+    /// when either changes over the canvas: text and when it appeared.
+    last_tool_state: (Tool, f32),
+    cursor_hint: Option<(String, f64)>,
     recent_projects: Vec<PathBuf>,
     recovery_scan: Option<Receiver<Vec<RecoveredScene>>>,
     wallpaper: wallpaper::Wallpaper,
@@ -729,6 +738,10 @@ impl SymphonyApp {
             show_icon_sheet: std::env::var_os("SYMPHONY_SHOT_ICONS").is_some(),
             last_time: None,
             frame_clock: 0.0,
+            notice_shown: None,
+            was_autosaving: false,
+            last_tool_state: (Tool::Brush, 0.0),
+            cursor_hint: None,
             shot,
             recovery,
             recovered: Vec::new(),
@@ -1716,6 +1729,83 @@ impl SymphonyApp {
         theme::glass_rim(ui.painter(), frame.response.rect);
     }
 
+    /// The current tool and its size (0 for tools without one).
+    fn tool_state(&self) -> (Tool, f32) {
+        let size = match self.s.tool {
+            Tool::Brush => self.s.brush.max_width,
+            Tool::Pencil => self.s.pencil.max_width,
+            Tool::Eraser => self.s.eraser.max_width,
+            _ => 0.0,
+        };
+        (self.s.tool, size)
+    }
+
+    /// Switching tool or changing its size while over the canvas shows the
+    /// tool's name or the new size beside the cursor for a moment: your
+    /// eyes are on the drawing, not the toolbar.
+    fn cursor_feedback(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let state = self.tool_state();
+        let (old_tool, old_size) = self.last_tool_state;
+        self.last_tool_state = state;
+        // Nothing to compare with on the first frames.
+        let over_canvas =
+            now > 0.5 && matches!(self.hovered_view, Some(View::Camera | View::Drawing));
+        if over_canvas && state.0 != old_tool {
+            let name = keymap::Action::ALL
+                .into_iter()
+                .find(|a| tool_action(state.0) == *a)
+                .map_or("Tool", |a| a.name());
+            let name = if self.s.pen_modes && matches!(state.0, Tool::Brush | Tool::Pencil) {
+                format!("Pen: {name}")
+            } else {
+                name.to_owned()
+            };
+            self.cursor_hint = Some((name, now));
+        } else if over_canvas
+            && state.0 == old_tool
+            && state.1 > 0.0
+            && (state.1 - old_size).abs() > 0.01
+        {
+            self.cursor_hint = Some((format!("Size {:.1}", state.1), now));
+        }
+        let Some((text, since)) = self.cursor_hint.clone() else {
+            return;
+        };
+        const HOLD: f64 = 0.8;
+        let age = now - since;
+        if age > HOLD + 0.25 {
+            self.cursor_hint = None;
+            return;
+        }
+        ctx.request_repaint();
+        use symphony_ui::motion::Motion;
+        let opacity = Motion::Appear.ease((age / Motion::Appear.seconds()) as f32)
+            * (1.0 - Motion::Dismiss.ease(((age - HOLD) / 0.25).clamp(0.0, 1.0) as f32));
+        let Some(p) = ctx.pointer_hover_pos() else {
+            return;
+        };
+        egui::Area::new(egui::Id::unique("symphony-cursor-hint"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(p + egui::vec2(18.0, 14.0))
+            .interactable(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
+                egui::Frame::new()
+                    .fill(theme::GLASS_FLOATING)
+                    .corner_radius(theme::RADIUS_CONTROL)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(text)
+                                .font(theme::dense())
+                                .color(theme::TEXT_PRIMARY),
+                        );
+                    });
+            });
+    }
+
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
         const GROUPS: [&[Tool]; 4] = [
             &[Tool::Select, Tool::Transform],
@@ -1825,6 +1915,36 @@ impl SymphonyApp {
                 dense(ui, "Auto-key".into(), theme::ACCENT_TIME);
             }
             let notice = s.notice.clone();
+            // Notices fade in (Appear), hold, then fade out (Dismiss) and
+            // clear, so the bar only ever shows something new.
+            const HOLD: f64 = 3.5;
+            let now = ui.input(|i| i.time);
+            let notice = match (&notice, &self.notice_shown) {
+                (Some(n), Some((shown, _))) if n == shown => notice,
+                (Some(n), _) => {
+                    self.notice_shown = Some((n.clone(), now));
+                    notice
+                }
+                (None, _) => {
+                    self.notice_shown = None;
+                    None
+                }
+            };
+            let notice_opacity = self.notice_shown.as_ref().map_or(1.0, |(_, since)| {
+                use symphony_ui::motion::Motion;
+                let age = now - since;
+                let fade_in = Motion::Appear.ease((age / Motion::Appear.seconds()) as f32);
+                let out = ((age - HOLD) / (Motion::Dismiss.seconds() * 3.0)).clamp(0.0, 1.0) as f32;
+                if age < HOLD + Motion::Dismiss.seconds() * 3.0 {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(30));
+                }
+                (fade_in * (1.0 - Motion::Dismiss.ease(out))).clamp(0.0, 1.0)
+            });
+            let expired = self
+                .notice_shown
+                .as_ref()
+                .is_some_and(|(_, since)| now - since > HOLD + 0.4);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if device.is_some_and(|pen| pen.in_proximity) {
                     dense(ui, "Pen in range".into(), theme::STATE_OK);
@@ -1870,8 +1990,9 @@ impl SymphonyApp {
                 }
                 // The last notice gets whatever room is left, cut short
                 // with an ellipsis (full text on hover), never overlapping.
-                if let Some(n) = notice {
+                if let Some(n) = notice.filter(|_| !expired) {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.multiply_opacity(notice_opacity);
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&n)
@@ -2572,7 +2693,7 @@ impl SymphonyApp {
                 .show(ctx, |ui| {
                     ui.multiply_opacity(shown);
                     egui::Frame::new()
-                        .fill(theme::GLASS_PANEL)
+                        .fill(theme::GLASS_FLOATING)
                         .stroke(egui::Stroke::new(1.0, theme::ACCENT_SELECT.gamma_multiply(0.55)))
                         .corner_radius(theme::GLASS_RADIUS)
                         .shadow(ui.visuals().popup_shadow)
@@ -3061,6 +3182,17 @@ impl eframe::App for SymphonyApp {
         let start = std::time::Instant::now();
         self.frame_ui(ui, frame);
         perf_log(start.elapsed());
+        if std::env::var_os("SYMPHONY_DEBUG_LAYERS").is_some() {
+            let order: Vec<String> = ui
+                .ctx()
+                .memory(|m| m.layer_ids().map(|l| format!("{:?}", l)).collect());
+            eprintln!(
+                "layers: {} || prefs={:?} tools={:?}",
+                order.join(" | "),
+                egui::Id::unique("symphony-preferences"),
+                egui::Id::unique("floating-tool-properties")
+            );
+        }
         // SYMPHONY_PERF_SPIN: repaint every frame, for profiling.
         if std::env::var_os("SYMPHONY_PERF_SPIN").is_some() {
             ui.ctx().request_repaint();
@@ -3236,6 +3368,20 @@ impl SymphonyApp {
                 .chrome(top.response.rect, wallpaper::ChromeSide::Top),
         );
 
+        self.cursor_feedback(&ctx);
+        // Autosave finishing says so; a faded notice is cleared.
+        let autosaving = self.autosaving.load(Ordering::SeqCst);
+        if self.was_autosaving && !autosaving {
+            self.s.notice = Some("Autosaved".into());
+        }
+        self.was_autosaving = autosaving;
+        let now = ctx.input(|i| i.time);
+        if let Some((shown, since)) = &self.notice_shown {
+            if now - since > 4.0 && self.s.notice.as_deref() == Some(shown.as_str()) {
+                self.s.notice = None;
+                self.notice_shown = None;
+            }
+        }
         let bottom_background = chrome.add(egui::Shape::Noop);
         let bottom = egui::Panel::bottom("status")
             .show_separator_line(false)
@@ -3259,7 +3405,7 @@ impl SymphonyApp {
                 .id(id)
                 .frame(
                     egui::Frame::window(&ctx.global_style())
-                        .fill(theme::GLASS_PANEL)
+                        .fill(theme::GLASS_FLOATING)
                         .stroke(egui::Stroke::NONE),
                 )
                 .open(&mut self.tool_options_open)
@@ -3436,7 +3582,7 @@ impl SymphonyApp {
                         shapes.push(egui::Shape::rect_filled(
                             rect,
                             theme::GLASS_RADIUS,
-                            theme::GLASS_PANEL,
+                            theme::GLASS_FLOATING,
                         ));
                         shapes
                     };

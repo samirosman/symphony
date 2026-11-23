@@ -27,6 +27,14 @@ fn picker(ui: &mut egui::Ui, rgba: &mut [u8; 4], edit_opacity: bool) -> egui::Re
             "Edit colour · {}% opacity",
             (u16::from(a) * 100 + 127) / 255
         ));
+    // A thin rim so very dark (or very light) colours never vanish into
+    // the panel.
+    ui.painter().rect_stroke(
+        chip.rect,
+        symphony_ui::theme::RADIUS_CONTROL,
+        Stroke::new(1.0, Color32::from_white_alpha(46)),
+        egui::StrokeKind::Inside,
+    );
     egui::Popup::menu(&chip)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
