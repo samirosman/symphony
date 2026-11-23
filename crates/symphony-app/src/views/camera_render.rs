@@ -7,7 +7,7 @@ use symphony_render::{render_camera, StrokePreview};
 
 use crate::session::{Session, Tool};
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct RenderKey {
     session: String,
     version: u64,
@@ -16,12 +16,20 @@ struct RenderKey {
     selection: Option<(Id, Vec<Id>, Affine)>,
 }
 
+type Rendered = (RenderKey, Option<(u32, u32, Vec<u8>)>);
+
 #[derive(Default)]
 pub(super) struct Cache {
     key: Option<RenderKey>,
     texture: Option<egui::TextureHandle>,
     capture_wallpaper: bool,
     wallpaper_pixels: Option<crate::wallpaper::CameraPixels>,
+    /// A render running in the background, and the key it's for. The
+    /// full renderer can take a tenth of a second on a busy scene, so it
+    /// never runs on the interface thread; the last image stays up until
+    /// the new one lands, and only the newest change is rendered next.
+    job: Option<(RenderKey, std::sync::mpsc::Receiver<Rendered>)>,
+    failed: bool,
 }
 
 impl Cache {
@@ -62,46 +70,76 @@ impl Cache {
             stage,
             selection,
         };
-        if self.key.as_ref() != Some(&key) {
+        // Collect a finished render.
+        if let Some((_, rx)) = &self.job {
+            if let Ok((done, image)) = rx.try_recv() {
+                self.job = None;
+                match image {
+                    Some((width, height, pixels)) => {
+                        let texture = egui::ColorImage::from_rgba_premultiplied(
+                            [width as usize, height as usize],
+                            &pixels,
+                        );
+                        self.wallpaper_pixels =
+                            self.capture_wallpaper
+                                .then(|| crate::wallpaper::CameraPixels {
+                                    size: [width, height],
+                                    rgba: std::sync::Arc::new(pixels),
+                                });
+                        if let Some(handle) = &mut self.texture {
+                            handle.set(texture, egui::TextureOptions::LINEAR);
+                        } else {
+                            self.texture = Some(painter.ctx().load_texture(
+                                "camera-display",
+                                texture,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                        self.failed = false;
+                    }
+                    None => {
+                        self.texture = None;
+                        self.wallpaper_pixels = None;
+                        self.failed = true;
+                    }
+                }
+                self.key = Some(done);
+            }
+        }
+        // Start rendering the newest state if it isn't shown or on its way.
+        let wanted =
+            self.key.as_ref() != Some(&key) && self.job.as_ref().is_none_or(|(k, _)| *k != key);
+        if wanted && self.job.is_none() {
             let scale = (1920.0 / stage[0].max(stage[1]) as f32).min(1.0);
             let [width, height] = stage.map(|size| (size as f32 * scale).round().max(1.0) as u32);
-            let preview =
-                key.selection
+            let scene = std::sync::Arc::new(s.doc.clone());
+            let frame = s.frame;
+            let job_key = key.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = painter.ctx().clone();
+            std::thread::spawn(move || {
+                let preview = job_key
+                    .selection
                     .as_ref()
                     .map(|(drawing, strokes, transform)| StrokePreview {
                         drawing: *drawing,
                         strokes,
                         transform: *transform,
                     });
-            if let Some(image) = render_camera(&s.doc, s.frame, width, height, preview) {
-                let texture = egui::ColorImage::from_rgba_premultiplied(
-                    [width as usize, height as usize],
-                    image.data(),
-                );
-                self.wallpaper_pixels =
-                    self.capture_wallpaper
-                        .then(|| crate::wallpaper::CameraPixels {
-                            size: [width, height],
-                            rgba: std::sync::Arc::new(image.take()),
-                        });
-                if let Some(handle) = &mut self.texture {
-                    handle.set(texture, egui::TextureOptions::LINEAR);
-                } else {
-                    self.texture = Some(painter.ctx().load_texture(
-                        "camera-display",
-                        texture,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                }
-            } else {
-                self.texture = None;
-                self.wallpaper_pixels = None;
-            }
-            self.key = Some(key);
+                let image = render_camera(&scene, frame, width, height, preview)
+                    .map(|image| (width, height, image.take()));
+                let _ = tx.send((job_key, image));
+                ctx.request_repaint();
+            });
+            self.job = Some((key, rx));
+        } else if wanted {
+            // Busy: check back once the running render lands.
+            painter.ctx().request_repaint();
         }
 
         let Some(texture) = &self.texture else {
-            return false;
+            // Nothing yet: still rendering is fine, only a failure isn't.
+            return !self.failed;
         };
         let mut mesh = egui::Mesh::with_texture(texture.id());
         let uv = [
@@ -198,7 +236,21 @@ mod tests {
                 ),
             );
         harness.state_mut().0.frame = 2;
-        harness.run_steps(1);
+        // The render runs in the background: wait for frame 2's to land.
+        for _ in 0..500 {
+            harness.run_steps(1);
+            let landed = harness
+                .state()
+                .1
+                .display
+                .key
+                .as_ref()
+                .is_some_and(|k| k.frame == 2);
+            if landed {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let camera_state = &harness.state().1;
         let texture = camera_state.display.texture.as_ref().unwrap().id();
         assert_eq!(camera_state.display.key.as_ref().unwrap().frame, 2);

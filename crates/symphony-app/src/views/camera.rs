@@ -13,7 +13,7 @@ use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::theme;
-use symphony_vector::{pressure_curve, scale_of, tessellate, Smoother};
+use symphony_vector::{pressure_curve, scale_of, Smoother};
 
 use crate::keymap::{self, Action, Profile};
 use crate::session::{apply_stencil, CanvasColours, Session, Stencil, Tool};
@@ -207,18 +207,6 @@ fn to_pos((x, y): (f32, f32)) -> Pos2 {
     Pos2::new(x, y)
 }
 
-fn paint_mesh(painter: &egui::Painter, mesh: symphony_vector::Mesh, colour: Color32) {
-    if mesh.indices.is_empty() {
-        return;
-    }
-    let mut out = egui::Mesh::default();
-    for v in &mesh.vertices {
-        out.colored_vertex(Pos2::new(v[0], v[1]), colour);
-    }
-    out.indices = mesh.indices;
-    painter.add(egui::Shape::mesh(out));
-}
-
 fn paint_stroke(
     painter: &egui::Painter,
     cache: &mut super::textured::Cache,
@@ -231,17 +219,7 @@ fn paint_stroke(
         cache.paint(painter.ctx(), painter, textures, stroke, tex, colour, m);
         return;
     }
-    let mesh = tessellate(stroke, m, 0.6);
-    if mesh.indices.is_empty() {
-        return;
-    }
-    let mut out = egui::Mesh::default();
-    out.vertices.reserve(mesh.vertices.len());
-    for v in &mesh.vertices {
-        out.colored_vertex(Pos2::new(v[0], v[1]), colour);
-    }
-    out.indices = mesh.indices;
-    painter.add(egui::Shape::mesh(out));
+    cache.vectors.paint(painter, stroke, colour, m);
 }
 
 /// When there's no native pen backend, egui's pointer becomes pen samples (E4.2).
@@ -636,7 +614,19 @@ pub fn ui(
     };
     // While the Select tool drags, the selected strokes draw through the preview.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
-    if !drawing_only && !state.display.paint(&painter, s, corners, preview) {
+    // Scenes of drawings, pegs and composites (most of them) draw straight
+    // on the GPU from cached triangles, updating on the very next frame.
+    // Effects, gradients and blend modes need the full renderer.
+    let gpu = drawing_only
+        || s.doc
+            .graph
+            .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
+            .is_ok_and(|commands| {
+                commands
+                    .iter()
+                    .all(|c| matches!(c, symphony_core::graph::RenderCommand::Drawing(_)))
+            });
+    if !gpu && !state.display.paint(&painter, s, corners, preview) {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
@@ -645,7 +635,7 @@ pub fn ui(
             theme::TEXT_PRIMARY,
         );
     }
-    for (_, d, m) in items.iter().filter(|_| drawing_only || s.show_strokes) {
+    for (_, d, m) in items.iter().filter(|_| gpu || s.show_strokes) {
         if let Some(dr) = s.doc.drawings.get(d) {
             let moving = preview.is_some() && s.selection.drawing == Some(*d);
             // Art layers back to front; within each, paint under ink.
@@ -655,17 +645,18 @@ pub fn ui(
                 if drawing_only && !s.art_preview && art != s.art {
                     continue;
                 }
-                if drawing_only {
+                if gpu {
                     for f in dr.fills.iter().filter(|f| f.art == art) {
-                        paint_mesh(
+                        state.strokes.vectors.paint_fill(
                             &painter,
-                            symphony_vector::fill::fill_mesh(&f.contours, view.compose(*m)),
+                            f,
                             colour(s, f.swatch),
+                            view.compose(*m),
                         );
                     }
                 }
                 for st in dr.strokes.iter().filter(|st| st.art == art) {
-                    if !drawing_only && st.kind != StrokeKind::Invisible {
+                    if !gpu && st.kind != StrokeKind::Invisible {
                         continue;
                     }
                     let m = match preview {

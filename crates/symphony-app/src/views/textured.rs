@@ -164,6 +164,8 @@ pub struct Cache {
     textures: HashMap<u64, Arc<Texture>>,
     worker: Option<Worker>,
     frame: u64,
+    /// Plain vector lines' cached triangles (they draw through here too).
+    pub vectors: super::vector_cache::VectorMeshes,
 }
 
 /// Stamped strokes are rebuilt per this many pixels of clip window, so
@@ -180,6 +182,7 @@ impl Cache {
     /// forget strokes not drawn lately.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
+        self.vectors.begin_frame();
         if let Some(w) = &self.worker {
             while let Ok(d) = w.done.try_recv() {
                 self.pending.remove(&d.key);

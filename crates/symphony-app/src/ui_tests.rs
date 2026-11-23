@@ -716,3 +716,69 @@ fn search_puts_a_blend_mode_on_the_selected_layer() {
     assert_eq!(s.doc.graph.links(), &links[..], "one undo rewires back");
     assert!(s.doc.graph.node(blend).is_none());
 }
+
+/// Cost of the eraser on a busy page of brush strokes and fills. Not
+/// pass/fail: `cargo test --release -p symphony-app erase_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn erase_cost() {
+    use symphony_core::stroke::{Fill, Point, Stroke};
+    let mut s = crate::session::Session::new_scene();
+    let swatch = s.swatch;
+    for i in 0..400 {
+        let y = -400.0 + (i % 40) as f32 * 20.0;
+        let x0 = -700.0 + (i / 40) as f32 * 140.0;
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 3.0,
+            max_width: 8.0,
+            points: (0..60)
+                .map(|k| Point {
+                    x: x0 + k as f32 * 2.0,
+                    y: y + (k as f32 * 0.3).sin() * 4.0,
+                    pressure: 0.7,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, 1, st);
+    }
+    let d = s.doc.exposed(0, 1).unwrap();
+    for i in 0..200 {
+        let (x, y) = (
+            -700.0 + (i % 20) as f32 * 70.0,
+            -400.0 + (i / 20) as f32 * 80.0,
+        );
+        let fill = Fill {
+            id: s.doc.ids.fresh(),
+            swatch,
+            art: Default::default(),
+            contours: vec![(0..24)
+                .map(|k| {
+                    let a = k as f32 / 24.0 * std::f32::consts::TAU;
+                    [x + a.cos() * 30.0, y + a.sin() * 30.0]
+                })
+                .collect()],
+        };
+        s.doc.drawings.get_mut(&d).unwrap().fills.push(fill);
+    }
+    let start = std::time::Instant::now();
+    for k in 0..60 {
+        let x = -650.0 + k as f32 * 4.0;
+        s.erase(d, &[([x, -390.0], 10.0), ([x + 4.0, -390.0], 10.0)]);
+    }
+    println!("erase_cost: {:?} per eraser move", start.elapsed() / 60);
+    let start = std::time::Instant::now();
+    for _ in 0..5 {
+        std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
+    }
+    println!(
+        "render_camera 1920x1080: {:?} per render",
+        start.elapsed() / 5
+    );
+}
