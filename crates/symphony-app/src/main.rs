@@ -2477,7 +2477,20 @@ impl SymphonyApp {
             if let Some(done) = job.poll() {
                 self.brush_import = None;
                 let n = done.presets.len();
+                // Importing a brush again (same name, same app) updates it
+                // in place: improved importers reach old presets without
+                // leaving numbered copies.
+                let mut updated = 0;
                 for p in done.presets {
+                    if let Some(old) =
+                        self.presets.brush.iter_mut().find(|o| {
+                            o.name == p.name && o.source.is_some() && o.source == p.source
+                        })
+                    {
+                        *old = p;
+                        updated += 1;
+                        continue;
+                    }
                     let name = self
                         .presets
                         .unique_name(presets::PresetTool::Brush, &p.name);
@@ -2492,6 +2505,12 @@ impl SymphonyApp {
                 };
                 if n == 0 {
                     text = text.replacen("Imported ", "", 1);
+                }
+                if updated > 0 {
+                    text.push_str(&format!(
+                        " {updated} already here {} updated.",
+                        if updated == 1 { "was" } else { "were" }
+                    ));
                 }
                 for m in &done.messages {
                     eprintln!("Brush import: {m}");
