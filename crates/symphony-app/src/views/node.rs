@@ -798,6 +798,29 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         }
         _ => {}
     }
+    // Pegs apply live, so the drawing moves as you drag a value: their
+    // values carry their own keys (Auto-key writes them as you edit), so
+    // the node itself is what changes. One drag is one undo step.
+    if matches!(draft.node.kind, NodeKind::Peg(_))
+        && draft.node.kind != draft.initial.kind
+        && draft.node.enabled == draft.initial.enabled
+    {
+        if let Some(before) = s.doc.graph.node(draft.id).cloned() {
+            let mut after = before.clone();
+            after.kind = draft.node.kind.clone();
+            s.history.apply_merged(
+                &mut s.doc,
+                "Change peg",
+                &format!("node-props-{}", draft.id.0),
+                Edit::SetNodeProperties {
+                    id: draft.id,
+                    before,
+                    after,
+                },
+            );
+            draft.initial.kind = draft.node.kind.clone();
+        }
+    }
     let camera_changed = draft.fov != draft.initial_fov || draft.motion != draft.initial_motion;
     let changed =
         (draft.node != draft.initial || camera_changed) && !draft.node.name.trim().is_empty();
@@ -1098,20 +1121,39 @@ fn card_width(graph: &symphony_core::graph::Graph, id: NodeId) -> f32 {
     }
 }
 
-fn peg_colour(graph: &symphony_core::graph::Graph, id: NodeId) -> Option<egui::Color32> {
-    const COLOURS: [(u8, u8, u8); 5] = [
-        (111, 194, 168),
-        (135, 172, 223),
-        (191, 155, 219),
-        (206, 172, 116),
-        (216, 143, 150),
+/// Every node type has its own colour, the same everywhere: card tint,
+/// edge and the cables leaving it. Blue (selection), amber (time) and red
+/// (danger) are kept for their meanings. Types beyond the table reuse a
+/// table colour shifted lighter or darker, so they read as related.
+pub fn kind_colour(kind: &NodeKind) -> egui::Color32 {
+    const TABLE: [(&str, (u8, u8, u8)); 10] = [
+        ("Drawing", (111, 194, 168)),
+        ("Peg", (186, 150, 222)),
+        ("Composite", (128, 182, 214)),
+        ("Camera", (214, 214, 220)),
+        ("Write", (168, 172, 180)),
+        ("Box Blur", (222, 143, 160)),
+        ("Grain", (196, 176, 128)),
+        ("Opacity", (150, 206, 222)),
+        ("Blend Modes", (232, 156, 122)),
+        ("Gradient", (172, 204, 118)),
     ];
-    if matches!(graph.node(id)?.kind, NodeKind::Peg(_)) {
-        let (r, g, b) = COLOURS[id.0 % COLOURS.len()];
-        Some(egui::Color32::from_rgb(r, g, b))
-    } else {
-        None
+    let label = kind_label(kind);
+    if let Some((_, (r, g, b))) = TABLE.iter().find(|(name, _)| *name == label) {
+        return egui::Color32::from_rgb(*r, *g, *b);
     }
+    // Out of colours: a stable cousin of one in the table.
+    let hash = label.bytes().fold(2166136261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16777619)
+    });
+    let (_, (r, g, b)) = TABLE[hash as usize % TABLE.len()];
+    let shift = if hash & 0x100 == 0 { 0.82 } else { 1.12 };
+    let f = |v: u8| ((f32::from(v) * shift).round().clamp(0.0, 255.0)) as u8;
+    egui::Color32::from_rgb(f(r), f(g), f(b))
+}
+
+fn peg_colour(graph: &symphony_core::graph::Graph, id: NodeId) -> Option<egui::Color32> {
+    graph.node(id).map(|n| kind_colour(&n.kind))
 }
 
 fn minimap(painter: &egui::Painter, viewport: Rect, bounds: Rect) {
@@ -1965,6 +2007,87 @@ pub fn library(ui: &mut egui::Ui, s: &Session, state: &mut NodeViewState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peg_wired_to_a_drawing_moves_it() {
+        use symphony_core::stroke::{Point, Stroke, StrokeKind};
+        let mut s = Session::new_scene();
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch: s.swatch,
+            min_width: 20.0,
+            max_width: 20.0,
+            points: [(-100.0, 0.0), (100.0, 0.0)]
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, s.frame, st);
+        let layer = s.doc.layers[0];
+        let render = |s: &Session| {
+            symphony_render::render_camera(&s.doc, s.frame, 192, 108, None)
+                .unwrap()
+                .data()
+                .to_vec()
+        };
+        let before = render(&s);
+        // A new peg, wired into the drawing's transform input, moved right.
+        add_node(&mut s, NodeKind::Peg(Default::default()), [0.0, 0.0]);
+        let peg = s.doc.graph.nodes().map(|(id, _)| id).max().unwrap();
+        edit_link(&mut s, Some(peg), (layer.node, 0), None);
+        eprintln!("links {:?}", s.doc.graph.links());
+        let mut node = s.doc.graph.node(peg).unwrap().clone();
+        if let NodeKind::Peg(p) = &mut node.kind {
+            p.x = symphony_core::anim::Value::Constant(300.0);
+        }
+        let old = s.doc.graph.node(peg).unwrap().clone();
+        s.history.apply(
+            &mut s.doc,
+            "Move peg",
+            vec![Edit::SetNodeProperties {
+                id: peg,
+                before: old,
+                after: node,
+            }],
+        );
+        eprintln!(
+            "world {:?}",
+            s.doc.graph.world_transform(layer.node, s.frame)
+        );
+        assert!(render(&s) != before, "the peg moves the drawing");
+    }
+
+    #[test]
+    fn node_colours_are_per_type_and_stable() {
+        let all: Vec<NodeKind> = addable_nodes()
+            .chain([
+                NodeKind::Display,
+                NodeKind::Write,
+                NodeKind::Drawing {
+                    column: symphony_core::id::Id(1),
+                },
+            ])
+            .collect();
+        // The same type always has the same colour...
+        assert_eq!(
+            kind_colour(&NodeKind::Peg(Default::default())),
+            kind_colour(&NodeKind::Peg(Default::default()))
+        );
+        // ...and every type we have is distinct.
+        let mut seen: Vec<egui::Color32> = all.iter().map(kind_colour).collect();
+        seen.sort_by_key(|c| c.to_array());
+        seen.dedup();
+        assert_eq!(seen.len(), all.len());
+    }
 
     #[test]
     fn pulling_a_node_out_of_a_chain_closes_the_chain() {

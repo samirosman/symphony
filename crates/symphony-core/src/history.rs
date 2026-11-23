@@ -455,6 +455,16 @@ impl Edit {
                 *after = *a2;
                 true
             }
+            // Live property edits on one node: first before, latest after.
+            (
+                Edit::SetNodeProperties { id, after, .. },
+                Edit::SetNodeProperties {
+                    id: i2, after: a2, ..
+                },
+            ) if id == i2 => {
+                *after = a2.clone();
+                true
+            }
             // A gesture that edits strokes again and again (the Line
             // Editor, a drag) keeps one entry: each stroke's first "before"
             // and latest "after", instead of a copy per frame.
