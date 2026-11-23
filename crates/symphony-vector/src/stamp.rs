@@ -62,6 +62,42 @@ pub fn rasterize(
     m: Affine,
     clip: [i32; 4],
 ) -> Option<Coverage> {
+    let outline: Vec<Vec<_>> = stroke
+        .shape
+        .iter()
+        .map(|ring| {
+            ring.iter()
+                .map(|point| m.apply(point[0], point[1]))
+                .collect()
+        })
+        .collect();
+    let mut clip = clip;
+    if !outline.is_empty() {
+        m.inverse()?;
+        // Avoid stamping pixels outside the surviving piece's bounding box.
+        let [mut left, mut top, mut right, mut bottom] = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for &(x, y) in outline.iter().flatten() {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+        }
+        clip = [
+            clip[0].max(left.floor() as i32),
+            clip[1].max(top.floor() as i32),
+            clip[2].min(right.ceil() as i32),
+            clip[3].min(bottom.ceil() as i32),
+        ];
+        if clip[0] >= clip[2] || clip[1] >= clip[3] {
+            return None;
+        }
+    }
+
     // Stamp along the same smooth curve that untextured lines follow.
     let step = 0.75 / scale_of(m).max(1e-6);
     let curved = Stroke {
@@ -71,23 +107,42 @@ pub fn rasterize(
     let mut s = Stamper::new(*tex, m, clip);
     s.extend(&curved, tip, grain);
     let mut c = s.coverage()?;
-    // An erased textured stroke: keep only what's inside its outline.
-    if !stroke.shape.is_empty() {
-        let inv = m.inverse()?;
-        for row in 0..c.height as i32 {
-            for col in 0..c.width as i32 {
-                let i = (row * c.width as i32 + col) as usize;
-                if c.data[i] == 0 {
-                    continue;
-                }
-                let (x, y) = inv.apply((c.x + col) as f32 + 0.5, (c.y + row) as f32 + 0.5);
-                if !crate::shape::hits_shape(&stroke.shape, x, y, 0.0) {
-                    c.data[i] = 0;
-                }
-            }
-        }
+    if !outline.is_empty() {
+        mask_coverage(&mut c, &outline);
     }
     Some(c)
+}
+
+/// Even–odd clipping at pixel centres. Intersect edges once per scanline,
+/// then clear the gaps as spans instead of testing every individual pixel.
+fn mask_coverage(c: &mut Coverage, outline: &[Vec<(f32, f32)>]) {
+    let mut crossings = Vec::new();
+    let width = c.width as usize;
+    for (row, pixels) in c.data.chunks_exact_mut(width).enumerate() {
+        let y = c.y as f32 + row as f32 + 0.5;
+        crossings.clear();
+        for ring in outline {
+            let Some(mut previous) = ring.last().copied() else {
+                continue;
+            };
+            for &next in ring {
+                let ((ax, ay), (bx, by)) = (previous, next);
+                if (ay > y) != (by > y) {
+                    crossings.push(ax + (bx - ax) * ((y - ay) / (by - ay)));
+                }
+                previous = next;
+            }
+        }
+        crossings.sort_unstable_by(f32::total_cmp);
+        let pixel = |x: f32| ((x - c.x as f32 - 0.5).ceil() as usize).min(width);
+        let mut start = 0;
+        for span in crossings.as_chunks::<2>().0 {
+            let left = pixel(span[0]);
+            pixels[start..left].fill(0);
+            start = pixel(span[1]);
+        }
+        pixels[start..].fill(0);
+    }
 }
 
 /// Stamps a stroke a piece at a time, so the stroke being drawn only
@@ -500,6 +555,42 @@ mod tests {
             return 0;
         }
         c.data[(cy * c.width as i32 + cx) as usize]
+    }
+
+    #[test]
+    fn scanline_mask_matches_point_sampling_for_rotated_outline_with_hole() {
+        let local = vec![
+            vec![[-9.2, -7.1], [8.3, -7.1], [8.3, 6.2], [-9.2, 6.2]],
+            vec![[-4.1, -3.2], [4.4, -3.2], [4.4, 2.3], [-4.1, 2.3]],
+        ];
+        let transform = Affine::translate(16.4, 20.7).compose(Affine::rotate_deg(27.0));
+        let inverse = transform.inverse().unwrap();
+        let outline: Vec<_> = local
+            .iter()
+            .map(|ring| ring.iter().map(|[x, y]| transform.apply(*x, *y)).collect())
+            .collect();
+        let mut coverage = Coverage {
+            x: 1,
+            y: 3,
+            width: 32,
+            height: 34,
+            data: vec![177; 32 * 34],
+        };
+        mask_coverage(&mut coverage, &outline);
+        for y in 0..coverage.height {
+            for x in 0..coverage.width {
+                let (lx, ly) = inverse.apply(
+                    coverage.x as f32 + x as f32 + 0.5,
+                    coverage.y as f32 + y as f32 + 0.5,
+                );
+                let expected = if crate::shape::hits_shape(&local, lx, ly, 0.0) {
+                    177
+                } else {
+                    0
+                };
+                assert_eq!(coverage.data[(y * coverage.width + x) as usize], expected);
+            }
+        }
     }
 
     #[test]
