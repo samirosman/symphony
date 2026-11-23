@@ -275,8 +275,10 @@ pub fn ui(
         .interactable(!st.closing)
         .show(ctx, |ui| {
             ui.multiply_opacity(opacity);
-            egui::Frame::new()
-                .fill(theme::BG_RAISED)
+            // Live blur behind the box (with interface effects on).
+            let slot = ui.painter().add(egui::Shape::Noop);
+            let frame = egui::Frame::new()
+                .fill(egui::Color32::TRANSPARENT)
                 .stroke(egui::Stroke::new(1.0, theme::LINE_STRONG))
                 .corner_radius(theme::RADIUS_FLOATING)
                 .shadow(ui.visuals().popup_shadow)
@@ -491,6 +493,14 @@ pub fn ui(
                         theme::fade_strip(ui.painter(), strip, theme::BG_RAISED, false);
                     }
                 });
+            ui.painter().set(
+                slot,
+                egui::Shape::Vec(crate::backdrop::glass(
+                    ui.ctx(),
+                    frame.response.rect,
+                    f32::from(theme::RADIUS_FLOATING),
+                )),
+            );
         });
     if st.closing {
         return Outcome::Closing;

@@ -4,6 +4,7 @@
 //! (ENGINEERING E4.3). Saving and autosave run off the main thread (E5.2).
 
 mod app_icon;
+mod backdrop;
 mod brush_import;
 mod codec;
 mod keymap;
@@ -181,7 +182,8 @@ fn preferences_window(ctx: &egui::Context, id: egui::Id) -> egui::Window<'static
         .default_pos(ctx.content_rect().center())
         .frame(
             egui::Frame::window(&ctx.global_style())
-                .fill(theme::GLASS_FLOATING)
+                // The glass (live blur and tint) is painted underneath.
+                .fill(egui::Color32::TRANSPARENT)
                 .stroke(egui::Stroke::NONE)
                 .corner_radius(theme::GLASS_RADIUS),
         )
@@ -2766,8 +2768,8 @@ impl SymphonyApp {
                 .fade_in(false)
                 .show(ctx, |ui| {
                     ui.multiply_opacity(shown);
-                    egui::Frame::new()
-                        .fill(theme::GLASS_FLOATING)
+                    let slot = ui.painter().add(egui::Shape::Noop);
+                    let panel = egui::Frame::new()
                         .stroke(egui::Stroke::new(1.0, theme::ACCENT_SELECT.gamma_multiply(0.55)))
                         .corner_radius(theme::GLASS_RADIUS)
                         .shadow(ui.visuals().popup_shadow)
@@ -2786,6 +2788,14 @@ impl SymphonyApp {
                                 .color(theme::TEXT_SECONDARY),
                             );
                         });
+                    ui.painter().set(
+                        slot,
+                        egui::Shape::Vec(backdrop::glass(
+                            ui.ctx(),
+                            panel.response.rect,
+                            f32::from(theme::GLASS_RADIUS),
+                        )),
+                    );
                 });
         }
         let paths: Vec<std::path::PathBuf> = dropped
@@ -3531,7 +3541,7 @@ impl SymphonyApp {
                 .id(id)
                 .frame(
                     egui::Frame::window(&ctx.global_style())
-                        .fill(theme::GLASS_FLOATING)
+                        .fill(egui::Color32::TRANSPARENT)
                         .stroke(egui::Stroke::NONE),
                 )
                 .open(&mut self.tool_options_open)
@@ -3542,9 +3552,10 @@ impl SymphonyApp {
                 });
             if let Some(window) = window {
                 let rect = window.response.rect;
-                if let Some(mask) = self.wallpaper.glass(rect) {
-                    glass.set(background, mask);
-                }
+                glass.set(
+                    background,
+                    egui::Shape::Vec(backdrop::glass(&ctx, rect, f32::from(theme::GLASS_RADIUS))),
+                );
                 theme::glass_rim(&glass, rect);
             }
         }
@@ -3661,9 +3672,10 @@ impl SymphonyApp {
             });
         if let Some(window) = preferences {
             let rect = window.response.rect;
-            if let Some(mask) = self.wallpaper.glass(rect) {
-                glass.set(background, mask);
-            }
+            glass.set(
+                background,
+                egui::Shape::Vec(backdrop::glass(&ctx, rect, f32::from(theme::GLASS_RADIUS))),
+            );
             theme::glass_rim(&glass, rect);
         }
         self.show_preferences = open;
@@ -3741,16 +3753,10 @@ impl SymphonyApp {
                     let background = painter.add(egui::Shape::Noop);
                     // Floating views are glass like every other panel:
                     // the blurred wallpaper under a translucent tint.
-                    let wallpaper = &self.wallpaper;
-                    let backdrop = |rect: egui::Rect| {
-                        let mut shapes: Vec<egui::Shape> =
-                            wallpaper.glass(rect).into_iter().collect();
-                        shapes.push(egui::Shape::rect_filled(
-                            rect,
-                            theme::GLASS_RADIUS,
-                            theme::GLASS_FLOATING,
-                        ));
-                        shapes
+                    // Floating views: live blur of what's behind them.
+                    let blur_ctx = ui.ctx().clone();
+                    let backdrop = move |rect: egui::Rect| {
+                        backdrop::glass(&blur_ctx, rect, f32::from(theme::GLASS_RADIUS))
                     };
                     DockArea::new(layout)
                         .style(theme::dock_style(ui.style()))

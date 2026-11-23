@@ -30,3 +30,21 @@ changes marked `// Symphony:`.
   rows of columns) with the same fractions. `DockArea` calls it when the
   pointer rests on one segment of a long divider where two dividers
   cross and line up, so that segment moves on its own.
+
+## egui-wgpu 0.37.0 (MIT OR Apache-2.0, by the egui authors)
+
+From crates.io. Symphony's change: a live backdrop blur.
+
+- `src/backdrop.rs` and `src/backdrop.wgsl` (new): `BackdropBlur` is a
+  paint-callback marker. `backdrop_texture_id()` is the blurred frame as
+  an egui texture. The blur downsamples to a quarter, then runs a 13-tap
+  Gaussian horizontally and vertically.
+- `src/winit.rs`: the surface is configured with `COPY_SRC` where the
+  platform allows it. A frame containing markers is drawn in segments: at
+  each marker the pass ends, the frame so far is copied and blurred, and
+  drawing resumes. Without markers it is one pass, as before.
+- `src/renderer.rs`: `Renderer::render_range` draws part of the frame
+  against the buffers uploaded for all of it; `update_buffers` skips the
+  marker without warning.
+
+The app side is `crates/symphony-app/src/backdrop.rs`.

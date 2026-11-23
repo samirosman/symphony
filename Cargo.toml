@@ -22,3 +22,6 @@ license = "GPL-3.0-or-later"
 # licensed; see vendor/egui_dock/LICENSE and vendor/README.md.
 [patch.crates-io]
 egui_dock = { path = "vendor/egui_dock" }
+# egui-wgpu with Symphony's backdrop blur (see vendor/README.md). MIT OR
+# Apache-2.0.
+egui-wgpu = { path = "vendor/egui-wgpu" }
