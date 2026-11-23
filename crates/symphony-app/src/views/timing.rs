@@ -1,14 +1,20 @@
 //! Timeline and Xsheet: two views over the same exposure data.
 //! Click a cell to go to that frame and select that layer (D8.9).
 //! Double-click a layer name to rename it; right-click for layer actions.
+//! Double-click a sound track to open the Sound editor.
 //! The amber playhead and frame tag are Symphony's signature (D3.9).
 
 use eframe::egui::{self, Align2, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
+use symphony_core::id::Id;
+use symphony_core::sound::{self, SoundTrack};
+
 use crate::keymap::{self, Action, Profile};
 use crate::session::{InsertExposure, Session};
+use crate::sound::SoundState;
+use crate::views::sound_editor::SoundEditor;
 
 #[derive(Default)]
 pub struct TimingState {
@@ -19,7 +25,37 @@ pub struct TimingState {
     swap_text: Option<(usize, String)>,
     /// Parameters column drag: row, starting drawing index, pixels dragged.
     swap_drag: Option<(usize, usize, f32)>,
+    /// Sound track being renamed, and the name typed so far.
+    renaming_sound: Option<(Id, String)>,
+    /// Sound track whose context menu is open.
+    sound_menu: Option<Id>,
+    /// A sound track being moved or trimmed.
+    sound_drag: Option<SoundDrag>,
+    /// The Sound editor, when open.
+    pub sound_editor: Option<SoundEditor>,
 }
+
+/// Which part of a sound block a drag holds.
+#[derive(Clone, Copy, PartialEq)]
+enum SoundPart {
+    /// The middle: moves the track.
+    Body,
+    /// The left edge: trims the start.
+    Start,
+    /// The right edge: trims the end.
+    End,
+}
+
+struct SoundDrag {
+    part: SoundPart,
+    /// Pointer x where the drag started.
+    x: f32,
+    /// The track as it was then; each step is worked out from it.
+    original: SoundTrack,
+}
+
+/// Pixels on each side of a sound block's edge that grab the edge.
+const SOUND_EDGE: f32 = 6.0;
 
 /// Width of the Timeline's Parameters field (the exposed drawing's name).
 const PARAM_W: f32 = 48.0;
@@ -330,6 +366,88 @@ fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usiz
     }
 }
 
+fn sound_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, id: Id) {
+    let Some(track) = s.doc.sounds.iter().find(|t| t.id == id) else {
+        return;
+    };
+    let (name, on) = (track.name.clone(), track.enabled);
+    if ui.button("Open sound editor").clicked() {
+        t.sound_editor = Some(SoundEditor::new(track));
+        ui.close();
+    }
+    if ui.button("Rename sound").clicked() {
+        t.renaming_sound = Some((id, name));
+        ui.close();
+    }
+    if ui
+        .button(if on { "Mute sound" } else { "Unmute sound" })
+        .clicked()
+    {
+        s.toggle_sound(id);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Delete sound").clicked() {
+        s.delete_sound(id);
+        ui.close();
+    }
+}
+
+/// [`rename_field`] for a sound track's name.
+fn sound_rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
+    let Some((id, text)) = t.renaming_sound.as_mut() else {
+        return;
+    };
+    let id = *id;
+    let resp = ui.put(rect, egui::TextEdit::singleline(text).font(theme::body()));
+    resp.request_focus();
+    let (enter, esc) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if esc {
+        t.renaming_sound = None;
+    } else if enter || resp.lost_focus() {
+        let name = text.clone();
+        t.renaming_sound = None;
+        s.rename_sound(id, &name);
+    }
+}
+
+/// A sound track's waveform over `block`, which starts at the track's
+/// first frame. One line per pixel column, from the lowest to the highest
+/// sample in that slice of time.
+fn waveform(
+    painter: &egui::Painter,
+    block: Rect,
+    peaks: &symphony_audio::Peaks,
+    gain: f32,
+    offset: f64,
+    seconds_per_pixel: f64,
+    colour: egui::Color32,
+) {
+    let mid = block.center().y;
+    let half = block.height() / 2.0 - 1.0;
+    let mut x = block.left().ceil();
+    while x < block.right() {
+        let from = offset + f64::from(x - block.left()) * seconds_per_pixel;
+        let (lo, hi) = peaks.range(from, from + seconds_per_pixel);
+        let (lo, hi) = ((lo * gain).max(-1.0), (hi * gain).min(1.0));
+        if hi > lo {
+            painter.line_segment(
+                [
+                    Pos2::new(x + 0.5, mid - hi * half),
+                    Pos2::new(x + 0.5, mid - lo * half + 1.0),
+                ],
+                Stroke::new(1.0, colour),
+            );
+        }
+        x += 1.0;
+    }
+}
+
 /// Inline rename field over a layer name. Enter or clicking away keeps it,
 /// Escape cancels (D8.6).
 /// Harmony's Timeline Parameters column for a drawing layer: the drawing
@@ -469,13 +587,21 @@ fn reveal_track(ui: &egui::Ui, row: Rect, reveal: bool) {
     }
 }
 
-pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {
+pub fn timeline(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    t: &mut TimingState,
+    sounds: &SoundState,
+    profile: Profile,
+) {
     header(ui, s, profile);
     const HEAD: f32 = 176.0;
     const RULER: f32 = 28.0;
     let cw = theme::FRAME_CELL;
     let rh = theme::ROW;
-    let rows = s.layer_count();
+    // Sound tracks come after the drawing layers, as in Harmony.
+    let layers = s.layer_count();
+    let rows = layers + s.doc.sounds.len();
     let len = s.length();
     let reveal = s.reveal_node_track.take();
     let visible_node = super::node::selected_node(s);
@@ -568,7 +694,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
-            for i in 0..rows {
+            for i in 0..layers {
                 let y = o.y + RULER + i as f32 * rh;
                 let node = s.doc.layers[i].node;
                 let sel = visible_node == Some(node);
@@ -731,6 +857,156 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
+            let fps = s.doc.settings.fps.max(1.0);
+            // Each sound block, for moving and trimming.
+            let mut blocks: Vec<(Id, Rect)> = Vec::new();
+            for (j, track) in s.doc.sounds.iter().enumerate() {
+                let y = o.y + RULER + (layers + j) as f32 * rh;
+                let on = track.enabled;
+                let eye_rect =
+                    Rect::from_center_size(Pos2::new(o.x + 22.0, y + rh / 2.0), Vec2::splat(16.0));
+                // Mute uses the layer's show/hide icon until the icon set
+                // has a speaker.
+                icons::paint(
+                    &painter,
+                    eye_rect,
+                    if on { Icon::Eye } else { Icon::EyeOff },
+                    if on {
+                        theme::TEXT_SECONDARY
+                    } else {
+                        theme::TEXT_DISABLED
+                    },
+                );
+                if !matches!(&t.renaming_sound, Some((id, _)) if *id == track.id) {
+                    widgets::fitted_text(
+                        ui,
+                        &painter,
+                        Pos2::new(o.x + 40.0, y + rh / 2.0),
+                        Align2::LEFT_CENTER,
+                        &track.name,
+                        theme::body(),
+                        if on {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
+                        HEAD - 56.0,
+                    );
+                }
+                let Some(file) = s.doc.sound_files.get(&track.key) else {
+                    continue;
+                };
+                let first = track.start.max(1);
+                if first > len {
+                    continue;
+                }
+                // A sound longer than the scene stops at the scene end.
+                let last = sound::last_frame(track, file, fps).min(len);
+                let block = Rect::from_min_max(
+                    Pos2::new(frame_x(first) + 1.0, y + 5.0),
+                    Pos2::new(frame_x(last + 1) - 1.0, y + rh - 5.0),
+                );
+                painter.rect_filled(block, theme::RADIUS_CONTROL as f32, theme::BG_HOVER);
+                blocks.push((track.id, block));
+                if let Some((peaks, gain)) = sounds.peaks(track.key) {
+                    let colour = if on {
+                        theme::TEXT_SECONDARY
+                    } else {
+                        theme::TEXT_DISABLED
+                    };
+                    let seconds_per_pixel = 1.0 / (f64::from(fps) * f64::from(cw));
+                    // Inset so the waveform stays inside the rounded block.
+                    waveform(
+                        &painter,
+                        block.shrink2(Vec2::new(1.0, 2.0)),
+                        peaks,
+                        gain,
+                        track.offset(file),
+                        seconds_per_pixel,
+                        colour,
+                    );
+                }
+            }
+
+            // Drag a sound block's middle to move it, an edge to trim it.
+            // With Shift, a drag anywhere trims the nearer edge.
+            let shift = ui.input(|i| i.modifiers.shift);
+            let hit = |p: Pos2| {
+                blocks.iter().find_map(|(id, r)| {
+                    r.expand2(Vec2::new(SOUND_EDGE / 2.0, 0.0))
+                        .contains(p)
+                        .then(|| {
+                            let part = if p.x - r.left() <= SOUND_EDGE {
+                                SoundPart::Start
+                            } else if r.right() - p.x <= SOUND_EDGE {
+                                SoundPart::End
+                            } else if shift && p.x < r.center().x {
+                                SoundPart::Start
+                            } else if shift {
+                                SoundPart::End
+                            } else {
+                                SoundPart::Body
+                            };
+                            (*id, part)
+                        })
+                })
+            };
+            // Where the press began, not where the pointer is when egui
+            // calls it a drag (a few pixels on, often past an edge's zone).
+            let pressed_on = ui
+                .input(|i| i.pointer.press_origin())
+                .filter(|_| resp.is_pointer_button_down_on() || resp.drag_stopped());
+            let on_block = pressed_on.and_then(hit).is_some();
+            if resp.drag_started() {
+                if let Some((p, (id, part))) = pressed_on.and_then(|p| hit(p).map(|h| (p, h))) {
+                    if let Some(original) = s.doc.sounds.iter().find(|t| t.id == id).cloned() {
+                        t.sound_drag = Some(SoundDrag {
+                            part,
+                            x: p.x,
+                            original,
+                        });
+                    }
+                }
+            }
+            let cursor = match &t.sound_drag {
+                Some(d) => Some(d.part),
+                None => resp.hover_pos().and_then(hit).map(|(_, part)| part),
+            };
+            match cursor {
+                Some(SoundPart::Body) if t.sound_drag.is_some() => {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing)
+                }
+                Some(SoundPart::Body) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+                Some(_) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal),
+                None => {}
+            }
+            let dragging_sound = t.sound_drag.is_some();
+            if let Some(d) = &t.sound_drag {
+                if let (Some(p), Some(file)) = (
+                    resp.interact_pointer_pos(),
+                    s.doc.sound_files.get(&d.original.key),
+                ) {
+                    let frames = ((p.x - d.x) / cw).round() as i64;
+                    let o = &d.original;
+                    let (after, name) = match d.part {
+                        SoundPart::Body => (
+                            // Never past the scene end, where the block would go away.
+                            o.moved_to(
+                                (i64::from(o.start) + frames).clamp(1, i64::from(len)) as u32
+                            ),
+                            "Move sound",
+                        ),
+                        SoundPart::Start => (o.trimmed_start(file, fps, frames), "Trim sound"),
+                        SoundPart::End => (o.trimmed_end(file, fps, frames), "Trim sound"),
+                    };
+                    s.drag_sound(after, name);
+                }
+                if resp.drag_stopped() {
+                    s.end_gesture();
+                    t.sound_drag = None;
+                }
+            }
+
             let cx = frame_x(s.frame.min(len)) + cw / 2.0;
             painter.line_segment(
                 [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
@@ -742,12 +1018,25 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 let r = ((p.y - o.y - RULER) / rh).floor();
                 (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
             };
-            if let Some(p) = resp.interact_pointer_pos() {
+            // A press on a sound block leaves the playhead alone until it
+            // turns out to be a click, so a drag never moves it.
+            let scrub = !dragging_sound && (!on_block || resp.clicked());
+            if let Some(p) = resp.interact_pointer_pos().filter(|_| scrub) {
                 let rel = p - o;
                 if rel.x >= HEAD {
                     s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);
                 }
-                if let Some(row) = row_at(p) {
+                if let Some(j) = row_at(p).and_then(|r| r.checked_sub(layers)) {
+                    let id = s.doc.sounds[j].id;
+                    if rel.x < 32.0 && resp.clicked() {
+                        s.toggle_sound(id);
+                    }
+                    // As in Harmony, a double-click opens the Sound editor,
+                    // from the name or from the sound itself.
+                    if resp.double_clicked() && rel.x >= 32.0 {
+                        t.sound_editor = Some(SoundEditor::new(&s.doc.sounds[j]));
+                    }
+                } else if let Some(row) = row_at(p) {
                     if resp.clicked() || resp.drag_started() {
                         if rel.x < 32.0 && resp.clicked() {
                             s.toggle_visible(row);
@@ -767,15 +1056,37 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
             if resp.secondary_clicked() {
-                t.menu_row = resp.interact_pointer_pos().and_then(row_at);
+                let row = resp.interact_pointer_pos().and_then(row_at);
+                t.sound_menu = row
+                    .and_then(|r| r.checked_sub(layers))
+                    .map(|j| s.doc.sounds[j].id);
+                t.menu_row = row.filter(|&r| r < layers);
                 if let Some(r) = t.menu_row {
                     s.select_graph_node(s.doc.layers[r].node, false);
                 }
             }
-            if let Some(row) = t.menu_row {
+            if let Some(id) = t.sound_menu {
+                resp.context_menu(|ui| sound_menu(ui, s, t, id));
+            } else if let Some(row) = t.menu_row {
                 resp.context_menu(|ui| layer_menu(ui, s, t, row));
             }
 
+            let renaming = t
+                .renaming_sound
+                .as_ref()
+                .and_then(|(id, _)| s.doc.sounds.iter().position(|t| t.id == *id));
+            if let Some(j) = renaming {
+                let y = o.y + RULER + (layers + j) as f32 * rh;
+                sound_rename_field(
+                    ui,
+                    s,
+                    t,
+                    Rect::from_min_size(
+                        Pos2::new(o.x + 36.0, y + 3.0),
+                        Vec2::new(HEAD - 52.0, rh - 6.0),
+                    ),
+                );
+            }
             if let Some((row, _)) = t.renaming {
                 let y = o.y + RULER + row as f32 * rh;
                 rename_field(

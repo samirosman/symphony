@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 bzip2 = "0.6"
 dirs = "7"
+symphony-audio = { path = "../symphony-audio" }
 symphony-brushes = { path = "../symphony-brushes" }
 eframe = { version = "0.37", features = ["persistence"] }
 egui_dock = { version = "0.22", features = ["serde"] }

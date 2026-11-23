@@ -111,6 +111,13 @@ pub struct Scene {
     /// key, so a scene carries its brushes with it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub textures: BTreeMap<u64, crate::stroke::Texture>,
+    /// Sound tracks, top to bottom in the Timeline ([`crate::sound`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<crate::sound::SoundTrack>,
+    /// Sound files by content key. The bytes live in the project's
+    /// `media/` folder, not in scene.json.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sound_files: BTreeMap<u64, crate::sound::SoundFile>,
     pub composite: NodeId,
     pub display: NodeId,
     #[serde(default = "default_camera_fov")]
@@ -202,6 +209,8 @@ impl Scene {
             drawings: BTreeMap::new(),
             palette,
             textures: BTreeMap::new(),
+            sounds: Vec::new(),
+            sound_files: BTreeMap::new(),
             composite,
             display,
             camera_fov: default_camera_fov(),

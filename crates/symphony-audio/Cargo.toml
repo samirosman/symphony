@@ -1,0 +1,13 @@
+[package]
+name = "symphony-audio"
+description = "Sound for Symphony: checks and decodes imported sound files, waveform peaks, and playback (ENGINEERING E1.4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphony-core = { path = "../symphony-core" }
+symphonia = { version = "0.6.1", default-features = false, features = ["wav", "aiff", "pcm", "mp3", "id3v2"] }
+cpal = "0.18.2"
+rubato = "5.1.0"
+rtrb = "0.4.1"

@@ -12,6 +12,7 @@ mod save_dialog;
 mod search;
 mod session;
 mod shot;
+mod sound;
 #[cfg(test)]
 mod ui_tests;
 mod update;
@@ -37,7 +38,7 @@ use symphony_ui::theme;
 
 use keymap::{Action, Profile};
 use session::{Session, Tool};
-use views::{camera, export, function, node, panels, timing};
+use views::{camera, export, function, node, panels, soundtrack, timing};
 use workspace::{View, Workspace};
 
 /// Pages of the Preferences window.
@@ -255,6 +256,8 @@ struct SymphonyApp {
     node_view: node::NodeViewState,
     timing: timing::TimingState,
     export: export::ExportDialog,
+    soundtrack: soundtrack::SoundtrackDialog,
+    sound: sound::SoundState,
     maximised: Option<View>,
     show_preferences: bool,
     prefs_page: PrefsPage,
@@ -726,6 +729,8 @@ impl SymphonyApp {
             node_view: Default::default(),
             timing: Default::default(),
             export: Default::default(),
+            soundtrack: Default::default(),
+            sound: Default::default(),
             maximised: None,
             show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
             // SYMPHONY_SHOT_PREFS=Canvas opens that page in screenshot runs.
@@ -1139,6 +1144,11 @@ impl SymphonyApp {
         let now = ctx.input(|i| i.time);
         let dt = self.last_time.map_or(0.0, |t| now - t);
         self.last_time = Some(now);
+        if self.sound.drive(&mut self.s) {
+            self.frame_clock = 0.0;
+            ctx.request_repaint();
+            return;
+        }
         if !self.s.playing {
             self.frame_clock = 0.0;
             return;
@@ -1232,6 +1242,8 @@ impl SymphonyApp {
                     Action::FirstFrame => s.frame = 1,
                     Action::LastFrame => s.frame = s.length(),
                     Action::PlayPause => s.playing = !s.playing,
+                    Action::EnableSound => self.sound.toggle_enabled(),
+                    Action::EnableSoundScrubbing => self.sound.toggle_scrubbing(),
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
                     Action::CreateEmptyDrawing => s.new_drawing(),
@@ -1366,6 +1378,16 @@ impl SymphonyApp {
                 ui.close();
                 self.guard(ui.ctx(), Pending::ImportHarmony);
             }
+            ui.menu_button("Import", |ui| {
+                if ui
+                    .button("Sound...")
+                    .on_hover_text("Add WAV, AIFF or MP3 files as sound tracks")
+                    .clicked()
+                {
+                    ui.close();
+                    self.sound.import_dialog(&mut self.s, ui.ctx());
+                }
+            });
             ui.separator();
             self.menu_action(ui, Action::Save);
             self.menu_item(ui, Action::SaveAs, "Save as...".into());
@@ -1383,6 +1405,10 @@ impl SymphonyApp {
                 }
                 if ui.button("Movie (H.264 MP4)...").clicked() {
                     self.export.open(symphony_render::Format::Mp4Movie, &self.s);
+                    ui.close();
+                }
+                if ui.button("Soundtrack...").clicked() {
+                    self.soundtrack.open(&self.s);
                     ui.close();
                 }
             });
@@ -1437,11 +1463,23 @@ impl SymphonyApp {
             });
         });
         ui.menu_button("Timing", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Scene frame rate");
-                let mut fps = self.s.doc.settings.fps;
-                symphony_ui::widgets::frame_rate(ui, "timing-menu-fps", &mut fps);
-                self.s.set_frame_rate(fps);
+            // A submenu, not a combo box: a menu closes on any click inside
+            // it, so a combo box in a menu never opens.
+            let fps = self.s.doc.settings.fps;
+            ui.menu_button(format!("Scene frame rate ({fps} fps)"), |ui| {
+                for rate in symphony_ui::widgets::FRAME_RATES {
+                    let item = egui::Button::new(format!("{rate:.0} fps")).selected(fps == rate);
+                    if ui.add(item).clicked() {
+                        self.s.set_frame_rate(rate);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Custom...").clicked() {
+                    let id = egui::Id::unique(TIMING_MENU_FPS);
+                    symphony_ui::widgets::ask_custom_frame_rate(ui.ctx(), id, fps);
+                    ui.close();
+                }
             });
             ui.menu_button("Insert in-betweens", |ui| {
                 let remaining = 100_000u32.saturating_sub(self.s.length());
@@ -1480,6 +1518,11 @@ impl SymphonyApp {
             self.menu_action(ui, Action::NextFrame);
             self.menu_action(ui, Action::FirstFrame);
             self.menu_action(ui, Action::LastFrame);
+            ui.separator();
+            let on = self.sound.enabled();
+            self.menu_toggle(ui, Action::EnableSound, on);
+            let on = self.sound.scrubbing();
+            self.menu_toggle(ui, Action::EnableSoundScrubbing, on);
         });
         ui.menu_button("View", |ui| {
             self.menu_action(ui, Action::ToggleOnionSkin);
@@ -1845,6 +1888,15 @@ impl SymphonyApp {
                         Some(done as f32 / total.max(1) as f32),
                     ));
                 }
+                if let Some((done, total)) = self.soundtrack.progress() {
+                    jobs.push((
+                        format!(
+                            "Exporting soundtrack, track {} of {total}",
+                            (done + 1).min(total)
+                        ),
+                        Some(done as f32 / total.max(1) as f32),
+                    ));
+                }
                 if let Some(d) = &self.codec_download {
                     jobs.push((
                         "Downloading OpenH264".into(),
@@ -1860,6 +1912,9 @@ impl SymphonyApp {
                         },
                         None,
                     ));
+                }
+                if let Some(label) = self.sound.activity() {
+                    jobs.push((label, None));
                 }
                 if self.saving_jobs > 0 {
                     jobs.push(("Saving".into(), None));
@@ -2179,6 +2234,15 @@ impl SymphonyApp {
                 .words(w),
             );
         }
+        out.push(
+            Entry::new(
+                "Export soundtrack (WAV)",
+                Kind::Action,
+                Command::OpenSoundtrackExport,
+                "export.soundtrack",
+            )
+            .words("sound audio wav music dialogue"),
+        );
         // Settings.
         let settings: [(&str, Setting, &str); 9] = [
             (
@@ -2375,6 +2439,7 @@ impl SymphonyApp {
             }
             Command::OpenPreferences => self.show_preferences = true,
             Command::OpenExport(f) => self.export.open(f, &self.s),
+            Command::OpenSoundtrackExport => self.soundtrack.open(&self.s),
             Command::Setting(s) => {
                 let flip = |b: &mut bool, name: &str, notice: &mut Option<String>| {
                     *b = !*b;
@@ -2876,6 +2941,7 @@ struct Viewer<'a> {
     node_view: &'a mut node::NodeViewState,
     function: &'a mut function::FunctionState,
     timing: &'a mut timing::TimingState,
+    sound: &'a sound::SoundState,
     samples: &'a [PenSample],
     device: Option<&'a DeviceInfo>,
     profile: Profile,
@@ -2924,7 +2990,7 @@ impl Viewer<'_> {
         match v {
             View::Camera => camera::ui(ui, self.s, self.camera, self.samples, false, self.profile),
             View::Drawing => camera::ui(ui, self.s, self.drawing, self.samples, true, self.profile),
-            View::Timeline => timing::timeline(ui, self.s, self.timing, self.profile),
+            View::Timeline => timing::timeline(ui, self.s, self.timing, self.sound, self.profile),
             View::Xsheet => timing::xsheet(ui, self.s, self.timing, self.profile),
             View::Node => node::ui(ui, self.s, self.node_view),
             View::Multiplane => views::multiplane::ui(ui, self.s, self.node_view),
@@ -3454,6 +3520,7 @@ impl SymphonyApp {
             node_view: &mut self.node_view,
             function: &mut self.function,
             timing: &mut self.timing,
+            sound: &self.sound,
             samples: &samples,
             device: device.as_ref(),
             profile: self.profile,
@@ -3556,6 +3623,7 @@ impl SymphonyApp {
         {
             self.start_codec_download(&ctx);
         }
+        self.soundtrack.ui(&ctx, &self.s);
         let mut open = self.show_licences;
         egui::Window::new("Licences")
             .open(&mut open)
@@ -3576,6 +3644,18 @@ impl SymphonyApp {
             });
         self.show_licences = open;
         self.file_drops(&ctx);
+        self.sound.update(&mut self.s, &ctx);
+        views::sound_editor::show(
+            &ctx,
+            &mut self.timing.sound_editor,
+            &mut self.s,
+            &mut self.sound,
+        );
+        let mut fps = self.s.doc.settings.fps;
+        let id = egui::Id::unique(TIMING_MENU_FPS);
+        if symphony_ui::widgets::custom_frame_rate(&ctx, id, &mut fps) {
+            self.s.set_frame_rate(fps);
+        }
         // Screenshot mode: SYMPHONY_SHOT_SEARCH="query" opens search typed.
         if let (Some(_), Ok(q)) = (&self.shot, std::env::var("SYMPHONY_SHOT_SEARCH")) {
             if !self.shot_search_opened {
@@ -3600,7 +3680,7 @@ impl SymphonyApp {
         if pending || self.camera.busy() || self.drawing.busy() {
             ctx.request_repaint();
         }
-        if self.export.busy() {
+        if self.export.busy() || self.soundtrack.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Keep autosave ticking even when idle.
@@ -3651,6 +3731,9 @@ fn pen_cursor(icon: egui::CursorIcon) -> symphony_pen::Cursor {
         I::ZoomOut => C::ZoomOut,
     }
 }
+
+/// The Custom frame rate dialog opened from Timing > Scene frame rate.
+const TIMING_MENU_FPS: &str = "timing-menu-fps";
 
 /// On macOS the top bar becomes the title bar: content runs under it and
 /// the window buttons float at its left (D3.1, D12.2).

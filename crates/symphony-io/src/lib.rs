@@ -6,6 +6,7 @@
 //! Name.symphony/
 //!   project.json          manifest: format version, scenes
 //!   scenes/main/scene.json
+//!   media/                imported sound, named by content (media.rs)
 //!   .backups/             the last 5 saves of each scene file
 //! ```
 //!
@@ -25,7 +26,13 @@ use serde::{Deserialize, Serialize};
 use symphony_core::doc::Scene;
 
 /// Bump when the on-disk format changes, and add a migration (E7.2).
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// - 1: the first format.
+/// - 2: scenes can have sound tracks, and the sound files live in
+///   `media/`. A version 1 file reads unchanged: it has no sound. The bump
+///   keeps an older Symphony from opening a version 2 file, dropping its
+///   sound without a word, and saving over it.
+pub const FORMAT_VERSION: u32 = 2;
 pub const EXTENSION: &str = "symphony";
 const KEEP_BACKUPS: usize = 5;
 
@@ -54,7 +61,7 @@ impl std::fmt::Display for IoError {
 
 impl std::error::Error for IoError {}
 
-fn err(what: &str, path: &Path, e: impl std::fmt::Display) -> IoError {
+pub(crate) fn err(what: &str, path: &Path, e: impl std::fmt::Display) -> IoError {
     IoError(format!("Couldn't {what} {} ({e}).", path.display()))
 }
 
@@ -138,9 +145,11 @@ pub fn save(scene: &Scene, path: &Path) -> Result<(), IoError> {
     let path = with_extension(path);
     let scene_path = path.join("scenes").join("main").join("scene.json");
     backup(&path, &scene_path);
+    let mut scene = scene.clone();
+    media::write_media(&mut scene, &path.join(media::MEDIA))?;
     let file = SceneFile {
         format_version: FORMAT_VERSION,
-        scene: scene.clone(),
+        scene,
     };
     let bytes = serde_json::to_vec(&file).map_err(|e| err("save", &scene_path, e))?;
     write_atomic(&scene_path, &bytes)?;
@@ -156,6 +165,12 @@ pub fn save(scene: &Scene, path: &Path) -> Result<(), IoError> {
 /// Open the project at `path`. Bad files give a readable error, never a
 /// panic (E7.6).
 pub fn open(path: &Path) -> Result<Scene, IoError> {
+    open_with_report(path).map(|(scene, _)| scene)
+}
+
+/// Like [`open`], and also names the files in `media/` that were missing
+/// or damaged and so were left out, for the user to import again.
+pub fn open_with_report(path: &Path) -> Result<(Scene, Vec<String>), IoError> {
     let manifest_path = path.join("project.json");
     let bytes = read_project_file(path, &manifest_path)?;
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
@@ -181,11 +196,13 @@ pub fn open(path: &Path) -> Result<Scene, IoError> {
         ));
     }
     let scene_path = path.join("scenes").join(scene_name).join("scene.json");
-    read_scene(path, &scene_path)
+    let mut scene = read_scene(path, &scene_path)?;
+    let dropped = media::read_media(&mut scene, path, &path.join(media::MEDIA));
+    Ok((scene, dropped))
 }
 
 /// Resolve links before reading so a project can only reference its own files.
-fn read_project_file(project: &Path, path: &Path) -> Result<Vec<u8>, IoError> {
+pub(crate) fn read_project_file(project: &Path, path: &Path) -> Result<Vec<u8>, IoError> {
     let root = project
         .canonicalize()
         .map_err(|e| err("open", project, e))?;
@@ -244,6 +261,11 @@ impl Recovery {
         self.dir.join(format!("{key}.json"))
     }
 
+    /// Media of one autosave, since an unsaved scene has no project folder.
+    fn media(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.{}", media::MEDIA))
+    }
+
     pub fn write(&self, key: &str, scene: &Scene, origin: Option<&Path>) -> Result<(), IoError> {
         #[derive(Serialize)]
         struct Rec<'a> {
@@ -252,11 +274,13 @@ impl Recovery {
             saved_at: u64,
             scene: &'a Scene,
         }
+        let mut scene = scene.clone();
+        media::write_media(&mut scene, &self.media(key))?;
         let rec = Rec {
             format_version: FORMAT_VERSION,
             origin,
             saved_at: now_secs(),
-            scene,
+            scene: &scene,
         };
         let bytes = serde_json::to_vec(&rec).map_err(|e| err("autosave", &self.dir, e))?;
         write_atomic(&self.file(key), &bytes)
@@ -264,6 +288,7 @@ impl Recovery {
 
     pub fn clear(&self, key: &str) {
         let _ = fs::remove_file(self.file(key));
+        let _ = fs::remove_dir_all(self.media(key));
     }
 
     /// Autosaves left behind by a crash: (key, original path, scene).
@@ -287,7 +312,9 @@ impl Recovery {
                 let key = p.file_stem()?.to_string_lossy().into_owned();
                 let rec: Rec = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
                 (rec.format_version <= FORMAT_VERSION).then_some(())?;
-                Some((key, rec.origin, validate(rec.scene).ok()?))
+                let mut scene = validate(rec.scene).ok()?;
+                media::read_media(&mut scene, &self.dir, &self.media(&key));
+                Some((key, rec.origin, scene))
             })
             .collect()
     }
@@ -454,6 +481,134 @@ mod tests {
         assert!(r.pending().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    fn with_sound(seed: i16) -> (Scene, u64) {
+        use symphony_core::sound::{add_track, content_key, SoundFile, SoundFormat};
+        let mut s = sample();
+        let bytes = media::wav(&[seed, -seed, seed], 8_000);
+        let key = content_key(&bytes);
+        let file = SoundFile {
+            format: SoundFormat::Wav,
+            rate: 8_000,
+            channels: 1,
+            samples: 3,
+            bytes: bytes.into(),
+        };
+        s.sound_files.insert(key, file);
+        let edit = add_track(&mut s, "Dialogue", key);
+        History::default().apply(&mut s, "Import Sound", vec![edit]);
+        (s, key)
+    }
+
+    #[test]
+    fn sound_files_are_copied_to_media_and_read_back() {
+        let dir = temp("sound");
+        let path = dir.join("S.symphony");
+        let (mut s, key) = with_sound(100);
+        // A file left over from an undone import isn't saved.
+        let (spare, file) = {
+            let (t, k) = with_sound(7);
+            (k, t.sound_files[&k].clone())
+        };
+        s.sound_files.insert(spare, file);
+        save(&s, &path).unwrap();
+        let name = s.sound_files[&key].file_name(key);
+        let on_disk = fs::read(path.join("media").join(&name)).unwrap();
+        assert_eq!(on_disk, *s.sound_files[&key].bytes);
+        assert_eq!(fs::read_dir(path.join("media")).unwrap().count(), 1);
+        let (back, dropped) = open_with_report(&path).unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(back.sounds, s.sounds);
+        assert_eq!(back.sound_files[&key].bytes, s.sound_files[&key].bytes);
+        assert_eq!(back.sound_files[&key].rate, 8_000);
+        assert!(!back.sound_files.contains_key(&spare));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_or_missing_sound_is_left_out_and_reported() {
+        let dir = temp("sound-bad");
+        let path = dir.join("D.symphony");
+        let (s, key) = with_sound(200);
+        save(&s, &path).unwrap();
+        let name = s.sound_files[&key].file_name(key);
+        let file = path.join("media").join(&name);
+        // Another valid WAV under this name: the content key doesn't match.
+        fs::write(&file, media::wav(&[1, 2, 3], 8_000)).unwrap();
+        let (back, dropped) = open_with_report(&path).unwrap();
+        assert_eq!(dropped, std::slice::from_ref(&name));
+        assert!(back.sound_files.is_empty());
+        // The track stays, so the user sees what to import again.
+        assert_eq!(back.sounds.len(), 1);
+        fs::remove_file(&file).unwrap();
+        assert_eq!(open_with_report(&path).unwrap().1, [name]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sound_with_bad_header_values_is_left_out() {
+        let dir = temp("sound-header");
+        let path = dir.join("H.symphony");
+        let (s, key) = with_sound(300);
+        save(&s, &path).unwrap();
+        let scene = path.join("scenes/main/scene.json");
+        let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&scene).unwrap()).unwrap();
+        v["scene"]["sound_files"][key.to_string()]["rate"] = serde_json::json!(0);
+        fs::write(&scene, serde_json::to_vec(&v).unwrap()).unwrap();
+        let (back, dropped) = open_with_report(&path).unwrap();
+        assert_eq!(dropped.len(), 1);
+        assert!(back.sound_files.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_sound_link_outside_the_project() {
+        let dir = temp("sound-link");
+        let path = dir.join("L.symphony");
+        let (s, key) = with_sound(400);
+        save(&s, &path).unwrap();
+        let file = path.join("media").join(s.sound_files[&key].file_name(key));
+        let outside = dir.join("outside.wav");
+        fs::rename(&file, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &file).unwrap();
+        assert!(open(&path).unwrap().sound_files.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_keeps_the_sound_of_unsaved_scenes() {
+        let dir = temp("recovery-sound");
+        let r = Recovery::new(dir.clone());
+        let (s, key) = with_sound(500);
+        r.write("k", &s, None).unwrap();
+        let pending = r.pending();
+        assert_eq!(
+            pending[0].2.sound_files[&key].bytes,
+            s.sound_files[&key].bytes
+        );
+        r.clear("k");
+        assert!(!dir.join("k.media").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_1_files_still_open() {
+        let dir = temp("v1");
+        let path = dir.join("Old.symphony");
+        save(&sample(), &path).unwrap();
+        for file in ["project.json", "scenes/main/scene.json"] {
+            let p = path.join(file);
+            let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+            v["format_version"] = serde_json::json!(1);
+            fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
+        }
+        let back = open(&path).unwrap();
+        assert_eq!(back.layers.len(), 1);
+        assert!(back.sounds.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 pub mod harmony;
+pub mod media;

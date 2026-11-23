@@ -53,6 +53,8 @@ pub enum Action {
     FirstFrame,
     LastFrame,
     PlayPause,
+    EnableSound,
+    EnableSoundScrubbing,
     IncreaseExposure,
     DecreaseExposure,
     CreateEmptyDrawing,
@@ -107,7 +109,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 70] = [
+    pub const ALL: [Action; 72] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -127,6 +129,8 @@ impl Action {
         Action::FirstFrame,
         Action::LastFrame,
         Action::PlayPause,
+        Action::EnableSound,
+        Action::EnableSoundScrubbing,
         Action::IncreaseExposure,
         Action::DecreaseExposure,
         Action::CreateEmptyDrawing,
@@ -202,6 +206,8 @@ impl Action {
             Action::FirstFrame => "frame.first",
             Action::LastFrame => "frame.last",
             Action::PlayPause => "playback.toggle",
+            Action::EnableSound => "playback.enable_sound",
+            Action::EnableSoundScrubbing => "playback.enable_sound_scrubbing",
             Action::IncreaseExposure => "timing.increase_exposure",
             Action::DecreaseExposure => "timing.decrease_exposure",
             Action::CreateEmptyDrawing => "drawing.create_empty",
@@ -277,6 +283,8 @@ impl Action {
             Action::FirstFrame => "First frame",
             Action::LastFrame => "Last frame",
             Action::PlayPause => "Play / pause",
+            Action::EnableSound => "Enable Sound",
+            Action::EnableSoundScrubbing => "Enable Sound Scrubbing",
             Action::IncreaseExposure => "Increase exposure",
             Action::DecreaseExposure => "Decrease exposure",
             Action::CreateEmptyDrawing => "Create empty drawing",
@@ -392,6 +400,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::FirstFrame => b(Key::Comma, SHIFT), // "<"
         Action::LastFrame => b(Key::Period, SHIFT), // ">"
         Action::PlayPause => b(Key::Enter, SHIFT),  // Toggle Playback
+        // Harmony 27's shortcut lists give these two no key.
+        Action::EnableSound | Action::EnableSoundScrubbing => None,
         Action::IncreaseExposure => b(Key::Plus, NONE),
         Action::DecreaseExposure => b(Key::Minus, NONE),
         Action::CreateEmptyDrawing => b(Key::R, ALT_SHIFT),

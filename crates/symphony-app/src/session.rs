@@ -11,6 +11,7 @@ use symphony_core::graph::{NodeId, NodeKind, PegParams};
 use symphony_core::history::{Edit, History};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
+use symphony_core::sound::{self, SoundFile, SoundTrack};
 use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind, Tips};
 
 /// Drawing tools, in Tools-toolbar order.
@@ -615,6 +616,85 @@ impl Session {
 
     fn note(&mut self, text: impl Into<String>) {
         self.notice = Some(text.into());
+    }
+
+    /// A message for the status bar from outside the session.
+    pub fn notify(&mut self, text: impl Into<String>) {
+        self.note(text);
+    }
+
+    // ---- Sound -----------------------------------------------------------
+
+    /// Add an imported sound as a new track at the bottom of the sound
+    /// tracks. Undo removes the track; the file stays until the next save,
+    /// which keeps only the files a track uses.
+    pub fn import_sound(&mut self, name: &str, key: u64, file: SoundFile) {
+        self.doc.sound_files.entry(key).or_insert(file);
+        let edit = sound::add_track(&mut self.doc, name, key);
+        self.history
+            .apply(&mut self.doc, "Import sound", vec![edit]);
+        self.note(format!("Imported {name}"));
+    }
+
+    fn change_sound(&mut self, id: Id, name: &str, change: impl FnOnce(&mut SoundTrack)) {
+        if let Some(edit) = sound::change_track(&self.doc, id, change) {
+            self.history.apply(&mut self.doc, name, vec![edit]);
+        }
+    }
+
+    /// Mute or unmute a sound track (Harmony's Disable Layer button).
+    pub fn toggle_sound(&mut self, id: Id) {
+        let Some(on) = self
+            .doc
+            .sounds
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.enabled)
+        else {
+            return;
+        };
+        let name = if on { "Mute sound" } else { "Unmute sound" };
+        self.change_sound(id, name, |t| t.enabled = !on);
+    }
+
+    /// Move or trim a sound track while it is dragged. The whole drag is
+    /// one undo step, until `end_gesture`.
+    pub fn drag_sound(&mut self, after: SoundTrack, name: &str) {
+        let Some(before) = self.doc.sounds.iter().find(|t| t.id == after.id).cloned() else {
+            return;
+        };
+        if before != after {
+            self.history.apply_merged(
+                &mut self.doc,
+                name,
+                "sound-drag",
+                Edit::SetSound { before, after },
+            );
+        }
+    }
+
+    pub fn rename_sound(&mut self, id: Id, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.change_sound(id, "Rename sound", |t| t.name = name.into());
+    }
+
+    pub fn delete_sound(&mut self, id: Id) {
+        let Some(edit) = sound::remove_track(&self.doc, id) else {
+            return;
+        };
+        let name = self
+            .doc
+            .sounds
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
+        self.history
+            .apply(&mut self.doc, "Delete sound", vec![edit]);
+        self.note(format!("Deleted {name}. Undo brings it back."));
     }
 
     // ---- Undo ------------------------------------------------------------
@@ -2420,6 +2500,42 @@ mod tests {
         assert_eq!(s.doc.drawings[&drawing].strokes, strokes);
         assert_eq!(s.selected_node, Some(upstream));
         assert_eq!(s.reveal_node_track, Some(upstream));
+    }
+
+    #[test]
+    fn sound_tracks_import_mute_rename_and_delete_with_undo() {
+        let mut s = Session::new_scene();
+        let file = SoundFile {
+            format: sound::SoundFormat::Wav,
+            rate: 8_000,
+            channels: 1,
+            samples: 8_000,
+            bytes: std::sync::Arc::new(Vec::new()),
+        };
+        s.import_sound("Dialogue", 7, file);
+        assert_eq!(s.doc.sounds.len(), 1);
+        assert!(s.doc.sound_files.contains_key(&7));
+        let id = s.doc.sounds[0].id;
+
+        s.toggle_sound(id);
+        assert!(!s.doc.sounds[0].enabled);
+        s.rename_sound(id, "  Lines ");
+        assert_eq!(s.doc.sounds[0].name, "Lines");
+        s.rename_sound(id, "   ");
+        assert_eq!(s.doc.sounds[0].name, "Lines");
+        s.delete_sound(id);
+        assert!(s.doc.sounds.is_empty());
+
+        s.undo();
+        assert_eq!(s.doc.sounds[0].name, "Lines");
+        s.undo();
+        s.undo();
+        assert!(s.doc.sounds[0].enabled);
+        s.undo();
+        // The track goes; the file stays for redo, and save drops it.
+        assert!(s.doc.sounds.is_empty());
+        s.redo();
+        assert_eq!(s.doc.sounds[0].name, "Dialogue");
     }
 
     #[test]
