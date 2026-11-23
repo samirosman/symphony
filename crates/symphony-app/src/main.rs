@@ -656,6 +656,7 @@ impl SymphonyApp {
         let shot = shot::Shot::from_env();
         // Screenshot runs never show a crash prompt.
         let crash_offer = shot.is_none().then(crash::pending).flatten();
+        let shot_recover = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_RECOVER").is_some();
         let demo = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_EMPTY").is_none();
         let mut s = if demo || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
             Session::demo()
@@ -789,7 +790,12 @@ impl SymphonyApp {
             cursor_hint: None,
             shot,
             recovery,
-            recovered: Vec::new(),
+            // SYMPHONY_SHOT_RECOVER: show the recovery dialog, for review.
+            recovered: if shot_recover {
+                vec![(String::new(), None, Scene::new(Default::default()))]
+            } else {
+                Vec::new()
+            },
             pending: None,
             allow_close: false,
             error: None,
@@ -3078,7 +3084,7 @@ impl SymphonyApp {
             let name = symphony_io::project_name(&o.path);
             let elapsed = self.last_time.unwrap_or(0.0) - o.started;
             let mut cancel = false;
-            egui::Modal::new(egui::Id::unique("symphony-opening")).show(ctx, |ui| {
+            theme::glass_modal(ctx, "symphony-opening").show(ctx, |ui| {
                 ui.set_width(320.0);
                 ui.horizontal(|ui| {
                     feedback::spinner(ui, 16.0);
@@ -3175,13 +3181,15 @@ impl SymphonyApp {
         if !self.recovered.is_empty() {
             let n = self.recovered.len();
             let mut choice = None;
-            egui::Modal::new(egui::Id::unique("symphony-recover")).show(ctx, |ui| {
+            theme::glass_modal(ctx, "symphony-recover").show(ctx, |ui| {
+                ui.set_max_width(400.0);
                 ui.heading("Recover unsaved work?");
+                ui.add_space(6.0);
                 let what = if n == 1 { "a scene".to_owned() } else { format!("{n} scenes") };
                 ui.label(format!("Symphony didn't close properly last time. It autosaved {what} you hadn't saved."));
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Recover").clicked() {
+                    if symphony_ui::widgets::primary_button(ui, "Recover", true).clicked() {
                         choice = Some(true);
                     }
                     if ui.button("Discard").clicked() {
@@ -3209,10 +3217,12 @@ impl SymphonyApp {
         }
 
         if let Some(e) = self.error.clone() {
-            egui::Modal::new(egui::Id::unique("symphony-error")).show(ctx, |ui| {
+            theme::glass_modal(ctx, "symphony-error").show(ctx, |ui| {
+                ui.set_max_width(400.0);
                 ui.heading("That didn't work");
+                ui.add_space(6.0);
                 ui.label(e);
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 if ui.button("OK").clicked() {
                     self.error = None;
                 }

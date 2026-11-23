@@ -271,7 +271,7 @@ pub fn feather_panel(painter: &egui::Painter, rect: egui::Rect, colour: Color32,
 }
 
 /// Project dialogs use a denser glass surface over the artwork.
-pub fn glass_modal(ctx: &egui::Context, id: &'static str) -> egui::Modal {
+pub fn glass_modal(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Modal {
     let frame = egui::Frame::popup(&ctx.global_style())
         .fill(Color32::from_rgba_premultiplied(26, 28, 31, 220))
         .corner_radius(GLASS_RADIUS)

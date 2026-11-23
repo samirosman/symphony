@@ -1079,3 +1079,105 @@ fn imported_video_becomes_a_frame_sequence() {
     assert_eq!(s.layer_count(), before + 1);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Erasing heavy textured art: scribbling back and forth over the same
+/// spot must stay fast, and erased shapes mustn't keep growing.
+#[test]
+#[ignore = "benchmark: cargo test --release textured_erase_cost -- --ignored --nocapture"]
+fn textured_erase_cost() {
+    use symphony_core::stroke::{Point, Stroke, StrokeTexture};
+    let mut s = crate::session::Session::new_scene();
+    let swatch = s.swatch;
+    for i in 0..300 {
+        let y = -300.0 + (i % 30) as f32 * 20.0;
+        let x0 = -500.0 + (i / 30) as f32 * 100.0;
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 10.0,
+            max_width: 30.0,
+            points: (0..120)
+                .map(|k| Point {
+                    x: x0 + k as f32 * 2.5,
+                    y: y + (k as f32 * 0.2).sin() * 15.0,
+                    pressure: 0.5 + (k as f32 * 0.1).sin() * 0.4,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: Some(StrokeTexture::default()),
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, 1, st);
+    }
+    let d = s.doc.exposed(0, 1).unwrap();
+    let mut worst = std::time::Duration::ZERO;
+    let start = std::time::Instant::now();
+    let moves = 400;
+    for k in 0..moves {
+        // Back and forth across a 300-unit patch, drifting down.
+        let t = (k % 40) as f32 / 40.0;
+        let x = -300.0 + if (k / 40) % 2 == 0 { t } else { 1.0 - t } * 300.0;
+        let y = -250.0 + k as f32 * 0.8;
+        let one = std::time::Instant::now();
+        s.erase(d, &[([x, y], 25.0), ([x + 8.0, y + 1.0], 25.0)]);
+        worst = worst.max(one.elapsed());
+    }
+    let dr = &s.doc.drawings[&d];
+    let verts: usize = dr
+        .strokes
+        .iter()
+        .map(|st| st.shape.iter().map(Vec::len).sum::<usize>())
+        .sum();
+    let most: usize = dr
+        .strokes
+        .iter()
+        .map(|st| st.shape.iter().map(Vec::len).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    println!(
+        "textured_erase_cost: {:?} per move, worst {worst:?}; {} strokes, {verts} shape points (most in one: {most})",
+        start.elapsed() / moves,
+        dr.strokes.len()
+    );
+    let start = std::time::Instant::now();
+    for _ in 0..3 {
+        std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
+    }
+    println!("render_camera after erasing: {:?}", start.elapsed() / 3);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn outline_cost() {
+    use symphony_core::stroke::{Point, Stroke, StrokeTexture};
+    let mut s = crate::session::Session::new_scene();
+    let st = Stroke {
+        id: s.doc.ids.fresh(),
+        kind: StrokeKind::Brush,
+        art: Default::default(),
+        swatch: s.swatch,
+        min_width: 10.0,
+        max_width: 30.0,
+        points: (0..120)
+            .map(|k| Point {
+                x: k as f32 * 2.5,
+                y: (k as f32 * 0.2).sin() * 15.0,
+                pressure: 0.5 + (k as f32 * 0.1).sin() * 0.4,
+            })
+            .collect(),
+        tips: Default::default(),
+        texture: Some(StrokeTexture::default()),
+        shape: Vec::new(),
+    };
+    let t = std::time::Instant::now();
+    let o = symphony_vector::shape::outline(&st);
+    let pts: usize = o.iter().flatten().map(Vec::len).sum();
+    println!("outline: {:?}, {pts} points", t.elapsed());
+    let eraser =
+        symphony_vector::shape::eraser_shape(&[([100.0, 0.0], 25.0), ([108.0, 1.0], 25.0)]);
+    let t = std::time::Instant::now();
+    let _ = symphony_vector::shape::erase(&o[0], &eraser);
+    println!("one cut: {:?}", t.elapsed());
+}

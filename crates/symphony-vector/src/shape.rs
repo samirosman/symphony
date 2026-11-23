@@ -46,10 +46,79 @@ fn bbox(contours: &[Vec<[f32; 2]>]) -> Option<([f32; 2], [f32; 2])> {
     Some((lo, hi))
 }
 
+/// How far (drawing units, a fraction of a pixel at 100%) a point may sit
+/// off the straight line between its neighbours and still be dropped.
+const SIMPLIFY: f32 = 0.06;
+/// Pieces smaller than this (square units) are invisible slivers.
+const SLIVER: f32 = 0.25;
+
+/// Drop points that don't change the contour's look (Douglas–Peucker:
+/// the result never strays more than `SIMPLIFY` from the original).
+/// Without this, every eraser pass leaves more points behind and each
+/// later pass gets slower.
+fn simplify(c: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let n = c.len();
+    if n <= 4 {
+        return c.to_vec();
+    }
+    let off = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = dx * dx + dy * dy;
+        if len2 < 1e-12 {
+            return (p[0] - a[0]).hypot(p[1] - a[1]);
+        }
+        // Distance to the segment (not the infinite line), so spikes stay.
+        let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0);
+        (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+    };
+    // A closed contour: split at the point farthest from the first.
+    let far = (1..n)
+        .max_by(|&i, &j| {
+            let d = |k: usize| (c[k][0] - c[0][0]).hypot(c[k][1] - c[0][1]);
+            d(i).total_cmp(&d(j))
+        })
+        .unwrap_or(n / 2);
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[far] = true;
+    // Spans to check, as (start, end) indices on the ring.
+    let mut stack = vec![(0usize, far), (far, n)];
+    while let Some((a, b)) = stack.pop() {
+        if b <= a + 1 {
+            continue;
+        }
+        let (pa, pb) = (c[a], c[b % n]);
+        let (mut worst, mut at) = (0.0f32, a);
+        for (k, &p) in c.iter().enumerate().take(b).skip(a + 1) {
+            let d = off(pa, pb, p);
+            if d > worst {
+                worst = d;
+                at = k;
+            }
+        }
+        if worst > SIMPLIFY {
+            keep[at] = true;
+            stack.push((a, at));
+            stack.push((at, b));
+        }
+    }
+    c.iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(p, _)| *p)
+        .collect()
+}
+
 fn to_f32(shapes: Vec<Vec<Vec<[f32; 2]>>>) -> Vec<Shape> {
     shapes
         .into_iter()
-        .filter(|s| shape_area(s) > 1e-3)
+        .map(|s| {
+            s.iter()
+                .map(|c| simplify(c))
+                .filter(|c| c.len() >= 3 && area(c).abs() > SLIVER * 0.1)
+                .collect::<Shape>()
+        })
+        .filter(|s| !s.is_empty() && shape_area(s) > SLIVER)
         .collect()
 }
 
@@ -59,7 +128,19 @@ pub fn outline(stroke: &Stroke) -> Vec<Shape> {
     if !stroke.shape.is_empty() {
         return vec![stroke.shape.clone()];
     }
-    let mesh = tessellate(stroke, Affine::IDENTITY, 0.05);
+    triangles_outline(stroke, OUTLINE_STEP)
+}
+
+/// How finely (drawing units) a stroke is sampled for its outline. The
+/// outline is merged from the stroke's triangles, and merging cost grows
+/// with their number: 0.05 took ~70 ms per stroke, which made erasing
+/// heavy art crawl. 0.4 is still within ~0.01 units on curves, invisible
+/// even at 16x zoom.
+const OUTLINE_STEP: f32 = 0.4;
+
+/// The stroke's triangles at `step`, merged into its outline.
+fn triangles_outline(stroke: &Stroke, step: f32) -> Vec<Shape> {
+    let mesh = tessellate(stroke, Affine::IDENTITY, step);
     let tris: Vec<Vec<[f32; 2]>> = mesh
         .indices
         .as_chunks::<3>()
@@ -71,7 +152,6 @@ pub fn outline(stroke: &Stroke) -> Vec<Shape> {
                 mesh.vertices[t[1] as usize],
                 mesh.vertices[t[2] as usize],
             );
-            // One winding for all, so non-zero filling unions them.
             if area(&[a, b, c]) < 0.0 {
                 vec![a, c, b]
             } else {
@@ -80,9 +160,6 @@ pub fn outline(stroke: &Stroke) -> Vec<Shape> {
         })
         .filter(|t| area(t).abs() > 1e-6)
         .collect();
-    if tris.is_empty() {
-        return Vec::new();
-    }
     let empty: Vec<[f32; 2]> = Vec::new();
     to_f32(tris.overlay(&empty, OverlayRule::Subject, FillRule::NonZero))
 }
@@ -209,6 +286,56 @@ mod tests {
             tips: Default::default(),
             texture: None,
             shape: Vec::new(),
+        }
+    }
+
+    /// A pressure-varying stroke through `pts`.
+    fn line(pts: &[(f32, f32)]) -> Stroke {
+        let mut s = bar();
+        s.min_width = 4.0;
+        s.max_width = 30.0;
+        s.points = pts
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| Point {
+                x,
+                y,
+                pressure: 0.3 + 0.7 * ((i as f32 * 0.7).sin() * 0.5 + 0.5),
+            })
+            .collect();
+        s
+    }
+
+    /// The coarser, fast outline covers what the finely sampled one does,
+    /// including strokes that loop over themselves and turn sharply.
+    #[test]
+    fn the_fast_outline_matches_a_fine_one() {
+        let wave: Vec<(f32, f32)> = (0..60)
+            .map(|k| (k as f32 * 4.0, (k as f32 * 0.3).sin() * 20.0))
+            .collect();
+        let lp: Vec<(f32, f32)> = (0..80)
+            .map(|k| {
+                let a = k as f32 / 80.0 * 9.0;
+                (a * 12.0 + a.cos() * 40.0, a.sin() * 40.0)
+            })
+            .collect();
+        let zig: Vec<(f32, f32)> = (0..20)
+            .map(|k| (k as f32 * 6.0, if k % 2 == 0 { 0.0 } else { 40.0 }))
+            .collect();
+        let back = vec![(0.0, 0.0), (100.0, 0.0), (2.0, 3.0)];
+        for (name, pts) in [
+            ("wave", wave),
+            ("loops", lp),
+            ("zigzag", zig),
+            ("doubling back", back),
+        ] {
+            let s = line(&pts);
+            let fast: f32 = outline(&s).iter().map(shape_area).sum();
+            let slow: f32 = triangles_outline(&s, 0.05).iter().map(shape_area).sum();
+            assert!(
+                (fast - slow).abs() < slow * 0.01,
+                "{name}: fast {fast} vs fine {slow}"
+            );
         }
     }
 

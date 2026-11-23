@@ -849,8 +849,10 @@ pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
         let pending = ui.data(|d| d.get_temp::<(Id, Id)>(removal));
         if let Some((id, mut next)) = pending {
             if let Some(sw_name) = s.doc.palette.get(id).map(|sw| sw.name.clone()) {
-                egui::Modal::new(removal).show(ui.ctx(), |ui| {
+                theme::glass_modal(ui.ctx(), removal).show(ui.ctx(), |ui| {
+                    ui.set_max_width(400.0);
                     ui.heading(format!("Remove {}?", sw_name));
+                    ui.add_space(6.0);
                     ui.label("Use this colour for its strokes and fills:");
                     egui::ComboBox::from_id_salt("replacement")
                         .selected_text(s.doc.palette.get(next).map_or("", |sw| sw.name.as_str()))
