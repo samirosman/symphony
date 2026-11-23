@@ -605,9 +605,18 @@ mod tests {
     use super::*;
     use egui_kittest::Harness;
 
+    /// The shortcut changes live in one list for the whole app. Tests that
+    /// change it take this lock, so they don't see each other's changes.
+    static SHORTCUTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn shortcuts_to_myself() -> std::sync::MutexGuard<'static, ()> {
+        SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn clashing_shortcuts_chain_until_nothing_clashes() {
         use egui_kittest::kittest::Queryable;
+        let _only_me = shortcuts_to_myself();
         let profile = Profile::Symphony;
         let (mine, theirs) = (Action::SetPlayStart, Action::ZoomIn);
         keymap::reset(profile, mine);
@@ -689,6 +698,7 @@ mod tests {
     #[test]
     fn right_click_a_result_to_give_it_a_shortcut() {
         use egui_kittest::kittest::Queryable;
+        let _only_me = shortcuts_to_myself();
         let profile = Profile::Symphony;
         keymap::reset(profile, Action::MirrorView);
         let entries = vec![Entry::new(
