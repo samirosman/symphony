@@ -81,6 +81,18 @@ item follows DESIGN §9: short, never blocking input.
 24. **Empty states:** an empty drawing, layer or Node view should say what
     to do next in one line (Drawing view, frame without a drawing).
 
+## Done (2026-11-23)
+
+1, 2, 3, 4 (ad61222); 5, 7, 10, 17 (e875069); 6, 23, 24 (this commit);
+8, 9, 22 (1b749ca); 14 (cc96fa6); 19, 20, 21 (ad61222). For 19, part
+of what looked see-through was screenshots catching windows mid
+fade-in; screenshots now wait for fades, and floating windows use a
+denser glass anyway.
+
+Left: 11 (hold Alt for Dropper, Shift+Space to rotate), 12 (stabiliser
+preview), 13 (field guide or grid), 15 and 16 (Xsheet layout and one
+shared transport: Codex's views), 18 (sound).
+
 ## Suggested order
 
 First batch (most felt per hour of work): 19, 20, 21, 1, 2, 3, 4, 8, 9,

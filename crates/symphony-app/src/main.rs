@@ -68,7 +68,8 @@ impl PrefsPage {
             PrefsPage::Canvas => "Canvas",
             PrefsPage::Workflow => "Workflow and shortcuts",
             PrefsPage::Video => "Video",
-            PrefsPage::Ai => "AI",
+            // The page promises no generative AI; "AI" alone read like a feature.
+            PrefsPage::Ai => "AI-free",
         }
     }
 }

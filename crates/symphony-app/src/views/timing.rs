@@ -21,6 +21,10 @@ pub struct TimingState {
     swap_drag: Option<(usize, usize, f32)>,
     /// A layer being dragged to a new place in the stack (its row).
     layer_drag: Option<usize>,
+    /// Layer order last frame (columns), and layers that just arrived or
+    /// moved with when, so their row glows briefly.
+    last_order: Vec<symphony_core::id::Id>,
+    arrived: Vec<(symphony_core::id::Id, f64)>,
 }
 
 /// Width of the Timeline's Parameters field (the exposed drawing's name).
@@ -733,6 +737,38 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
+            // A layer that was just added or moved glows briefly, so the
+            // eye finds it instead of rows simply jumping.
+            let now = ui.input(|i| i.time);
+            let order: Vec<symphony_core::id::Id> = s.doc.layers.iter().map(|l| l.column).collect();
+            if !t.last_order.is_empty() && order != t.last_order {
+                for (i, id) in order.iter().enumerate() {
+                    if t.last_order.get(i) != Some(id) && !t.last_order.is_empty() {
+                        let moved_or_new = t.last_order.iter().position(|c| c == id) != Some(i);
+                        if moved_or_new && s.selected == i {
+                            t.arrived.retain(|(c, _)| c != id);
+                            t.arrived.push((*id, now));
+                        }
+                    }
+                }
+            }
+            t.last_order = order.clone();
+            t.arrived.retain(|(_, at)| now - at < 0.8);
+            for (id, at) in &t.arrived {
+                if let Some(row) = order.iter().position(|c| c == id) {
+                    let k = 1.0 - ((now - at) / 0.8) as f32;
+                    let y = o.y + RULER + row as f32 * rh;
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(o.x + 4.0, y + 1.0),
+                            Vec2::new(width - 8.0, rh - 2.0),
+                        ),
+                        theme::RADIUS_CONTROL,
+                        theme::ACCENT_SELECT.gamma_multiply(0.22 * k * k),
+                    );
+                    ui.ctx().request_repaint();
+                }
+            }
             // The playback range, as a band along the ruler.
             if let Some((a, b)) = s.play_range {
                 let (a, b) = (a.clamp(1, len), b.clamp(1, len));

@@ -715,6 +715,17 @@ pub fn ui(
             })
             .unwrap_or_default()
     };
+    // An empty frame in the Drawing view says what to do next.
+    if drawing_only && items.is_empty() {
+        let name = s.layer_name(s.selected).to_owned();
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            format!("No drawing on {name} at this frame. Draw to start one."),
+            theme::body(),
+            theme::TEXT_SECONDARY,
+        );
+    }
     // Undo and redo show where they landed: a soft outline around what
     // changed, fading out.
     if s.flash_serial != state.flash_seen.0 {
