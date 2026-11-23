@@ -1953,6 +1953,20 @@ impl SymphonyApp {
             .words("auto arrange layout tidy graph")
             .ctx(&node_views),
         );
+        if let Some(id) = views::node::selected_node(&self.s) {
+            if let Some(label) = views::node::drawing_conversion_label(&self.s, id) {
+                out.push(
+                    Entry::new(
+                        label,
+                        Kind::Node,
+                        Command::ConvertDrawing(id),
+                        "node.convert-drawing",
+                    )
+                    .words("convert change drawing mask matte regular artwork")
+                    .ctx(&node_views),
+                );
+            }
+        }
         for kind in views::node::addable_nodes() {
             let name = views::node::kind_label(&kind);
             let mut entry = Entry::new(
@@ -2448,6 +2462,7 @@ impl SymphonyApp {
             }
             Command::SetArt(a) => self.s.set_art(a),
             Command::ArrangeNodes => views::node::arrange(&mut self.s, &mut self.node_view),
+            Command::ConvertDrawing(id) => views::node::convert_drawing(&mut self.s, id),
             Command::AddDrawingNode => {
                 self.s.add_layer();
                 if let Some(layer) = self.s.doc.layers.get(self.s.selected) {

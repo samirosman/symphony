@@ -306,7 +306,7 @@ fn open_properties(s: &Session, state: &mut NodeViewState, id: NodeId) {
     state.properties_open = true;
 }
 
-fn selected_node(s: &Session) -> Option<NodeId> {
+pub fn selected_node(s: &Session) -> Option<NodeId> {
     s.selected_node
         .filter(|&id| s.doc.graph.node(id).is_some())
         .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node))
@@ -644,27 +644,29 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         ui.text_edit_singleline(&mut draft.node.name);
     });
     ui.checkbox(&mut draft.node.enabled, "Enabled");
-    ui.checkbox(&mut s.animate, "Auto-key")
-        .on_hover_text("Record property or peg changes at the current frame when you apply them. With Auto-key off, unanimated properties keep one value until you set a key.");
     ui.separator();
     match &mut draft.node.kind {
         NodeKind::Peg(peg) => {
             peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
             peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
-            peg_value(ui, "Depth Z", &mut peg.z, s.frame, s.animate);
             peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
-            for (label, value) in [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)] {
-                let mut draft = value
-                    .clone()
-                    .unwrap_or(symphony_core::anim::Value::Constant(1.0));
-                if peg_value(ui, label, &mut draft, s.frame, s.animate) {
-                    *value = Some(draft);
+            ui.label("Transform values update live.");
+            ui.collapsing("Scale, pivot and depth", |ui| {
+                peg_value(ui, "Depth Z", &mut peg.z, s.frame, s.animate);
+                for (label, value) in [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)]
+                {
+                    let mut draft = value
+                        .clone()
+                        .unwrap_or(symphony_core::anim::Value::Constant(1.0));
+                    if peg_value(ui, label, &mut draft, s.frame, s.animate) {
+                        *value = Some(draft);
+                    }
                 }
-            }
-            ui.horizontal(|ui| {
-                ui.label("Pivot");
-                ui.add(egui::DragValue::new(&mut peg.pivot.0).prefix("X "));
-                ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
+                ui.horizontal(|ui| {
+                    ui.label("Pivot");
+                    ui.add(egui::DragValue::new(&mut peg.pivot.0).prefix("X "));
+                    ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
+                });
             });
         }
         NodeKind::Drawing { column } => {
@@ -710,18 +712,24 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         ui.selectable_value(fov, angle, title);
                     }
                 });
-                widgets::precise_slider(
-                    ui,
-                    egui::Slider::new(fov, 20.0..=120.0)
-                        .step_by(0.1)
-                        .text("Horizontal FOV")
-                        .suffix("°"),
-                );
+                egui::CollapsingHeader::new(format!("Lens · {:.1}°", *fov))
+                    .id_salt("camera-lens")
+                    .show(ui, |ui| {
+                        widgets::precise_slider(
+                            ui,
+                            egui::Slider::new(fov, 20.0..=120.0)
+                                .step_by(0.1)
+                                .text("Horizontal FOV")
+                                .suffix("°"),
+                        );
+                    });
             }
             if let Some(motion) = &mut draft.motion {
-                peg_value(ui, "Camera X", &mut motion.x, s.frame, s.animate);
-                peg_value(ui, "Camera Y", &mut motion.y, s.frame, s.animate);
-                peg_value(ui, "Dolly Z", &mut motion.dolly, s.frame, s.animate);
+                ui.collapsing("Camera movement", |ui| {
+                    peg_value(ui, "Camera X", &mut motion.x, s.frame, s.animate);
+                    peg_value(ui, "Camera Y", &mut motion.y, s.frame, s.animate);
+                    peg_value(ui, "Dolly Z", &mut motion.dolly, s.frame, s.animate);
+                });
             }
         }
         NodeKind::Effect(Effect::Blur { radius }) => {
@@ -833,10 +841,12 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     let changed =
         (draft.node != draft.initial || camera_changed) && !draft.node.name.trim().is_empty();
     let keyed = s.doc.graph.has_key(draft.id, s.frame);
+    let has_staged_controls = !matches!(draft.node.kind, NodeKind::Peg(_));
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(changed, egui::Button::new("Apply"))
-            .clicked()
+        if (has_staged_controls || changed)
+            && ui
+                .add_enabled(changed, egui::Button::new("Apply changes"))
+                .clicked()
         {
             let animatable_changed = draft.node.enabled != draft.initial.enabled
                 || draft.node.kind != draft.initial.kind
@@ -1805,15 +1815,11 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     }
                 }
                 if let Some(id) = drawing {
-                    let is_matte = s.doc.graph.is_drawing_matte(id);
-                    let label = if is_matte {
-                        "Convert to Drawing"
-                    } else {
-                        "Convert to Mask Drawing"
-                    };
-                    if ui.button(label).clicked() {
-                        convert = Some((id, is_matte, label));
-                        ui.close();
+                    if let Some(label) = drawing_conversion_label(s, id) {
+                        if ui.button(label).clicked() {
+                            convert = Some(id);
+                            ui.close();
+                        }
                     }
                 }
             });
@@ -1822,16 +1828,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     if let Some(input) = disconnect {
         edit_link(s, None, input, None);
     }
-    if let Some((id, before, label)) = convert {
-        s.history.apply(
-            &mut s.doc,
-            label,
-            vec![Edit::SetDrawingMatte {
-                id,
-                before,
-                after: !before,
-            }],
-        );
+    if let Some(id) = convert {
+        convert_drawing(s, id);
         ui.ctx().request_repaint();
     }
 
@@ -2069,9 +2067,60 @@ pub fn library(ui: &mut egui::Ui, s: &Session, state: &mut NodeViewState) {
     });
 }
 
+pub fn drawing_conversion_label(s: &Session, id: NodeId) -> Option<&'static str> {
+    let node = s.doc.graph.node(id)?;
+    matches!(node.kind, NodeKind::Drawing { .. }).then(|| {
+        if s.doc.graph.is_drawing_matte(id) {
+            "Convert to Drawing"
+        } else {
+            "Convert to Mask Drawing"
+        }
+    })
+}
+
+pub fn convert_drawing(s: &mut Session, id: NodeId) {
+    let Some(label) = drawing_conversion_label(s, id) else {
+        return;
+    };
+    let before = s.doc.graph.is_drawing_matte(id);
+    s.history.apply(
+        &mut s.doc,
+        label,
+        vec![Edit::SetDrawingMatte {
+            id,
+            before,
+            after: !before,
+        }],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawing_conversion_is_reversible_and_ignores_other_nodes() {
+        let mut s = Session::new_scene();
+        let layer = s.doc.layers[0];
+        assert_eq!(drawing_conversion_label(&s, layer.peg), None);
+        convert_drawing(&mut s, layer.peg);
+        assert_eq!(
+            drawing_conversion_label(&s, layer.node),
+            Some("Convert to Mask Drawing")
+        );
+
+        convert_drawing(&mut s, layer.node);
+        assert_eq!(
+            drawing_conversion_label(&s, layer.node),
+            Some("Convert to Drawing")
+        );
+        convert_drawing(&mut s, layer.node);
+        assert!(!s.doc.graph.is_drawing_matte(layer.node));
+        s.undo();
+        assert!(s.doc.graph.is_drawing_matte(layer.node));
+        s.undo();
+        assert!(!s.doc.graph.is_drawing_matte(layer.node));
+    }
 
     #[test]
     fn a_peg_wired_to_a_drawing_moves_it() {

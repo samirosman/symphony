@@ -14,6 +14,7 @@ use crate::session::{InsertExposure, Session};
 pub struct TimingState {
     renaming: Option<(usize, String)>,
     menu_row: Option<usize>,
+    show_unanimated_nodes: bool,
     /// Parameters column: drawing name being typed, per row.
     swap_text: Option<(usize, String)>,
     /// Parameters column drag: row, starting drawing index, pixels dragged.
@@ -147,56 +148,23 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let available = ui.available_width();
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if available >= 285.0 {
-                    if icons::button(ui, Icon::FirstFrame, false, true, "First frame").clicked() {
-                        s.frame = 1;
-                    }
-                    if icons::button(
-                        ui,
-                        Icon::PrevFrame,
-                        false,
-                        true,
-                        &keymap::tooltip(profile, Action::PrevFrame),
-                    )
-                    .clicked()
-                    {
-                        s.frame = s.frame.saturating_sub(1).max(1);
-                    }
-                    let icon = if s.playing { Icon::Pause } else { Icon::Play };
-                    if icons::button(
-                        ui,
-                        icon,
-                        s.playing,
-                        true,
-                        &keymap::tooltip(profile, Action::PlayPause),
-                    )
-                    .clicked()
-                    {
-                        s.playing = !s.playing;
-                    }
-                    if icons::button(
-                        ui,
-                        Icon::NextFrame,
-                        false,
-                        true,
-                        &keymap::tooltip(profile, Action::NextFrame),
-                    )
-                    .clicked()
-                    {
-                        s.frame = (s.frame + 1).min(s.length());
-                    }
-                    if icons::button(ui, Icon::LastFrame, false, true, "Last frame").clicked() {
-                        s.frame = s.length();
-                    }
-                    ui.add_space(12.0);
+                let icon = if s.playing { Icon::Pause } else { Icon::Play };
+                if icons::button(
+                    ui,
+                    icon,
+                    s.playing,
+                    true,
+                    &keymap::tooltip(profile, Action::PlayPause),
+                )
+                .clicked()
+                {
+                    s.playing = !s.playing;
                 }
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let len = s.length();
-                // In a narrow card (like the Hand-Drawn Xsheet) keep only the
-                // frame field, so nothing runs past the card edge.
+                // Keep scene settings in the menu when the panel is narrow.
                 let compact = available < 535.0;
                 ui.add(
                     egui::DragValue::new(&mut s.frame)
@@ -220,47 +188,92 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
                 if icons::button(ui, icon, keyed, action.enabled(s), tooltip).clicked() {
                     action.run(s);
                 }
-                ui.menu_button("Frames", |ui| frame_menu(ui, s));
-                if compact {
-                    return;
-                }
-                let mut length = len;
-                let r = ui.add(
-                    egui::DragValue::new(&mut length)
-                        .range(1..=100_000)
-                        .prefix("Length "),
-                );
-                if r.changed() {
-                    s.set_length(length);
-                    s.frame = s.frame.min(length);
-                }
-                if r.drag_stopped() || r.lost_focus() {
-                    s.end_gesture();
-                }
-                let mut fps = s.doc.settings.fps;
-                widgets::frame_rate(ui, "timeline-fps", &mut fps);
-                s.set_frame_rate(fps);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    if icons::button(ui, Icon::Trash, false, s.layer_count() > 1, "Delete layer")
-                        .clicked()
-                    {
-                        s.delete_layer(s.selected);
-                    }
-                    if icons::button(
-                        ui,
-                        Icon::Plus,
-                        false,
-                        true,
-                        &keymap::tooltip(profile, Action::AddLayer),
-                    )
-                    .clicked()
-                    {
-                        s.add_layer();
-                    }
+                ui.menu_button("Frames", |ui| {
+                    frame_menu(ui, s);
+                    ui.separator();
+                    ui.menu_button("Timing options", |ui| timing_options(ui, s));
                 });
+                if !compact {
+                    scene_timing(ui, s);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if icons::button(
+                            ui,
+                            Icon::Trash,
+                            false,
+                            s.layer_count() > 1,
+                            "Delete layer",
+                        )
+                        .clicked()
+                        {
+                            s.delete_layer(s.selected);
+                        }
+                        if icons::button(
+                            ui,
+                            Icon::Plus,
+                            false,
+                            true,
+                            &keymap::tooltip(profile, Action::AddLayer),
+                        )
+                        .clicked()
+                        {
+                            s.add_layer();
+                        }
+                    });
+                }
             });
         });
+}
+
+fn timing_options(ui: &mut egui::Ui, s: &mut Session) {
+    ui.checkbox(&mut s.animate, "Auto-key")
+        .on_hover_text("Record animated property edits at the current frame.");
+    ui.separator();
+    let len = s.length();
+    for (label, frame) in [
+        ("First frame", 1),
+        ("Previous frame", s.frame.saturating_sub(1).max(1)),
+        ("Next frame", (s.frame + 1).min(len)),
+        ("Last frame", len),
+    ] {
+        if ui.button(label).clicked() {
+            s.frame = frame;
+            ui.close();
+        }
+    }
+    ui.separator();
+    scene_timing(ui, s);
+    ui.separator();
+    if ui.button("Add layer").clicked() {
+        s.add_layer();
+        ui.close();
+    }
+    if ui
+        .add_enabled(s.layer_count() > 1, egui::Button::new("Delete layer"))
+        .clicked()
+    {
+        s.delete_layer(s.selected);
+        ui.close();
+    }
+}
+
+fn scene_timing(ui: &mut egui::Ui, s: &mut Session) {
+    let mut length = s.length();
+    let response = ui.add(
+        egui::DragValue::new(&mut length)
+            .range(1..=100_000)
+            .prefix("Length "),
+    );
+    if response.changed() {
+        s.set_length(length);
+        s.frame = s.frame.min(length);
+    }
+    if response.drag_stopped() || response.lost_focus() {
+        s.end_gesture();
+    }
+    let mut fps = s.doc.settings.fps;
+    widgets::frame_rate(ui, "timeline-fps", &mut fps);
+    s.set_frame_rate(fps);
 }
 
 /// Keyframe: amber diamond (amber = time, plus a shape, D4.5).
@@ -464,19 +477,57 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
     let rh = theme::ROW;
     let rows = s.layer_count();
     let len = s.length();
-    let node_tracks: Vec<_> = s
-        .doc
-        .graph
-        .nodes()
-        .filter(|(_, node)| !matches!(node.kind, symphony_core::graph::NodeKind::Drawing { .. }))
-        .map(|(id, node)| (id, super::node::node_name(node).to_owned()))
+    let reveal = s.reveal_node_track.take();
+    let visible_node = super::node::selected_node(s);
+    let mut node_tracks = Vec::new();
+    let mut has_unanimated_nodes = false;
+    for (id, node) in s.doc.graph.nodes() {
+        use symphony_core::graph::NodeKind;
+        if matches!(node.kind, NodeKind::Drawing { .. }) {
+            continue;
+        }
+        let mut frames = std::collections::BTreeSet::new();
+        frames.extend(
+            s.doc
+                .graph
+                .keys(id)
+                .into_iter()
+                .flat_map(|keys| keys.keys().copied()),
+        );
+        match &node.kind {
+            NodeKind::Peg(peg) => {
+                for value in [&peg.x, &peg.y, &peg.z, &peg.rotation]
+                    .into_iter()
+                    .chain(peg.scale_x.iter())
+                    .chain(peg.scale_y.iter())
+                {
+                    frames.extend(value.keys().iter().map(|key| key.frame));
+                }
+            }
+            NodeKind::Display => {
+                let motion = &s.doc.camera_motion;
+                for value in [&s.doc.camera_fov, &motion.x, &motion.y, &motion.dolly] {
+                    frames.extend(value.keys().iter().map(|key| key.frame));
+                }
+            }
+            _ => {}
+        }
+        has_unanimated_nodes |= frames.is_empty();
+        node_tracks.push((id, super::node::node_name(node), frames));
+    }
+    if has_unanimated_nodes {
+        ui.toggle_value(&mut t.show_unanimated_nodes, "Show all node tracks")
+            .on_hover_text("Animated nodes and the selected node are always shown.");
+    }
+    node_tracks.retain(|(id, _, frames)| {
+        t.show_unanimated_nodes || !frames.is_empty() || Some(*id) == visible_node
+    });
+    // Own labels because timeline interactions can mutate the document.
+    let node_tracks: Vec<_> = node_tracks
+        .into_iter()
+        .map(|(id, name, frames)| (id, name.to_owned(), frames))
         .collect();
     let track_count = rows + node_tracks.len();
-    let reveal = s.reveal_node_track.take();
-    let visible_node = s
-        .selected_node
-        .filter(|&id| s.doc.graph.node(id).is_some())
-        .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node));
     let width = HEAD + len as f32 * cw + 16.0;
 
     egui::ScrollArea::both()
@@ -651,7 +702,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 }
             }
 
-            for (index, (node, name)) in node_tracks.iter().enumerate() {
+            for (index, (node, name, frames)) in node_tracks.iter().enumerate() {
                 let y = o.y + RULER + (rows + index) as f32 * rh;
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
@@ -671,26 +722,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     theme::TEXT_SECONDARY,
                     HEAD - 30.0,
                 );
-                let mut frames = std::collections::BTreeSet::new();
-                frames.extend(
-                    s.doc
-                        .graph
-                        .keys(*node)
-                        .into_iter()
-                        .flat_map(|keys| keys.keys().copied()),
-                );
-                if let Some(symphony_core::graph::NodeKind::Peg(peg)) =
-                    s.doc.graph.node(*node).map(|node| &node.kind)
-                {
-                    for value in [&peg.x, &peg.y, &peg.z, &peg.rotation]
-                        .into_iter()
-                        .chain(peg.scale_x.iter())
-                        .chain(peg.scale_y.iter())
-                    {
-                        frames.extend(value.keys().iter().map(|key| key.frame));
-                    }
-                }
-                for f in frames.into_iter().filter(|f| (1..=len).contains(f)) {
+                for f in frames.iter().copied().filter(|f| (1..=len).contains(f)) {
                     key_diamond(
                         &painter,
                         Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0),
@@ -727,7 +759,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     }
                 } else if resp.clicked() || resp.drag_started() {
                     let index = ((p.y - o.y - RULER) / rh).floor() as isize - rows as isize;
-                    if let Some((node, _)) =
+                    if let Some((node, _, _)) =
                         usize::try_from(index).ok().and_then(|i| node_tracks.get(i))
                     {
                         s.select_graph_node(*node, false);
