@@ -528,7 +528,9 @@ impl<Tab> DockArea<'_, Tab> {
                             self.to_detach.push((path, tab_index).into());
                             ui.close();
                         }
-                        if show_close_button && ui.add(close_button).clicked() {
+                        // Symphony: Close stays in this menu even when tabs
+                        // show no close button.
+                        if closeable && ui.add(close_button).clicked() {
                             match tab_viewer.on_close(tab) {
                                 OnCloseResponse::Close => self.to_remove.push(TabRemoval::Tab(
                                     (path, tab_index).into(),
@@ -597,7 +599,8 @@ impl<Tab> DockArea<'_, Tab> {
 
             tab_viewer.on_tab_button(tab, &response);
 
-            if self.show_close_buttons && tab_viewer.is_closeable(tab) && response.middle_clicked()
+            // Symphony: middle-click closes whether or not tabs show a ×.
+            if tab_viewer.is_closeable(tab) && response.middle_clicked()
             {
                 self.to_remove.push(TabRemoval::Tab(
                     (path, tab_index).into(),

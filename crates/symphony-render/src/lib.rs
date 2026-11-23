@@ -33,6 +33,60 @@ pub struct StrokePreview<'a> {
     pub transform: Affine,
 }
 
+/// One drawing's artwork fitted into a `side` x `side` square with a small
+/// margin, on transparent paper (premultiplied RGBA), for thumbnails such
+/// as the Node view's hover preview. None when the drawing is empty.
+pub fn render_drawing_thumbnail(
+    scene: &Scene,
+    node: symphony_core::graph::NodeId,
+    column: symphony_core::id::Id,
+    drawing: symphony_core::id::Id,
+    frame: u32,
+    side: u32,
+) -> Option<Pixmap> {
+    let d = scene.drawings.get(&drawing)?;
+    let mut lo = [f32::INFINITY; 2];
+    let mut hi = [f32::NEG_INFINITY; 2];
+    for st in &d.strokes {
+        if let Some((a, b)) = symphony_vector::bounds(st) {
+            lo = [lo[0].min(a[0]), lo[1].min(a[1])];
+            hi = [hi[0].max(b[0]), hi[1].max(b[1])];
+        }
+    }
+    for fill in &d.fills {
+        for c in &fill.contours {
+            for p in c {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+        }
+    }
+    if !(lo[0] < hi[0] || lo[1] < hi[1]) {
+        return None;
+    }
+    let side = side.clamp(8, 1024);
+    let mut pix = Pixmap::new(side, side)?;
+    let span = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0);
+    let k = side as f32 * 0.86 / span;
+    let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    let fit = Affine::translate(side as f32 / 2.0, side as f32 / 2.0)
+        .compose(Affine::scale(k, k))
+        .compose(Affine::translate(-centre[0], -centre[1]));
+    // paint_drawing applies the camera's projection; cancel it so the
+    // drawing is shown as drawn.
+    let project = scene.project_plane(frame, 0.0)?;
+    let view = fit.compose(project.inverse()?);
+    let item = RenderItem {
+        node,
+        column,
+        drawing,
+        transform: Affine::IDENTITY,
+        depth: 0.0,
+    };
+    paint_drawing(&mut pix, scene, frame, view, item, None);
+    Some(pix)
+}
+
 /// Render the Display graph as a premultiplied RGBA stage with transparent paper.
 pub fn render_camera(
     scene: &Scene,

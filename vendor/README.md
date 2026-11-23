@@ -22,3 +22,6 @@ From crates.io. Symphony's changes, marked `// Symphony:` in the code:
 
 To update: copy the new version over this folder, then reapply the
 changes marked `// Symphony:`.
+- `src/widgets/dock_area/show/leaf.rs`: Close in a tab's right-click
+  menu, and middle-click close, depend only on the tab being closeable,
+  not on tabs showing a × (Symphony hides it).

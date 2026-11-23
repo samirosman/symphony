@@ -35,6 +35,77 @@ pub struct NodeViewState {
     properties_open: bool,
     preview: Option<egui::TextureHandle>,
     preview_open: bool,
+    /// Links and their ends as last drawn, to animate connections that
+    /// appear (drawn out from the output) and disappear (fade).
+    drawn_links: Vec<(Link, Pos2, Pos2)>,
+    drawn_scene: String,
+    link_anims: Vec<LinkAnim>,
+    /// The hover thumbnail: what it shows (drawing, scene version, frame)
+    /// and its texture, plus the last card it was shown beside (for its
+    /// fade-out).
+    thumb: Option<(
+        (symphony_core::id::Id, u64, u32),
+        Option<egui::TextureHandle>,
+    )>,
+    thumb_at: Option<(Rect, String)>,
+}
+
+#[derive(Clone, Copy)]
+struct LinkAnim {
+    link: Link,
+    start: f64,
+    /// None: appearing. Some(ends): disappearing from where it was.
+    gone: Option<(Pos2, Pos2)>,
+}
+
+/// Can a node pass its input straight through (peg to peg, image to
+/// image)? Pulling one out of a chain then rejoins its neighbours.
+fn passes_through(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Peg(_) | NodeKind::Effect(_) | NodeKind::Composite
+    )
+}
+
+/// The links after pulling `id` out of its chain: its own links go, and
+/// what fed its first input now feeds what it fed (if it passes through).
+fn detached_links(graph: &symphony_core::graph::Graph, id: NodeId) -> Vec<Link> {
+    let before = graph.links();
+    let mut after: Vec<Link> = before
+        .iter()
+        .copied()
+        .filter(|l| l.from != id && l.to != id)
+        .collect();
+    let heals = graph.node(id).is_some_and(|n| passes_through(&n.kind));
+    if let (true, Some(source)) = (heals, graph.input(id, 0)) {
+        for out in before.iter().filter(|l| l.from == id) {
+            if !after.iter().any(|l| l.to == out.to && l.port == out.port) {
+                after.push(Link {
+                    from: source,
+                    to: out.to,
+                    port: out.port,
+                });
+            }
+        }
+    }
+    after
+}
+
+/// Points along a cable from its output to `upto` (0..=1) of the way.
+fn cable_path(from: Pos2, to: Pos2, upto: f32) -> Vec<Pos2> {
+    let [a, b, c, d] = cable_points(from, to);
+    let n = 32;
+    (0..=n)
+        .map(|i| {
+            let t = upto.clamp(0.0, 1.0) * i as f32 / n as f32;
+            let u = 1.0 - t;
+            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+            Pos2::new(
+                a.x * w[0] + b.x * w[1] + c.x * w[2] + d.x * w[3],
+                a.y * w[0] + b.y * w[1] + c.y * w[2] + d.y * w[3],
+            )
+        })
+        .collect()
 }
 
 struct PropertyDraft {
@@ -1271,7 +1342,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         ui.ctx().request_repaint();
     }
 
-    let hit_radius = 9.0 * zoom.min(1.0);
+    // Generous targets: ports are small, hands aren't.
+    let hit_radius = 16.0 * zoom.clamp(0.6, 1.0);
     let input_at = |p: Pos2| {
         inputs
             .iter()
@@ -1291,6 +1363,33 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .find(|(_, (card, _))| card.contains(p))
             .map(|(&id, _)| id)
     };
+    // Where a cable from `source` dropped at `p` connects: the port under
+    // it, else the nearest fitting input of the node under it (empty ports
+    // first), else the nearest fitting input within reach.
+    let drop_target =
+        |graph: &symphony_core::graph::Graph, source: NodeId, p: Pos2| -> Option<Input> {
+            let fits = |input: &Input| input.0 != source && graph.can_connect(source, input.0);
+            if let Some(input) = input_at(p).filter(fits) {
+                return Some(input);
+            }
+            let near = |only: Option<NodeId>, reach: f32| {
+                inputs
+                    .iter()
+                    .filter(|(input, _)| fits(input) && only.is_none_or(|n| input.0 == n))
+                    .map(|(&input, &at)| {
+                        let taken = graph.input(input.0, input.1).is_some();
+                        (input, at.distance(p) + if taken { 1000.0 } else { 0.0 })
+                    })
+                    .filter(|(_, d)| *d <= reach)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(input, _)| input)
+            };
+            match node_at(p) {
+                Some(node) if node != source => near(Some(node), f32::INFINITY),
+                Some(_) => None,
+                None => near(None, 40.0 * zoom.clamp(0.6, 1.0)),
+            }
+        };
     if resp.drag_started() {
         if let Some(point) = ui.input(|i| i.pointer.press_origin()) {
             state.drag = if let Some(input) = input_at(point) {
@@ -1370,12 +1469,10 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                         edits.push(wiring.edit(s));
                         "Move and connect node"
                     } else if detach == Some(id) {
+                        // Pulled out of its chain: the chain closes up
+                        // behind it.
                         let before = s.doc.graph.links().to_vec();
-                        let after = before
-                            .iter()
-                            .copied()
-                            .filter(|link| link.from != id && link.to != id)
-                            .collect();
+                        let after = detached_links(&s.doc.graph, id);
                         edits.push(Edit::RewireNodes {
                             before,
                             after,
@@ -1393,7 +1490,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     .interact_pointer_pos()
                     .filter(|point| viewport.contains(*point))
                 {
-                    if let Some(input) = input_at(point) {
+                    if let Some(input) = drop_target(&s.doc.graph, source, point) {
                         if old_input != Some(input) {
                             edit_link(s, Some(source), input, old_input);
                         }
@@ -1450,8 +1547,88 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
 
+    // Connections animate: new ones draw out from their output (Expand),
+    // removed ones fade where they were (Dismiss).
+    let now = ui.input(|i| i.time);
+    let animated = symphony_ui::motion::enabled(ui.ctx());
+    let mut ends: Vec<(Link, Pos2, Pos2)> = Vec::new();
+    for link in s.doc.graph.links() {
+        if let (Some(&from), Some(&to)) =
+            (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
+        {
+            ends.push((*link, from, to));
+        }
+    }
+    if state.drawn_scene != s.key {
+        // A different scene: nothing to animate from.
+        state.drawn_scene = s.key.clone();
+        state.link_anims.clear();
+    } else if animated {
+        for &(link, ..) in &ends {
+            if !state.drawn_links.iter().any(|(l, ..)| *l == link) {
+                state.link_anims.retain(|a| a.link != link);
+                state.link_anims.push(LinkAnim {
+                    link,
+                    start: now,
+                    gone: None,
+                });
+            }
+        }
+        for &(link, from, to) in &state.drawn_links {
+            if !ends.iter().any(|(l, ..)| *l == link) {
+                state.link_anims.retain(|a| a.link != link);
+                state.link_anims.push(LinkAnim {
+                    link,
+                    start: now,
+                    gone: Some((from, to)),
+                });
+            }
+        }
+    }
+    state.drawn_links = ends;
+    let grow = symphony_ui::motion::Motion::Expand;
+    let fade = symphony_ui::motion::Motion::Dismiss;
+    state.link_anims.retain(|a| {
+        let length = if a.gone.is_some() {
+            fade.seconds() * 1.8
+        } else {
+            grow.seconds()
+        };
+        now - a.start < length
+    });
+    if !state.link_anims.is_empty() {
+        ui.ctx().request_repaint();
+    }
+    for a in &state.link_anims {
+        if let Some((from, to)) = a.gone {
+            let t = ((now - a.start) / (fade.seconds() * 1.8)) as f32;
+            let ink = peg_colour(&s.doc.graph, a.link.from)
+                .unwrap_or(theme::LINE_CONTROL)
+                .gamma_multiply(1.0 - fade.ease(t));
+            curve(&painter, from, to, Stroke::new(1.5, ink));
+        }
+    }
+    let growing = |link: &Link| {
+        state
+            .link_anims
+            .iter()
+            .find(|a| a.link == *link && a.gone.is_none())
+            .map(|a| grow.ease(((now - a.start) / grow.seconds()) as f32))
+    };
     for link in s.doc.graph.links() {
         if auto_wire.and_then(AutoWire::replaced) == Some(*link) {
+            continue;
+        }
+        if let Some(upto) = growing(link) {
+            if let (Some(&from), Some(&to)) =
+                (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
+            {
+                let ink = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
+                painter.add(egui::Shape::line(
+                    cable_path(from, to, upto),
+                    Stroke::new(1.5, ink),
+                ));
+            }
             continue;
         }
         let input = (link.to, link.port);
@@ -1470,11 +1647,29 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
     if let Some(Drag::Cable { source, .. }) = state.drag {
-        if let (Some(&from), Some(to)) =
+        if let (Some(&from), Some(pointer)) =
             (outputs.get(&source), ui.input(|i| i.pointer.latest_pos()))
         {
+            // The cable jumps to the input it would connect to.
+            let to = drop_target(&s.doc.graph, source, pointer)
+                .and_then(|input| inputs.get(&input).copied())
+                .unwrap_or(pointer);
             let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::ACCENT_SELECT);
             curve(&painter, from, to, Stroke::new(2.0, ink));
+        }
+    }
+    // While pulling a node out, show the chain closing up behind it.
+    if let Some(id) = detach {
+        let before = s.doc.graph.links();
+        for link in detached_links(&s.doc.graph, id) {
+            if before.contains(&link) {
+                continue;
+            }
+            if let (Some(&from), Some(&to)) =
+                (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
+            {
+                curve(&painter, from, to, Stroke::new(2.0, theme::ACCENT_SELECT));
+            }
         }
     }
     if let Some(wiring) = auto_wire {
@@ -1546,7 +1741,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         edit_link(s, None, input, None);
     }
 
-    for (input, point) in inputs {
+    for (&input, &point) in &inputs {
         let node = s.doc.graph.node(input.0);
         let transform =
             node.is_some_and(|n| matches!(n.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }));
@@ -1555,7 +1750,13 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             _ => true,
         };
         let filled = s.doc.graph.input(input.0, input.1).is_some();
-        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius) && compatible;
+        let target = match state.drag {
+            Some(Drag::Cable { source, .. }) => {
+                hover.and_then(|p| drop_target(&s.doc.graph, source, p)) == Some(input)
+            }
+            _ => hover.is_some_and(|p| p.distance(point) <= hit_radius),
+        };
+        let highlighted = target && compatible;
         let ink = s
             .doc
             .graph
@@ -1584,6 +1785,100 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         .values()
         .fold(Rect::NOTHING, |bounds, (card, _)| bounds.union(*card));
     minimap(&painter, viewport, bounds);
+    let hovered = if state.drag.is_none() {
+        hover.and_then(node_at)
+    } else {
+        None
+    };
+    hover_thumbnail(
+        ui,
+        s,
+        state,
+        hovered.and_then(|id| Some((id, cards.get(&id)?.0))),
+    );
+}
+
+/// Hovering a drawing node shows a small picture of its current drawing
+/// beside it, fading in and out.
+fn hover_thumbnail(
+    ui: &egui::Ui,
+    s: &Session,
+    state: &mut NodeViewState,
+    hovered: Option<(NodeId, Rect)>,
+) {
+    const SIDE: u32 = 112;
+    let target = hovered.and_then(|(id, card)| {
+        let NodeKind::Drawing { column } = s.doc.graph.node(id)?.kind else {
+            return None;
+        };
+        let col = s.doc.xsheet.column(column)?;
+        let drawing = col.get(s.frame);
+        Some((id, card, column, drawing, col.name.clone()))
+    });
+    if let Some((id, card, column, drawing, name)) = &target {
+        let label = match drawing.and_then(|d| s.doc.drawings.get(&d)) {
+            Some(d) => format!("{name}, drawing {}", d.name),
+            None => format!("{name}: no drawing on this frame"),
+        };
+        state.thumb_at = Some((*card, label));
+        if let Some(d) = drawing {
+            let key = (*d, s.doc.version, s.frame);
+            if state.thumb.as_ref().is_none_or(|(k, _)| *k != key) {
+                let texture = symphony_render::render_drawing_thumbnail(
+                    &s.doc, *id, *column, *d, s.frame, SIDE,
+                )
+                .map(|pix| {
+                    ui.ctx().load_texture(
+                        "node-hover-thumbnail",
+                        egui::ColorImage::from_rgba_premultiplied(
+                            [pix.width() as usize, pix.height() as usize],
+                            pix.data(),
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+                state.thumb = Some((key, texture));
+            }
+        } else {
+            state.thumb = None;
+        }
+    }
+    let shown = symphony_ui::motion::presence(
+        ui.ctx(),
+        egui::Id::unique("node-hover-thumbnail"),
+        target.is_some(),
+    );
+    let Some((card, label)) = state.thumb_at.clone().filter(|_| shown > 0.0) else {
+        return;
+    };
+    let stage = crate::session::CanvasColours::get(s.colours.stage);
+    let texture = state.thumb.as_ref().and_then(|(_, t)| t.clone());
+    egui::Area::new(egui::Id::unique("node-hover-thumbnail-area"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(card.right_top() + Vec2::new(10.0, 0.0))
+        .interactable(false)
+        .fade_in(false)
+        .show(ui.ctx(), |ui| {
+            ui.multiply_opacity(shown);
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let size = Vec2::splat(SIDE as f32);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, theme::RADIUS_CONTROL, stage);
+                if let Some(t) = texture {
+                    ui.painter().image(
+                        t.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                ui.label(
+                    egui::RichText::new(label)
+                        .font(theme::dense())
+                        .color(theme::TEXT_SECONDARY),
+                );
+            });
+        });
 }
 
 fn socket(
@@ -1670,6 +1965,71 @@ pub fn library(ui: &mut egui::Ui, s: &Session, state: &mut NodeViewState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pulling_a_node_out_of_a_chain_closes_the_chain() {
+        let s = Session::new_scene();
+        let mut g = s.doc.graph.clone();
+        // Drawing -> Blur -> whatever the drawing fed.
+        let layer = s.doc.layers[0];
+        let old = *g.links().iter().find(|l| l.from == layer.node).unwrap();
+        let blur = g.add("Blur", NodeKind::Effect(Effect::Blur { radius: 4.0 }));
+        g.disconnect_inputs(old.to);
+        g.connect(layer.node, blur, 0);
+        g.connect(blur, old.to, old.port);
+        let after = detached_links(&g, blur);
+        assert!(after.iter().all(|l| l.from != blur && l.to != blur));
+        assert!(
+            after.contains(&Link {
+                from: layer.node,
+                ..old
+            }),
+            "the drawing feeds where the blur fed: {after:?}"
+        );
+        // A drawing node doesn't pass its peg input through as an image,
+        // so pulling one out doesn't wire its peg into a composite.
+        let healed = detached_links(&g, layer.node);
+        assert!(!healed.iter().any(|l| l.from == layer.peg && l.to == blur));
+    }
+
+    #[test]
+    fn drawing_thumbnails_show_the_artwork() {
+        use symphony_core::stroke::{Point, Stroke, StrokeKind};
+        let mut s = Session::new_scene();
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Pencil,
+            art: Default::default(),
+            swatch: s.swatch,
+            min_width: 6.0,
+            max_width: 6.0,
+            points: [(-50.0, -20.0), (40.0, 30.0)]
+                .iter()
+                .map(|&(x, y)| Point {
+                    x,
+                    y,
+                    pressure: 1.0,
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, s.frame, st);
+        let layer = s.doc.layers[0];
+        let column = s.doc.xsheet.column(layer.column).unwrap();
+        let drawing = column.get(s.frame).expect("demo drawing");
+        let pix = symphony_render::render_drawing_thumbnail(
+            &s.doc,
+            layer.node,
+            layer.column,
+            drawing,
+            s.frame,
+            96,
+        )
+        .expect("a thumbnail");
+        assert!(pix.data().chunks(4).filter(|p| p[3] > 0).count() > 50);
+    }
     use egui_kittest::Harness;
 
     #[test]

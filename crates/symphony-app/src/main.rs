@@ -285,67 +285,120 @@ struct SymphonyApp {
 /// along the gap, replacing the dock's own hard-edged bar. Blue while
 /// dragging.
 fn resize_grip(ui: &egui::Ui, leaves: &[egui::Rect]) {
-    let Some(p) = ui.ctx().pointer_hover_pos() else {
-        return;
-    };
-    if ui
-        .ctx()
-        .layer_id_at(p)
-        .is_some_and(|layer| layer != ui.layer_id())
-    {
-        return;
+    use symphony_ui::motion;
+    // What's being dragged: which kinds of gap (vertical, horizontal), and
+    // where the grip was. While dragging, the grip stays on the nearest gap
+    // of that kind even when a fast pointer runs ahead of the divider, so it
+    // never blinks off mid-drag.
+    #[derive(Clone, Copy, Default)]
+    struct Grip {
+        held: Option<(bool, bool)>,
+        shapes: [Option<egui::Rect>; 2],
     }
+    let id = egui::Id::unique("symphony-resize-grip-state");
+    let mut grip: Grip = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let (down, pressed) = ui.input(|i| (i.pointer.primary_down(), i.pointer.primary_pressed()));
+    if !down {
+        grip.held = None;
+    }
+    let pointer = ui.ctx().pointer_hover_pos();
+    let covered = pointer.is_some_and(|p| {
+        ui.ctx()
+            .layer_id_at(p)
+            .is_some_and(|layer| layer != ui.layer_id())
+    });
     let gap = theme::GUTTER * 2.0 + 2.0;
-    // Gaps next to the pointer: vertical ones (side by side views) and
-    // horizontal ones (stacked views). Near a crossing, both count.
-    let mut vertical: Option<egui::Rect> = None;
-    let mut horizontal: Option<egui::Rect> = None;
-    for a in leaves {
-        for b in leaves {
-            let dx = b.left() - a.right();
-            let (top, bottom) = (a.top().max(b.top()), a.bottom().min(b.bottom()));
-            if dx > 0.0 && dx <= gap && bottom > top {
-                let r = egui::Rect::from_x_y_ranges(a.right()..=b.left(), top..=bottom);
-                if r.expand2(egui::vec2(3.0, gap)).contains(p) {
-                    vertical = Some(r);
+    // While held, look much further along the drag axis.
+    let reach = if grip.held.is_some() { 80.0 } else { 3.0 };
+    let mut vertical: Option<(f32, egui::Rect)> = None;
+    let mut horizontal: Option<(f32, egui::Rect)> = None;
+    if let (Some(p), false) = (pointer, covered) {
+        for a in leaves {
+            for b in leaves {
+                let dx = b.left() - a.right();
+                let (top, bottom) = (a.top().max(b.top()), a.bottom().min(b.bottom()));
+                if dx > 0.0 && dx <= gap && bottom > top {
+                    let r = egui::Rect::from_x_y_ranges(a.right()..=b.left(), top..=bottom);
+                    let d = (p.x - r.center().x).abs();
+                    if r.expand2(egui::vec2(reach, gap)).contains(p)
+                        && vertical.is_none_or(|(best, _)| d < best)
+                    {
+                        vertical = Some((d, r));
+                    }
                 }
-            }
-            let dy = b.top() - a.bottom();
-            let (left, right) = (a.left().max(b.left()), a.right().min(b.right()));
-            if dy > 0.0 && dy <= gap && right > left {
-                let r = egui::Rect::from_x_y_ranges(left..=right, a.bottom()..=b.top());
-                if r.expand2(egui::vec2(gap, 3.0)).contains(p) {
-                    horizontal = Some(r);
+                let dy = b.top() - a.bottom();
+                let (left, right) = (a.left().max(b.left()), a.right().min(b.right()));
+                if dy > 0.0 && dy <= gap && right > left {
+                    let r = egui::Rect::from_x_y_ranges(left..=right, a.bottom()..=b.top());
+                    let d = (p.y - r.center().y).abs();
+                    if r.expand2(egui::vec2(gap, reach)).contains(p)
+                        && horizontal.is_none_or(|(best, _)| d < best)
+                    {
+                        horizontal = Some((d, r));
+                    }
                 }
             }
         }
     }
-    let dragging = ui.input(|i| i.pointer.primary_down());
-    let colour = if dragging {
-        theme::ACCENT_SELECT
-    } else {
-        theme::TEXT_SECONDARY.gamma_multiply(0.7)
-    };
-    let painter = ui.painter();
-    let pill = |r: egui::Rect| {
-        painter.rect_filled(r, 1.5, colour);
-    };
-    match (vertical, horizontal) {
+    let (mut vertical, mut horizontal) = (vertical.map(|v| v.1), horizontal.map(|h| h.1));
+    if let Some((v, h)) = grip.held {
+        // Only the kinds being dragged.
+        vertical = vertical.filter(|_| v);
+        horizontal = horizontal.filter(|_| h);
+    } else if let Some(p) = pointer {
+        // Not dragging: a single bar shows only right at the gap.
+        let near = |r: &egui::Rect| r.expand(3.0).contains(p);
+        if vertical.is_some() != horizontal.is_some() {
+            vertical = vertical.filter(near);
+            horizontal = horizontal.filter(near);
+        }
+    }
+    if pressed && grip.held.is_none() && (vertical.is_some() || horizontal.is_some()) {
+        grip.held = Some((vertical.is_some(), horizontal.is_some()));
+    }
+    let shapes: [Option<egui::Rect>; 2] = match (vertical, horizontal) {
         // A crossing: a small cross, since dragging here moves both ways.
         (Some(v), Some(h)) => {
             let c = egui::pos2(v.center().x, h.center().y);
-            pill(egui::Rect::from_center_size(c, egui::vec2(3.0, 26.0)));
-            pill(egui::Rect::from_center_size(c, egui::vec2(26.0, 3.0)));
+            [
+                Some(egui::Rect::from_center_size(c, egui::vec2(3.0, 26.0))),
+                Some(egui::Rect::from_center_size(c, egui::vec2(26.0, 3.0))),
+            ]
         }
-        (Some(v), None) if v.expand(3.0).contains(p) => pill(egui::Rect::from_center_size(
-            v.center(),
-            egui::vec2(3.0, (v.height() - 24.0).max(12.0)),
-        )),
-        (None, Some(h)) if h.expand(3.0).contains(p) => pill(egui::Rect::from_center_size(
-            h.center(),
-            egui::vec2((h.width() - 24.0).max(12.0), 3.0),
-        )),
-        _ => {}
+        (Some(v), None) => [
+            Some(egui::Rect::from_center_size(
+                v.center(),
+                egui::vec2(3.0, (v.height() - 24.0).max(12.0)),
+            )),
+            None,
+        ],
+        (None, Some(h)) => [
+            Some(egui::Rect::from_center_size(
+                h.center(),
+                egui::vec2((h.width() - 24.0).max(12.0), 3.0),
+            )),
+            None,
+        ],
+        (None, None) => [None, None],
+    };
+    let showing = shapes[0].is_some();
+    if showing {
+        grip.shapes = shapes;
+    }
+    ui.data_mut(|d| d.insert_temp(id, grip));
+    // Fade in and out rather than popping (the last place fades out).
+    let shown = motion::presence(ui.ctx(), id.with("shown"), showing);
+    if shown <= 0.0 {
+        return;
+    }
+    let colour = if grip.held.is_some() {
+        theme::ACCENT_SELECT
+    } else {
+        theme::TEXT_SECONDARY.gamma_multiply(0.7)
+    }
+    .gamma_multiply(shown);
+    for r in grip.shapes.into_iter().flatten() {
+        ui.painter().rect_filled(r, 1.5, colour);
     }
 }
 
@@ -3234,7 +3287,8 @@ impl eframe::App for SymphonyApp {
                         .window_frame(theme::glass_window_frame(ui.style()))
                         .window_backdrop(&backdrop)
                         .show_add_buttons(false)
-                        .show_close_buttons(true)
+                        // Close views from the tab's right-click menu; no × on every tab.
+                        .show_close_buttons(false)
                         .show_leaf_close_all_buttons(false)
                         .show_leaf_collapse_buttons(false)
                         .show_inside(ui, &mut viewer);

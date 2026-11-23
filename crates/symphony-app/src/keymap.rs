@@ -481,6 +481,14 @@ pub fn pressed(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
                     .any(|e| matches!(e, egui::Event::Text(t) if t == "*"))
         });
     }
+    // Mac users press Cmd+Shift+Z for Redo out of habit, whatever the
+    // profile; Harmony's own Ctrl+Shift+Z still works too.
+    if action == Action::Redo
+        && cfg!(target_os = "macos")
+        && ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.matches_exact(CMD_SHIFT))
+    {
+        return true;
+    }
     let Some(bind) = binding(profile, action) else {
         return false;
     };
@@ -551,6 +559,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Which actions fire for one key press with `mods`.
+    fn fired(profile: Profile, key: Key, mods: egui::Modifiers) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let mut got = Vec::new();
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::ModifiersChanged(mods),
+                egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: mods,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            for a in Action::ALL {
+                if pressed(ui.ctx(), profile, a) {
+                    got.push(a);
+                }
+            }
+        });
+        out.textures_delta.clear();
+        got
+    }
+
+    #[test]
+    fn redo_fires_from_its_shortcut_in_both_profiles() {
+        for profile in [Profile::Harmony, Profile::Symphony] {
+            let bind = binding(profile, Action::Redo).unwrap();
+            assert_eq!(
+                fired(profile, bind.key, bind.mods),
+                vec![Action::Redo],
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn mac_redo_also_answers_cmd_shift_z_in_the_harmony_profile() {
+        assert_eq!(
+            fired(Profile::Harmony, Key::Z, CMD_SHIFT),
+            vec![Action::Redo]
+        );
     }
 
     #[test]
