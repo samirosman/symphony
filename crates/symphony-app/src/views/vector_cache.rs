@@ -22,6 +22,9 @@ struct Entry {
     /// Vertices in drawing units, and triangle indices.
     vertices: Vec<[f32; 2]>,
     indices: Vec<u32>,
+    /// The scene version the fingerprint was last checked at: lines can
+    /// only change when the scene does, so in between it isn't re-hashed.
+    checked: u64,
     /// Bounds in drawing units.
     lo: [f32; 2],
     hi: [f32; 2],
@@ -40,6 +43,8 @@ pub struct VectorMeshes {
     spent: std::time::Duration,
     /// Some lines are waiting for a rebuild.
     behind: bool,
+    /// The scene's edit counter this frame (see `set_version`).
+    version: u64,
 }
 
 /// Rebuild time allowed per frame before finer detail waits a frame.
@@ -81,6 +86,12 @@ impl VectorMeshes {
         }
     }
 
+    /// The scene's edit counter for this frame. Lines are only re-checked
+    /// for changes when it moves.
+    pub fn set_version(&mut self, version: u64) {
+        self.version = version;
+    }
+
     /// Draw a paint fill under `m`, triangulated once per shape.
     pub fn paint_fill(
         &mut self,
@@ -111,6 +122,7 @@ impl VectorMeshes {
                 lod: 1.0,
                 vertices: Vec::new(),
                 indices: Vec::new(),
+                checked: 0,
                 lo: [0.0; 2],
                 hi: [0.0; 2],
                 seen: u64::MAX,
@@ -127,6 +139,7 @@ impl VectorMeshes {
                 lod: 1.0,
                 vertices: mesh.vertices,
                 indices: mesh.indices,
+                checked: 0,
                 lo,
                 hi,
                 seen: frame,
@@ -142,8 +155,20 @@ impl VectorMeshes {
         if !(k.is_finite() && k > 0.0) {
             return;
         }
-        let fp = fingerprint(st);
+        let version = self.version;
+        let unchanged = self
+            .entries
+            .get(&st.id)
+            .is_some_and(|e| e.checked == version && version != 0);
+        let fp = if unchanged {
+            self.entries[&st.id].fingerprint
+        } else {
+            fingerprint(st)
+        };
         let frame = self.frame;
+        if let Some(e) = self.entries.get_mut(&st.id).filter(|e| e.fingerprint == fp) {
+            e.checked = version;
+        }
         let entry = self.entries.get(&st.id).filter(|e| e.fingerprint == fp);
         // Cull before any work: from the cached bounds, or the line's own.
         let (lo, hi) = match entry {
@@ -196,6 +221,7 @@ impl VectorMeshes {
                     lod,
                     vertices,
                     indices: mesh.indices,
+                    checked: version,
                     lo,
                     hi,
                     seen: frame,

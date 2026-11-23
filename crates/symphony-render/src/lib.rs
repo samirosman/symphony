@@ -210,6 +210,11 @@ fn paint_drawing(
     }
 }
 
+/// Smallest gap between line points when rendering, in pixels. The
+/// curve is smooth between them and anti-aliasing blends edges, so finer
+/// steps only add triangles to fill.
+const RASTER_STEP: f32 = 1.0;
+
 /// Ink for one art layer. Invisible strokes only bound paint zones.
 fn paint_strokes(
     pix: &mut Pixmap,
@@ -233,7 +238,7 @@ fn paint_strokes(
                 paint_textured(pix, scene, st, tex, m);
                 continue;
             }
-            let mesh = tessellate(st, m, 0.35);
+            let mesh = tessellate(st, m, RASTER_STEP);
             if mesh.indices.is_empty() {
                 continue;
             }

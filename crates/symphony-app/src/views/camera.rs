@@ -457,6 +457,7 @@ pub fn ui(
     let rect = response.rect;
     let painter = painter.with_clip_rect(rect);
     state.strokes.begin_frame(ui.ctx());
+    state.strokes.vectors.set_version(s.doc.version);
     let (w, h) = (s.doc.settings.width as f32, s.doc.settings.height as f32);
 
     state.framing = if drawing_only {

@@ -672,8 +672,10 @@ impl SymphonyApp {
             }
         }
         let recovery = recovery_dir().map(Recovery::new);
-        let welcome = (shot.is_none() || std::env::var_os("SYMPHONY_SHOT_WELCOME").is_some())
-            .then(|| welcome::Welcome::new(false));
+        // SYMPHONY_PERF_EDITOR: straight into the editor, for measuring it.
+        let welcome = ((shot.is_none() && std::env::var_os("SYMPHONY_PERF_EDITOR").is_none())
+            || std::env::var_os("SYMPHONY_SHOT_WELCOME").is_some())
+        .then(|| welcome::Welcome::new(false));
         let recovery_scan = recovery_dir().filter(|_| shot.is_none()).map(|dir| {
             let (tx, rx) = channel();
             let ctx = cc.egui_ctx.clone();
@@ -2890,6 +2892,12 @@ impl Viewer<'_> {
                 ui.multiply_opacity(p);
             }
         }
+        let started = std::time::Instant::now();
+        self.view_body(ui, v);
+        perf_span(v.title(), started);
+    }
+
+    fn view_body(&mut self, ui: &mut egui::Ui, v: View) {
         match v {
             View::Camera => camera::ui(ui, self.s, self.camera, self.samples, false, self.profile),
             View::Drawing => camera::ui(ui, self.s, self.drawing, self.samples, true, self.profile),
@@ -2976,8 +2984,114 @@ impl egui_dock::TabViewer for Viewer<'_> {
     }
 }
 
+/// SYMPHONY_PERF=1: add time spent in a named part of the frame.
+fn perf_span(name: &'static str, start: std::time::Instant) {
+    if std::env::var_os("SYMPHONY_PERF").is_none() {
+        return;
+    }
+    let spent = start.elapsed();
+    let mut g = PERF_SPANS.lock().unwrap();
+    match g.iter_mut().find(|(n, _)| *n == name) {
+        Some((_, t)) => *t += spent,
+        None => g.push((name, spent)),
+    }
+}
+
+static PERF_SPANS: std::sync::Mutex<Vec<(&'static str, std::time::Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// SYMPHONY_PERF=1: once a second, print how many frames ran and the
+/// slowest one's time, to find work that runs when nothing changes.
+fn perf_log(spent: std::time::Duration) {
+    use std::sync::Mutex;
+    static STATE: Mutex<
+        Option<(
+            std::time::Instant,
+            u32,
+            std::time::Duration,
+            std::time::Duration,
+        )>,
+    > = Mutex::new(None);
+    if std::env::var_os("SYMPHONY_PERF").is_none() {
+        return;
+    }
+    let mut g = STATE.lock().unwrap();
+    let now = std::time::Instant::now();
+    let (start, frames, total, worst) =
+        g.get_or_insert((now, 0, Default::default(), Default::default()));
+    *frames += 1;
+    *total += spent;
+    *worst = (*worst).max(spent);
+    if now.duration_since(*start).as_secs_f32() >= 1.0 {
+        let mut spans = PERF_SPANS.lock().unwrap();
+        spans.sort_by_key(|s| std::cmp::Reverse(s.1));
+        let parts: Vec<String> = spans
+            .iter()
+            .map(|(n, t)| format!("{n} {:?}", *t / *frames))
+            .collect();
+        spans.clear();
+        eprintln!(
+            "perf: {frames} frames/s, avg {:?}, worst {:?} | {}",
+            *total / *frames,
+            *worst,
+            parts.join(", ")
+        );
+        *g = None;
+    }
+}
+
 impl eframe::App for SymphonyApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let start = std::time::Instant::now();
+        self.frame_ui(ui, frame);
+        perf_log(start.elapsed());
+        // SYMPHONY_PERF_SPIN: repaint every frame, for profiling.
+        if std::env::var_os("SYMPHONY_PERF_SPIN").is_some() {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Screenshot runs use fresh layouts and test data; they must never
+        // overwrite the person's real preferences.
+        if self.shot.is_some() {
+            return;
+        }
+        let saved = Saved {
+            tool_dock: self.tool_dock,
+            recent_projects: self.recent_projects.clone(),
+            wallpaper: self.wallpaper.choice.clone(),
+            wallpaper_blur: self.wallpaper.blur,
+            interface_animations: self.interface_animations,
+            workspace: self.workspace,
+            layouts: self.layouts.clone(),
+            profile: self.profile,
+            use_no_ai: self.use_no_ai,
+            pressure_gamma: Some(self.s.pressure_gamma),
+            brush_size_cursor: self.s.brush_size_cursor,
+            overlay_underlay: self.s.overlay_underlay,
+            size_follows_zoom: self.s.size_follows_zoom,
+            stroke_detail: Some(self.s.stroke_detail),
+            colours: Some(self.s.colours),
+            use_openh264: self.use_openh264,
+            presets: Some(self.presets.clone()),
+            search_uses: self.search_uses.clone(),
+        };
+        eframe::set_value(storage, eframe::APP_KEY, &saved);
+    }
+
+    fn on_exit(&mut self) {
+        // A clean exit with nothing unsaved needs no recovery file (E7.5).
+        if !self.s.dirty() {
+            if let Some(r) = &self.recovery {
+                r.clear(&self.s.key);
+            }
+        }
+    }
+}
+
+impl SymphonyApp {
+    fn frame_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if let Some(s) = self.shot.as_mut() {
             s.tick(&ctx);
@@ -3081,8 +3195,10 @@ impl eframe::App for SymphonyApp {
 
         self.wallpaper.sync_camera_session(&self.s.key);
         self.camera.capture_wallpaper(self.wallpaper.uses_camera());
+        let perf_t = std::time::Instant::now();
         self.wallpaper.paint(ui);
         let chrome = ui.painter().clone();
+        perf_span("wallpaper", perf_t);
         let top_background = chrome.add(egui::Shape::Noop);
         // The Symphony profile merges Brush and Pencil into one Pen tool.
         self.s.pen_modes = self.profile == keymap::Profile::Symphony;
@@ -3093,7 +3209,11 @@ impl eframe::App for SymphonyApp {
             .show_separator_line(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 0)))
             .exact_size(theme::TOP_BAR)
-            .show(ui, |ui| self.top_bar(ui));
+            .show(ui, |ui| {
+                let perf_t = std::time::Instant::now();
+                self.top_bar(ui);
+                perf_span("top bar", perf_t);
+            });
         chrome.set(
             top_background,
             self.wallpaper
@@ -3111,7 +3231,9 @@ impl eframe::App for SymphonyApp {
             self.wallpaper
                 .chrome(bottom.response.rect, wallpaper::ChromeSide::Bottom),
         );
+        let perf_t = std::time::Instant::now();
         self.tools_panel(ui);
+        perf_span("tools panel", perf_t);
 
         if self.tool_options_open {
             let id = egui::Id::unique("floating-tool-properties");
@@ -3245,6 +3367,7 @@ impl eframe::App for SymphonyApp {
             .collect();
         layout.translations.tab_context_menu.close_button = "Remove".into();
         self.hovered_view = None;
+        let perf_dock = std::time::Instant::now();
         let mut viewer = Viewer {
             ctx: ctx.clone(),
             active,
@@ -3346,6 +3469,7 @@ impl eframe::App for SymphonyApp {
                         .map(|leaf| leaf.rect())
                         .collect();
                     resize_grip(ui, &rects);
+                    perf_span("dock total", perf_dock);
                 }
             });
 
@@ -3405,44 +3529,6 @@ impl eframe::App for SymphonyApp {
         // Keep autosave ticking even when idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
     }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        // Screenshot runs use fresh layouts and test data; they must never
-        // overwrite the person's real preferences.
-        if self.shot.is_some() {
-            return;
-        }
-        let saved = Saved {
-            tool_dock: self.tool_dock,
-            recent_projects: self.recent_projects.clone(),
-            wallpaper: self.wallpaper.choice.clone(),
-            wallpaper_blur: self.wallpaper.blur,
-            interface_animations: self.interface_animations,
-            workspace: self.workspace,
-            layouts: self.layouts.clone(),
-            profile: self.profile,
-            use_no_ai: self.use_no_ai,
-            pressure_gamma: Some(self.s.pressure_gamma),
-            brush_size_cursor: self.s.brush_size_cursor,
-            overlay_underlay: self.s.overlay_underlay,
-            size_follows_zoom: self.s.size_follows_zoom,
-            stroke_detail: Some(self.s.stroke_detail),
-            colours: Some(self.s.colours),
-            use_openh264: self.use_openh264,
-            presets: Some(self.presets.clone()),
-            search_uses: self.search_uses.clone(),
-        };
-        eframe::set_value(storage, eframe::APP_KEY, &saved);
-    }
-
-    fn on_exit(&mut self) {
-        // A clean exit with nothing unsaved needs no recovery file (E7.5).
-        if !self.s.dirty() {
-            if let Some(r) = &self.recovery {
-                r.clear(&self.s.key);
-            }
-        }
-    }
 }
 
 /// On macOS the top bar becomes the title bar: content runs under it and
@@ -3485,6 +3571,12 @@ fn main() -> eframe::Result {
         // design review never reads or changes the real preferences.
         persistence_path: std::env::var_os("SYMPHONY_SCREENSHOT")
             .map(|_| std::env::temp_dir().join("symphony-shot-state")),
+        // Queue one frame, not two: the pen shows up a frame sooner. Our
+        // GPU work per frame is small, which is when egui recommends it.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            surface: eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY,
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

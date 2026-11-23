@@ -782,3 +782,87 @@ fn erase_cost() {
         start.elapsed() / 5
     );
 }
+
+/// Frame cost of the Camera view on a busy scene at 2560x1440: idle,
+/// panning, zooming and drawing. Not pass/fail:
+/// `cargo test --release -p symphony-app busy_frame_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn busy_frame_cost() {
+    use symphony_core::stroke::{Fill, Point, Stroke, StrokeTexture};
+    let mut h = rig();
+    h.set_size(Vec2::new(2560.0, 1440.0));
+    {
+        let s = &mut h.state_mut().s;
+        let swatch = s.swatch;
+        let line = |s: &mut crate::session::Session, i: usize, textured: bool| Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 2.0,
+            max_width: if textured { 14.0 } else { 5.0 },
+            points: (0..80)
+                .map(|k| Point {
+                    x: -900.0 + (i % 30) as f32 * 60.0 + k as f32 * 2.5,
+                    y: -500.0 + (i / 30) as f32 * 45.0 + (k as f32 * 0.3).sin() * 10.0,
+                    pressure: 0.4 + 0.6 * (k as f32 * 0.1).sin().abs(),
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: textured.then(StrokeTexture::default),
+            shape: Vec::new(),
+        };
+        for i in 0..640 {
+            let st = line(s, i, i % 16 == 0);
+            s.commit_stroke(0, 1, st);
+        }
+        let d = s.doc.exposed(0, 1).unwrap();
+        for i in 0..100 {
+            let (x, y) = (
+                -900.0 + (i % 10) as f32 * 180.0,
+                -500.0 + (i / 10) as f32 * 100.0,
+            );
+            let fill = Fill {
+                id: s.doc.ids.fresh(),
+                swatch,
+                art: Default::default(),
+                contours: vec![(0..32)
+                    .map(|k| {
+                        let a = k as f32 / 32.0 * std::f32::consts::TAU;
+                        [x + a.cos() * 40.0, y + a.sin() * 30.0]
+                    })
+                    .collect()],
+            };
+            s.doc.drawings.get_mut(&d).unwrap().fills.push(fill);
+        }
+        s.doc.version += 1;
+    }
+    // Let background stamping settle.
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let time = |h: &mut Harness<'static, Rig>,
+                n: u32,
+                f: &mut dyn FnMut(&mut Harness<'static, Rig>, u32)| {
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            f(h, i);
+            h.step();
+        }
+        start.elapsed() / n
+    };
+    let idle = time(&mut h, 30, &mut |_, _| {});
+    let zoom = time(&mut h, 30, &mut |h, _| {
+        h.input_mut().events.push(egui::Event::Zoom(1.06));
+    });
+    let tool = h.state().s.tool;
+    h.state_mut().s.tool = Tool::Pencil;
+    let pts = line((-200.0, 0.0), (200.0, 60.0), 60);
+    let start = std::time::Instant::now();
+    drag(&mut h, &pts, 0.8, PenTool::Pen);
+    let draw = start.elapsed() / 63;
+    h.state_mut().s.tool = tool;
+    println!("busy_frame_cost idle {idle:?}, zoom {zoom:?}, drawing {draw:?} per frame");
+}
