@@ -607,6 +607,9 @@ mod tests {
 
     #[test]
     fn clashing_shortcuts_chain_until_nothing_clashes() {
+        let _remaps = keymap::TEST_REMAPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use egui_kittest::kittest::Queryable;
         let profile = Profile::Symphony;
         let (mine, theirs) = (Action::SetPlayStart, Action::ZoomIn);
@@ -688,6 +691,9 @@ mod tests {
 
     #[test]
     fn right_click_a_result_to_give_it_a_shortcut() {
+        let _remaps = keymap::TEST_REMAPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use egui_kittest::kittest::Queryable;
         let profile = Profile::Symphony;
         keymap::reset(profile, Action::MirrorView);

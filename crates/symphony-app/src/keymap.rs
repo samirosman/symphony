@@ -583,6 +583,11 @@ pub fn remaps() -> Vec<Remap> {
 }
 
 /// Load saved remaps (at start-up).
+/// Tests that change or depend on shortcut remaps hold this, since the
+/// remaps are one global and tests run in parallel.
+#[cfg(test)]
+pub static TEST_REMAPS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn set_remaps(list: Vec<Remap>) {
     if let Ok(mut r) = REMAPS.write() {
         *r = list;
@@ -751,6 +756,7 @@ mod tests {
     /// E11.3: no two actions share a binding within a profile.
     #[test]
     fn no_duplicate_bindings() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
             let mut seen = Vec::new();
             for a in Action::ALL {
@@ -793,6 +799,7 @@ mod tests {
 
     #[test]
     fn redo_fires_from_its_shortcut_in_both_profiles() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
             let bind = binding(profile, Action::Redo).unwrap();
             assert_eq!(
