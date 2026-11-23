@@ -98,6 +98,18 @@ impl Launcher {
                 Msg::Releases(Ok(r)) => {
                     self.releases = r;
                     self.job = Job::Idle;
+                    // A first install while only previews exist: use
+                    // Preview straight away rather than showing an empty
+                    // Stable channel. Once Stable has a release, new users
+                    // stay on it.
+                    if self.state.channel == Channel::Stable
+                        && self.paths.installed().is_empty()
+                        && release::newest(&self.releases, Channel::Stable).is_none()
+                        && release::newest(&self.releases, Channel::Preview).is_some()
+                    {
+                        self.state.channel = Channel::Preview;
+                        self.save();
+                    }
                 }
                 Msg::Releases(Err(e)) => {
                     self.error = Some(e);

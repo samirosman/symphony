@@ -31,14 +31,9 @@ time. This happens once.
 - **Linux**: extract the file and run `./symphony-launcher`.
 
 ## 3. Install and launch
-1. Set **Updates** to **Preview (for testers)**.
-2. Click **Install Symphony**. The launcher downloads it and checks the
+1. Click **Install Symphony**. The launcher downloads it and checks the
    download before installing.
-3. Click **Launch Symphony**.
-
-If the launcher says "Symphony isn't installed yet" and "You have the
-newest version" with no Install button, it's still on **Stable**, which
-has no release yet. Switch **Updates** to **Preview (for testers)**.
+2. Click **Launch Symphony**.
 
 Next time, open the launcher and click **Launch**. When an update is out,
 the launcher shows what changed and an **Update** button.

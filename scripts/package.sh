@@ -53,6 +53,11 @@ if [[ "$TARGET" == *apple* ]]; then
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+  # Ad-hoc sign the whole bundle (no Developer ID: testers trust it once
+  # in Privacy & Security). An unsigned bundle downloaded in a browser can
+  # be refused as "damaged" with no way to open it.
+  codesign --force --deep --sign - "$BUNDLE"
+  codesign --verify --deep --strict "$BUNDLE"
   ditto -c -k --norsrc --noextattr --keepParent "$BUNDLE" "dist/$L.zip"
 elif [[ "$TARGET" == *windows* ]]; then
   cp "$BIN/symphony-launcher.exe" "$STAGE/"
