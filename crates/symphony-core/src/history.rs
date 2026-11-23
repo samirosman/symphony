@@ -148,6 +148,11 @@ pub enum Edit {
         after: u32,
     },
     AddLayer(Box<LayerSnapshot>),
+    /// Move a layer from one place in the stack to another.
+    MoveLayer {
+        from: usize,
+        to: usize,
+    },
     RemoveLayer(Box<LayerSnapshot>),
 }
 
@@ -426,6 +431,10 @@ impl Edit {
             }
             Edit::SetLength { before, after } => {
                 s.settings.length = if forward { *after } else { *before }
+            }
+            Edit::MoveLayer { from, to } => {
+                let (a, b) = if forward { (*from, *to) } else { (*to, *from) };
+                s.move_layer(a, b);
             }
             Edit::AddLayer(snap) | Edit::RemoveLayer(snap) => {
                 let adding = matches!(self, Edit::AddLayer(_)) == forward;

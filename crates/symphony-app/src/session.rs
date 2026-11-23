@@ -1966,6 +1966,23 @@ impl Session {
         self.selected = index;
     }
 
+    /// Move layer `from` to position `to` in the stack, undoably; the
+    /// selection follows the layer.
+    pub fn move_layer(&mut self, from: usize, to: usize) {
+        let n = self.layer_count();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let name = self.layer_name(from).to_owned();
+        self.history.apply(
+            &mut self.doc,
+            "Move layer",
+            vec![symphony_core::history::Edit::MoveLayer { from, to }],
+        );
+        self.selected = to;
+        self.note(format!("Moved {name}"));
+    }
+
     pub fn delete_layer(&mut self, i: usize) {
         if self.layer_count() <= 1 {
             self.note("A scene needs at least one layer");
@@ -2454,6 +2471,32 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_layer_restacks_it_and_undoes_in_one_step() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        s.add_layer();
+        let names = |s: &Session| {
+            (0..s.layer_count())
+                .map(|i| s.layer_name(i).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let before = names(&s);
+        let bottom = s.doc.layers[2];
+        s.move_layer(2, 0);
+        let after = names(&s);
+        assert_eq!(after[0], before[2]);
+        assert_eq!(&after[1..], &before[..2]);
+        // The Composite stacks in the same order (port 0 is in front).
+        assert_eq!(s.doc.graph.input(s.doc.composite, 0), Some(bottom.node));
+        // Xsheet columns follow the layer order.
+        assert_eq!(s.doc.xsheet.columns[0].id, bottom.column);
+        assert_eq!(s.selected, 0, "the selection follows");
+        s.undo();
+        assert_eq!(names(&s), before);
+        assert_eq!(s.doc.graph.input(s.doc.composite, 2), Some(bottom.node));
+    }
 
     #[test]
     fn timeline_duplicate_and_reuse_have_different_drawing_identity() {

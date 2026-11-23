@@ -19,6 +19,8 @@ pub struct TimingState {
     swap_text: Option<(usize, String)>,
     /// Parameters column drag: row, starting drawing index, pixels dragged.
     swap_drag: Option<(usize, usize, f32)>,
+    /// A layer being dragged to a new place in the stack (its row).
+    layer_drag: Option<usize>,
 }
 
 /// Width of the Timeline's Parameters field (the exposed drawing's name).
@@ -530,7 +532,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
     let track_count = rows + node_tracks.len();
     let width = HEAD + len as f32 * cw + 16.0;
 
-    egui::ScrollArea::both()
+    let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let size = Vec2::new(
@@ -744,7 +746,23 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     theme::ACCENT_TIME.gamma_multiply(0.16),
                 );
             }
-            let cx = frame_x(s.frame.min(len)) + cw / 2.0;
+            // The playhead glides to a clicked frame (Select motion); while
+            // playing it stays exactly on the frame.
+            let target = s.frame.min(len) as f32;
+            let shown = if s.playing {
+                target
+            } else {
+                symphony_ui::motion::value(
+                    ui.ctx(),
+                    egui::Id::unique("timeline-playhead"),
+                    target,
+                    symphony_ui::motion::Motion::Select,
+                )
+            };
+            let whole = (shown.floor() as u32).clamp(1, len);
+            let cx = frame_x(whole)
+                + (frame_x((whole + 1).min(len)) - frame_x(whole)) * shown.fract()
+                + cw / 2.0;
             painter.line_segment(
                 [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
                 Stroke::new(1.5, theme::ACCENT_TIME),
@@ -755,7 +773,41 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 let r = ((p.y - o.y - RULER) / rh).floor();
                 (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
             };
-            if let Some(p) = resp.interact_pointer_pos() {
+            // Drag a layer by its name to move it in the stack; a line
+            // shows where it will land.
+            if resp.drag_started() {
+                if let (Some(p), Some(row)) = (
+                    resp.interact_pointer_pos(),
+                    resp.interact_pointer_pos().and_then(row_at),
+                ) {
+                    let x = p.x - o.x;
+                    if (32.0..HEAD - PARAM_W).contains(&x) {
+                        t.layer_drag = Some(row);
+                    }
+                }
+            }
+            if let (Some(from), Some(p)) = (t.layer_drag, resp.interact_pointer_pos()) {
+                let gap = (((p.y - o.y - RULER) / rh) + 0.5)
+                    .floor()
+                    .clamp(0.0, rows as f32) as usize;
+                let y = o.y + RULER + gap as f32 * rh;
+                painter.line_segment(
+                    [Pos2::new(o.x + 8.0, y), Pos2::new(o.x + width - 8.0, y)],
+                    Stroke::new(2.0, theme::ACCENT_SELECT),
+                );
+                if resp.drag_stopped() {
+                    t.layer_drag = None;
+                    let to = if gap > from { gap - 1 } else { gap };
+                    s.move_layer(from, to.min(rows.saturating_sub(1)));
+                }
+            }
+            if !resp.dragged() && !resp.drag_stopped() {
+                t.layer_drag = None;
+            }
+            if let Some(p) = resp
+                .interact_pointer_pos()
+                .filter(|_| t.layer_drag.is_none())
+            {
                 let rel = p - o;
                 if rel.x >= HEAD {
                     s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);
@@ -802,6 +854,18 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 );
             }
         });
+    // More tracks below (or above): a soft fade at that edge says so.
+    let view = out.inner_rect;
+    let (offset, content) = (out.state.clamped_offset().y, out.content_size.y);
+    let fade = 24.0_f32.min(view.height() * 0.25);
+    if offset + view.height() < content - 1.0 {
+        theme::fade_strip(
+            ui.painter(),
+            Rect::from_min_max(Pos2::new(view.left(), view.bottom() - fade), view.max),
+            theme::GLASS_PANEL,
+            false,
+        );
+    }
 }
 
 pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: Profile) {

@@ -515,9 +515,16 @@ fn sized_button(
     };
     let hover = transition("hover", enabled && response.hovered());
     let selected = transition("selected", enabled && active);
+    // Pressed: a quick darken, so a click feels like it lands.
+    let pressed = enabled && response.is_pointer_button_down_on();
     let bg = egui::Color32::TRANSPARENT
         .lerp_to_gamma(theme::BG_HOVER, hover)
         .lerp_to_gamma(theme::ACCENT_SELECT_FILL, selected);
+    let bg = if pressed {
+        bg.lerp_to_gamma(egui::Color32::BLACK, 0.25)
+    } else {
+        bg
+    };
     let radius = if size == theme::TOOL_BUTTON {
         if selected > 0.0 {
             painter.add(
@@ -540,6 +547,8 @@ fn sized_button(
     } else {
         theme::TEXT_DISABLED
     };
+    // The icon dips slightly while pressed.
+    let icon_size = if pressed { icon_size * 0.92 } else { icon_size };
     paint(
         painter,
         Rect::from_center_size(rect.center(), Vec2::splat(icon_size)),
