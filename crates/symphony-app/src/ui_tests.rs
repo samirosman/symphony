@@ -1018,3 +1018,64 @@ fn imported_sound_lands_on_the_timeline() {
     assert_eq!(s.length(), len);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Video import round trip: a 30 fps MP4 (made by Symphony's exporter)
+/// becomes one layer resampled to a 24 fps scene, with frames that look
+/// like the movie. Needs the OpenH264 codec; skipped without it.
+#[test]
+fn imported_video_becomes_a_frame_sequence() {
+    let Some(codec) = crate::codec::installed() else {
+        eprintln!("OpenH264 not installed: skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("symphony-video-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A 1 s, 30 fps movie of a red picture.
+    let red = dir.join("red.png");
+    image::RgbImage::from_pixel(64, 36, image::Rgb([220, 30, 30]))
+        .save(&red)
+        .unwrap();
+    let mut src = crate::session::Session::new_scene();
+    src.doc.media_dirs = vec![cache.clone()];
+    src.doc.settings.fps = 30.0;
+    let out = crate::import::stage_images_into(&[red], &cache);
+    src.import_images(out.groups);
+    let movie = dir.join("clip.mp4");
+    symphony_render::movie::export_mp4(
+        &src.doc,
+        &codec,
+        &movie,
+        1,
+        30,
+        320,
+        180,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
+        &|_, _| {},
+    )
+    .unwrap();
+
+    let got = crate::video::import_into(&movie, &codec, 24.0, [1920, 1080], &cache);
+    assert!(got.problems.is_empty(), "{:?}", got.problems);
+    let g = got.frames.expect("frames");
+    assert!(
+        (23..=25).contains(&g.frames.len()),
+        "1 s at 24 fps: {}",
+        g.frames.len()
+    );
+    assert_eq!(g.name, "clip");
+    let first = image::open(cache.join(&g.frames[0].file))
+        .unwrap()
+        .to_rgb8();
+    let p = first.get_pixel(first.width() / 2, first.height() / 2);
+    assert!(p[0] > 160 && p[1] < 90 && p[2] < 90, "looks red: {p:?}");
+
+    let mut s = crate::session::Session::new_scene();
+    s.doc.media_dirs = vec![cache.clone()];
+    s.doc.settings.fps = 24.0;
+    let before = s.layer_count();
+    s.import_images(vec![g]);
+    assert_eq!(s.layer_count(), before + 1);
+    std::fs::remove_dir_all(&dir).ok();
+}

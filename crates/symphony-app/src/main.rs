@@ -19,6 +19,7 @@ mod shot;
 #[cfg(test)]
 mod ui_tests;
 mod update;
+mod video;
 mod views;
 mod wallpaper;
 mod welcome;
@@ -302,6 +303,7 @@ struct SymphonyApp {
     /// Images being read and copied in the background.
     image_import: Option<import::ImageImport>,
     sound_import: Option<import::SoundImport>,
+    video_import: Option<video::VideoImport>,
     /// The scene's sound, in step with the playhead.
     player: audio::Player,
     /// Screenshot runs import their file once.
@@ -804,6 +806,7 @@ impl SymphonyApp {
             brush_import: None,
             image_import: None,
             sound_import: None,
+            video_import: None,
             player: Default::default(),
             shot_imported: false,
             show_licences: false,
@@ -2062,6 +2065,9 @@ impl SymphonyApp {
                         d.total.map(|t| d.done as f32 / t.max(1) as f32),
                     ));
                 }
+                if let Some(v) = &self.video_import {
+                    jobs.push((format!("Importing {}", v.name), None));
+                }
                 if let Some(i) = &self.sound_import {
                     jobs.push((
                         if i.files == 1 {
@@ -2831,8 +2837,37 @@ impl SymphonyApp {
                     }
                 }
                 6 => {
+                    // Videos decode with Cisco's OpenH264, which the user
+                    // turns on themselves (Symphony never ships it).
+                    let Some(codec) = codec::installed() else {
+                        notes.push(
+                            "Video import uses the OpenH264 codec: turn it on in Preferences > Video, then import again."
+                                .into(),
+                        );
+                        continue;
+                    };
+                    if self.video_import.is_some() {
+                        notes.push(
+                            "Still importing the last video. Try this again in a moment.".into(),
+                        );
+                        continue;
+                    }
+                    let mut paths = paths.into_iter();
+                    if let Some(p) = paths.next() {
+                        let st = &self.s.doc.settings;
+                        self.video_import = Some(video::VideoImport::start(
+                            p,
+                            codec,
+                            st.fps,
+                            [st.width, st.height],
+                            ctx,
+                        ));
+                    }
                     for p in paths {
-                        notes.push(format!("{}: video import is coming soon.", name(&p)));
+                        notes.push(format!(
+                            "{}: one video at a time. Import it again after this one.",
+                            name(&p)
+                        ));
                     }
                 }
                 _ => {
@@ -2848,6 +2883,36 @@ impl SymphonyApp {
     }
 
     fn file_drops(&mut self, ctx: &egui::Context) {
+        // A video finished decoding: its frames become a layer from the
+        // current frame, its sound a clip at the same frame.
+        if let Some(job) = &self.video_import {
+            if let Some(done) = job.poll() {
+                let shown = job.name.clone();
+                self.video_import = None;
+                let frames = done.frames.as_ref().map_or(0, |g| g.frames.len());
+                if let Some(g) = done.frames {
+                    self.s.import_images(vec![g]);
+                }
+                let sound = done.sound.is_some();
+                self.s.import_sounds(done.sound.into_iter().collect());
+                let mut text = if frames > 0 {
+                    format!(
+                        "Imported {shown}: {frames} frames{} at frame {}.",
+                        if sound { " and its sound" } else { "" },
+                        self.s.frame
+                    )
+                } else {
+                    String::new()
+                };
+                if !done.problems.is_empty() {
+                    text.push(' ');
+                    text.push_str(&done.problems.join(". "));
+                }
+                if !text.is_empty() {
+                    self.s.notice = Some(text.trim().to_owned());
+                }
+            }
+        }
         // Sounds finished decoding: put them on the timeline.
         if let Some(job) = &self.sound_import {
             if let Some(done) = job.poll() {
