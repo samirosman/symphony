@@ -180,6 +180,24 @@ Layers** to see the entire drawing while you edit.
 Exports render the same Display graph. From the Node view, **Render
 preview** also lets you check an individual frame.
 
+## Import brush packs
+
+Drop a brush file or pack onto Symphony. The importer adds compatible
+presets to your brushes and reports entries it could not read.
+
+| Source | Formats |
+| --- | --- |
+| Photoshop | Sampled tips from `.abr` versions 1, 2, 6 and 10 |
+| Krita | `.kpp` presets and `.bundle` resource bundles |
+| MyPaint | `.myb` presets and exported brush pack `.zip` archives |
+| Procreate | `.brush` and `.brushset` |
+| Clip Studio Paint | `.sut` |
+| GIMP | `.gbr` tips and `.gih` image pipes |
+
+Photoshop sampled tips use Symphony’s brush dynamics. Each GIMP image
+pipe cell imports as an individual preset. MyPaint packs import the
+compatible brushes listed in their manifest.
+
 ## Mask artwork
 
 Add **Mask** in Node view or Tab search. Connect the artwork to its

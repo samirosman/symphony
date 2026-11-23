@@ -12,7 +12,8 @@ node-based compositing.
 
 - **Make room for in-betweens.** Insert frames after the playhead. Current exposures hold through the gap, and later exposures and peg keys shift together.
 - **Turn a drawing into an editable matte.** Switch a drawing to a mask and back while keeping its artwork, exposures, and node connections.
-- **Bring brushes from Krita.** Import Krita .kpp presets and .bundle files to use their brush tips in Symphony’s vector strokes.
+- **Bring your brush packs.** Use sampled Photoshop tips in vector strokes and import packs from Krita, Procreate, and MyPaint.
+- **Find actions with Search.** Press Tab and type what you want to do. Results prioritize the panel you’re working in.
 
 Not affiliated with Toon Boom. Built clean-room from public documentation
 (see [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md)).

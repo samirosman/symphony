@@ -4,10 +4,11 @@
 //! Artists bring their brushes with them. Drag a brush file onto Symphony
 //! and it is imported. Supported today:
 //! - Krita: `.kpp` presets and `.bundle` resource bundles
-//! - MyPaint: `.myb`
+//! - MyPaint: `.myb` and brush pack `.zip`
 //! - Procreate: `.brush` and `.brushset`
 //! - Clip Studio Paint: `.sut`
-//! - GIMP: `.gbr` tips
+//! - GIMP: `.gbr` tips and `.gih` image pipes
+//! - Photoshop: sampled `.abr` brush tips
 //!
 //! Every format is read from files users made or bought themselves, using
 //! each app's public documentation or open-source code as the reference
@@ -23,6 +24,7 @@ mod clip;
 mod gimp;
 mod krita;
 mod mypaint;
+mod photoshop;
 mod procreate;
 
 /// Which app a brush came from.
@@ -33,6 +35,7 @@ pub enum Source {
     Procreate,
     ClipStudio,
     Gimp,
+    Photoshop,
 }
 
 impl Source {
@@ -43,6 +46,7 @@ impl Source {
             Source::Procreate => "Procreate",
             Source::ClipStudio => "Clip Studio Paint",
             Source::Gimp => "GIMP",
+            Source::Photoshop => "Photoshop",
         }
     }
 }
@@ -272,7 +276,7 @@ const MAX_BRUSHES: usize = 2000;
 
 /// Extensions that can be dropped onto Symphony as brushes.
 pub const EXTENSIONS: &[&str] = &[
-    "kpp", "bundle", "myb", "brush", "brushset", "sut", "gbr", "abr", "tbr",
+    "kpp", "bundle", "myb", "brush", "brushset", "sut", "gbr", "gih", "abr", "tbr", "zip",
 ];
 
 /// Is this a file we'd try to import as brushes?
@@ -324,7 +328,9 @@ pub fn import_bytes(ext: &str, stem: &str, bytes: &[u8]) -> Result<Imported, Err
             brushes: vec![b],
             problems: Vec::new(),
         }),
-        "abr" => Err(Error::NotYet("Photoshop brushes (.abr)")),
+        "abr" => photoshop::pack(bytes, stem),
+        "gih" => gimp::pipe(bytes, stem),
+        "zip" => mypaint::pack(bytes),
         "tbr" | "xml" => Err(Error::NotYet("Harmony brush presets")),
         other => Err(Error::Unknown(other.to_owned())),
     }?;
@@ -334,6 +340,24 @@ pub fn import_bytes(ext: &str, stem: &str, bytes: &[u8]) -> Result<Imported, Err
         out.problems.push("The file has no brushes in it.".into());
     }
     Ok(out)
+}
+
+fn sampled_tip(name: String, source: Source, spacing: f32, mut tip: GrayImage) -> Brush {
+    let (w, h) = tip.dimensions();
+    let diameter = w.max(h);
+    if diameter > MAX_IMAGE {
+        tip = image::imageops::thumbnail(
+            &tip,
+            (w * MAX_IMAGE / diameter).max(1),
+            (h * MAX_IMAGE / diameter).max(1),
+        );
+    }
+    let mut brush = Brush::new(name, source);
+    brush.diameter = diameter as f32;
+    brush.spacing = spacing;
+    brush.min_fraction = 1.0;
+    brush.tip = Some(tip);
+    brush
 }
 
 /// Decode an image and keep its brightness as a mask: white paints.
@@ -537,7 +561,7 @@ mod tests {
     #[test]
     fn unknown_and_unsupported_formats_say_so() {
         assert!(matches!(
-            import_bytes("abr", "x", b""),
+            import_bytes("abr", "x", &[0, 99, 0, 1]),
             Err(Error::NotYet(_))
         ));
         assert!(matches!(

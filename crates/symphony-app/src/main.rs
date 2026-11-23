@@ -2585,7 +2585,7 @@ impl SymphonyApp {
                             );
                             ui.label(
                                 egui::RichText::new(
-                                    "Krita, MyPaint, Procreate, Clip Studio and GIMP brushes, or Symphony presets",
+                                    "Photoshop, Krita, MyPaint, Procreate, Clip Studio and GIMP brushes, or Symphony presets",
                                 )
                                 .font(theme::dense())
                                 .color(theme::TEXT_SECONDARY),
