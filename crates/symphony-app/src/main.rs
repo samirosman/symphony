@@ -6,6 +6,7 @@
 mod app_icon;
 mod brush_import;
 mod codec;
+mod images;
 mod keymap;
 mod presets;
 mod save_dialog;
@@ -243,6 +244,8 @@ struct SymphonyApp {
     pen: Option<PenInput>,
     /// Pen samples taken early by `raw_input_hook`, for this frame's canvas.
     pen_backlog: Vec<PenSample>,
+    /// The pen's button bits in the last sample `raw_input_hook` passed on.
+    pen_buttons: u32,
     camera: camera::CanvasState,
     drawing: camera::CanvasState,
     function: function::FunctionState,
@@ -258,6 +261,7 @@ struct SymphonyApp {
     export: export::ExportDialog,
     soundtrack: soundtrack::SoundtrackDialog,
     sound: sound::SoundState,
+    images: images::ImageState,
     maximised: Option<View>,
     show_preferences: bool,
     prefs_page: PrefsPage,
@@ -719,6 +723,7 @@ impl SymphonyApp {
             use_no_ai,
             pen,
             pen_backlog: Vec::new(),
+            pen_buttons: 0,
             camera: Default::default(),
             drawing: Default::default(),
             function: Default::default(),
@@ -731,6 +736,7 @@ impl SymphonyApp {
             export: Default::default(),
             soundtrack: Default::default(),
             sound: Default::default(),
+            images: Default::default(),
             maximised: None,
             show_preferences: std::env::var_os("SYMPHONY_SHOT_PREFS").is_some(),
             // SYMPHONY_SHOT_PREFS=Canvas opens that page in screenshot runs.
@@ -1387,6 +1393,14 @@ impl SymphonyApp {
                     ui.close();
                     self.sound.import_dialog(&mut self.s, ui.ctx());
                 }
+                if ui
+                    .button("Images...")
+                    .on_hover_text("Add PNG, JPEG or OpenEXR files as an image layer")
+                    .clicked()
+                {
+                    ui.close();
+                    self.images.import_dialog(ui.ctx());
+                }
             });
             ui.separator();
             self.menu_action(ui, Action::Save);
@@ -1914,6 +1928,9 @@ impl SymphonyApp {
                     ));
                 }
                 if let Some(label) = self.sound.activity() {
+                    jobs.push((label, None));
+                }
+                if let Some(label) = self.images.activity() {
                     jobs.push((label, None));
                 }
                 if self.saving_jobs > 0 {
@@ -2942,6 +2959,7 @@ struct Viewer<'a> {
     function: &'a mut function::FunctionState,
     timing: &'a mut timing::TimingState,
     sound: &'a sound::SoundState,
+    images: &'a images::ImageState,
     samples: &'a [PenSample],
     device: Option<&'a DeviceInfo>,
     profile: Profile,
@@ -2988,8 +3006,24 @@ impl Viewer<'_> {
 
     fn view_body(&mut self, ui: &mut egui::Ui, v: View) {
         match v {
-            View::Camera => camera::ui(ui, self.s, self.camera, self.samples, false, self.profile),
-            View::Drawing => camera::ui(ui, self.s, self.drawing, self.samples, true, self.profile),
+            View::Camera => camera::ui(
+                ui,
+                self.s,
+                self.camera,
+                self.images,
+                self.samples,
+                false,
+                self.profile,
+            ),
+            View::Drawing => camera::ui(
+                ui,
+                self.s,
+                self.drawing,
+                self.images,
+                self.samples,
+                true,
+                self.profile,
+            ),
             View::Timeline => timing::timeline(ui, self.s, self.timing, self.sound, self.profile),
             View::Xsheet => timing::xsheet(ui, self.s, self.timing, self.profile),
             View::Node => node::ui(ui, self.s, self.node_view),
@@ -3198,6 +3232,15 @@ impl eframe::App for SymphonyApp {
             }
             let pos = egui::pos2(s.x as f32 / zoom, s.y as f32 / zoom);
             raw.events.push(egui::Event::PointerMoved(pos));
+            for (button, pressed) in pen_side_buttons(self.pen_buttons, s.buttons) {
+                raw.events.push(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers,
+                });
+            }
+            self.pen_buttons = s.buttons;
             let pressed = match s.phase {
                 symphony_pen::Phase::Down => true,
                 symphony_pen::Phase::Up => false,
@@ -3224,6 +3267,21 @@ impl eframe::App for SymphonyApp {
             }
         }
     }
+}
+
+/// The egui button changes between two pen button states. The first side
+/// button (`BTN_STYLUS`) acts as the right mouse button and the second as
+/// the middle one: on the GT1602 that puts right on the upper button and
+/// middle on the lower.
+fn pen_side_buttons(before: u32, now: u32) -> Vec<(egui::PointerButton, bool)> {
+    [
+        (symphony_pen::BUTTON_STYLUS, egui::PointerButton::Secondary),
+        (symphony_pen::BUTTON_STYLUS2, egui::PointerButton::Middle),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| (before ^ now) & bit != 0)
+    .map(|(bit, button)| (button, now & bit != 0))
+    .collect()
 }
 
 impl SymphonyApp {
@@ -3521,6 +3579,7 @@ impl SymphonyApp {
             function: &mut self.function,
             timing: &mut self.timing,
             sound: &self.sound,
+            images: &self.images,
             samples: &samples,
             device: device.as_ref(),
             profile: self.profile,
@@ -3645,6 +3704,7 @@ impl SymphonyApp {
         self.show_licences = open;
         self.file_drops(&ctx);
         self.sound.update(&mut self.s, &ctx);
+        self.images.update(&mut self.s, &ctx);
         views::sound_editor::show(
             &ctx,
             &mut self.timing.sound_editor,
@@ -3788,6 +3848,27 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(SymphonyApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod pen_button_tests {
+    use super::egui::PointerButton::{Middle, Secondary};
+    use super::pen_side_buttons;
+    use symphony_pen::{BUTTON_STYLUS, BUTTON_STYLUS2, BUTTON_TIP};
+
+    #[test]
+    fn side_buttons_press_and_release_right_and_middle() {
+        assert_eq!(pen_side_buttons(0, BUTTON_STYLUS), vec![(Secondary, true)]);
+        assert_eq!(pen_side_buttons(BUTTON_STYLUS, 0), vec![(Secondary, false)]);
+        assert_eq!(pen_side_buttons(0, BUTTON_STYLUS2), vec![(Middle, true)]);
+        assert_eq!(pen_side_buttons(BUTTON_STYLUS2, 0), vec![(Middle, false)]);
+        // Held buttons and the tip send nothing new.
+        assert!(pen_side_buttons(BUTTON_STYLUS, BUTTON_STYLUS | BUTTON_TIP).is_empty());
+        assert_eq!(
+            pen_side_buttons(BUTTON_STYLUS, BUTTON_STYLUS2),
+            vec![(Secondary, false), (Middle, true)]
+        );
+    }
 }
 
 #[cfg(test)]

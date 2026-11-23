@@ -8,6 +8,7 @@ use egui_kittest::Harness;
 use symphony_core::stroke::{ArtLayer, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 
+use crate::images::ImageState;
 use crate::keymap::Profile;
 use crate::session::{Session, Tool};
 use crate::views::camera::{self, CanvasState};
@@ -15,6 +16,7 @@ use crate::views::camera::{self, CanvasState};
 pub struct Rig {
     pub s: Session,
     pub canvas: CanvasState,
+    pub images: ImageState,
     samples: Vec<PenSample>,
 }
 
@@ -24,6 +26,7 @@ pub fn rig() -> Harness<'static, Rig> {
     let rig = Rig {
         s,
         canvas: CanvasState::default(),
+        images: ImageState::default(),
         samples: Vec::new(),
     };
     let mut h = Harness::builder()
@@ -35,6 +38,7 @@ pub fn rig() -> Harness<'static, Rig> {
                     ui,
                     &mut r.s,
                     &mut r.canvas,
+                    &r.images,
                     &samples,
                     false,
                     Profile::Harmony,
@@ -865,4 +869,46 @@ fn busy_frame_cost() {
     let draw = start.elapsed() / 63;
     h.state_mut().s.tool = tool;
     println!("busy_frame_cost idle {idle:?}, zoom {zoom:?}, drawing {draw:?} per frame");
+}
+
+#[test]
+fn the_camera_view_draws_an_imported_image() {
+    let mut h = rig();
+    let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]));
+    let mut bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    let file = symphony_io::media::image_from_bytes(bytes).unwrap();
+    h.state_mut().s.import_images("Red", vec![file]);
+    let d = h.state().s.doc.exposed(0, 1).unwrap();
+    let r = h.state().s.doc.drawings[&d].image.unwrap();
+    // The image decodes on a worker thread.
+    let ctx = h.ctx.clone();
+    for _ in 0..500 {
+        let rig = h.state_mut();
+        rig.images.update(&mut rig.s, &ctx);
+        if rig.images.texture(r).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let tex = h.state().images.texture(r).expect("decoded").id();
+    h.run();
+    let quads: Vec<_> = h
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Mesh(m) if m.texture_id == tex => Some(m.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(quads.len(), 1, "one quad for the image");
+    let b = quads[0].calc_bounds();
+    // Fit: a 2:1 image across the width of the 16:9 stage.
+    assert!((b.width() / b.height() - 2.0).abs() < 0.01, "{b:?}");
+    assert!(b.width() > 100.0, "{b:?}");
 }

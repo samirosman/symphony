@@ -226,7 +226,16 @@ mod tests {
                     } else {
                         camera_state
                     };
-                    camera::ui(ui, session, state, &[], *drawing_only, Profile::Harmony);
+                    let images = crate::images::ImageState::default();
+                    camera::ui(
+                        ui,
+                        session,
+                        state,
+                        &images,
+                        &[],
+                        *drawing_only,
+                        Profile::Harmony,
+                    );
                 },
                 (
                     session,

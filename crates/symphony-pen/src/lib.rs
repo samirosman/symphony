@@ -26,6 +26,16 @@ mod wayland;
 #[cfg(target_os = "linux")]
 mod x11;
 
+/// [`PenSample::buttons`] bit: the tip touches the surface.
+pub const BUTTON_TIP: u32 = 1;
+/// [`PenSample::buttons`] bit: the first side button (`BTN_STYLUS`).
+/// Which end of the barrel it is depends on the pen: on a Huion Kamvas
+/// GT1602 under GNOME it is the upper one (measured 2026-11-23).
+pub const BUTTON_STYLUS: u32 = 2;
+/// [`PenSample::buttons`] bit: the second side button (`BTN_STYLUS2`);
+/// the lower one on the GT1602.
+pub const BUTTON_STYLUS2: u32 = 4;
+
 /// Where the pointer is in the stroke lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -104,7 +114,8 @@ pub struct PenSample {
     pub tangential: f32,
     pub phase: Phase,
     pub tool: Tool,
-    /// Raw pen button bits (tip, lower side, upper side).
+    /// Raw pen button bits (tip, lower side, upper side): see
+    /// [`BUTTON_TIP`], [`BUTTON_STYLUS`] and [`BUTTON_STYLUS2`].
     pub buttons: u32,
     /// Seconds, monotonic (system uptime on macOS).
     pub time: f64,
