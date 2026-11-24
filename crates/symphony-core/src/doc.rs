@@ -444,7 +444,24 @@ impl Scene {
             .columns
             .insert(at.min(self.xsheet.columns.len()), s.column.clone());
         self.graph.restore(s.layer.peg, s.peg.clone(), &[]);
-        self.graph.restore(s.layer.node, s.node.clone(), &s.links);
+        let mut links = s.links.clone();
+        if self.custom_wiring {
+            // Its old Composite ports may be taken now (the inputs were
+            // restacked): use free ones, and `rewire` sorts them.
+            let free = self
+                .graph
+                .links()
+                .iter()
+                .filter(|l| l.to == self.composite)
+                .map(|l| l.port + 1)
+                .max()
+                .unwrap_or(0);
+            let composite = self.composite;
+            for (port, l) in (free..).zip(links.iter_mut().filter(|l| l.to == composite)) {
+                l.port = port;
+            }
+        }
+        self.graph.restore(s.layer.node, s.node.clone(), &links);
         self.layers.insert(at, s.layer);
         self.rewire();
     }
@@ -495,15 +512,58 @@ impl Scene {
         self.rewire();
     }
 
-    /// Composite inputs follow layer order (port 0 = front).
+    /// Composite inputs follow layer order (port 0 = front): the Timeline's
+    /// top layer is in front, like the top cel of a stack.
     pub fn rewire(&mut self) {
         if self.custom_wiring {
+            self.restack();
             return;
         }
         self.graph.disconnect_inputs(self.composite);
         for (port, l) in self.layers.iter().enumerate() {
             self.graph.connect(l.node, self.composite, port);
         }
+    }
+
+    /// With the Node view rewired: keep the wiring, but sort the Composite
+    /// inputs into Timeline order. An input belongs to the highest layer
+    /// that feeds it (a layer's Blur stays with that layer); inputs that
+    /// no layer feeds keep their order, behind the layers.
+    fn restack(&mut self) {
+        let composite = self.composite;
+        let links = self.graph.links().to_vec();
+        let owner = |start: NodeId| -> Option<usize> {
+            let mut seen = vec![start];
+            let mut todo = vec![start];
+            let mut best: Option<usize> = None;
+            while let Some(n) = todo.pop() {
+                if let Some(i) = self.layers.iter().position(|l| l.node == n) {
+                    best = Some(best.map_or(i, |b| b.min(i)));
+                }
+                for l in links.iter().filter(|l| l.to == n) {
+                    if !seen.contains(&l.from) {
+                        seen.push(l.from);
+                        todo.push(l.from);
+                    }
+                }
+            }
+            best
+        };
+        let mut inputs: Vec<Link> = links
+            .iter()
+            .copied()
+            .filter(|l| l.to == composite)
+            .collect();
+        inputs.sort_by_key(|l| l.port);
+        inputs.sort_by_key(|l| owner(l.from).unwrap_or(usize::MAX));
+        let mut out: Vec<Link> = links.into_iter().filter(|l| l.to != composite).collect();
+        out.extend(
+            inputs
+                .into_iter()
+                .enumerate()
+                .map(|(port, l)| Link { port, ..l }),
+        );
+        self.graph.replace_links(out);
     }
 
     pub fn column(&self, layer: usize) -> Option<&Column> {
