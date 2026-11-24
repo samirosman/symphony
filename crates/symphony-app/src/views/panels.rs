@@ -204,14 +204,8 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
             false,
         );
     });
-    // Brush presets show in their own kind only: vector or bitmap.
-    let bitmap = current_settings.texture.is_some();
-    let list: Vec<Preset> = presets
-        .list(tool)
-        .iter()
-        .filter(|p| pencil || p.settings.texture.is_some() == bitmap)
-        .cloned()
-        .collect();
+    // Both smooth and textured presets produce editable vector strokes.
+    let list = presets.list(tool).to_vec();
     let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
     let ink = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
     egui::ScrollArea::vertical()
@@ -428,42 +422,6 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
     } else {
         PresetTool::Brush
     };
-    // First the kind of line, since it decides everything below: vector
-    // (clean lines, a pen) or bitmap (textured stamps, a brush). Brushes
-    // that only make textured lines are listed under Bitmap only.
-    if !pencil {
-        let bitmap = s.brush.texture.is_some();
-        let mut want = bitmap;
-        widgets::segmented(
-            ui,
-            "brush-kind",
-            &mut want,
-            &[(false, "Vector"), (true, "Bitmap")],
-            false,
-        );
-        if want != bitmap {
-            // Pick up the first preset of that kind, if there is one.
-            let found = presets
-                .list(tool)
-                .iter()
-                .find(|p| p.settings.texture.is_some() == want)
-                .cloned();
-            match found {
-                Some(p) => {
-                    s.brush = p.settings;
-                    presets.set_current(tool, Some(p.name));
-                }
-                None => {
-                    s.brush.texture = want.then(|| symphony_core::stroke::StrokeTexture {
-                        spacing: 0.1,
-                        ..Default::default()
-                    });
-                    presets.set_current(tool, None);
-                }
-            }
-        }
-        ui.add_space(6.0);
-    }
     // The preview is pinned above (tool_properties); then the presets,
     // then the settings, as in Harmony.
     preset_list(ui, s, presets, tool);

@@ -193,8 +193,10 @@ Each GIMP image pipe cell imports as an individual preset.
 
 Re-import a source file to apply improvements to its presets. Photoshop
 presets previously imported under numbered names may appear alongside
-their newly named versions. Imported brushes use Symphony’s vector
-renderer. Some source behaviours, such as Photoshop dual brushes and
+their newly named versions. Imported presets appear alongside the other
+vector brush presets and retain editable points even when they use a
+bitmap tip or grain. Pixel painting is planned as a separate brush
+category. Some source behaviours, such as Photoshop dual brushes and
 scatter, Krita smudging, and MyPaint’s time-based dabs, are still outside
 the importer’s mapping.
 

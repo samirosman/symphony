@@ -1978,8 +1978,8 @@ impl SymphonyApp {
                     tip.push_str("\nDrag, scale or rotate the selection");
                     Icon::Transform
                 }
-                // The Brush shows its kind: a pen for vector lines, a
-                // brush for bitmap (textured) ones.
+                // Both tips make vector strokes. The icon shows whether
+                // the current brush uses a texture.
                 Tool::Brush if self.s.brush.texture.is_none() => Icon::Pen,
                 Tool::Brush => Icon::Brush,
                 Tool::Transform => {
