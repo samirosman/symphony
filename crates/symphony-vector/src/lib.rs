@@ -12,6 +12,7 @@ pub mod cut;
 pub mod fill;
 pub mod shape;
 pub mod stamp;
+pub mod stamped;
 
 use symphony_core::math::Affine;
 use symphony_core::stroke::{Point, Stroke, Tip};

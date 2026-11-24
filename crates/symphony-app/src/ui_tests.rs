@@ -1317,8 +1317,15 @@ fn bitmap_brushes_also_come_as_vector_versions() {
     let vector = brush_list(&all, false);
     assert_eq!(names(vector.clone()), ["Ink", "Grainy"]);
     assert!(
-        vector.iter().all(|p| p.settings.texture.is_none()),
-        "vector versions draw clean lines"
+        vector
+            .iter()
+            .all(|p| !crate::views::panels::is_bitmap(&p.settings)),
+        "vector versions are vector brushes"
+    );
+    let grainy = vector.iter().find(|p| p.name == "Grainy").unwrap();
+    assert!(
+        grainy.settings.texture.is_some_and(|t| t.vector),
+        "it keeps its tip, stamped as shapes"
     );
 }
 
@@ -1373,4 +1380,59 @@ fn strokes_keep_how_the_pen_was_held() {
         p.pen = Default::default();
     }
     assert!(!serde_json::to_string(&flat).unwrap().contains("\"pen\""));
+}
+
+/// A vector brush (a bitmap brush's tip stamped as shapes): drawn in the
+/// Camera view it renders solid where the line is, and the eraser cuts
+/// its merged outline into pieces.
+#[test]
+fn vector_brushes_draw_solid_shapes_and_erase_cleanly() {
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    {
+        let s = &mut h.state_mut().s;
+        s.tool = crate::session::Tool::Brush;
+        s.brush.min_width = 16.0;
+        s.brush.max_width = 16.0;
+        s.brush.texture = Some(symphony_core::stroke::StrokeTexture {
+            spacing: 0.2,
+            vector: true,
+            ..Default::default()
+        });
+    }
+    drag(
+        &mut h,
+        &line((-200.0, 0.0), (200.0, 0.0), 20),
+        1.0,
+        PenTool::Pen,
+    );
+    let st = strokes(&h, layer).last().cloned().expect("a stroke");
+    assert!(st.texture.is_some_and(|t| t.vector));
+    let s = &h.state().s;
+    let (w, ht) = (s.doc.settings.width, s.doc.settings.height);
+    let img = symphony_render::render_camera(&s.doc, 1, w, ht, None).unwrap();
+    // Scene origin is the frame centre; the line runs along y = 0.
+    let px = |x: f32, y: f32| {
+        let (cx, cy) = ((w as f32 / 2.0 + x) as u32, (ht as f32 / 2.0 + y) as u32);
+        img.pixel(cx, cy).unwrap().alpha()
+    };
+    assert!(px(0.0, 0.0) > 200, "solid on the line");
+    assert!(px(0.0, 30.0) < 10, "nothing well off it");
+    // Erase across the middle: two pieces, each an outline.
+    let d = h.state().s.doc.exposed(layer, 1).unwrap();
+    let eraser: Vec<symphony_vector::cut::Disc> = (0..10)
+        .map(|i| ([0.0, -20.0 + i as f32 * 4.0], 10.0))
+        .collect();
+    h.state_mut().s.erase(d, &eraser);
+    let pieces = strokes(&h, layer);
+    let cut: Vec<_> = pieces
+        .iter()
+        .filter(|p| p.texture.is_some_and(|t| t.vector))
+        .collect();
+    assert_eq!(cut.len(), 2, "split in two");
+    assert!(
+        cut.iter().all(|p| !p.shape.is_empty()),
+        "each piece is its outline"
+    );
 }

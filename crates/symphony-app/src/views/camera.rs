@@ -303,6 +303,10 @@ fn paint_stroke(
     colour: Color32,
     m: Affine,
 ) {
+    if let Some(tex) = stroke.texture.filter(|t| t.vector) {
+        cache.paint_stamped(painter, textures, stroke, &tex, colour, m);
+        return;
+    }
     if let Some(tex) = &stroke.texture {
         cache.paint(painter.ctx(), painter, textures, stroke, tex, colour, m);
         return;

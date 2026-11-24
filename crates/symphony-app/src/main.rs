@@ -1983,7 +1983,7 @@ impl SymphonyApp {
                 }
                 // Both tips make vector strokes. The icon shows whether
                 // the current brush uses a texture.
-                Tool::Brush if self.s.brush.texture.is_none() => Icon::Pen,
+                Tool::Brush if !crate::views::panels::is_bitmap(&self.s.brush) => Icon::Pen,
                 Tool::Brush => Icon::Brush,
                 Tool::Transform => {
                     tip = format!("Transform the peg\n{tip}");

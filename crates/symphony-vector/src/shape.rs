@@ -109,6 +109,12 @@ fn simplify(c: &[[f32; 2]]) -> Vec<[f32; 2]> {
         .collect()
 }
 
+/// Merged shapes, cleaned: points that don't change the look dropped and
+/// invisible slivers removed.
+pub(crate) fn tidy(shapes: Vec<Vec<Vec<[f32; 2]>>>) -> Vec<Shape> {
+    to_f32(shapes)
+}
+
 fn to_f32(shapes: Vec<Vec<Vec<[f32; 2]>>>) -> Vec<Shape> {
     shapes
         .into_iter()

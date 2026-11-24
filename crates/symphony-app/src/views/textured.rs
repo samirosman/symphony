@@ -223,6 +223,9 @@ pub struct Cache {
     /// Quick low-resolution stamps shown while a stroke's new shape is
     /// stamped in full in the background (editing), by full key.
     low_res: HashMap<u64, (Image, u64)>,
+    /// Vector brush strokes: their merged stamp outline, triangulated in
+    /// drawing space, by content key.
+    stamped: HashMap<u64, (Arc<symphony_vector::Mesh>, u64)>,
     /// Plain vector lines' cached triangles (they draw through here too).
     pub vectors: super::vector_cache::VectorMeshes,
 }
@@ -321,6 +324,9 @@ impl Cache {
         self.entries.retain(|_, e| e.used >= keep_after);
         self.last.retain(|_, (_, used)| *used >= keep_after);
         self.low_res.retain(|_, (_, used)| *used >= keep_after);
+        let keep_stamped_after = self.frame.saturating_sub(120);
+        self.stamped
+            .retain(|_, (_, used)| *used >= keep_stamped_after);
         let keep_preview_after = self.frame.saturating_sub(16);
         self.ink_history
             .retain(|_, preview| preview.used >= keep_preview_after);
@@ -524,6 +530,80 @@ impl Cache {
     }
 }
 
+impl Cache {
+    /// A vector brush stroke: the tip's shape stamped along the line and
+    /// merged into one outline, drawn solid. The outline is worked out once
+    /// per shape of the stroke (in drawing space) and only moved after.
+    pub fn paint_stamped(
+        &mut self,
+        painter: &egui::Painter,
+        textures: &BTreeMap<u64, Texture>,
+        stroke: &Stroke,
+        tex: &StrokeTexture,
+        colour: Color32,
+        m: Affine,
+    ) {
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for p in &stroke.points {
+                (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
+                (
+                    p.pen.tilt.to_bits(),
+                    p.pen.azimuth.to_bits(),
+                    p.pen.rotation.to_bits(),
+                )
+                    .hash(&mut h);
+            }
+            (
+                stroke.min_width.to_bits(),
+                stroke.max_width.to_bits(),
+                stroke.id.0,
+            )
+                .hash(&mut h);
+            format!("{tex:?}").hash(&mut h);
+            for ring in &stroke.shape {
+                for &[x, y] in ring {
+                    (x.to_bits(), y.to_bits()).hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        let frame = self.frame;
+        let mesh = match self.stamped.get_mut(&key) {
+            Some((mesh, used)) => {
+                *used = frame;
+                mesh.clone()
+            }
+            None => {
+                let tip = self.texture(textures, tex.tip);
+                let shapes =
+                    symphony_vector::stamped::vector_brush_shapes(stroke, tex, tip.as_deref());
+                let mut all = symphony_vector::Mesh::default();
+                for shape in &shapes {
+                    let part = symphony_vector::fill::fill_mesh(shape, Affine::IDENTITY);
+                    let base = all.vertices.len() as u32;
+                    all.vertices.extend(part.vertices);
+                    all.indices.extend(part.indices.iter().map(|i| i + base));
+                }
+                let mesh = Arc::new(all);
+                self.stamped.insert(key, (mesh.clone(), frame));
+                mesh
+            }
+        };
+        if mesh.indices.is_empty() {
+            return;
+        }
+        let mut out = egui::Mesh::default();
+        out.vertices.reserve(mesh.vertices.len());
+        for &[x, y] in &mesh.vertices {
+            let (sx, sy) = m.apply(x, y);
+            out.colored_vertex(Pos2::new(sx, sy), colour);
+        }
+        out.indices = mesh.indices.clone();
+        painter.add(egui::Shape::mesh(out));
+    }
+}
+
 /// The stroke being drawn, stamped a piece at a time.
 pub struct Live {
     px: Affine,
@@ -636,6 +716,7 @@ fn keys(
         format!("{:?}", tex.dynamics).hash(&mut h);
         stroke.id.0.hash(&mut h);
     }
+    tex.vector.hash(&mut h);
     let ink = h.finish();
     for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
         v.to_bits().hash(&mut h);
@@ -701,6 +782,33 @@ pub fn sample(
         .hash(&mut h);
     (rect.width().to_bits(), rect.height().to_bits()).hash(&mut h);
     let id = egui::Id::unique(("brush-sample", h.finish()));
+    // A vector brush: its merged stamp outline, drawn solid.
+    if tex.vector {
+        let mesh = ctx
+            .data(|d| d.get_temp::<Arc<symphony_vector::Mesh>>(id))
+            .unwrap_or_else(|| {
+                let tip = tex.tip.and_then(crate::brush_import::library_texture);
+                let mut all = symphony_vector::Mesh::default();
+                for shape in
+                    symphony_vector::stamped::vector_brush_shapes(&stroke, tex, tip.as_deref())
+                {
+                    let part = symphony_vector::fill::fill_mesh(&shape, Affine::IDENTITY);
+                    let base = all.vertices.len() as u32;
+                    all.vertices.extend(part.vertices);
+                    all.indices.extend(part.indices.iter().map(|i| i + base));
+                }
+                let mesh = Arc::new(all);
+                ctx.data_mut(|d| d.insert_temp(id, mesh.clone()));
+                mesh
+            });
+        let mut out = egui::Mesh::default();
+        for &[x, y] in &mesh.vertices {
+            out.colored_vertex(rect.min + egui::vec2(x, y), ink);
+        }
+        out.indices = mesh.indices.clone();
+        painter.add(egui::Shape::mesh(out));
+        return;
+    }
     let handle = ctx
         .data(|d| d.get_temp::<egui::TextureHandle>(id))
         .or_else(|| {

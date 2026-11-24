@@ -158,7 +158,10 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                     }) {
                         // Updating a bitmap brush from its vector version
                         // keeps the brush's stamps.
-                        let texture = current_settings.texture.or(p.settings.texture);
+                        let texture = match current_settings.texture {
+                            Some(t) if !t.vector => Some(t),
+                            _ => p.settings.texture,
+                        };
                         p.settings = current_settings;
                         p.settings.texture = texture;
                     }
@@ -216,7 +219,7 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
     let list = if pencil {
         presets.list(tool).to_vec()
     } else {
-        brush_list(presets.list(tool), current_settings.texture.is_some())
+        brush_list(presets.list(tool), is_bitmap(&current_settings))
     };
     let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
     let ink = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
@@ -433,7 +436,7 @@ fn export_presets(s: &mut Session, presets: &Presets) {
 pub fn brush_list(all: &[Preset], bitmap: bool) -> Vec<Preset> {
     if bitmap {
         all.iter()
-            .filter(|p| p.settings.texture.is_some())
+            .filter(|p| is_bitmap(&p.settings))
             .cloned()
             .collect()
     } else {
@@ -441,11 +444,19 @@ pub fn brush_list(all: &[Preset], bitmap: bool) -> Vec<Preset> {
     }
 }
 
-/// A brush as a clean vector line: a bitmap brush keeps its name, size
-/// range and smoothing, without its stamps.
+/// Does this brush paint bitmap stamps (rather than vector lines)?
+pub fn is_bitmap(b: &BrushSettings) -> bool {
+    b.texture.is_some_and(|t| !t.vector)
+}
+
+/// A brush as a true vector brush: a bitmap brush keeps its name, size,
+/// tip and dynamics, but its tip's shape is stamped along the line and
+/// merged into one clean outline instead of painting pixels.
 fn vector_version(p: &Preset) -> Preset {
     let mut v = p.clone();
-    v.settings.texture = None;
+    if let Some(t) = &mut v.settings.texture {
+        t.vector = true;
+    }
     v
 }
 
@@ -457,7 +468,7 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
     };
     // First the kind of brush, since it decides the list below.
     if !pencil {
-        let bitmap = s.brush.texture.is_some();
+        let bitmap = is_bitmap(&s.brush);
         let mut want = bitmap;
         widgets::segmented(
             ui,
@@ -475,12 +486,13 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
                 .and_then(|name| presets.list(tool).iter().find(|p| &p.name == name).cloned());
             let pick = match (want, same) {
                 (false, Some(p)) => Some(vector_version(&p)),
-                (true, Some(p)) if p.settings.texture.is_some() => Some(p),
+                (true, Some(p)) if is_bitmap(&p.settings) => Some(p),
                 _ => presets
                     .list(tool)
                     .iter()
-                    .find(|p| p.settings.texture.is_some() == want)
-                    .cloned(),
+                    .find(|p| is_bitmap(&p.settings) == want)
+                    .cloned()
+                    .map(|p| if want { p } else { vector_version(&p) }),
             };
             match pick {
                 Some(p) => {

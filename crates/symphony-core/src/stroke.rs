@@ -179,6 +179,11 @@ pub struct StrokeTexture {
     /// every redraw.
     #[serde(default, skip_serializing_if = "Dynamics::is_still")]
     pub dynamics: Dynamics,
+    /// A vector brush made from this bitmap brush: the tip's shape is
+    /// stamped along the line and merged into one clean outline (no
+    /// pixels), instead of painting the tip image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vector: bool,
 }
 
 /// Per-stamp variation of a textured brush. All zero is a steady brush.
@@ -324,6 +329,7 @@ impl Default for StrokeTexture {
             grain_offset: [0.0, 0.0],
             auto_spacing: 0.0,
             dynamics: Dynamics::default(),
+            vector: false,
         }
     }
 }

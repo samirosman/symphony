@@ -166,6 +166,33 @@ pub struct Stamper {
     /// The stroke's random seed: the same stroke always gets the same
     /// scatter and jitter, at any zoom and on every redraw.
     seed: u64,
+    /// Recording instead of painting: where each stamp lands (for vector
+    /// brushes, which turn stamps into shapes).
+    record: Option<Vec<Dab>>,
+}
+
+/// One stamp as placed on the line: centre, diameter, turn (radians, tip
+/// angle and heading included) and roundness (height over width).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dab {
+    pub c: [f32; 2],
+    pub d: f32,
+    pub angle: f32,
+    pub ratio: f32,
+}
+
+/// Every stamp a textured brush lays along `stroke`, in drawing units,
+/// placed exactly as the painting engine places them (same spacing and
+/// dynamics), but not painted.
+pub fn dabs(stroke: &Stroke, tex: &StrokeTexture) -> Vec<Dab> {
+    let mut s = Stamper::new(
+        *tex,
+        Affine::IDENTITY,
+        [i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4],
+    );
+    s.record = Some(Vec::new());
+    s.extend(stroke, None, None);
+    s.record.take().unwrap_or_default()
 }
 
 /// A repeatable random number in 0..1 for `seed`, stamp `n`, channel `k`.
@@ -193,6 +220,7 @@ impl Stamper {
             last: None,
             stamps: 0,
             seed: 0,
+            record: None,
         }
     }
 
@@ -424,6 +452,14 @@ impl Stamper {
                 ratio
             }
         };
+        if let Some(record) = self.record.as_mut() {
+            if d.is_finite() && d > 0.0 && record.len() < MAX_STAMPS {
+                let angle = (self.tex.angle + turn).to_radians()
+                    + if self.tex.follow { heading } else { 0.0 };
+                record.push(Dab { c, d, angle, ratio });
+            }
+            return;
+        }
         let fade_level = 1.0 - fin(dy_.opacity_jitter, 1.0) * r(4);
         let fade_flow = 1.0 - fin(dy_.flow_jitter, 1.0) * r(5);
         // Each stamp raises pixels toward its own opacity (faded by

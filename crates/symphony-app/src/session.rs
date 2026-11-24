@@ -779,7 +779,15 @@ impl Session {
             // shape; a textured one keeps its texture, clipped to it.
             let by_shape = st.kind == StrokeKind::Brush;
             if by_shape {
-                let outlines = shape::outline(st);
+                // A vector brush's outline is its merged stamps.
+                let outlines = match st.texture.filter(|t| t.vector) {
+                    Some(tex) => symphony_vector::stamped::vector_brush_shapes(
+                        st,
+                        &tex,
+                        tex.tip.and_then(|k| self.doc.textures.get(&k)),
+                    ),
+                    None => shape::outline(st),
+                };
                 let mut hit = false;
                 let mut left: Vec<shape::Shape> = Vec::new();
                 for o in &outlines {

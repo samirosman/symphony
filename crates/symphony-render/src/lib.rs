@@ -351,6 +351,39 @@ fn paint_strokes(
                 Some(p) if p.strokes.contains(&st.id) => m.compose(p.transform),
                 _ => m,
             };
+            if let Some(tex) = st.texture.filter(|t| t.vector) {
+                // A vector brush: its merged stamp shapes, filled solid.
+                let tip = tex.tip.and_then(|k| scene.textures.get(&k));
+                let shapes = symphony_vector::stamped::vector_brush_shapes(st, &tex, tip);
+                let mut pb = PathBuilder::new();
+                for shape in &shapes {
+                    for ring in shape {
+                        for (i, &[x, y]) in ring.iter().enumerate() {
+                            let (x, y) = m.apply(x, y);
+                            if i == 0 {
+                                pb.move_to(x, y);
+                            } else {
+                                pb.line_to(x, y);
+                            }
+                        }
+                        pb.close();
+                    }
+                }
+                if let Some(path) = pb.finish() {
+                    let [r, g, b, a] = scene.swatch_rgba(st.swatch);
+                    let mut paint = tiny_skia::Paint::default();
+                    paint.set_color_rgba8(r, g, b, a);
+                    paint.anti_alias = true;
+                    pix.fill_path(
+                        &path,
+                        &paint,
+                        tiny_skia::FillRule::EvenOdd,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                continue;
+            }
             if let Some(tex) = &st.texture {
                 paint_textured(pix, scene, st, tex, m);
                 continue;
