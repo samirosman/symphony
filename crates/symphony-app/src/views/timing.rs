@@ -315,6 +315,23 @@ fn frame_tag(painter: &egui::Painter, centre: Pos2, frame: u32) {
     );
 }
 
+/// The Timeline ruler's beats for a frame rate: [small step, half second,
+/// second], in frames. 24 fps: 6, 12, 24; 30 fps: 5, 15, 30; 25 fps: 5,
+/// 25 (no whole half), 25; 12 fps: 3, 6, 12.
+fn ruler_steps(fps: f32) -> [u32; 3] {
+    let second = (fps.round() as u32).max(1);
+    let half = if second.is_multiple_of(2) {
+        second / 2
+    } else {
+        second
+    };
+    let small = [4, 6, 5, 3, 2]
+        .into_iter()
+        .find(|d| second.is_multiple_of(*d) && second / d >= 3)
+        .map_or(half, |d| second / d);
+    [small.max(1), half.max(1), second]
+}
+
 /// Indent per level of the node hierarchy, in the Timeline's name column.
 const INDENT: f32 = 12.0;
 
@@ -696,28 +713,54 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
 
-            for f in (5..=len).step_by(5) {
-                let x = frame_x(f) + cw;
-                painter.line_segment(
-                    [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
-                    Stroke::new(1.0, theme::LINE_SUBTLE),
-                );
-            }
+            // Beats follow the frame rate: the second, its half and a
+            // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
+            // numbers sit on the frame's centre, like the playhead.
+            let [small, half, second] = ruler_steps(s.doc.settings.fps);
+            // Number every small step if there's room, else every half.
+            let label_step = if small as f32 * cw >= 22.0 {
+                small
+            } else {
+                half
+            };
             for f in 1..=len {
                 let x = frame_x(f) + cw / 2.0;
-                let major = f % 5 == 0 || f == 1;
-                let top = if major { 16.0 } else { 21.0 };
+                let level = if f % second == 0 {
+                    3
+                } else if f % half == 0 {
+                    2
+                } else if f % small == 0 {
+                    1
+                } else {
+                    0
+                };
+                if level > 0 {
+                    let alpha = [0.0, 0.35, 0.6, 1.0][level];
+                    painter.line_segment(
+                        [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
+                        Stroke::new(1.0, theme::LINE_STRONG.gamma_multiply(alpha)),
+                    );
+                }
+                let top = match level {
+                    0 => 22.0,
+                    1 => 18.0,
+                    _ => 15.0,
+                };
                 painter.line_segment(
                     [Pos2::new(x, o.y + top), Pos2::new(x, o.y + RULER - 2.0)],
                     Stroke::new(1.0, theme::LINE_STRONG),
                 );
-                if major {
+                if f == 1 || f % label_step == 0 {
                     painter.text(
                         Pos2::new(x, o.y + 4.0),
                         Align2::CENTER_TOP,
                         f.to_string(),
                         theme::numbers(),
-                        theme::TEXT_SECONDARY,
+                        if level == 3 {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
                     );
                 }
             }
@@ -1322,6 +1365,15 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
 #[cfg(test)]
 mod hierarchy_tests {
     use super::*;
+
+    #[test]
+    fn ruler_beats_follow_the_frame_rate() {
+        assert_eq!(ruler_steps(24.0), [6, 12, 24]);
+        assert_eq!(ruler_steps(30.0), [5, 15, 30]);
+        assert_eq!(ruler_steps(12.0), [3, 6, 12]);
+        assert_eq!(ruler_steps(25.0), [5, 25, 25]);
+        assert_eq!(ruler_steps(60.0), [15, 30, 60]);
+    }
     use symphony_core::graph::Effect;
 
     /// Nodes added from the Timeline go to the nearest fitting place, and
