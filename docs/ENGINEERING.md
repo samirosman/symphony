@@ -125,6 +125,16 @@ symphony-core       document model, commands, undo, evaluation. Pure Rust.
   imports, vectorising, lip-sync analysis) runs on worker threads. Each
   job reports progress, can be cancelled, and sends its result back as a
   message, never by sharing mutable state.
+  - **Exports lose nothing** (`symphony_render::checkpoint`). Each frame
+    is kept on disk as soon as it's rendered: a PNG sequence's frames are
+    its files, and a movie or GIF keeps PNGs in `name.mp4.partial/` and
+    writes `name.mp4.part`, renamed only when whole. Every file is written
+    under a temporary name and renamed when complete. A manifest holds a
+    fingerprint of the scene, size and Symphony version. Exporting the
+    same scene to the same place after a crash, a full disk or Cancel
+    reuses every frame that reads back whole and renders the rest; a
+    changed scene starts over. Tested with a real kill
+    (`export_after_a_crash`) and in `an_interrupted_export_loses_nothing`.
 - **E5.3 Snapshots.** Background readers get an immutable snapshot of the
   document (copy-on-write, `Arc`-shared), so the user can keep working
   while an export runs.

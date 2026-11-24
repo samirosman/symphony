@@ -4732,6 +4732,7 @@ dependencies = [
  "mp4",
  "openh264",
  "rayon",
+ "serde_json",
  "symphony-core",
  "symphony-vector",
  "tiny-skia",

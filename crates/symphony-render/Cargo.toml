@@ -9,6 +9,8 @@ license.workspace = true
 # Stamping a drawing's textured strokes in parallel.
 rayon = "1"
 symphony-core = { path = "../symphony-core" }
+# Fingerprinting the scene so an unfinished export can continue.
+serde_json = "1"
 symphony-vector = { path = "../symphony-vector" }
 tiny-skia = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "webp", "bmp", "tiff", "tga"] }

@@ -56,12 +56,15 @@ pub fn output_frame_count(source_frames: u32, source_fps: f32, output_fps: f32) 
         .max(1.0) as u32
 }
 
-/// Encode frames `first..=last` of `scene` at `w` x `h` into an MP4 at `out`.
+/// Encode frames `first..=last` of `scene` at `w` x `h` into an MP4 at
+/// `out`, keeping each frame in `ck` (and reusing ones kept from an
+/// unfinished export). Returns how many were reused.
 #[allow(clippy::too_many_arguments)]
 pub fn export_mp4(
     scene: &Scene,
     codec: &Path,
     out: &Path,
+    ck: &crate::checkpoint::Checkpoint,
     first: u32,
     last: u32,
     w: u32,
@@ -69,7 +72,7 @@ pub fn export_mp4(
     movie_fps: Option<f32>,
     cancel: &AtomicBool,
     progress: &dyn Fn(u32, u32),
-) -> Result<(), String> {
+) -> Result<u32, String> {
     // 4:2:0 video needs even sizes.
     let (w, h) = ((w & !1).max(2), (h & !1).max(2));
     let source_fps = scene.settings.fps.max(1.0);
@@ -116,7 +119,7 @@ pub fn export_mp4(
     let to_yuv = |img: image::RgbaImage| {
         YUVBuffer::from_rgb_source(RgbaSliceU8::new(img.as_raw(), (w as usize, h as usize)))
     };
-    crate::in_order(scene, &frames, w, h, cancel, to_yuv, |i, f, yuv| {
+    let reused = crate::in_order(scene, &frames, w, h, ck, cancel, to_yuv, |i, f, yuv| {
         let i = i as u32;
         let stream = encoder
             .encode(&yuv)
@@ -183,8 +186,14 @@ pub fn export_mp4(
     if let Some(mut wr) = writer {
         wr.write_end()
             .map_err(|e| format!("Couldn't finish the movie file ({e})."))?;
+        let file = wr
+            .into_writer()
+            .into_inner()
+            .map_err(|e| format!("Couldn't finish the movie file ({}).", e.error()))?;
+        file.sync_all()
+            .map_err(|e| format!("Couldn't finish the movie file ({e})."))?;
     }
-    Ok(())
+    Ok(reused)
 }
 
 #[cfg(test)]

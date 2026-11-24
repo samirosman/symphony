@@ -3,6 +3,7 @@
 //!
 //! Export runs on a background thread with progress and cancel (E5.2).
 
+pub mod checkpoint;
 mod effects;
 pub mod movie;
 
@@ -504,14 +505,26 @@ pub struct ExportJob {
     pub movie_fps: Option<f32>,
 }
 
+/// How an export went.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Exported {
+    /// Frames kept from an earlier export of the same scene that didn't
+    /// finish (a crash, a full disk, Cancel), so not rendered again.
+    pub reused: u32,
+}
+
 /// Run an export. `progress` gets (done, total). Stops early, cleanly, when
 /// `cancel` is set. Errors are plain sentences (DESIGN D10.3).
+///
+/// Nothing finished is ever lost (see [`checkpoint`]): each frame is kept
+/// on disk as soon as it's rendered, and exporting the same scene again
+/// to the same place continues from there.
 pub fn export(
     scene: &Scene,
     job: &ExportJob,
     cancel: &AtomicBool,
     progress: &dyn Fn(u32, u32),
-) -> Result<(), String> {
+) -> Result<Exported, String> {
     let (w, h) = (
         ((scene.settings.width as f32 * job.scale).round() as u32).max(1),
         ((scene.settings.height as f32 * job.scale).round() as u32).max(1),
@@ -520,34 +533,42 @@ pub fn export(
     let total = last - first + 1;
     match job.format {
         Format::PngSequence => {
-            // Each frame is its own file, so frames render and compress
-            // (the slow part of PNG) side by side across the cores.
-            use rayon::prelude::*;
+            let key = checkpoint::fingerprint(scene, w, h);
+            let ck = checkpoint::Checkpoint::sequence(&job.path, &key, w, h)?;
             let frames: Vec<u32> = (first..=last).collect();
-            let mut done = 0;
-            for batch in frames.chunks(batch_len(w, h)) {
-                if cancel.load(Ordering::SeqCst) {
-                    return Err("Export cancelled.".into());
-                }
-                batch.par_iter().try_for_each(|&f| {
-                    let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
-                    let out = numbered(&job.path, f);
-                    img.save(&out)
-                        .map_err(|e| format!("Couldn't write {} ({e}).", out.display()))
-                })?;
-                done += batch.len() as u32;
-                progress(done, total);
-            }
-            Ok(())
+            // The frames are the output: they're written (and compressed)
+            // across the cores as they render, so there's nothing to do in
+            // order but count.
+            let reused = in_order(
+                scene,
+                &frames,
+                w,
+                h,
+                &ck,
+                cancel,
+                |_| (),
+                |i, _, ()| {
+                    progress(i as u32 + 1, total);
+                    Ok(())
+                },
+            )?;
+            ck.finish();
+            Ok(Exported { reused })
         }
         Format::Mp4Movie => {
             let codec = job.codec.as_deref().ok_or(
                 "Movie export needs the OpenH264 codec. Download it in Preferences > Video.",
             )?;
-            movie::export_mp4(
+            // 4:2:0 video needs even sizes.
+            let (w, h) = ((w & !1).max(2), (h & !1).max(2));
+            let key = checkpoint::fingerprint(scene, w, h);
+            let ck = checkpoint::Checkpoint::folder(&job.path, &key, w, h)?;
+            let part = checkpoint::with_suffix(&job.path, ".part");
+            let reused = movie::export_mp4(
                 scene,
                 codec,
-                &job.path,
+                &part,
+                &ck,
                 first,
                 last,
                 w,
@@ -555,15 +576,21 @@ pub fn export(
                 job.movie_fps,
                 cancel,
                 progress,
-            )
+            )?;
+            finish_file(&part, &job.path)?;
+            ck.finish();
+            Ok(Exported { reused })
         }
         Format::AnimatedGif => {
             let (gw, gh) = (
                 u16::try_from(w).map_err(|_| "GIFs can be at most 65535 pixels wide.")?,
                 u16::try_from(h).map_err(|_| "GIFs can be at most 65535 pixels tall.")?,
             );
-            let file = std::fs::File::create(&job.path)
-                .map_err(|e| format!("Couldn't create {} ({e}).", job.path.display()))?;
+            let key = checkpoint::fingerprint(scene, w, h);
+            let ck = checkpoint::Checkpoint::folder(&job.path, &key, w, h)?;
+            let part = checkpoint::with_suffix(&job.path, ".part");
+            let file = std::fs::File::create(&part)
+                .map_err(|e| format!("Couldn't create {} ({e}).", part.display()))?;
             let mut enc = gif::Encoder::new(std::io::BufWriter::new(file), gw, gh, &[])
                 .map_err(|e| format!("Couldn't start the GIF ({e})."))?;
             enc.set_repeat(gif::Repeat::Infinite)
@@ -580,14 +607,36 @@ pub fn export(
                 frame.make_lzw_pre_encoded();
                 frame
             };
-            in_order(scene, &frames, w, h, cancel, prepare, |i, _, frame| {
+            let reused = in_order(scene, &frames, w, h, &ck, cancel, prepare, |i, _, frame| {
                 enc.write_lzw_pre_encoded_frame(&frame)
                     .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
                 progress(i as u32 + 1, total);
                 Ok(())
-            })
+            })?;
+            let unfinished = |e: String| format!("Couldn't finish the GIF ({e}).");
+            let file: std::fs::File = enc
+                .into_inner()
+                .map_err(|e| unfinished(e.to_string()))?
+                .into_inner()
+                .map_err(|e| unfinished(e.error().to_string()))?;
+            file.sync_all().map_err(|e| unfinished(e.to_string()))?;
+            drop(file);
+            finish_file(&part, &job.path)?;
+            ck.finish();
+            Ok(Exported { reused })
         }
     }
+}
+
+/// A finished movie or GIF takes its real name only once it's whole.
+fn finish_file(part: &Path, out: &Path) -> Result<(), String> {
+    std::fs::rename(part, out).map_err(|e| {
+        format!(
+            "Couldn't name the finished file {} ({e}). It is complete at {}.",
+            out.display(),
+            part.display()
+        )
+    })
 }
 
 /// Frames rendered at once while exporting: one per core, fewer for huge
@@ -602,56 +651,88 @@ fn batch_len(w: u32, h: u32) -> usize {
 /// GIF colour reduction speed (1 best .. 30 fastest), as before.
 const GIF_SPEED: i32 = 10;
 
-/// Render `frames`, `prepare` each, and hand them to `each` in order
-/// (index, frame, prepared). Batches render and prepare ahead across the
-/// cores on another thread while `each` runs (writing a movie or GIF has
-/// to go in order on one thread).
+/// Render `frames` (or take them from `ck`, kept from an unfinished
+/// export), keep each in `ck`, `prepare` it, and hand them to `each` in
+/// order (index, frame, prepared). Batches render, save and prepare ahead
+/// across the cores on another thread while `each` runs (writing a movie
+/// or GIF has to go in order on one thread). Returns how many frames were
+/// reused from `ck`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn in_order<T: Send>(
     scene: &Scene,
     frames: &[u32],
     w: u32,
     h: u32,
+    ck: &checkpoint::Checkpoint,
     cancel: &AtomicBool,
     prepare: impl Fn(RgbaImage) -> T + Sync,
     mut each: impl FnMut(usize, u32, T) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     use rayon::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
     let batch = batch_len(w, h);
-    std::thread::scope(|scope| {
+    let reused = AtomicU32::new(0);
+    let kept = AtomicU32::new(0);
+    let one = |f: u32| -> Result<RgbaImage, String> {
+        if let Some(img) = ck.load(f) {
+            reused.fetch_add(1, Ordering::Relaxed);
+            kept.fetch_add(1, Ordering::Relaxed);
+            return Ok(img);
+        }
+        let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
+        ck.save(f, &img)?;
+        kept.fetch_add(1, Ordering::Relaxed);
+        Ok(img)
+    };
+    let stopped = || {
+        format!(
+            "Export cancelled. The {} frames done are kept: export again to continue.",
+            kept.load(Ordering::Relaxed)
+        )
+    };
+    let result = std::thread::scope(|scope| {
         // One batch waiting while the next renders: at most three batches
         // of images exist at once.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Option<T>>>(1);
-        let prepare = &prepare;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Result<T, String>>>(1);
+        let (prepare, one) = (&prepare, &one);
         scope.spawn(move || {
             for chunk in frames.chunks(batch) {
                 if cancel.load(Ordering::SeqCst) {
                     break;
                 }
-                let images = chunk
+                // A movie at a higher rate repeats frames: each is made
+                // once (two threads must never write the same file).
+                let mut unique = chunk.to_vec();
+                unique.sort_unstable();
+                unique.dedup();
+                let images: HashMap<u32, Result<RgbaImage, String>> =
+                    unique.par_iter().map(|&f| (f, one(f))).collect();
+                let prepared = chunk
                     .par_iter()
-                    .map(|&f| render_frame(scene, f, w, h).map(prepare))
+                    .map(|f| images[f].clone().map(prepare))
                     .collect();
-                if tx.send(images).is_err() {
+                if tx.send(prepared).is_err() {
                     break;
                 }
             }
         });
         let mut i = 0;
-        for images in rx {
-            for img in images {
+        for prepared in rx {
+            for item in prepared {
                 if cancel.load(Ordering::SeqCst) {
-                    return Err("Export cancelled.".into());
+                    return Err(stopped());
                 }
-                let img = img.ok_or("Couldn't render a frame.")?;
-                each(i, frames[i], img)?;
+                each(i, frames[i], item?)?;
                 i += 1;
             }
         }
         if i < frames.len() {
-            return Err("Export cancelled.".into());
+            return Err(stopped());
         }
         Ok(())
-    })
+    });
+    result.map(|()| reused.load(Ordering::Relaxed))
 }
 
 /// `shot.png` + frame 7 -> `shot_0007.png`.
@@ -1049,6 +1130,84 @@ mod tests {
         }
         cancel.store(true, Ordering::SeqCst);
         assert!(export(&s, &png, &cancel, &|_, _| {}).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An export that stops part way (Cancel here; a crash or a full disk
+    /// leave the same files) keeps every finished frame, leaves no broken
+    /// file under the real name, and exporting again reuses those frames.
+    /// A damaged frame is rendered again, and a changed scene starts over.
+    #[test]
+    fn an_interrupted_export_loses_nothing() {
+        // Batches of at least three frames on any machine, so all three
+        // are done when the Cancel lands.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(interrupted_export);
+    }
+
+    fn interrupted_export() {
+        let mut s = scene_with_line();
+        let dir = std::env::temp_dir().join(format!("symphony-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (format, name) in [
+            (Format::AnimatedGif, "a.gif"),
+            (Format::PngSequence, "f.png"),
+        ] {
+            let out = dir.join(name);
+            let job = ExportJob {
+                format,
+                path: out.clone(),
+                first: 1,
+                last: 3,
+                scale: 0.5,
+                codec: None,
+                movie_fps: None,
+            };
+            let cancel = AtomicBool::new(false);
+            let stop = |_: u32, _: u32| cancel.store(true, Ordering::SeqCst);
+            let err = export(&s, &job, &cancel, &stop).unwrap_err();
+            assert!(err.contains("kept"), "{err}");
+            let frame = |f: u32| match format {
+                Format::PngSequence => numbered(&out, f),
+                _ => checkpoint::with_suffix(&out, ".partial").join(format!("frame_{f:05}.png")),
+            };
+            if format == Format::AnimatedGif {
+                assert!(!out.exists(), "no unfinished GIF under the real name");
+            }
+            assert!(frame(1).is_file() && frame(3).is_file());
+            // A frame cut short (a power cut while writing).
+            std::fs::write(frame(2), b"\x89PNG").unwrap();
+            let go = AtomicBool::new(false);
+            let done = export(&s, &job, &go, &|_, _| {}).unwrap();
+            assert_eq!(done.reused, 2, "{name}: frames 1 and 3 reused, 2 redone");
+            assert!(out.is_file() || numbered(&out, 2).is_file());
+            assert!(image::open(frame(2)).is_ok() || format == Format::AnimatedGif);
+            if format == Format::AnimatedGif {
+                assert!(!checkpoint::with_suffix(&out, ".partial").exists());
+                assert!(!checkpoint::with_suffix(&out, ".part").exists());
+            }
+        }
+        // A changed scene doesn't reuse old frames.
+        let png = ExportJob {
+            format: Format::PngSequence,
+            path: dir.join("f.png"),
+            first: 1,
+            last: 3,
+            scale: 0.5,
+            codec: None,
+            movie_fps: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let _ = export(&s, &png, &cancel, &|_, _| {
+            cancel.store(true, Ordering::SeqCst)
+        });
+        s.settings.fps = 24.0;
+        let go = AtomicBool::new(false);
+        assert_eq!(export(&s, &png, &go, &|_, _| {}).unwrap().reused, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

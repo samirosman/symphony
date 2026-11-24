@@ -1060,10 +1060,13 @@ fn imported_video_becomes_a_frame_sequence() {
     let out = crate::import::stage_images_into(&[red], &cache);
     src.import_images(out.groups);
     let movie = dir.join("clip.mp4");
+    let key = symphony_render::checkpoint::fingerprint(&src.doc, 320, 180);
+    let ck = symphony_render::checkpoint::Checkpoint::folder(&movie, &key, 320, 180).unwrap();
     symphony_render::movie::export_mp4(
         &src.doc,
         &codec,
         &movie,
+        &ck,
         1,
         30,
         320,
@@ -1073,6 +1076,7 @@ fn imported_video_becomes_a_frame_sequence() {
         &|_, _| {},
     )
     .unwrap();
+    ck.finish();
 
     let got = crate::video::import_into(&movie, &codec, 24.0, [1920, 1080], &cache);
     assert!(got.problems.is_empty(), "{:?}", got.problems);
@@ -1563,8 +1567,56 @@ fn real_scene_export_cost() {
         times.push(start.elapsed());
     }
     let _ = std::fs::remove_dir_all(&dir);
+    let start = std::time::Instant::now();
+    let key = symphony_render::checkpoint::fingerprint(&scene, w, h);
+    let hashing = start.elapsed();
     println!(
-        "{last} frames at {w}x{h}: rendering one at a time {one:?}; PNG export {:?}, GIF export {:?}",
-        times[0], times[1]
+        "{last} frames at {w}x{h}: rendering one at a time {one:?}; PNG export {:?}, GIF export {:?}; \
+         scene fingerprint {hashing:?} ({} chars)",
+        times[0],
+        times[1],
+        key.len()
     );
+}
+
+/// A real crash mid-export: run this, kill it (`kill -9`) part way, and
+/// run it again; the second run reports the frames it reused.
+/// `SYMPHONY_PERF_OPEN=<project> SYMPHONY_EXPORT_TO=<dir> cargo test
+/// --release -p symphony-app export_after_a_crash -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a real project and a kill"]
+fn export_after_a_crash() {
+    let (Some(path), Some(to)) = (
+        std::env::var_os("SYMPHONY_PERF_OPEN"),
+        std::env::var_os("SYMPHONY_EXPORT_TO"),
+    ) else {
+        return;
+    };
+    let scene = symphony_io::open(std::path::Path::new(&path)).unwrap();
+    let format = match std::env::var("SYMPHONY_EXPORT_FORMAT").as_deref() {
+        Ok("gif") => symphony_render::Format::AnimatedGif,
+        _ => symphony_render::Format::PngSequence,
+    };
+    let name = if format == symphony_render::Format::AnimatedGif {
+        "shot.gif"
+    } else {
+        "shot.png"
+    };
+    let job = symphony_render::ExportJob {
+        format,
+        path: std::path::Path::new(&to).join(name),
+        first: 1,
+        last: 120,
+        scale: 1.0,
+        codec: None,
+        movie_fps: None,
+    };
+    let done = symphony_render::export(
+        &scene,
+        &job,
+        &std::sync::atomic::AtomicBool::new(false),
+        &|d, t| eprintln!("frame {d} of {t}"),
+    )
+    .unwrap();
+    println!("export finished, {} frames reused", done.reused);
 }
