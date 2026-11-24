@@ -1744,11 +1744,20 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             }
         }
     }
-    for (id, (card, _)) in &cards {
+    // Selected nodes draw last, so their lift and shadow sit above the rest.
+    let mut order: Vec<(&NodeId, &(Rect, _))> = cards.iter().collect();
+    order.sort_by_key(|(id, _)| state.selection.contains(id));
+    for (id, (card, _)) in order {
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
         let selected = state.selection.contains(id);
+        // Selecting eases the card up a little, with a shadow under it and
+        // a thicker rim (Motion presence, so it eases out again too).
+        let lift = symphony_ui::motion::presence(ui.ctx(), resp.id.with(("lift", *id)), selected);
+        let card = &Rect::from_center_size(card.center(), card.size() * (1.0 + 0.06 * lift));
+        // The same shape at any zoom: corners scale with the card.
+        let radius = f32::from(theme::RADIUS_CONTROL) * zoom;
         let peg = peg_colour(&s.doc.graph, *id);
         let matte = s.doc.graph.is_drawing_matte(*id);
         let title = if matte {
@@ -1764,11 +1773,20 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         let face = peg.map_or(theme::BG_RAISED, |colour| {
             theme::BG_RAISED.lerp_to_gamma(colour, 0.12)
         });
+        if lift > 0.0 {
+            let shadow = egui::epaint::Shadow {
+                offset: [0, (6.0 * zoom * lift) as i8],
+                blur: (16.0 * zoom * lift).min(255.0) as u8,
+                spread: 0,
+                color: egui::Color32::from_black_alpha((110.0 * lift) as u8),
+            };
+            painter.add(shadow.as_shape(*card, radius));
+        }
         painter.rect(
             *card,
-            theme::RADIUS_CONTROL,
+            radius,
             face,
-            Stroke::new(if selected { 2.0 } else { 1.0 }, edge),
+            Stroke::new(1.0 + 1.5 * lift, edge),
             StrokeKind::Inside,
         );
         let mut font = theme::body();

@@ -835,15 +835,19 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     theme::ACCENT_TIME.gamma_multiply(0.16),
                 );
             }
-            // The playhead glides to a clicked frame (Select motion); while
-            // playing it stays exactly on the frame.
+            // A click jumps straight to the frame (only that frame is ever
+            // shown or rendered); just the line glides there (Select
+            // motion). Dragging and playing keep it exactly on the frame:
+            // scrubbing must feel snappy, not trail the mouse.
             let target = s.frame.min(len) as f32;
-            let shown = if s.playing {
+            let playhead = egui::Id::unique("timeline-playhead");
+            let shown = if s.playing || resp.dragged() || resp.drag_stopped() {
+                symphony_ui::motion::start(ui.ctx(), playhead, target);
                 target
             } else {
                 symphony_ui::motion::value(
                     ui.ctx(),
-                    egui::Id::unique("timeline-playhead"),
+                    playhead,
                     target,
                     symphony_ui::motion::Motion::Select,
                 )
