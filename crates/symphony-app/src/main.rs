@@ -11,6 +11,7 @@ mod codec;
 mod crash;
 mod import;
 mod keymap;
+mod perf;
 mod presets;
 mod save_dialog;
 mod search;
@@ -247,6 +248,10 @@ type SaveResult = (u64, PathBuf, Result<(), String>);
 type RecoveredScene = (String, Option<PathBuf>, Scene);
 
 struct SymphonyApp {
+    /// SYMPHONY_PERF_SECONDS: a timed performance run.
+    perf_run: Option<perf::Run>,
+    /// SYMPHONY_PERF_OPEN: a project to open on the first frame.
+    perf_open: Option<PathBuf>,
     tool_dock: ToolDock,
     tool_options_open: bool,
     save_dialog: Option<(save_dialog::SaveDialog, Option<Pending>)>,
@@ -671,11 +676,17 @@ impl SymphonyApp {
         let crash_offer = shot.is_none().then(crash::pending).flatten();
         let shot_recover = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_RECOVER").is_some();
         let demo = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_EMPTY").is_none();
-        let mut s = if demo || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
+        let perf_scene = std::env::var_os("SYMPHONY_PERF_SCENE").is_some();
+        let mut s = if perf_scene {
+            perf::heavy_scene()
+        } else if demo || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
             Session::demo()
         } else {
             Session::new_scene()
         };
+        if std::env::var_os("SYMPHONY_PERF_PLAY").is_some() {
+            s.playing = true;
+        }
         if let Some(g) = gamma {
             s.pressure_gamma = g;
         }
@@ -687,6 +698,16 @@ impl SymphonyApp {
         }
         if let Some(c) = colours {
             s.colours = c;
+        }
+        // SYMPHONY_PERF_VIEW: bring a view to the front for measuring it.
+        if let Ok(name) = std::env::var("SYMPHONY_PERF_VIEW") {
+            if let Some(view) = View::ALL.into_iter().find(|view| view.title() == name) {
+                for (_, dock) in layouts.iter_mut() {
+                    if let Some(found) = dock.find_tab(&view) {
+                        let _ = dock.set_active_tab(found);
+                    }
+                }
+            }
         }
         // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
@@ -760,6 +781,8 @@ impl SymphonyApp {
         let (save_tx, save_rx) = channel();
         let version = s.doc.version;
         SymphonyApp {
+            perf_run: perf::Run::from_env(),
+            perf_open: std::env::var_os("SYMPHONY_PERF_OPEN").map(PathBuf::from),
             tool_dock,
             tool_options_open: false,
             save_dialog: std::env::var_os("SYMPHONY_SHOT_SAVE").map(|_| {
@@ -3544,6 +3567,32 @@ fn playback_stays_in_its_range() {
     assert_eq!(next_play_frame(48, Some((40, 90)), 48, true), Some(40));
 }
 
+/// SYMPHONY_PERF=1: time between painting a frame and starting the next.
+fn perf_gap(gap: std::time::Duration) {
+    use std::sync::Mutex;
+    /// Since, frames, total ms, worst ms, frames over 10 ms.
+    type Gaps = (std::time::Instant, u32, f32, f32, u32);
+    static ACC: Mutex<Option<Gaps>> = Mutex::new(None);
+    let mut g = ACC.lock().unwrap();
+    let a = g.get_or_insert((std::time::Instant::now(), 0, 0.0, 0.0, 0));
+    let ms = gap.as_secs_f32() * 1000.0;
+    a.1 += 1;
+    a.2 += ms;
+    a.3 = a.3.max(ms);
+    if ms > 10.0 {
+        a.4 += 1;
+    }
+    if a.0.elapsed().as_secs_f32() >= 1.0 {
+        eprintln!(
+            "after paint, before next frame: avg {:.2} ms, worst {:.2} ms, {} over 10 ms",
+            a.2 / a.1.max(1) as f32,
+            a.3,
+            a.4
+        );
+        *g = None;
+    }
+}
+
 /// SYMPHONY_PERF=1: add time spent in a named part of the frame.
 fn perf_span(name: &'static str, start: std::time::Instant) {
     if std::env::var_os("SYMPHONY_PERF").is_none() {
@@ -3602,9 +3651,18 @@ fn perf_log(spent: std::time::Duration) {
 
 impl eframe::App for SymphonyApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if std::env::var_os("SYMPHONY_PERF").is_some() {
+            if let Some(gap) = eframe::egui_wgpu::perf_since_paint_end() {
+                perf_gap(gap);
+            }
+        }
         let start = std::time::Instant::now();
         self.frame_ui(ui, frame);
         perf_log(start.elapsed());
+        eframe::egui_wgpu::perf_ui_end();
+        if let Some(run) = self.perf_run.as_mut() {
+            run.frame(start.elapsed());
+        }
         // SYMPHONY_PERF_SPIN: repaint every frame, for profiling.
         if std::env::var_os("SYMPHONY_PERF_SPIN").is_some() {
             ui.ctx().request_repaint();
@@ -3654,6 +3712,15 @@ impl eframe::App for SymphonyApp {
 
 impl SymphonyApp {
     fn frame_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Performance runs: open a project, and keep navigating.
+        if let Some(path) = self.perf_open.take() {
+            let ctx = ui.ctx().clone();
+            self.open_path(path, false, &ctx);
+        }
+        if let Ok(how) = std::env::var("SYMPHONY_PERF_NAV") {
+            let t = ui.input(|i| i.time) as f32;
+            self.camera.perf_navigate(t, &how);
+        }
         let ctx = ui.ctx().clone();
         if let Some(s) = self.shot.as_mut() {
             s.tick(&ctx);

@@ -1436,3 +1436,66 @@ fn vector_brushes_draw_solid_shapes_and_erase_cleanly() {
         "each piece is its outline"
     );
 }
+
+/// Real-project stamping cost: `SYMPHONY_PERF_OPEN=<project> cargo test
+/// --release -p symphony-app real_scene_stamp_cost -- --ignored --nocapture`.
+/// Times stamping every textured stroke at a typical screen scale, one
+/// stroke at a time on one thread (the old way) vs in parallel bands.
+#[test]
+#[ignore = "needs a real project"]
+fn real_scene_stamp_cost() {
+    let Some(path) = std::env::var_os("SYMPHONY_PERF_OPEN") else {
+        return;
+    };
+    let scene = symphony_io::open(std::path::Path::new(&path)).unwrap();
+    let m = symphony_core::math::Affine::translate(1200.0, 700.0)
+        .compose(symphony_core::math::Affine::scale(0.9, 0.9));
+    let clip = [0, 0, 2600, 1500];
+    let strokes: Vec<_> = scene
+        .drawings
+        .values()
+        .flat_map(|d| d.strokes.iter())
+        .filter(|s| s.texture.is_some_and(|t| !t.vector))
+        .collect();
+    let tex = |k: Option<u64>| k.and_then(|k| scene.textures.get(&k));
+    let start = std::time::Instant::now();
+    for st in &strokes {
+        let t = st.texture.unwrap();
+        let mut s = symphony_vector::stamp::Stamper::new(t, m, clip);
+        let curved = symphony_core::stroke::Stroke {
+            points: symphony_vector::curve::spline(&st.points, 0.75 / 0.9),
+            ..(*st).clone()
+        };
+        s.extend(&curved, tex(t.tip), tex(t.grain));
+        std::hint::black_box(s.coverage());
+    }
+    let one = start.elapsed();
+    let start = std::time::Instant::now();
+    for st in &strokes {
+        let t = st.texture.unwrap();
+        std::hint::black_box(symphony_vector::stamp::rasterize(
+            st,
+            &t,
+            tex(t.tip),
+            tex(t.grain),
+            m,
+            clip,
+        ));
+    }
+    let bands = start.elapsed();
+    let start = std::time::Instant::now();
+    let reps: u32 = std::env::var("SYMPHONY_PERF_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    for _ in 0..reps {
+        std::hint::black_box(symphony_render::render_camera(&scene, 1, 1920, 1080, None));
+    }
+    println!(
+        "{} textured strokes: one thread {:?}, parallel bands {:?}; full camera render 1080p {:?}",
+        strokes.len(),
+        one,
+        bands,
+        start.elapsed() / reps
+    );
+}

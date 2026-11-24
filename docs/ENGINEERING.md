@@ -155,6 +155,59 @@ Measured on a mid-range laptop at 60 Hz. Breaking a budget is a bug.
 
 A CI benchmark tracks these once the renderer exists.
 
+### E6.1 Rules that keep it smooth
+
+Every feature follows these. A change that breaks one needs a written
+reason in its commit.
+
+- **The UI thread only paints.** Anything that can take over about 2 ms
+  (stamping, tracing, decoding, rendering, file work) runs on a worker
+  thread. The canvas shows a cheap stand-in until the result arrives:
+  the last image, a low-resolution preview, or a faint plain line.
+  Nothing waits on a result inside a frame.
+- **Small synchronous budget.** A frame may do at most a few
+  milliseconds of heavy work itself (`SYNC_BUDGET` in textured.rs), so
+  small strokes appear at once. Everything past the budget queues.
+- **Use every core for big jobs.** Heavy pixel work splits across cores
+  with rayon:
+  - one big stroke stamps in parallel horizontal bands;
+  - a drawing's textured strokes stamp together;
+  - the result must be byte-for-byte what one thread would make. A test
+    checks it (`parallel_bands_match_one_pass_exactly`).
+- **Never rebuild geometry each frame.** Tessellated meshes, stamped
+  images and traced outlines are cached by content key. A frame that
+  re-tessellates a stroke it drew last frame is a bug. Stand-ins are
+  cached too.
+- **Cancel stale work.** A job whose stroke changed since it was queued
+  is dropped, not finished.
+- **Measure on real projects.** Synthetic scenes miss real problems. The
+  first real scene showed one frame in three janking, while the
+  generated heavy scene was smooth.
+
+### E6.2 Measuring
+
+Set these environment variables on a release build:
+
+| Variable | Effect |
+|---|---|
+| `SYMPHONY_PERF=1` | Per-second timing of frame parts, GPU paint stages, and slow paints with their biggest mesh |
+| `SYMPHONY_PERF_SECONDS=n` | Quit after n seconds and print CPU and between-frame percentiles and the jank count |
+| `SYMPHONY_PERF_SPIN=1` | Redraw every frame |
+| `SYMPHONY_PERF_OPEN=<project>` | Open a project on start |
+| `SYMPHONY_PERF_SCENE=heavy` or `effects` | Start on a generated heavy scene |
+| `SYMPHONY_PERF_VIEW=<tab>` | Bring a view to the front |
+| `SYMPHONY_PERF_PLAY=1` | Start playing |
+| `SYMPHONY_PERF_NAV=zoom` or `pan` | Keep navigating |
+
+Example:
+
+```
+SYMPHONY_PERF_SECONDS=5 SYMPHONY_PERF_SPIN=1 SYMPHONY_PERF_OPEN=My.symphony ./target/release/symphony
+```
+
+"Between frames" is what smoothness feels like. Any frame over 16.7 ms
+counts as a jank.
+
 ---
 
 ## E7. Files
