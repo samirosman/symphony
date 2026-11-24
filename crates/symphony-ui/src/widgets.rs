@@ -256,6 +256,9 @@ pub fn segmented<T: PartialEq + Copy>(
         if !vertical {
             ui.spacing_mut().item_spacing.x = 2.0;
         }
+        // Track the highlight in the control's space so parent scrolling
+        // moves the entire control and any in-flight transition together.
+        let origin = ui.next_widget_position().to_vec2();
         let highlight = ui.painter().add(egui::Shape::Noop);
         let mut chosen = None;
         for &(value, label) in options {
@@ -308,7 +311,7 @@ pub fn segmented<T: PartialEq + Copy>(
             }
         }
         if let Some(rect) = chosen {
-            let r = crate::motion::slide(ui.ctx(), id, rect);
+            let r = crate::motion::slide(ui.ctx(), id, rect.translate(-origin)).translate(origin);
             let fill = if ui.is_enabled() {
                 theme::ACCENT_SELECT_FILL
             } else {
