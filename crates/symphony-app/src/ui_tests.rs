@@ -1814,3 +1814,89 @@ fn trace_a_picture() {
     img.save(out).unwrap();
     println!("traced in {traced:?}: {pieces} pieces");
 }
+
+/// The Select tool works on colour zones too (imported or painted):
+/// clicking one selects it, dragging moves it, Delete removes it, and
+/// select all includes zones on the current art layer.
+#[test]
+fn colour_zones_can_be_selected_moved_and_deleted() {
+    use symphony_core::stroke::{ArtLayer, Fill};
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    // A square zone on Colour Art, through the importer's path.
+    {
+        let s = &mut h.state_mut().s;
+        let col = s.doc.layers[layer].column;
+        let d = s.doc.make_drawing(col);
+        let did = d.id;
+        s.doc.drawings.insert(did, d);
+        s.doc.xsheet.column_mut(col).unwrap().set(1, Some(did));
+        let swatch = s.doc.palette.swatches[1].id;
+        let fill = Fill {
+            id: s.doc.ids.fresh(),
+            swatch,
+            art: ArtLayer::ColourArt,
+            contours: vec![vec![
+                [-40.0, -40.0],
+                [40.0, -40.0],
+                [40.0, 40.0],
+                [-40.0, 40.0],
+            ]],
+        };
+        s.doc.drawings.get_mut(&did).unwrap().fills.push(fill);
+        s.art = ArtLayer::ColourArt;
+        s.tool = Tool::Select;
+        s.frame = 1;
+    }
+    h.run_steps(2);
+    let centre = |h: &Harness<'static, Rig>| {
+        let f = &fills(h, layer)[0];
+        let c = &f.contours[0];
+        (
+            c.iter().map(|p| p[0]).sum::<f32>() / c.len() as f32,
+            c.iter().map(|p| p[1]).sum::<f32>() / c.len() as f32,
+        )
+    };
+    let start = centre(&h);
+    // Press inside the zone and drag it 60 units right (the Select tool
+    // follows the pointer's button).
+    let path = line((0.0, 0.0), (60.0, 0.0), 8);
+    for (i, &(x, y)) in path.iter().enumerate() {
+        let pos = h.state().canvas.to_screen(x, y);
+        h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        let press = match i {
+            0 => Some(true),
+            _ if i + 1 == path.len() => Some(false),
+            _ => None,
+        };
+        if let Some(pressed) = press {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(
+        h.state().s.selection.strokes.len(),
+        1,
+        "the zone is selected"
+    );
+    let moved = centre(&h);
+    assert!(
+        (moved.0 - start.0 - 60.0).abs() < 3.0 && (moved.1 - start.1).abs() < 3.0,
+        "{start:?} -> {moved:?}"
+    );
+    // Select all picks it again; Delete removes it.
+    h.state_mut().s.deselect();
+    h.state_mut().s.select_all();
+    assert_eq!(h.state().s.selection.strokes.len(), 1);
+    h.state_mut().s.delete_selection();
+    assert!(fills(&h, layer).is_empty());
+    h.state_mut().s.undo();
+    assert_eq!(fills(&h, layer).len(), 1, "undo brings it back");
+}

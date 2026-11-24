@@ -941,10 +941,20 @@ pub fn ui(
                     continue;
                 }
                 for f in dr.fills.iter().filter(|f| f.art == art) {
+                    // Selected zones follow the Select tool's live preview.
+                    let transform = match preview {
+                        Some(l)
+                            if s.selection.drawing == Some(*d)
+                                && s.selection.strokes.contains(&f.id) =>
+                        {
+                            world.compose(l)
+                        }
+                        _ => world,
+                    };
                     state
                         .strokes
                         .vectors
-                        .paint_fill(&painter, f, colour(s, f.swatch), world);
+                        .paint_fill(&painter, f, colour(s, f.swatch), transform);
                 }
                 for st in dr
                     .strokes

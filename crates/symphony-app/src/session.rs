@@ -419,6 +419,8 @@ pub struct Session {
     pub easy_drag: bool,
     /// Copied strokes (Cut/Copy/Paste).
     pub clipboard: Vec<Stroke>,
+    /// Colour zones copied with the strokes.
+    pub clipboard_fills: Vec<symphony_core::stroke::Fill>,
     /// Last action, for the status bar ("Undo Brush stroke").
     pub notice: Option<String>,
 }
@@ -515,6 +517,7 @@ impl Session {
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),
+            clipboard_fills: Vec::new(),
             animate: true,
             notice: None,
         }
@@ -1242,9 +1245,52 @@ impl Session {
             return;
         }
         if let Some(d) = current.and_then(|d| self.doc.drawings.get(&d)) {
-            self.selection
-                .strokes
-                .retain(|id| d.strokes.iter().any(|st| st.id == *id));
+            // The selection holds strokes and colour zones (ids are unique
+            // across both).
+            self.selection.strokes.retain(|id| {
+                d.strokes.iter().any(|st| st.id == *id) || d.fills.iter().any(|f| f.id == *id)
+            });
+        }
+    }
+
+    /// Selected colour zones (the Select tool picks zones as well as
+    /// strokes, as in Harmony).
+    pub fn selected_fills(&self) -> Vec<&symphony_core::stroke::Fill> {
+        let Some(d) = self
+            .selection
+            .drawing
+            .and_then(|d| self.doc.drawings.get(&d))
+        else {
+            return Vec::new();
+        };
+        d.fills
+            .iter()
+            .filter(|f| self.selection.strokes.contains(&f.id))
+            .collect()
+    }
+
+    /// The box around everything selected, in drawing space.
+    pub fn selection_bounds(&self) -> Option<([f32; 2], [f32; 2])> {
+        let strokes = symphony_vector::bounds_of(self.selected_strokes());
+        let fills = self
+            .selected_fills()
+            .into_iter()
+            .flat_map(|f| f.contours.iter().flatten())
+            .fold(None, |acc: Option<([f32; 2], [f32; 2])>, p| {
+                Some(match acc {
+                    None => (*p, *p),
+                    Some((lo, hi)) => (
+                        [lo[0].min(p[0]), lo[1].min(p[1])],
+                        [hi[0].max(p[0]), hi[1].max(p[1])],
+                    ),
+                })
+            });
+        match (strokes, fills) {
+            (Some((a0, a1)), Some((b0, b1))) => Some((
+                [a0[0].min(b0[0]), a0[1].min(b0[1])],
+                [a1[0].max(b1[0]), a1[1].max(b1[1])],
+            )),
+            (a, b) => a.or(b),
         }
     }
 
@@ -1275,6 +1321,7 @@ impl Session {
                 .iter()
                 .filter(|st| st.art == art)
                 .map(|st| st.id)
+                .chain(d.fills.iter().filter(|f| f.art == art).map(|f| f.id))
                 .collect();
         }
     }
@@ -1289,27 +1336,51 @@ impl Session {
             return;
         };
         let before: Vec<Stroke> = self.selected_strokes().into_iter().cloned().collect();
-        if before.is_empty() {
+        let fills: Vec<(usize, symphony_core::stroke::Fill)> = self
+            .doc
+            .drawings
+            .get(&drawing)
+            .map(|d| {
+                d.fills
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| self.selection.strokes.contains(&f.id))
+                    .map(|(i, f)| (i, f.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if before.is_empty() && fills.is_empty() {
             return;
         }
         let after = before
             .iter()
             .map(|st| symphony_vector::transformed(st, m))
             .collect();
-        self.history.apply(
-            &mut self.doc,
-            name,
-            vec![Edit::SetStrokes {
+        let mut edits = vec![Edit::SetStrokes {
+            drawing,
+            before,
+            after,
+        }];
+        // Zones move with the lines (same id, same depth).
+        for (index, f) in fills {
+            let mut moved = f.clone();
+            for p in moved.contours.iter_mut().flatten() {
+                let (x, y) = m.apply(p[0], p[1]);
+                *p = [x, y];
+            }
+            edits.push(Edit::ReplaceFill {
                 drawing,
-                before,
-                after,
-            }],
-        );
+                index,
+                before: f,
+                after: vec![moved],
+            });
+        }
+        self.history.apply(&mut self.doc, name, edits);
     }
 
     /// Flip the selection around its centre.
     pub fn flip_selection(&mut self, horizontal: bool) {
-        let Some((lo, hi)) = symphony_vector::bounds_of(self.selected_strokes()) else {
+        let Some((lo, hi)) = self.selection_bounds() else {
             return;
         };
         let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
@@ -1337,6 +1408,17 @@ impl Session {
         };
         let selected = self.selected_strokes();
         let mut edits = Vec::new();
+        // Selected zones take the colour directly.
+        for f in self.selected_fills() {
+            if f.swatch != self.swatch && !self.is_locked(f.swatch) {
+                edits.push(Edit::SetFillSwatch {
+                    drawing,
+                    fill: f.id,
+                    before: f.swatch,
+                    after: self.swatch,
+                });
+            }
+        }
         for stroke in &selected {
             if stroke.kind != StrokeKind::Invisible
                 && stroke.swatch != self.swatch
@@ -1409,17 +1491,36 @@ impl Session {
             })
             .collect();
         edits.reverse();
+        let mut zones: Vec<Edit> = d
+            .fills
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| ids.contains(&f.id))
+            .map(|(index, f)| Edit::RemoveFill {
+                drawing,
+                index,
+                fill: f.clone(),
+            })
+            .collect();
+        zones.reverse();
+        edits.extend(zones);
         self.history.apply(&mut self.doc, "Delete", edits);
     }
 
     pub fn copy_selection(&mut self) {
         self.clipboard = self.selected_strokes().into_iter().cloned().collect();
-        let n = self.clipboard.len();
-        if n > 0 {
-            self.note(format!(
-                "Copied {n} stroke{}",
-                if n == 1 { "" } else { "s" }
-            ));
+        self.clipboard_fills = self.selected_fills().into_iter().cloned().collect();
+        let (n, z) = (self.clipboard.len(), self.clipboard_fills.len());
+        let plural = |k: usize| if k == 1 { "" } else { "s" };
+        match (n, z) {
+            (0, 0) => {}
+            (n, 0) => self.note(format!("Copied {n} stroke{}", plural(n))),
+            (0, z) => self.note(format!("Copied {z} colour zone{}", plural(z))),
+            (n, z) => self.note(format!(
+                "Copied {n} stroke{} and {z} colour zone{}",
+                plural(n),
+                plural(z)
+            )),
         }
     }
 
@@ -1431,7 +1532,7 @@ impl Session {
     /// Paste into the current cell (creating a drawing there if it's empty),
     /// with fresh IDs, and select what was pasted.
     pub fn paste(&mut self) {
-        if self.clipboard.is_empty() {
+        if self.clipboard.is_empty() && self.clipboard_fills.is_empty() {
             return;
         }
         let Some(col) = self.doc.layers.get(self.selected).map(|l| l.column) else {
@@ -1465,6 +1566,15 @@ impl Session {
                 drawing,
                 stroke: st,
             });
+        }
+        for f in self.clipboard_fills.clone() {
+            let mut f = f;
+            if self.doc.palette.get(f.swatch).is_none() {
+                f.swatch = self.swatch;
+            }
+            f.id = self.doc.ids.fresh();
+            ids.push(f.id);
+            edits.push(Edit::AddFill { drawing, fill: f });
         }
         self.history.apply(&mut self.doc, "Paste", edits);
         self.selection = Selection {
@@ -3313,9 +3423,10 @@ mod tests {
         assert_eq!(fills(&s).len(), 1);
         assert_eq!(fills(&s)[0].art, ArtLayer::ColourArt);
 
-        // Tools only see the current art layer.
+        // Tools only see the current art layer: select all takes its
+        // line and its zone.
         s.select_all();
-        assert_eq!(s.selection.strokes.len(), 1);
+        assert_eq!(s.selection.strokes.len(), 2);
         s.switch_line_colour_art();
         assert_eq!(s.art, ArtLayer::LineArt);
         assert!(

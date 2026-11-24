@@ -155,14 +155,25 @@ impl VectorMeshes {
         colour: Color32,
         m: Affine,
     ) {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for c in &fill.contours {
-            c.len().hash(&mut h);
-            for v in c {
-                (v[0].to_bits(), v[1].to_bits()).hash(&mut h);
+        // Zones only change when the scene does: between edits the
+        // outline isn't re-hashed (imported zones can have many points).
+        let version = self.version;
+        let unchanged = self
+            .fills
+            .get(&fill.id)
+            .is_some_and(|e| e.checked == version && version != 0 && e.seen != u64::MAX);
+        let fp = if unchanged {
+            self.fills[&fill.id].fingerprint
+        } else {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for c in &fill.contours {
+                c.len().hash(&mut h);
+                for v in c {
+                    (v[0].to_bits(), v[1].to_bits()).hash(&mut h);
+                }
             }
-        }
-        let fp = h.finish();
+            h.finish()
+        };
         let frame = self.frame;
         let e = self
             .fills
@@ -195,13 +206,14 @@ impl VectorMeshes {
                 lod: 1.0,
                 vertices: mesh.vertices,
                 indices: mesh.indices,
-                checked: 0,
+                checked: version,
                 lo,
                 hi,
                 seen: frame,
             };
         }
         e.seen = frame;
+        e.checked = version;
         draw(painter, e, colour, m);
     }
 

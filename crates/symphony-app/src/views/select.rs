@@ -252,14 +252,14 @@ pub fn ui(
             .iter()
             .find(|(l, _, _)| *l == layer)
             .and_then(|(_, d, world)| {
-                let dr = s.doc.drawings.get(d)?;
-                let (lo, hi) = bounds_of(&dr.strokes)?;
+                let (lo, hi) = drawing_bounds(s.doc.drawings.get(d)?)?;
                 Some((lo, hi, view.compose(*world)))
             })
     } else {
         s.validate_selection();
         let world = world_of(s, items);
-        bounds_of(s.selected_strokes()).map(|(lo, hi)| (lo, hi, view.compose(world)))
+        s.selection_bounds()
+            .map(|(lo, hi)| (lo, hi, view.compose(world)))
     };
 
     st.hover = match (&st.drag, target, pointer) {
@@ -344,12 +344,13 @@ pub fn ui(
                         .iter()
                         .find(|(l, _, _)| *l == s.selected)
                         .and_then(|(_, d, w)| {
-                            let (lo, hi) = bounds_of(&s.doc.drawings.get(d)?.strokes)?;
+                            let (lo, hi) = drawing_bounds(s.doc.drawings.get(d)?)?;
                             Some((lo, hi, view.compose(*w)))
                         })
                 } else {
                     let world = world_of(s, items);
-                    bounds_of(s.selected_strokes()).map(|(lo, hi)| (lo, hi, view.compose(world)))
+                    s.selection_bounds()
+                        .map(|(lo, hi)| (lo, hi, view.compose(world)))
                 };
                 if let Some((lo, hi, m)) = fresh {
                     st.drag = Some(start_drag(Kind::Move, lo, hi, m, s));
@@ -627,6 +628,7 @@ fn hit_selection(s: &Session, p: Pos2, view: Affine, items: &[Item], transform_t
     let (x, y) = inv.apply(p.x, p.y);
     let r = PICK / scale_of(m).max(1e-6);
     s.selected_strokes().iter().any(|st| hits(st, x, y, r))
+        || s.selected_fills().iter().any(|f| f.contains(x, y))
 }
 
 /// The front-most layer with artwork under `p`.
@@ -667,15 +669,21 @@ fn pick(
     let inv = m.inverse()?;
     let (x, y) = inv.apply(p.x, p.y);
     let r = PICK / scale_of(m).max(1e-6);
-    let hit = s
-        .doc
-        .drawings
-        .get(&d)?
+    // A line under the pen first, else the colour zone it's in.
+    let dr = s.doc.drawings.get(&d)?;
+    let hit = dr
         .strokes
         .iter()
         .rev()
-        .find(|st| st.art == s.art && hits(st, x, y, r))?
-        .id;
+        .find(|st| st.art == s.art && hits(st, x, y, r))
+        .map(|st| st.id)
+        .or_else(|| {
+            dr.fills
+                .iter()
+                .rev()
+                .find(|f| f.art == s.art && f.contains(x, y))
+                .map(|f| f.id)
+        })?;
     if remove {
         s.selection.strokes.retain(|id| *id != hit);
     } else if add {
@@ -686,6 +694,23 @@ fn pick(
         s.selection.strokes = vec![hit];
     }
     Some(s.selected)
+}
+
+/// The box around a drawing's strokes and colour zones.
+fn drawing_bounds(d: &symphony_core::stroke::Drawing) -> Option<([f32; 2], [f32; 2])> {
+    let zones = d.fills.iter().flat_map(|f| f.contours.iter().flatten());
+    let strokes = bounds_of(&d.strokes);
+    let mut acc = strokes;
+    for p in zones {
+        acc = Some(match acc {
+            None => (*p, *p),
+            Some((lo, hi)) => (
+                [lo[0].min(p[0]), lo[1].min(p[1])],
+                [hi[0].max(p[0]), hi[1].max(p[1])],
+            ),
+        });
+    }
+    acc
 }
 
 /// Lasso or marquee: select strokes whose middle falls inside `poly` (screen).
@@ -715,6 +740,27 @@ fn select_area(
             })
         })
         .map(|st| st.id)
+        .chain(
+            // Colour zones whose middle is inside.
+            dr.fills
+                .iter()
+                .filter(|f| f.art == s.art)
+                .filter(|f| {
+                    let mut it = f.contours.iter().flatten();
+                    let Some(first) = it.next() else {
+                        return false;
+                    };
+                    let (lo, hi) = it.fold((*first, *first), |(lo, hi), p| {
+                        (
+                            [lo[0].min(p[0]), lo[1].min(p[1])],
+                            [hi[0].max(p[0]), hi[1].max(p[1])],
+                        )
+                    });
+                    let (x, y) = m.apply((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+                    inside_polygon(x, y, poly)
+                })
+                .map(|f| f.id),
+        )
         .collect();
     if remove {
         s.selection.strokes.retain(|id| !inside.contains(id));

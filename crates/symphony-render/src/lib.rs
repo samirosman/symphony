@@ -290,8 +290,14 @@ fn paint_drawing(
         paint_image(pix, scene, img, m);
     }
     // Art layers back to front; within each, paint under ink.
+    let moving = preview.filter(|p| p.drawing == item.drawing);
     for art in ArtLayer::STACK {
         for fill in d.fills.iter().filter(|f| f.art == art) {
+            // Selected zones follow the Select tool's live preview.
+            let m = match moving {
+                Some(p) if p.strokes.contains(&fill.id) => m.compose(p.transform),
+                _ => m,
+            };
             let mut pb = PathBuilder::new();
             for c in &fill.contours {
                 for (k, p) in c.iter().enumerate() {
