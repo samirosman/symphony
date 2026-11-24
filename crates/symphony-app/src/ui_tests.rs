@@ -1661,6 +1661,7 @@ fn imported_svg_and_traced_pictures_are_editable() {
     let opts = ImportOptions {
         as_vectors: true,
         vectorize: Vectorize::LineArt { threshold: 0.5 },
+        fps: 24.0,
     };
     let out = stage_into(&[svg, png], &cache, opts);
     assert!(out.problems.is_empty(), "{:?}", out.problems);
@@ -1777,6 +1778,7 @@ fn trace_a_picture() {
     let opts = crate::import::ImportOptions {
         as_vectors: true,
         vectorize: how,
+        fps: 24.0,
     };
     let dir = std::env::temp_dir().join("symphony-trace-cache");
     let mut input = std::path::PathBuf::from(input);
@@ -1899,4 +1901,102 @@ fn colour_zones_can_be_selected_moved_and_deleted() {
     assert!(fills(&h, layer).is_empty());
     h.state_mut().s.undo();
     assert_eq!(fills(&h, layer).len(), 1, "undo brings it back");
+}
+
+/// Layered files keep their stacking in the scene (the top layer is drawn
+/// over the bottom one, even when both fill the frame), and an animated
+/// GIF becomes one layer whose drawings are held as long as its frames.
+#[test]
+fn layered_files_stack_and_animations_keep_their_timing() {
+    use crate::import::{stage_into, ImportOptions};
+    let dir = std::env::temp_dir().join(format!("symphony-layered-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let psd = dir.join("rg.psd");
+    std::fs::write(
+        &psd,
+        include_bytes!("../tests/fixtures/two-layers-red-green-1x1.psd"),
+    )
+    .unwrap();
+    let gif = dir.join("blink.gif");
+    {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame};
+        let mut enc = GifEncoder::new(std::fs::File::create(&gif).unwrap());
+        for (c, ms) in [(0u8, 250u32), (255, 125)] {
+            let img = image::RgbaImage::from_pixel(16, 9, image::Rgba([c, c, c, 255]));
+            enc.encode_frame(Frame::from_parts(
+                img,
+                0,
+                0,
+                Delay::from_numer_denom_ms(ms, 1),
+            ))
+            .unwrap();
+        }
+    }
+    let mut s = crate::session::Session::new_scene();
+    for l in (0..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    let opts = ImportOptions {
+        fps: 24.0,
+        ..Default::default()
+    };
+    let out = stage_into(&[psd], &cache, opts);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    s.doc.media_dirs = vec![cache.clone()];
+    assert_eq!(s.import_images(out.groups), 2);
+    // Red is the PSD's top layer: it covers the green one.
+    let img = symphony_render::render_frame(&s.doc, 1, 64, 36).unwrap();
+    assert_eq!(img.get_pixel(32, 18).0, [255, 0, 0, 255]);
+
+    let out = stage_into(&[gif], &cache, opts);
+    assert_eq!(out.groups.len(), 1);
+    // 250 ms then 125 ms at 24 fps: 6 frames then 3.
+    assert_eq!(out.groups[0].frames.len(), 9);
+    assert_eq!(out.groups[0].frames[0].key, out.groups[0].frames[5].key);
+    assert_ne!(out.groups[0].frames[5].key, out.groups[0].frames[6].key);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Less common picture formats import too, kept as PNG in the project.
+#[test]
+fn more_picture_formats_import() {
+    let dir = std::env::temp_dir().join(format!("symphony-formats-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(12, 6, image::Rgba([40, 90, 200, 255]));
+    let mut paths = Vec::new();
+    for ext in ["qoi", "exr", "ico", "ppm", "ff", "hdr"] {
+        let p = dir.join(format!("swatch-{ext}.{ext}"));
+        let ok = match ext {
+            "ppm" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgb8()
+                .save(&p),
+            "hdr" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgb32f()
+                .save(&p),
+            "exr" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgba32f()
+                .save(&p),
+            "ff" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgba16()
+                .save(&p),
+            _ => img.save(&p),
+        };
+        ok.unwrap_or_else(|e| panic!("{ext}: {e}"));
+        paths.push(p);
+    }
+    let out = crate::import::stage_into(&paths, &cache, Default::default());
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    let frames: Vec<_> = out.groups.iter().flat_map(|g| &g.frames).collect();
+    assert_eq!(frames.len(), 6);
+    for f in frames {
+        assert!(f.file.ends_with(".png"), "{}", f.file);
+        assert_eq!(f.size, [12, 6]);
+        let px = image::open(cache.join(&f.file)).unwrap().to_rgba8();
+        let p = px.get_pixel(3, 3).0;
+        assert!(p[2] > 150 && p[0] < 80, "{}: {p:?}", f.name);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

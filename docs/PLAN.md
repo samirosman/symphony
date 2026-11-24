@@ -311,11 +311,15 @@ Every effect is a node in the graph.
 - ⬜ Game engine export (Unity / Godot)
 
 ### 4.11 Import and export
-- ⬜ Import bitmaps (as bitmaps, or vectorised)
-- ⬜ PSD import as separate layers, PSD export
-- ⬜ Import AI, PDF and SVG. Export SVG.
+- 🟡 Import bitmaps (as bitmaps, or vectorised) (picture ✅, vector
+  drawing ✅ (Line art / Colour), editable bitmap drawing ⬜). Formats: PNG,
+  JPEG, WebP, BMP, TIFF, GIF, TGA, EXR, HDR, ICO, QOI, PBM/PGM/PPM, DDS,
+  Farbfeld ✅; animated GIF/PNG/WebP as timed sequences ✅
+- 🟡 PSD import as separate layers ✅ (also OpenRaster layers, Krita
+  flattened), PSD export ⬜
+- 🟡 Import AI, PDF and SVG (SVG as an editable vector drawing ✅). Export SVG.
 - ⬜ Import sound (WAV, MP3, AIFF) and video
-- ⬜ Vectorise (pix2vec-style line extraction)
+- 🟡 Vectorise (pix2vec-style line extraction) (on import ✅)
 - ⬜ Library audio bin with detail view (27.1)
 - ⬜ Templates: save and load (`.tpl`-style folders, our own format)
 - ⬜ Harmony interop: read `.xstage` scenes from user-made files (clean-room),

@@ -88,6 +88,7 @@ pub fn import_into(
         Ok(frames) if !frames.is_empty() => {
             out.frames = Some(ImageGroup {
                 name: stem.clone(),
+                layered: false,
                 frames,
             });
         }

@@ -26,8 +26,9 @@ pub enum Kind {
     Unknown,
 }
 
-const IMAGES: [&str; 10] = [
-    "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif", "tga", "svg",
+const IMAGES: [&str; 25] = [
+    "png", "apng", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif", "tga", "svg", "exr", "hdr",
+    "ico", "qoi", "pbm", "pgm", "ppm", "pnm", "pam", "dds", "ff", "psd", "ora", "kra",
 ];
 const SOUNDS: [&str; 8] = ["wav", "mp3", "ogg", "flac", "m4a", "aac", "aif", "aiff"];
 const VIDEOS: [&str; 3] = ["mp4", "mov", "m4v"];
@@ -97,6 +98,9 @@ pub struct Staged {
 #[derive(Clone, Debug)]
 pub struct ImageGroup {
     pub name: String,
+    /// One of a file's layers (PSD, ORA): stacks in file order rather
+    /// than a full-frame picture going to the bottom.
+    pub layered: bool,
     pub frames: Vec<Staged>,
 }
 
@@ -121,6 +125,9 @@ pub struct Outcome {
 pub struct ImportOptions {
     pub as_vectors: bool,
     pub vectorize: crate::vector_import::Vectorize,
+    /// The scene's frame rate, to time animated pictures (not saved).
+    #[serde(skip)]
+    pub fps: f32,
 }
 
 pub struct ImageImport {
@@ -134,7 +141,17 @@ impl ImageImport {
         let files = paths.len();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(stage_images(&paths, opts));
+            // A bug while reading must not leave the import waiting
+            // forever: it ends with a note instead (and a crash report).
+            let out =
+                std::panic::catch_unwind(|| stage_images(&paths, opts)).unwrap_or_else(|_| {
+                    Outcome {
+                        groups: Vec::new(),
+                        vectors: Vec::new(),
+                        problems: vec!["Something went wrong reading these files.".into()],
+                    }
+                });
+            let _ = tx.send(out);
             ctx.request_repaint();
         });
         ImageImport { rx, files }
@@ -185,71 +202,163 @@ pub fn stage_images_into(paths: &[PathBuf], cache: &Path) -> Outcome {
 /// picture) become vector drawings; the rest are copied into `cache` as
 /// pictures. Numbered files group into sequences either way.
 pub fn stage_into(paths: &[PathBuf], cache: &Path, opts: ImportOptions) -> Outcome {
+    use crate::vector_import::{vectorize, VectorArt};
     use rayon::prelude::*;
-    let is_svg = |p: &PathBuf| {
-        p.extension()
-            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("svg"))
-    };
-    let (vector_paths, picture_paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
-        .iter()
-        .cloned()
-        .partition(|p| is_svg(p) || opts.as_vectors);
-    // Each file traces on its own (and each trace uses the cores too).
-    let traced: Vec<(PathBuf, Result<crate::vector_import::VectorArt, String>)> = vector_paths
+    enum Read {
+        /// An ordinary picture, copied as it is (or traced).
+        Plain,
+        Vector(VectorArt),
+        /// Layers or frames.
+        Many(crate::layered::Many),
+        Failed(String),
+        /// An SVG made only of pictures comes in as a picture.
+        SvgPicture,
+    }
+    let _ = std::fs::create_dir_all(cache);
+    // Each file reads (and traces) on its own, across the cores.
+    let read: Vec<(PathBuf, Read)> = paths
         .par_iter()
-        .map(|p| (p.clone(), read_vectors(p, opts)))
+        .map(|path| {
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let r = (|| -> Read {
+                let bytes = match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => return Read::Failed(format!("couldn't read it ({e})")),
+                };
+                if ext == "svg" {
+                    return match crate::vector_import::from_svg(&bytes) {
+                        Ok(art) => Read::Vector(art),
+                        Err(e) if e.contains("pictures") => Read::SvgPicture,
+                        Err(e) => Read::Failed(e),
+                    };
+                }
+                match crate::layered::read(&stem, &bytes, &ext, opts.fps) {
+                    Ok(Some(many)) => return Read::Many(many),
+                    Ok(None) => {}
+                    Err(e) => return Read::Failed(e),
+                }
+                if !opts.as_vectors {
+                    return Read::Plain;
+                }
+                let Some(img) = decode(&bytes, &ext) else {
+                    return Read::Failed("not an image Symphony can read".into());
+                };
+                let art = vectorize(&img.into_rgba8(), opts.vectorize);
+                if art.pieces.is_empty() {
+                    return Read::Failed(
+                        "nothing to trace in it (try a lower threshold, or Colour)".into(),
+                    );
+                }
+                Read::Vector(art)
+            })();
+            (path.clone(), r)
+        })
         .collect();
     let mut problems = Vec::new();
-    let mut fallback = Vec::new();
+    let mut plain = Vec::new();
     let mut arts = Vec::new();
-    for (path, r) in traced {
+    let mut groups = Vec::new();
+    let mut vectors = Vec::new();
+    for (path, r) in read {
         let shown = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         match r {
-            Ok(art) => arts.push((path, art)),
-            // An SVG made only of pictures comes in as a picture.
-            Err(e) if is_svg(&path) && e.contains("pictures") => fallback.push(path),
-            Err(e) => problems.push(format!("{shown}: {e}")),
+            Read::Plain | Read::SvgPicture => plain.push(path),
+            Read::Vector(art) => arts.push((path, art)),
+            Read::Failed(e) => problems.push(format!("{shown}: {e}")),
+            Read::Many(many) => {
+                if opts.as_vectors {
+                    // Every layer or frame traced; holds repeat the drawing.
+                    for part in many.parts {
+                        let frames: Vec<VectorArt> = part
+                            .frames
+                            .par_iter()
+                            .map(|(img, _)| vectorize(img, opts.vectorize))
+                            .collect();
+                        let mut held = Vec::new();
+                        for (art, (_, hold)) in frames.into_iter().zip(&part.frames) {
+                            for _ in 0..*hold {
+                                held.push(art.clone());
+                            }
+                        }
+                        vectors.push(VectorGroup {
+                            name: part.name,
+                            frames: held,
+                        });
+                    }
+                } else {
+                    for part in many.parts {
+                        let mut frames = Vec::new();
+                        for (img, hold) in &part.frames {
+                            match stage_rgba(img, &part.name, cache) {
+                                Ok(st) => {
+                                    for _ in 0..*hold {
+                                        frames.push(st.clone());
+                                    }
+                                }
+                                Err(e) => problems.push(format!("{shown}: {e}")),
+                            }
+                        }
+                        if !frames.is_empty() {
+                            groups.push(ImageGroup {
+                                name: part.name,
+                                layered: many.layered,
+                                frames,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
-    let vectors = group_numbered(arts.into_iter().map(|(p, a)| {
-        let name = p
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        (p, name, a)
-    }))
-    .into_iter()
-    .map(|(name, frames)| VectorGroup { name, frames })
-    .collect();
-    let mut out = stage_pictures(&[picture_paths, fallback].concat(), cache);
+    vectors.extend(
+        group_numbered(arts.into_iter().map(|(p, a)| {
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (p, name, a)
+        }))
+        .into_iter()
+        .map(|(name, frames)| VectorGroup { name, frames }),
+    );
+    let mut out = stage_pictures(&plain, cache);
+    out.groups.extend(groups);
     out.vectors = vectors;
     problems.append(&mut out.problems);
     out.problems = problems;
     out
 }
 
-/// One file as a vector drawing.
-fn read_vectors(
-    path: &Path,
-    opts: ImportOptions,
-) -> Result<crate::vector_import::VectorArt, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read it ({e})"))?;
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    if ext == "svg" {
-        return crate::vector_import::from_svg(&bytes);
+/// A decoded picture (a layer or a frame) into the media cache as PNG.
+fn stage_rgba(img: &image::RgbaImage, name: &str, cache: &Path) -> Result<Staged, String> {
+    let mut bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    )
+    .map_err(|e| format!("couldn't convert it ({e})"))?;
+    let key = content_key(&bytes);
+    let file = format!("{key:016x}.png");
+    let dest = cache.join(&file);
+    if !dest.is_file() {
+        std::fs::write(&dest, &bytes).map_err(|e| format!("couldn't copy it ({e})"))?;
     }
-    let img = decode(&bytes, &ext).ok_or("not an image Symphony can read")?;
-    let art = crate::vector_import::vectorize(&img.into_rgba8(), opts.vectorize);
-    if art.pieces.is_empty() {
-        return Err("nothing to trace in it (try a lower threshold, or Colour)".into());
-    }
-    Ok(art)
+    Ok(Staged {
+        key,
+        file,
+        name: name.to_owned(),
+        size: [img.width(), img.height()],
+    })
 }
 
 /// Decode a picture, trusting its extension first (TGA has no signature).
@@ -288,6 +397,12 @@ fn stage_pictures(paths: &[PathBuf], cache: &Path) -> Outcome {
             .unwrap_or_else(|| "png".into());
         // SVG is drawn into a sharp picture here; the rest of Symphony
         // then treats it like any other image.
+        // Formats beyond the everyday ones (EXR, HDR, QOI, DDS...) are
+        // kept as PNG, so a project only ever holds pictures every part
+        // of Symphony (and any other app) reads.
+        const KEPT: [&str; 9] = [
+            "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif", "tga",
+        ];
         let bytes = if ext == "svg" {
             match rasterize_svg(&bytes) {
                 Ok(png) => {
@@ -299,6 +414,19 @@ fn stage_pictures(paths: &[PathBuf], cache: &Path) -> Outcome {
                     continue;
                 }
             }
+        } else if !KEPT.contains(&ext.as_str()) {
+            let mut png = Vec::new();
+            let converted = decode(&bytes, &ext).is_some_and(|img| {
+                img.into_rgba8()
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .is_ok()
+            });
+            if !converted {
+                problems.push(format!("{shown}: not an image Symphony can read"));
+                continue;
+            }
+            ext = "png".into();
+            png
         } else {
             bytes
         };
@@ -386,7 +514,11 @@ fn group_numbered<T>(
 fn group(staged: Vec<(PathBuf, Staged)>) -> Vec<ImageGroup> {
     group_numbered(staged.into_iter().map(|(p, s)| (p, s.name.clone(), s)))
         .into_iter()
-        .map(|(name, frames)| ImageGroup { name, frames })
+        .map(|(name, frames)| ImageGroup {
+            name,
+            layered: false,
+            frames,
+        })
         .collect()
 }
 

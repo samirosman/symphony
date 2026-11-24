@@ -11,6 +11,7 @@ mod codec;
 mod crash;
 mod import;
 mod keymap;
+mod layered;
 mod perf;
 mod presets;
 mod save_dialog;
@@ -2891,12 +2892,18 @@ impl SymphonyApp {
                     {
                         self.image_import = Some(import::ImageImport::finished(
                             paths,
-                            import::ImportOptions::default(),
+                            import::ImportOptions {
+                                fps: self.s.doc.settings.fps,
+                                ..Default::default()
+                            },
                         ));
                     } else if only_svg {
                         // Nothing to ask: SVG is always a vector drawing.
-                        self.image_import =
-                            Some(import::ImageImport::start(paths, self.import_options, ctx));
+                        let opts = import::ImportOptions {
+                            fps: self.s.doc.settings.fps,
+                            ..self.import_options
+                        };
+                        self.image_import = Some(import::ImageImport::start(paths, opts, ctx));
                     } else {
                         // SYMPHONY_SHOT_IMPORT_ASK=colour shows the question
                         // in a screenshot run, set to Vector drawing.
@@ -3051,8 +3058,11 @@ impl SymphonyApp {
             match import::options_ui(ctx, paths, &mut self.import_options) {
                 Some(true) => {
                     let paths = self.image_import_asking.take().unwrap_or_default();
-                    self.image_import =
-                        Some(import::ImageImport::start(paths, self.import_options, ctx));
+                    let opts = import::ImportOptions {
+                        fps: self.s.doc.settings.fps,
+                        ..self.import_options
+                    };
+                    self.image_import = Some(import::ImageImport::start(paths, opts, ctx));
                 }
                 Some(false) => self.image_import_asking = None,
                 None => {}

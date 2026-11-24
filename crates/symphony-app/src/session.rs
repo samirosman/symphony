@@ -2104,7 +2104,7 @@ impl Session {
             // A single picture filling most of the frame is a background:
             // it goes to the bottom. Anything else goes above the
             // selected layer.
-            let fills_frame = g.frames.len() == 1 && {
+            let fills_frame = !g.layered && g.frames.len() == 1 && {
                 let [iw, ih] = g.frames[0].size;
                 let (iw, ih) = (iw as f32, ih as f32);
                 let k = (sw / iw).min(sh / ih);
