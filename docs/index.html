@@ -111,6 +111,14 @@
     }
     dt { font-size: 1.14rem; }
     dd { margin: 4px 0 0; max-width: 38ch; }
+    .feature-demos dd { max-width: none; }
+    .feature-demos img {
+      width: 100%;
+      height: auto;
+      margin-top: 10px;
+      border-radius: 8px;
+      background: var(--panel);
+    }
     footer { border-top: 1px solid #303336; font-size: .85rem; }
     @media (max-width: 640px) {
       .wrap { width: calc(100% - 28px); }
@@ -138,13 +146,67 @@
     </figure>
     <section aria-labelledby="features">
       <h2 id="features">Features on the development branch</h2>
-      <dl>
-        <div><dt>Turn brush tips into editable vectors</dt><dd>Use imported brush presets with supported pen dynamics, or trace their tips into editable vector outlines you can reshape and recolour.</dd></div>
-        <div><dt>Resume an interrupted export</dt><dd>Restart the same export to reuse finished frames after a crash or cancellation. This works for movies, GIFs, and image sequences.</dd></div>
-        <div><dt>Untangle a node graph</dt><dd>Arrange Nodes lays out the graph by signal flow. As you drag a node, nearby cards slide out of its way.</dd></div>
-        <div><dt>Make room for in-betweens</dt><dd>Insert frames after the playhead. Current exposures hold through the gap, and later exposures and peg keys shift together.</dd></div>
-        <div><dt>Turn a drawing into an editable matte</dt><dd>Switch a drawing to a mask and back while keeping its artwork, exposures, and node connections.</dd></div>
-        <div><dt>Find actions with Tab Search</dt><dd>Type what you want to do. Results prioritize the panel you’re working in, from adding an effect to running a timing command.</dd></div>
+      <dl class="feature-demos">
+        <div>
+          <dt>Turn brush tips into editable vectors</dt>
+          <dd>
+            Use imported brush presets with supported pen dynamics, or trace their tips into editable vector outlines you can reshape and recolour.
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="presentation/editable-brush-tips.png">
+              <img src="presentation/editable-brush-tips.gif" width="720" height="400" loading="lazy" alt="The same imported chisel brush in Bitmap mode, then in Vector mode.">
+            </picture>
+          </dd>
+        </div>
+        <div>
+          <dt>Resume an interrupted export</dt>
+          <dd>
+            Restart the same export to reuse finished frames after a crash or cancellation. This works for movies, GIFs, and image sequences.
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="presentation/resumable-export.png">
+              <img src="presentation/resumable-export.gif" width="720" height="400" loading="lazy" alt="An image sequence export is restarted and reports the finished frames it reused.">
+            </picture>
+          </dd>
+        </div>
+        <div>
+          <dt>Untangle a node graph</dt>
+          <dd>
+            Arrange Nodes lays out the graph by signal flow. As you drag a node, nearby cards slide out of its way.
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="presentation/node-layout.png">
+              <img src="presentation/node-layout.gif" width="720" height="400" loading="lazy" alt="Arrange Nodes sorts a cluttered graph into rows so the connections are easier to follow.">
+            </picture>
+          </dd>
+        </div>
+        <div>
+          <dt>Make room for in-betweens</dt>
+          <dd>
+            Insert frames after the playhead. Current exposures hold through the gap, and later exposures and peg keys shift together.
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="presentation/insert-in-betweens.png">
+              <img src="presentation/insert-in-betweens.gif" width="720" height="400" loading="lazy" alt="Eight frames are inserted at the playhead and the held exposures and later keys move together.">
+            </picture>
+          </dd>
+        </div>
+        <div>
+          <dt>Turn a drawing into an editable matte</dt>
+          <dd>
+            Switch a drawing to a mask and back while keeping its artwork, exposures, and node connections.
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="presentation/reversible-matte.png">
+              <img src="presentation/reversible-matte.gif" width="720" height="400" loading="lazy" alt="A Drawing node switches to Matte while its graph connections stay in place.">
+            </picture>
+          </dd>
+        </div>
+        <div>
+          <dt>Find actions with Tab Search</dt>
+          <dd>
+            Type what you want to do. Results prioritize the panel you’re working in, from adding an effect to running a timing command.
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="presentation/tab-search.png">
+              <img src="presentation/tab-search.gif" width="720" height="400" loading="lazy" alt="Tab Search narrows suggested commands to Add Blur as the query is typed.">
+            </picture>
+          </dd>
+        </div>
       </dl>
     </section>
   </main>
