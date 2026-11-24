@@ -786,17 +786,48 @@ impl SymphonyApp {
                 if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
                     let (w, h) = (s.doc.settings.width, s.doc.settings.height);
                     views::node::insert_near(&mut s, node, views::node::mesh_warp(w, h));
+                    let points = std::env::var("SYMPHONY_SHOT_WARP").is_ok_and(|v| v == "points");
+                    // The artwork's box, for placing points on it.
+                    let bounds = s
+                        .doc
+                        .exposed(s.selected, s.frame)
+                        .and_then(|d| s.doc.drawings.get(&d))
+                        .and_then(|d| symphony_vector::bounds_of(&d.strokes));
                     if let Some(id) = s.doc.graph.input(node, 0) {
                         if let Some(n) = s.doc.graph.node_mut(id) {
                             if let symphony_core::graph::NodeKind::MeshWarp(m) = &mut n.kind {
-                                m.points[12] = [
-                                    symphony_core::anim::Value::Constant(90.0),
-                                    symphony_core::anim::Value::Constant(-120.0),
-                                ];
+                                if let (true, Some((lo, hi))) = (points, bounds) {
+                                    let cx = (lo[0] + hi[0]) / 2.0;
+                                    m.kind = symphony_core::warp::WarpKind::Points;
+                                    m.lines = symphony_core::warp::WarpLines::Shape;
+                                    m.pins = vec![[cx, hi[1] - 4.0], [cx, lo[1] + 4.0]];
+                                    m.pin_moves = vec![
+                                        [
+                                            symphony_core::anim::Value::Constant(0.0),
+                                            symphony_core::anim::Value::Constant(0.0),
+                                        ];
+                                        2
+                                    ];
+                                } else {
+                                    m.points[12] = [
+                                        symphony_core::anim::Value::Constant(90.0),
+                                        symphony_core::anim::Value::Constant(-120.0),
+                                    ];
+                                }
                             }
                         }
                         s.select_graph_node(id, false);
                         s.fit_tool_to_context();
+                        if points && views::warp_edit::build_mesh(&mut s, id).is_ok() {
+                            if let Some(n) = s.doc.graph.node_mut(id) {
+                                if let symphony_core::graph::NodeKind::MeshWarp(m) = &mut n.kind {
+                                    m.pin_moves[1] = [
+                                        symphony_core::anim::Value::Constant(140.0),
+                                        symphony_core::anim::Value::Constant(30.0),
+                                    ];
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -1,12 +1,16 @@
 //! Artwork bent by Mesh Warps ([`symphony_core::warp`]): a copy of a
 //! drawing with every line and zone passed through the warp, ready to draw
 //! with the warp's outer transform. Lines are first smoothed into their
-//! curve and long edges split, so they bend smoothly; widths follow the
-//! plain transforms on the way. An imported picture isn't bent (it's
-//! left out; draw it with the plain transform).
+//! curve and long edges split, so they bend smoothly. With the warp's
+//! Lines set to Paths, lines keep their thickness (scaled only by the
+//! plain transforms on the way); with Shape, a plain line is bent as its
+//! outline, so it thickens where the warp stretches and thins where it
+//! squeezes, like a picture seen in perspective. (Textured lines stamp
+//! along their path, so they always bend as paths.) An imported picture
+//! isn't bent (it's left out; draw it with the plain transform).
 
 use symphony_core::stroke::{Drawing, Point, Stroke};
-use symphony_core::warp::{densify, Warp};
+use symphony_core::warp::{densify, Warp, WarpLines};
 
 /// `d` bent by `warp`, in the space `warp.outer()` draws from.
 pub fn drawing(d: &Drawing, warp: &Warp) -> Drawing {
@@ -41,7 +45,18 @@ fn width_scale(warp: &Warp) -> f32 {
 
 fn stroke(st: &Stroke, warp: &Warp, piece: f32, k: f32) -> Stroke {
     let mut out = st.clone();
-    if !st.shape.is_empty() {
+    // The whole shape warps: a plain line as its outline.
+    if warp.lines == WarpLines::Shape
+        && st.shape.is_empty()
+        && st.texture.is_none()
+        && st.kind != symphony_core::stroke::StrokeKind::Invisible
+    {
+        let outline: Vec<Vec<[f32; 2]>> = crate::shape::outline(st).into_iter().flatten().collect();
+        if !outline.is_empty() {
+            out.shape = outline;
+        }
+    }
+    if !out.shape.is_empty() {
         for ring in &mut out.shape {
             *ring = densify(ring, piece, true)
                 .into_iter()
@@ -91,7 +106,7 @@ mod tests {
     use symphony_core::id::Id;
     use symphony_core::math::Affine;
     use symphony_core::stroke::{Fill, StrokeKind};
-    use symphony_core::warp::{MeshWarp, WarpStep};
+    use symphony_core::warp::{MeshWarp, WarpField, WarpStep};
 
     /// A straight line across a grid whose middle is pulled down comes out
     /// curved: its middle follows the point, its ends stay put.
@@ -102,9 +117,10 @@ mod tests {
         let warp = Warp {
             steps: vec![WarpStep {
                 outer: Affine::translate(500.0, 0.0),
-                grid: w.grid_at(1),
+                field: WarpField::Grid(w.grid_at(1)),
             }],
             inner: Affine::IDENTITY,
+            lines: WarpLines::Paths,
         };
         let p = |x: f32| Point {
             x,
@@ -156,5 +172,41 @@ mod tests {
         let ring = &bent.fills[0].contours[0];
         assert!(ring.len() > 4);
         assert!(ring.iter().any(|p| p[1] > 60.0), "the zone bends");
+
+        // Shape: the line becomes its outline, thicker where the grid
+        // stretches it (pull the middle column apart vertically).
+        let mut stretch = MeshWarp::new(2, 2, 0.0, 0.0, 200.0, 200.0);
+        stretch.points[1] = [Value::Constant(0.0), Value::Constant(-60.0)];
+        stretch.points[7] = [Value::Constant(0.0), Value::Constant(60.0)];
+        let thick = Warp {
+            steps: vec![WarpStep {
+                outer: Affine::IDENTITY,
+                field: WarpField::Grid(stretch.grid_at(1)),
+            }],
+            inner: Affine::IDENTITY,
+            lines: WarpLines::Shape,
+        };
+        let shaped = drawing(&d, &thick);
+        let outline = &shaped.strokes[0].shape;
+        assert!(!outline.is_empty(), "the line warps as a shape");
+        // Its thickness at the middle: was 4, now stretched.
+        let span: Vec<f32> = outline
+            .iter()
+            .flatten()
+            .filter(|p| p[0].abs() < 3.0)
+            .map(|p| p[1])
+            .collect();
+        let thickness = span.iter().fold(f32::MIN, |a, &b| a.max(b))
+            - span.iter().fold(f32::MAX, |a, &b| a.min(b));
+        assert!(thickness > 6.0, "thicker where stretched: {thickness}");
+        let paths = drawing(
+            &d,
+            &Warp {
+                lines: WarpLines::Paths,
+                ..thick.clone()
+            },
+        );
+        assert!(paths.strokes[0].shape.is_empty(), "Paths keeps it a line");
+        assert_eq!(paths.strokes[0].max_width, 4.0);
     }
 }

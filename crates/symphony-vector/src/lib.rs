@@ -11,6 +11,7 @@ pub mod bend;
 pub mod curve;
 pub mod cut;
 pub mod fill;
+pub mod puppet_mesh;
 mod recent;
 pub mod shape;
 pub mod stamp;

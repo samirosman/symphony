@@ -14,6 +14,7 @@ pub mod history;
 pub mod id;
 pub mod math;
 pub mod palette;
+pub mod puppet;
 pub mod stroke;
 pub mod warp;
 pub mod xsheet;

@@ -488,7 +488,7 @@ fn bent_drawing(
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     version.hash(&mut h);
-    format!("{warp:?}").hash(&mut h);
+    warp.key().hash(&mut h);
     let key = h.finish();
     if let Some((k, bent)) = cache.get(&d.id) {
         if *k == key {

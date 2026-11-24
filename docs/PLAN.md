@@ -257,11 +257,16 @@ continues.
 - ⬜ Backdrops in the Node view
 
 ### 4.7 Deformation
-- 🟡 **Mesh Warp**. Non-destructive grid for a drawing or group (✅ node in
-  the peg chain; Rows, Columns, (x)/(y) Axis, Width, Height, Deformation
-  Quality in Node Properties; points dragged in the Camera view with the
+- 🟡 **Mesh Warp**. Non-destructive deformation for a drawing or group (✅
+  node in the peg chain; points dragged in the Camera view with the
   Transform tool, keyed in Animate mode; bends in the canvas and renders).
-  Still to do: Bézier handles on grid points, bending imported pictures.
+  Kinds: ✅ Grid (Rows, Columns, (x)/(y) Axis, Width, Height, Deformation
+  Quality) and ✅ Points (Harmony 24 Shape-Aware style: place points on the
+  art, Build mesh over its shape, as-rigid-as-possible bending, only
+  connected art follows). Lines: ✅ Paths (keep thickness) or ✅ Whole shape
+  (thickness follows the warp). Still to do: rotating/scaling single points,
+  bones and cages, per-point Weight, rigidity maps, Bézier handles on grid
+  points, bending imported pictures.
 - ⬜ Bone deformer (bias, regions of influence, chains)
 - ⬜ Game Bone deformer (game export, no bias or regions)
 - ⬜ Curve deformer (Bézier chain)

@@ -61,6 +61,29 @@ impl WarpQuality {
     }
 }
 
+/// What bends the artwork.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WarpKind {
+    /// A grid of rows x columns over an area.
+    #[default]
+    Grid,
+    /// Points placed on the artwork, with a mesh built over its shape
+    /// (like Harmony's Shape-Aware Deformation): parts bend as rigidly
+    /// as they can, and only what's connected to a point follows it.
+    Points,
+}
+
+/// What happens to lines' thickness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WarpLines {
+    /// Lines follow the warp but keep their thickness (the paths bend).
+    #[default]
+    Paths,
+    /// The whole shape warps, as if seen in perspective: where the warp
+    /// stretches, lines get thicker; where it squeezes, thinner.
+    Shape,
+}
+
 /// A Mesh Warp node's parameters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshWarp {
@@ -76,6 +99,27 @@ pub struct MeshWarp {
     pub points: Vec<[Value; 2]>,
     #[serde(default)]
     pub quality: WarpQuality,
+    #[serde(default)]
+    pub kind: WarpKind,
+    #[serde(default)]
+    pub lines: WarpLines,
+    /// Points mode: where the points were placed (the warp's space).
+    #[serde(default)]
+    pub pins: Vec<[f32; 2]>,
+    /// Points mode: how far each point has moved (animatable).
+    #[serde(default)]
+    pub pin_moves: Vec<[Value; 2]>,
+    /// Points mode: the mesh built over the artwork once the points are
+    /// placed (None while placing them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<crate::puppet::PuppetMesh>,
+    /// Points mode: about how big the mesh's triangles are.
+    #[serde(default = "default_density")]
+    pub density: f32,
+}
+
+fn default_density() -> f32 {
+    30.0
 }
 
 /// Most rows or columns a grid can have.
@@ -94,6 +138,12 @@ impl MeshWarp {
             height: Value::Constant(height),
             points: vec![[Value::Constant(0.0), Value::Constant(0.0)]; point_count(rows, columns)],
             quality: WarpQuality::default(),
+            kind: WarpKind::Grid,
+            lines: WarpLines::Paths,
+            pins: Vec::new(),
+            pin_moves: Vec::new(),
+            mesh: None,
+            density: default_density(),
         }
     }
 
@@ -132,7 +182,36 @@ impl MeshWarp {
         [&self.x, &self.y, &self.width, &self.height]
             .into_iter()
             .chain(self.points.iter().flatten())
+            .chain(self.pin_moves.iter().flatten())
             .any(|v| v.has_key(frame))
+    }
+
+    /// Points mode: where each point is on `frame`.
+    pub fn pins_at(&self, frame: u32) -> Vec<[f32; 2]> {
+        self.pins
+            .iter()
+            .enumerate()
+            .map(|(i, p)| match self.pin_moves.get(i) {
+                Some([x, y]) => [p[0] + x.at(frame), p[1] + y.at(frame)],
+                None => *p,
+            })
+            .collect()
+    }
+
+    /// What bends the artwork on `frame` (None: nothing does yet, such
+    /// as points placed but no mesh built).
+    pub fn field_at(&self, frame: u32) -> Option<WarpField> {
+        match self.kind {
+            WarpKind::Grid => Some(WarpField::Grid(self.grid_at(frame))),
+            WarpKind::Points => {
+                let mesh = self.mesh.clone()?;
+                let targets = self.pins_at(frame);
+                let now = crate::puppet::deform(&mesh, &targets);
+                Some(WarpField::Points(std::sync::Arc::new(
+                    crate::puppet::PuppetField::new(std::sync::Arc::new(mesh), now),
+                )))
+            }
+        }
     }
 
     /// The grid as it is on `frame`.
@@ -253,12 +332,43 @@ fn catmull_weights(t: f32) -> [f32; 4] {
     ]
 }
 
-/// One Mesh Warp on the way from a drawing to the stage: the grid, and
-/// the plain transform that takes the grid's space onward.
+/// What one Mesh Warp does on one frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WarpField {
+    Grid(WarpGrid),
+    Points(std::sync::Arc<crate::puppet::PuppetField>),
+}
+
+impl WarpField {
+    pub fn apply(&self, p: [f32; 2]) -> [f32; 2] {
+        match self {
+            WarpField::Grid(g) => g.apply(p),
+            WarpField::Points(f) => f.apply(p),
+        }
+    }
+
+    pub fn is_flat(&self) -> bool {
+        match self {
+            WarpField::Grid(g) => g.is_flat(),
+            WarpField::Points(f) => f.is_flat(),
+        }
+    }
+
+    /// The longest straight piece that still bends smoothly.
+    pub fn piece(&self) -> f32 {
+        match self {
+            WarpField::Grid(g) => g.piece(),
+            WarpField::Points(f) => f.cell() / 4.0,
+        }
+    }
+}
+
+/// One Mesh Warp on the way from a drawing to the stage: what it does,
+/// and the plain transform that takes its space onward.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WarpStep {
     pub outer: Affine,
-    pub grid: WarpGrid,
+    pub field: WarpField,
 }
 
 /// How a drawing under Mesh Warps reaches the stage: a drawing point p
@@ -267,9 +377,43 @@ pub struct WarpStep {
 pub struct Warp {
     pub steps: Vec<WarpStep>,
     pub inner: Affine,
+    /// Shape when any of the warps bends lines' thickness too.
+    pub lines: WarpLines,
 }
 
 impl Warp {
+    /// A cheap fingerprint of everything that shapes the bend (to cache
+    /// bent artwork by).
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let affine = |m: Affine, h: &mut std::collections::hash_map::DefaultHasher| {
+            for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
+                v.to_bits().hash(h);
+            }
+        };
+        affine(self.inner, &mut h);
+        (self.lines as u8).hash(&mut h);
+        for s in &self.steps {
+            affine(s.outer, &mut h);
+            match &s.field {
+                WarpField::Grid(g) => {
+                    (g.rows, g.columns, g.quality as u8).hash(&mut h);
+                    for v in g
+                        .centre
+                        .iter()
+                        .chain(&g.size)
+                        .chain(g.offsets.iter().flatten())
+                    {
+                        v.to_bits().hash(&mut h);
+                    }
+                }
+                WarpField::Points(f) => f.key().hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+
     /// A drawing point into the space of the outermost grid's parent
     /// (everything but `steps[0].outer`): the shape the drawing takes, to
     /// draw with `steps[0].outer` as its transform.
@@ -277,7 +421,7 @@ impl Warp {
         let (x, y) = self.inner.apply(p[0], p[1]);
         let mut q = [x, y];
         for (i, step) in self.steps.iter().enumerate().rev() {
-            q = step.grid.apply(q);
+            q = step.field.apply(q);
             if i > 0 {
                 let (x, y) = step.outer.apply(q[0], q[1]);
                 q = [x, y];
@@ -300,14 +444,14 @@ impl Warp {
         let k = ((m.a * m.d - m.b * m.c).abs().sqrt()).max(1e-6);
         self.steps
             .iter()
-            .map(|s| s.grid.piece())
+            .map(|s| s.field.piece())
             .fold(f32::MAX, f32::min)
             / k
     }
 
     /// Nothing bends (every grid flat).
     pub fn is_flat(&self) -> bool {
-        self.steps.iter().all(|s| s.grid.is_flat())
+        self.steps.iter().all(|s| s.field.is_flat())
     }
 }
 
@@ -395,14 +539,15 @@ mod tests {
             steps: vec![
                 WarpStep {
                     outer: Affine::translate(1000.0, 0.0),
-                    grid: w.grid_at(1),
+                    field: WarpField::Grid(w.grid_at(1)),
                 },
                 WarpStep {
                     outer: Affine::scale(2.0, 2.0),
-                    grid: w.grid_at(1),
+                    field: WarpField::Grid(w.grid_at(1)),
                 },
             ],
             inner: Affine::IDENTITY,
+            lines: WarpLines::Paths,
         };
         // inner, inner grid (+5), its outer (x2), outer grid (+5).
         let b = warp.bend([1.0, 0.0]);

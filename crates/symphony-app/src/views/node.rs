@@ -233,9 +233,9 @@ pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
 
 /// A new Mesh Warp: a 4 x 4 grid over the whole stage (`w` x `h`).
 pub fn mesh_warp(w: u32, h: u32) -> NodeKind {
-    NodeKind::MeshWarp(symphony_core::warp::MeshWarp::new(
+    NodeKind::MeshWarp(Box::new(symphony_core::warp::MeshWarp::new(
         4, 4, 0.0, 0.0, w as f32, h as f32,
-    ))
+    )))
 }
 
 /// A Mesh Warp from search or a menu, sized to this scene's stage.
@@ -876,6 +876,7 @@ fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
 }
 
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
+    let mut build_mesh_now = false;
     ui.horizontal(|ui| {
         ui.label("Name");
         ui.text_edit_singleline(&mut draft.node.name);
@@ -907,39 +908,131 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             });
         }
         NodeKind::MeshWarp(warp) => {
-            let (mut rows, mut columns) = (warp.rows, warp.columns);
-            ui.horizontal(|ui| {
-                ui.label("Rows");
-                ui.add(egui::DragValue::new(&mut rows).range(1..=symphony_core::warp::MAX_CELLS));
-                ui.label("Columns");
-                ui.add(
-                    egui::DragValue::new(&mut columns).range(1..=symphony_core::warp::MAX_CELLS),
-                );
-            });
-            if (rows, columns) != (warp.rows, warp.columns) {
-                warp.resize(rows, columns);
-            }
-            peg_value(ui, "(x) Axis", &mut warp.x, s.frame, s.animate);
-            peg_value(ui, "(y) Axis", &mut warp.y, s.frame, s.animate);
-            peg_value(ui, "Width", &mut warp.width, s.frame, s.animate);
-            peg_value(ui, "Height", &mut warp.height, s.frame, s.animate);
-            egui::ComboBox::from_label("Deformation Quality")
-                .selected_text(warp.quality.title())
-                .show_ui(ui, |ui| {
-                    for q in symphony_core::warp::WarpQuality::ALL {
-                        ui.selectable_value(&mut warp.quality, q, q.title());
+            use symphony_core::warp::{WarpKind, WarpLines};
+            ui.label("Kind");
+            widgets::segmented(
+                ui,
+                "warp-kind",
+                &mut warp.kind,
+                &[(WarpKind::Grid, "Grid"), (WarpKind::Points, "Points")],
+                false,
+            );
+            ui.label("Lines");
+            widgets::segmented(
+                ui,
+                "warp-lines",
+                &mut warp.lines,
+                &[
+                    (WarpLines::Paths, "Paths"),
+                    (WarpLines::Shape, "Whole shape"),
+                ],
+                false,
+            );
+            ui.label(
+                egui::RichText::new(match warp.lines {
+                    WarpLines::Paths => "Lines bend but keep their thickness.",
+                    WarpLines::Shape => {
+                        "Lines thicken where the warp stretches and thin where it squeezes, \
+                         as if seen in perspective."
                     }
-                });
-            ui.label("Drag the grid's points in the Camera view to bend the artwork under it.");
-            if ui
-                .button("Reset points")
-                .on_hover_text("Flatten the grid (removes the points' keys too).")
-                .clicked()
-            {
-                warp.points.fill([
-                    symphony_core::anim::Value::Constant(0.0),
-                    symphony_core::anim::Value::Constant(0.0),
-                ]);
+                })
+                .font(theme::dense())
+                .color(theme::TEXT_SECONDARY),
+            );
+            ui.add_space(6.0);
+            match warp.kind {
+                WarpKind::Grid => {
+                    let (mut rows, mut columns) = (warp.rows, warp.columns);
+                    ui.horizontal(|ui| {
+                        ui.label("Rows");
+                        ui.add(
+                            egui::DragValue::new(&mut rows)
+                                .range(1..=symphony_core::warp::MAX_CELLS),
+                        );
+                        ui.label("Columns");
+                        ui.add(
+                            egui::DragValue::new(&mut columns)
+                                .range(1..=symphony_core::warp::MAX_CELLS),
+                        );
+                    });
+                    if (rows, columns) != (warp.rows, warp.columns) {
+                        warp.resize(rows, columns);
+                    }
+                    peg_value(ui, "(x) Axis", &mut warp.x, s.frame, s.animate);
+                    peg_value(ui, "(y) Axis", &mut warp.y, s.frame, s.animate);
+                    peg_value(ui, "Width", &mut warp.width, s.frame, s.animate);
+                    peg_value(ui, "Height", &mut warp.height, s.frame, s.animate);
+                    egui::ComboBox::from_label("Deformation Quality")
+                        .selected_text(warp.quality.title())
+                        .show_ui(ui, |ui| {
+                            for q in symphony_core::warp::WarpQuality::ALL {
+                                ui.selectable_value(&mut warp.quality, q, q.title());
+                            }
+                        });
+                    ui.label(
+                        "Drag the grid's points in the Camera view (Transform tool) to bend the \
+                         artwork under it.",
+                    );
+                    if ui
+                        .button("Reset points")
+                        .on_hover_text("Flatten the grid (removes the points' keys too).")
+                        .clicked()
+                    {
+                        warp.points.fill([
+                            symphony_core::anim::Value::Constant(0.0),
+                            symphony_core::anim::Value::Constant(0.0),
+                        ]);
+                    }
+                }
+                WarpKind::Points => {
+                    ui.label(format!(
+                        "{} point{}{}",
+                        warp.pins.len(),
+                        if warp.pins.len() == 1 { "" } else { "s" },
+                        if warp.mesh.is_some() {
+                            ", mesh built"
+                        } else {
+                            ""
+                        }
+                    ));
+                    ui.add_enabled_ui(warp.mesh.is_none(), |ui| {
+                        widgets::precise_slider(
+                            ui,
+                            egui::Slider::new(&mut warp.density, 6.0..=120.0)
+                                .text("Mesh detail")
+                                .suffix(" px"),
+                        )
+                        .on_hover_text("Smaller triangles bend more finely.");
+                    });
+                    ui.label(if warp.mesh.is_none() {
+                        "In the Camera view (Transform tool), click the artwork to place points \
+                         at the joints and ends you'll move; Alt-click removes one. Then build \
+                         the mesh."
+                    } else {
+                        "Drag the points in the Camera view: the artwork bends as rigidly as it \
+                         can, and only what's connected to a point follows it."
+                    });
+                    ui.horizontal(|ui| {
+                        if warp.mesh.is_none() {
+                            if ui
+                                .add_enabled(!warp.pins.is_empty(), egui::Button::new("Build mesh"))
+                                .clicked()
+                            {
+                                build_mesh_now = true;
+                            }
+                        } else if ui.button("Edit points").clicked() {
+                            warp.mesh = None;
+                        }
+                        if ui
+                            .add_enabled(!warp.pins.is_empty(), egui::Button::new("Clear points"))
+                            .clicked()
+                        {
+                            warp.pins.clear();
+                            warp.pin_moves.clear();
+                            warp.mesh = None;
+                        }
+                    });
+                }
             }
         }
         NodeKind::Drawing { column } => {
@@ -1137,6 +1230,17 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             );
             draft.initial.kind = draft.node.kind.clone();
         }
+    }
+    // Building a mesh needs the artwork under the node: done on the
+    // scene, then the form catches up.
+    if build_mesh_now {
+        if let Err(e) = super::warp_edit::build_mesh(s, draft.id) {
+            s.note(e);
+        }
+        if let Some(current) = PropertyDraft::new(s, draft.id) {
+            *draft = current;
+        }
+        return;
     }
     let camera_changed = draft.fov != draft.initial_fov || draft.motion != draft.initial_motion;
     let changed =

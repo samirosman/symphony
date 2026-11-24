@@ -68,7 +68,8 @@ pub enum NodeKind {
     Peg(PegParams),
     /// Bends the artwork under it with a grid of points (Harmony's Mesh
     /// Warp). A position node, like a peg.
-    MeshWarp(crate::warp::MeshWarp),
+    /// Boxed: it's much bigger than the other kinds.
+    MeshWarp(Box<crate::warp::MeshWarp>),
     /// Stacks its inputs. Port 0 (leftmost) is in front.
     Composite,
     Effect(Effect),
@@ -773,6 +774,7 @@ impl Graph {
         }
         let mut steps = Vec::new();
         let mut outer = Affine::IDENTITY;
+        let mut lines = crate::warp::WarpLines::Paths;
         for &n in chain.iter().rev() {
             let node = self.get(n, depth)?;
             let enabled = self
@@ -784,11 +786,13 @@ impl Graph {
             match &node.kind {
                 NodeKind::Peg(p) => outer = outer.compose(p.transform_at(frame)),
                 NodeKind::MeshWarp(w) => {
-                    steps.push(crate::warp::WarpStep {
-                        outer,
-                        grid: w.grid_at(frame),
-                    });
-                    outer = Affine::IDENTITY;
+                    if let Some(field) = w.field_at(frame) {
+                        steps.push(crate::warp::WarpStep { outer, field });
+                        if w.lines == crate::warp::WarpLines::Shape {
+                            lines = w.lines;
+                        }
+                        outer = Affine::IDENTITY;
+                    }
                 }
                 _ => {}
             }
@@ -796,6 +800,7 @@ impl Graph {
         let warp = crate::warp::Warp {
             steps,
             inner: outer,
+            lines,
         };
         Ok((!warp.steps.is_empty() && !warp.is_flat()).then(|| std::sync::Arc::new(warp)))
     }

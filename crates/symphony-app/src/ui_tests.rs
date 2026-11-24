@@ -2131,3 +2131,88 @@ fn the_text_tool_types_vector_letters() {
     h.state_mut().s.undo();
     assert_eq!(strokes(&h, layer).len(), before, "one undo step");
 }
+
+/// Mesh Warp in Points mode, puppet style: points placed on an "arm"
+/// (a thick line), a mesh built over the artwork, the end point lifted:
+/// the arm swings up in renders, its base stays, and a separate shape no
+/// point is on (a "ball" below) doesn't move.
+#[test]
+fn points_warp_bends_only_the_connected_artwork() {
+    use symphony_core::graph::NodeKind;
+    use symphony_core::stroke::{Point, Stroke};
+    use symphony_core::warp::WarpKind;
+    let mut s = crate::session::Session::new_scene();
+    for l in (1..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    let col = s.doc.layers[0].column;
+    let d = s.doc.make_drawing(col);
+    let did = d.id;
+    s.doc.drawings.insert(did, d);
+    s.doc.xsheet.column_mut(col).unwrap().set(1, Some(did));
+    let line = |s: &mut crate::session::Session, a: (f32, f32), b: (f32, f32), w: f32| {
+        let p = |(x, y): (f32, f32)| Point {
+            x,
+            y,
+            pressure: 1.0,
+            pen: Default::default(),
+        };
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: s.doc.palette.swatches[0].id,
+            min_width: w,
+            max_width: w,
+            points: vec![p(a), p(b)],
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.doc.drawings.get_mut(&did).unwrap().strokes.push(st);
+    };
+    line(&mut s, (-400.0, 0.0), (400.0, 0.0), 40.0); // the arm
+    line(&mut s, (0.0, 300.0), (10.0, 300.0), 60.0); // the ball
+    s.frame = 1;
+    let node = s.doc.layers[0].node;
+    crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(1920, 1080));
+    let warp = s.doc.graph.input(node, 0).unwrap();
+    s.select_graph_node(warp, false);
+    // Points mode: the shoulder held by two points, the hand at the end.
+    if let NodeKind::MeshWarp(w) = &mut s.doc.graph.node_mut(warp).unwrap().kind {
+        w.kind = WarpKind::Points;
+        w.pins = vec![[-400.0, -10.0], [-400.0, 10.0], [400.0, 0.0]];
+        w.pin_moves = vec![
+            [
+                symphony_core::anim::Value::Constant(0.0),
+                symphony_core::anim::Value::Constant(0.0),
+            ];
+            3
+        ];
+    }
+    let ink_at = |s: &crate::session::Session, x: u32, y: u32| {
+        let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+        let p = img.get_pixel(x, y).0;
+        (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+    };
+    // Scene (x, y) is pixel (960 + x, 540 + y) here.
+    assert!(ink_at(&s, 960 + 350, 540), "the arm's end, before");
+    crate::views::warp_edit::build_mesh(&mut s, warp).unwrap();
+    assert!(ink_at(&s, 960 + 350, 540), "building changes nothing yet");
+    // Lift the hand 300 up.
+    if let NodeKind::MeshWarp(w) = &mut s.doc.graph.node_mut(warp).unwrap().kind {
+        w.pin_moves[2][1] = symphony_core::anim::Value::Constant(-300.0);
+    }
+    let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+    let ink = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y).0;
+        (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+    };
+    assert!(!ink(960 + 390, 540), "the end left its old place");
+    assert!(
+        (180..260).any(|y| ink(960 + 360, y)) || (200..300).any(|y| ink(960 + 300, y)),
+        "the end went up"
+    );
+    assert!(ink(960 - 380, 540), "the shoulder stayed");
+    assert!(ink(965, 840), "the ball (no point on it) didn't move");
+}
