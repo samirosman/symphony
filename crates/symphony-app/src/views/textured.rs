@@ -83,7 +83,7 @@ impl Image {
     fn draw_clipped(
         &self,
         painter: &egui::Painter,
-        stroke: &Stroke,
+        shape: &symphony_vector::Mesh,
         screen: Affine,
         colour: Color32,
     ) -> bool {
@@ -101,10 +101,9 @@ impl Image {
         if !rect.intersects(painter.clip_rect()) {
             return false;
         }
-        let shape = symphony_vector::fill::fill_mesh(&stroke.shape, Affine::IDENTITY);
         let mut mesh = egui::Mesh::with_texture(self.handle.id());
         mesh.vertices.reserve(shape.vertices.len());
-        for [dx, dy] in shape.vertices {
+        for &[dx, dy] in &shape.vertices {
             let (sx, sy) = screen.apply(dx, dy);
             let (tx, ty) = self.px.apply(dx, dy);
             mesh.vertices.push(egui::epaint::Vertex {
@@ -113,7 +112,7 @@ impl Image {
                 color: colour,
             });
         }
-        mesh.indices = shape.indices;
+        mesh.indices = shape.indices.clone();
         painter.with_clip_rect(rect).add(egui::Shape::mesh(mesh));
         true
     }
@@ -232,8 +231,30 @@ pub struct Cache {
     /// Vector brush strokes: their merged stamp outline, triangulated in
     /// drawing space, by content key.
     stamped: HashMap<u64, (Arc<symphony_vector::Mesh>, u64)>,
+    /// The last outline drawn for each vector-brush stroke, to stand in
+    /// while its new shape is built.
+    stamped_last: HashMap<Id, (Arc<symphony_vector::Mesh>, u64)>,
+    outline_worker: Option<OutlineWorker>,
+    outlines_pending: HashSet<u64>,
+    /// Erased textured strokes' outlines, triangulated, by full key (shown
+    /// clipping the old image while the exact stamp is made).
+    cut_meshes: HashMap<u64, (Arc<symphony_vector::Mesh>, u64)>,
+    /// Vector-brush stamps that may still be merged this frame.
+    sync_stamps: f32,
     /// Plain vector lines' cached triangles (they draw through here too).
     pub vectors: super::vector_cache::VectorMeshes,
+    /// Work done on the UI thread so far, so tests can check that an
+    /// unchanged frame does none (ENGINEERING E6.1).
+    pub work: Work,
+}
+
+/// Counts of slow work done while drawing (totals since start).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Work {
+    /// Textured strokes stamped (full or preview).
+    pub stamps: u64,
+    /// Vector-brush or cut outlines triangulated.
+    pub triangulated: u64,
 }
 
 /// Stamped strokes are rebuilt per this many pixels of clip window, so
@@ -247,6 +268,9 @@ const SYNC_BUDGET: f32 = 2_400_000.0;
 /// Background stamping threads (each stroke also splits across cores).
 const STAMP_WORKERS: usize = 3;
 const UPLOADS_PER_FRAME: usize = 4;
+/// Vector-brush stamps merged right away per frame (about 2 ms); longer
+/// strokes are built in the background.
+const SYNC_STAMPS: f32 = 600.0;
 /// The smallest scale a quick edit preview is stamped at; below this it
 /// would be mush, so the full stamp is awaited instead.
 const MIN_PREVIEW_SCALE: f32 = 0.08;
@@ -321,6 +345,21 @@ impl Cache {
             );
         }
         self.sync_remaining = SYNC_BUDGET;
+        self.sync_stamps = SYNC_STAMPS;
+        if let Some(w) = &self.outline_worker {
+            while let Ok(d) = w.done.try_recv() {
+                self.outlines_pending.remove(&d.key);
+                let current = w
+                    .latest
+                    .lock()
+                    .map(|l| l.get(&d.id) == Some(&d.key))
+                    .unwrap_or(true);
+                if let Some(mesh) = d.mesh.filter(|_| current) {
+                    self.stamped.insert(d.key, (mesh, self.frame));
+                    ctx.request_repaint();
+                }
+            }
+        }
         self.vectors.begin_frame();
         if let Some(w) = &self.worker {
             for _ in 0..UPLOADS_PER_FRAME {
@@ -357,6 +396,9 @@ impl Cache {
         let keep_stamped_after = self.frame.saturating_sub(120);
         self.stamped
             .retain(|_, (_, used)| *used >= keep_stamped_after);
+        self.stamped_last
+            .retain(|_, (_, used)| *used >= keep_stamped_after);
+        self.cut_meshes.retain(|_, (_, used)| *used >= keep_after);
         let keep_preview_after = self.frame.saturating_sub(16);
         self.ink_history
             .retain(|_, preview| preview.used >= keep_preview_after);
@@ -452,6 +494,7 @@ impl Cache {
         // Line Editor reshaping a line), so they never lag behind.
         if cost <= self.sync_remaining {
             self.sync_remaining -= cost;
+            self.work.stamps += 1;
             let c = symphony_vector::stamp::rasterize(
                 stroke,
                 tex,
@@ -486,6 +529,7 @@ impl Cache {
                 let s = (self.sync_remaining / cost.max(1.0)).sqrt().min(0.5);
                 if s >= MIN_PREVIEW_SCALE {
                     self.sync_remaining -= cost * s * s;
+                    self.work.stamps += 1;
                     let low = Affine::scale(s, s).compose(local);
                     let clip_low = [
                         (clip[0] as f32 * s).floor() as i32,
@@ -512,12 +556,32 @@ impl Cache {
         // Expensive strokes stamp in the background. Keep a cached texture
         // visible when available, including a clipped preview for erasing.
         let clipped = previewed
-            || uncut_key.is_some_and(|key| {
-                self.entries
-                    .get(&key)
-                    .and_then(|e| e.image.as_ref())
-                    .or_else(|| self.ink_history.get(&ink).map(|preview| &preview.image))
-                    .is_some_and(|image| image.draw_clipped(painter, stroke, m, colour))
+            || uncut_key.is_some_and(|uncut| {
+                let image = self
+                    .entries
+                    .get(&uncut)
+                    .and_then(|e| e.image.clone())
+                    .or_else(|| self.ink_history.get(&ink).map(|p| p.image.clone()));
+                image.is_some_and(|image| {
+                    // The cut outline, triangulated once (not every frame
+                    // while the exact stamp is made).
+                    let shape = match self.cut_meshes.get_mut(&key) {
+                        Some((mesh, used)) => {
+                            *used = frame;
+                            mesh.clone()
+                        }
+                        None => {
+                            self.work.triangulated += 1;
+                            let mesh = Arc::new(symphony_vector::fill::fill_mesh(
+                                &stroke.shape,
+                                Affine::IDENTITY,
+                            ));
+                            self.cut_meshes.insert(key, (mesh.clone(), frame));
+                            mesh
+                        }
+                    };
+                    image.draw_clipped(painter, &shape, m, colour)
+                })
             });
         if !clipped {
             match self.last.get_mut(&stroke.id) {
@@ -561,6 +625,9 @@ impl Cache {
     /// A vector brush stroke: the tip's shape stamped along the line and
     /// merged into one outline, drawn solid. The outline is worked out once
     /// per shape of the stroke (in drawing space) and only moved after.
+    /// Long strokes are worked out in the background (E6.1: the UI thread
+    /// only paints); until then the stroke's previous outline, or the
+    /// image it was drawn with, stands in.
     pub fn paint_stamped(
         &mut self,
         painter: &egui::Painter,
@@ -570,64 +637,168 @@ impl Cache {
         colour: Color32,
         m: Affine,
     ) {
-        let key = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for p in &stroke.points {
-                (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
-                (
-                    p.pen.tilt.to_bits(),
-                    p.pen.azimuth.to_bits(),
-                    p.pen.rotation.to_bits(),
-                )
-                    .hash(&mut h);
-            }
-            (
-                stroke.min_width.to_bits(),
-                stroke.max_width.to_bits(),
-                stroke.id.0,
-            )
-                .hash(&mut h);
-            format!("{tex:?}").hash(&mut h);
-            for ring in &stroke.shape {
-                for &[x, y] in ring {
-                    (x.to_bits(), y.to_bits()).hash(&mut h);
-                }
-            }
-            h.finish()
-        };
+        let key = stamped_key(stroke, tex);
         let frame = self.frame;
-        let mesh = match self.stamped.get_mut(&key) {
-            Some((mesh, used)) => {
-                *used = frame;
-                mesh.clone()
-            }
-            None => {
-                let tip = self.texture(textures, tex.tip);
-                let shapes =
-                    symphony_vector::stamped::vector_brush_shapes(stroke, tex, tip.as_deref());
-                let mut all = symphony_vector::Mesh::default();
-                for shape in &shapes {
-                    let part = symphony_vector::fill::fill_mesh(shape, Affine::IDENTITY);
-                    let base = all.vertices.len() as u32;
-                    all.vertices.extend(part.vertices);
-                    all.indices.extend(part.indices.iter().map(|i| i + base));
-                }
-                let mesh = Arc::new(all);
-                self.stamped.insert(key, (mesh.clone(), frame));
-                mesh
-            }
-        };
-        if mesh.indices.is_empty() {
+        if let Some((mesh, used)) = self.stamped.get_mut(&key) {
+            *used = frame;
+            let mesh = mesh.clone();
+            self.stamped_last.insert(stroke.id, (mesh.clone(), frame));
+            draw_mesh(painter, &mesh, colour, m);
             return;
         }
-        let mut out = egui::Mesh::default();
-        out.vertices.reserve(mesh.vertices.len());
-        for &[x, y] in &mesh.vertices {
-            let (sx, sy) = m.apply(x, y);
-            out.colored_vertex(Pos2::new(sx, sy), colour);
+        let tip = self.texture(textures, tex.tip);
+        // Cheap now: an erased stroke (its outline is stored, only
+        // triangulated here), an outline built already (by the eraser or
+        // export), or a short stroke that fits this frame's budget.
+        let cheap = !stroke.shape.is_empty()
+            || symphony_vector::stamped::cached_outline(symphony_vector::stamped::outline_key(
+                stroke, tex,
+            ))
+            .is_some()
+            || {
+                let n = symphony_vector::stamped::estimated_stamps(stroke, tex);
+                let fits = n <= self.sync_stamps;
+                if fits {
+                    self.sync_stamps -= n;
+                }
+                fits
+            };
+        if cheap {
+            self.work.triangulated += 1;
+            let mesh = outline_mesh(stroke, tex, tip.as_deref());
+            self.stamped.insert(key, (mesh.clone(), frame));
+            self.stamped_last.insert(stroke.id, (mesh.clone(), frame));
+            draw_mesh(painter, &mesh, colour, m);
+            return;
         }
-        out.indices = mesh.indices.clone();
-        painter.add(egui::Shape::mesh(out));
+        let worker = self
+            .outline_worker
+            .get_or_insert_with(|| OutlineWorker::start(painter.ctx()));
+        if let Ok(mut latest) = worker.latest.lock() {
+            latest.insert(stroke.id, key);
+        }
+        if self.outlines_pending.insert(key) {
+            let _ = worker.jobs.send(OutlineJob {
+                key,
+                stroke: stroke.clone(),
+                tex: *tex,
+                tip,
+            });
+        }
+        // Meanwhile: the outline it had, the image it was drawn with, or
+        // a faint plain line.
+        if let Some((mesh, used)) = self.stamped_last.get_mut(&stroke.id) {
+            *used = frame;
+            let mesh = mesh.clone();
+            draw_mesh(painter, &mesh, colour, m);
+        } else if let Some((img, used)) = self.last.get_mut(&stroke.id) {
+            *used = frame;
+            let ppp = painter.ctx().pixels_per_point();
+            img.draw(painter, Affine::scale(ppp, ppp).compose(m), ppp, colour);
+        } else {
+            self.vectors
+                .paint(painter, stroke, colour.gamma_multiply(0.35), m);
+        }
+    }
+}
+
+/// What a vector-brush stroke's drawn outline depends on: its stamps, or
+/// once erased, its stored outline.
+fn stamped_key(stroke: &Stroke, tex: &StrokeTexture) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    symphony_vector::stamped::outline_key(stroke, tex).hash(&mut h);
+    for ring in &stroke.shape {
+        ring.len().hash(&mut h);
+        for &[x, y] in ring {
+            (x.to_bits(), y.to_bits()).hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// A vector-brush stroke's outline, triangulated in drawing space.
+fn outline_mesh(
+    stroke: &Stroke,
+    tex: &StrokeTexture,
+    tip: Option<&Texture>,
+) -> Arc<symphony_vector::Mesh> {
+    let shapes = symphony_vector::stamped::vector_brush_shapes(stroke, tex, tip);
+    let mut all = symphony_vector::Mesh::default();
+    for shape in &shapes {
+        let part = symphony_vector::fill::fill_mesh(shape, Affine::IDENTITY);
+        let base = all.vertices.len() as u32;
+        all.vertices.extend(part.vertices);
+        all.indices.extend(part.indices.iter().map(|i| i + base));
+    }
+    Arc::new(all)
+}
+
+fn draw_mesh(painter: &egui::Painter, mesh: &symphony_vector::Mesh, colour: Color32, m: Affine) {
+    if mesh.indices.is_empty() {
+        return;
+    }
+    let mut out = egui::Mesh::default();
+    out.vertices.reserve(mesh.vertices.len());
+    for &[x, y] in &mesh.vertices {
+        let (sx, sy) = m.apply(x, y);
+        out.colored_vertex(Pos2::new(sx, sy), colour);
+    }
+    out.indices = mesh.indices.clone();
+    painter.add(egui::Shape::mesh(out));
+}
+
+struct OutlineJob {
+    key: u64,
+    stroke: Stroke,
+    tex: StrokeTexture,
+    tip: Option<Arc<Texture>>,
+}
+
+struct OutlineDone {
+    key: u64,
+    id: Id,
+    /// None when a newer shape of the stroke was wanted first.
+    mesh: Option<Arc<symphony_vector::Mesh>>,
+}
+
+/// Builds vector-brush outlines off the UI thread (each build also merges
+/// across the cores).
+struct OutlineWorker {
+    jobs: Sender<OutlineJob>,
+    done: Receiver<OutlineDone>,
+    /// The newest key wanted per stroke; older queued jobs are skipped.
+    latest: Arc<Mutex<HashMap<Id, u64>>>,
+}
+
+impl OutlineWorker {
+    fn start(ctx: &egui::Context) -> Self {
+        let (jobs, rx) = channel::<OutlineJob>();
+        let (tx, done) = channel();
+        let latest: Arc<Mutex<HashMap<Id, u64>>> = Arc::default();
+        let (wanted, ctx) = (latest.clone(), ctx.clone());
+        std::thread::Builder::new()
+            .name("symphony-outline".into())
+            .spawn(move || {
+                for job in rx {
+                    let current = wanted
+                        .lock()
+                        .map(|m| m.get(&job.stroke.id) == Some(&job.key))
+                        .unwrap_or(true);
+                    let mesh =
+                        current.then(|| outline_mesh(&job.stroke, &job.tex, job.tip.as_deref()));
+                    let done = OutlineDone {
+                        key: job.key,
+                        id: job.stroke.id,
+                        mesh,
+                    };
+                    if tx.send(done).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            })
+            .ok();
+        OutlineWorker { jobs, done, latest }
     }
 }
 
@@ -900,6 +1071,98 @@ mod tests {
         assert_ne!(start.0, stamp_view(at(1.4, 70.0, 60.0), viewport, 1.0).0);
     }
 
+    /// A line of `n` points with `texture`, for the work tests.
+    fn line(id: u64, y: f32, n: usize, width: f32, texture: Option<StrokeTexture>) -> Stroke {
+        Stroke {
+            id: Id(id),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: width,
+            max_width: width,
+            points: (0..n)
+                .map(|i| symphony_core::stroke::Point {
+                    x: 20.0 + i as f32 * 1.5,
+                    y: y + (i as f32 * 0.1).sin() * 10.0,
+                    pressure: 1.0,
+                    pen: Default::default(),
+                })
+                .collect(),
+            tips: Default::default(),
+            texture,
+            shape: Vec::new(),
+        }
+    }
+
+    /// The rule that keeps frames smooth (ENGINEERING E6.1): once a
+    /// scene is drawn, drawing it again, or panning a little, rebuilds
+    /// nothing. Every kind of stroke is here: plain lines, small and big
+    /// textured strokes, short and long vector-brush strokes, and an
+    /// erased textured stroke. (A stand-in that was rebuilt every frame
+    /// once made a real scene stutter; this catches that kind of bug.)
+    #[test]
+    fn an_unchanged_frame_rebuilds_nothing() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 700.0));
+        let textured = StrokeTexture::default();
+        let vector = StrokeTexture {
+            vector: true,
+            ..Default::default()
+        };
+        let mut cut = cut_stroke();
+        cut.texture = Some(textured);
+        cut.id = Id(99);
+        let strokes = vec![
+            line(1, 40.0, 40, 3.0, None),
+            line(2, 100.0, 12, 4.0, Some(textured)),
+            line(3, 180.0, 400, 60.0, Some(textured)),
+            line(4, 300.0, 12, 4.0, Some(vector)),
+            line(5, 400.0, 400, 2.0, Some(vector)),
+            cut,
+        ];
+        let textures = BTreeMap::new();
+        let mut cache = Cache::default();
+        let mut draw = |m: Affine| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                cache.begin_frame(&ctx);
+                let painter = ui.painter().with_clip_rect(viewport);
+                for st in &strokes {
+                    let tex = st.texture;
+                    match tex {
+                        Some(t) if t.vector => {
+                            cache.paint_stamped(&painter, &textures, st, &t, Color32::WHITE, m)
+                        }
+                        Some(t) => {
+                            cache.paint(&ctx, &painter, &textures, st, &t, Color32::WHITE, m)
+                        }
+                        None => cache.vectors.paint(&painter, st, Color32::WHITE, m),
+                    }
+                }
+            });
+            output.textures_delta.clear();
+            let idle = cache.pending.is_empty() && cache.outlines_pending.is_empty();
+            (cache.work, cache.vectors.built, idle)
+        };
+        let at = |dx: f32| Affine::translate(30.0 + dx, 20.0);
+        // Let the background finish everything.
+        let mut settled = draw(at(0.0));
+        for _ in 0..400 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let now = draw(at(0.0));
+            if now == settled && now.2 {
+                break;
+            }
+            settled = now;
+        }
+        for frame in 0..6 {
+            assert_eq!(
+                draw(at(frame as f32 * 0.7)),
+                settled,
+                "frame {frame} rebuilt something"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "CPU navigation benchmark"]
     fn textured_navigation_cost() {
@@ -1128,7 +1391,8 @@ mod tests {
         };
         let image = Image::upload(&ctx, &coverage, Affine::IDENTITY, "erase preview test");
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            image.draw_clipped(ui.painter(), &cut, Affine::IDENTITY, Color32::WHITE);
+            let shape = symphony_vector::fill::fill_mesh(&cut.shape, Affine::IDENTITY);
+            image.draw_clipped(ui.painter(), &shape, Affine::IDENTITY, Color32::WHITE);
         });
         output.textures_delta.clear();
         let mesh = output

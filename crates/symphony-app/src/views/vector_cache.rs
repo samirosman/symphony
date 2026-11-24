@@ -47,6 +47,9 @@ pub struct VectorMeshes {
     behind: bool,
     /// The scene's edit counter this frame (see `set_version`).
     version: u64,
+    /// Lines tessellated and fills triangulated so far (tests check an
+    /// unchanged frame adds none).
+    pub built: u64,
 }
 
 /// Rebuild time allowed per frame before finer detail waits a frame.
@@ -180,6 +183,7 @@ impl VectorMeshes {
                 seen: u64::MAX,
             });
         if e.seen == u64::MAX || e.fingerprint != fp {
+            self.built += 1;
             let mesh = symphony_vector::fill::fill_mesh(&fill.contours, Affine::IDENTITY);
             let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
             for v in &mesh.vertices {
@@ -264,6 +268,7 @@ impl VectorMeshes {
         if !fresh && !can_wait {
             let start = std::time::Instant::now();
             let lod = 2f32.powf(k.log2().ceil()).max(1.0 / 64.0);
+            self.built += 1;
             let mesh = symphony_vector::tessellate(st, Affine::scale(lod, lod), 0.6);
             let inv = 1.0 / lod;
             let vertices: Vec<[f32; 2]> = mesh
