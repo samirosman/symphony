@@ -1912,19 +1912,25 @@ impl SymphonyApp {
         {
             self.cursor_hint = Some((format!("Size {:.1}", state.1), now));
         }
-        let Some((text, since)) = self.cursor_hint.clone() else {
+        let Some((text, since)) = self.cursor_hint.as_ref() else {
             return;
         };
         const HOLD: f64 = 0.8;
-        let age = now - since;
-        if age > HOLD + 0.25 {
+        let remaining = HOLD - (now - since);
+        let shown = remaining > 0.0;
+        let opacity = symphony_ui::motion::presence(
+            ctx,
+            egui::Id::unique("symphony-cursor-hint").with("presence"),
+            shown,
+        );
+        if shown {
+            // The shared motion helper requests frames during a fade.
+            // The steady part only needs a wake-up when the hint expires.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+        } else if opacity <= 0.0 {
             self.cursor_hint = None;
             return;
         }
-        ctx.request_repaint();
-        use symphony_ui::motion::Motion;
-        let opacity = Motion::Appear.ease((age / Motion::Appear.seconds()) as f32)
-            * (1.0 - Motion::Dismiss.ease(((age - HOLD) / 0.25).clamp(0.0, 1.0) as f32));
         let Some(p) = ctx.pointer_hover_pos() else {
             return;
         };
