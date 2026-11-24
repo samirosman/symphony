@@ -154,12 +154,18 @@ impl Worker {
         let (jobs, rx) = channel::<Job>();
         let (tx, done) = channel();
         let latest: Arc<Mutex<HashMap<Id, u64>>> = Arc::default();
-        let wanted = latest.clone();
-        let ctx = ctx.clone();
-        std::thread::Builder::new()
-            .name("symphony-stamp".into())
-            .spawn(move || {
-                while let Ok(job) = rx.recv() {
+        // A few workers share the queue, so several strokes stamp at once
+        // (each also splits into parallel bands across the cores).
+        let rx = Arc::new(Mutex::new(rx));
+        for n in 0..STAMP_WORKERS {
+            let (rx, tx, wanted, ctx) = (rx.clone(), tx.clone(), latest.clone(), ctx.clone());
+            std::thread::Builder::new()
+                .name(format!("symphony-stamp-{n}"))
+                .spawn(move || loop {
+                    let job = match rx.lock().map(|r| r.recv()) {
+                        Ok(Ok(job)) => job,
+                        _ => break,
+                    };
                     let current = wanted
                         .lock()
                         .map(|m| m.get(&job.stroke.id) == Some(&job.key))
@@ -189,9 +195,9 @@ impl Worker {
                         break;
                     }
                     ctx.request_repaint();
-                }
-            })
-            .ok();
+                })
+                .ok();
+        }
         Worker { jobs, done, latest }
     }
 }
@@ -236,11 +242,14 @@ const CLIP_GRID: f32 = 512.0;
 /// Most cached strokes; old ones are dropped first.
 const MAX_ENTRIES: usize = 512;
 /// Total synchronous stamp work per canvas frame, in estimated pixels.
-const SYNC_BUDGET: f32 = 600_000.0;
+/// (Stamping runs across all cores, so this is a few milliseconds.)
+const SYNC_BUDGET: f32 = 2_400_000.0;
+/// Background stamping threads (each stroke also splits across cores).
+const STAMP_WORKERS: usize = 3;
 const UPLOADS_PER_FRAME: usize = 4;
 /// The smallest scale a quick edit preview is stamped at; below this it
 /// would be mush, so the full stamp is awaited instead.
-const MIN_PREVIEW_SCALE: f32 = 0.18;
+const MIN_PREVIEW_SCALE: f32 = 0.08;
 
 fn stamp_view(px: Affine, visible: Rect, ppp: f32) -> (Affine, [i32; 4]) {
     let scale = symphony_vector::scale_of(px).max(1e-6);
@@ -290,6 +299,27 @@ impl Cache {
     /// forget strokes not drawn lately.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
+        if std::env::var_os("SYMPHONY_PERF").is_some() && self.frame.is_multiple_of(120) {
+            let bytes = |img: &Image| (img.rect[2] * img.rect[3] * 4.0) as u64;
+            let entries: u64 = self
+                .entries
+                .values()
+                .filter_map(|e| e.image.as_ref())
+                .map(bytes)
+                .sum();
+            let last: u64 = self.last.values().map(|(i, _)| bytes(i)).sum();
+            let hist: u64 = self.ink_history.values().map(|p| bytes(&p.image)).sum();
+            let low: u64 = self.low_res.values().map(|(i, _)| bytes(i)).sum();
+            eprintln!(
+                "stroke images: {} cached ({} MB), last {} MB, ink history {} ({} MB), previews {} MB",
+                self.entries.len(),
+                entries >> 20,
+                last >> 20,
+                self.ink_history.len(),
+                hist >> 20,
+                low >> 20
+            );
+        }
         self.sync_remaining = SYNC_BUDGET;
         self.vectors.begin_frame();
         if let Some(w) = &self.worker {
@@ -500,13 +530,10 @@ impl Cache {
                     }
                 }
                 None if stroke.shape.is_empty() => {
-                    let mesh = symphony_vector::tessellate(stroke, m, 0.6);
-                    let mut out = egui::Mesh::default();
-                    for v in &mesh.vertices {
-                        out.colored_vertex(Pos2::new(v[0], v[1]), colour.gamma_multiply(0.35));
-                    }
-                    out.indices = mesh.indices;
-                    painter.add(egui::Shape::mesh(out));
+                    // A faint plain line while it stamps (cached, not
+                    // re-tessellated every frame).
+                    self.vectors
+                        .paint(painter, stroke, colour.gamma_multiply(0.35), m);
                 }
                 // A genuinely cold cache has no textured image to show yet.
                 None => {}
