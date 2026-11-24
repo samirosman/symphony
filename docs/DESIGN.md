@@ -262,6 +262,32 @@ and animation state.
   states and accessibility labels are consistent. Review new controls in the
   running app at 1280×800 and 1024×640, including a keyboard pass.
 
+- **D6.8 A control’s appearance tells you what clicking it does.** Use the
+  same role, shape, and resting cues everywhere that kind of control
+  appears. Choose an existing shared widget and theme tokens. Add shared
+  variants when a new role is needed.
+
+  | Role | Appearance and behaviour |
+  |---|---|
+  | Primary action | Filled cel blue button for the main action in the current panel or dialog. |
+  | Secondary action | Neutral button for other commands. |
+  | Destructive action | Shared button or menu style with a clear verb and the destructive token. |
+  | Icon action | Standard icon and hit area, with a tooltip and an accessible name. |
+  | Menu trigger | A dropdown cue for contextual triggers. The menu bar uses its shared menu-label style. |
+  | Tab or selectable row | Shared tab or row style with a persistent selected state. |
+  | Toggle or choice | Checkbox, radio, or toolbar toggle with a visible on or selected state. |
+  | Link | Link styling with a visible underline at rest. Activates a destination. |
+  | Plain text | Label or body styling for information. |
+
+- **D6.9 Make states recognisable.** Enabled controls have a resting cue
+  that works with a pen and on touch. Hover, keyboard focus, and press give
+  distinct feedback. Focus uses a visible outline, and selection or an on
+  state persists after the pointer leaves. Disabled controls retain their
+  shape, use the disabled token, and cannot be activated. Use a check,
+  underline, fill, or outline alongside colour so states remain distinct
+  without relying on hue alone. Preserve the hit area and layout as visual
+  states change.
+
 ---
 
 ## 7. Icons
@@ -486,6 +512,9 @@ finished.
 - [ ] The action is in a menu, with its shortcut shown (D8.7).
 - [ ] Shortcuts are defined for both profiles. Any Symphony difference is
       logged in §11.1.
+- [ ] Clickable controls reuse the shared style for their role. Check that
+      labels, links, selection, keyboard focus, and disabled controls are
+      distinguishable (D6.8–D6.9).
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
 - [ ] Waits follow §17: acknowledged at once, spinner past 150 ms, words and progress past 1 s, Cancel past 3 s.
