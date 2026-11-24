@@ -4,6 +4,7 @@
 //! Export runs on a background thread with progress and cancel (E5.2).
 
 pub mod bitmap;
+pub mod checkpoint;
 pub mod deform;
 mod effects;
 #[cfg(test)]
@@ -14,7 +15,7 @@ pub mod warp;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use image::{Delay, Frame, RgbaImage};
+use image::RgbaImage;
 use symphony_core::doc::Scene;
 use symphony_core::graph::{Effect, RenderCommand, RenderItem};
 use symphony_core::id::Id;
@@ -288,6 +289,30 @@ fn paint_strokes(
     preview: Option<StrokePreview<'_>>,
 ) {
     {
+        // Stamp every textured stroke at once across the cores, then lay
+        // them down in order (the picture is the same as one at a time).
+        let stamped: std::collections::HashMap<
+            symphony_core::id::Id,
+            symphony_vector::stamp::Coverage,
+        > = {
+            use rayon::prelude::*;
+            let clip = [0, 0, pix.width() as i32, pix.height() as i32];
+            d.strokes
+                .par_iter()
+                .filter(|s| s.art == art && s.kind != StrokeKind::Invisible)
+                .filter_map(|st| {
+                    let tex = st.texture.filter(|t| !t.vector)?;
+                    let m = match preview {
+                        Some(p) if p.strokes.contains(&st.id) => m.compose(p.transform),
+                        _ => m,
+                    };
+                    let tip = tex.tip.and_then(|k| scene.textures.get(&k));
+                    let grain = tex.grain.and_then(|k| scene.textures.get(&k));
+                    symphony_vector::stamp::rasterize(st, &tex, tip, grain, m, clip)
+                        .map(|c| (st.id, c))
+                })
+                .collect()
+        };
         for st in d
             .strokes
             .iter()
@@ -330,8 +355,10 @@ fn paint_strokes(
                 }
                 continue;
             }
-            if let Some(tex) = &st.texture {
-                paint_textured(pix, scene, st, tex, m);
+            if st.texture.is_some() {
+                if let Some(c) = stamped.get(&st.id) {
+                    composite_coverage(pix, scene, st, c);
+                }
                 continue;
             }
             let mesh = tessellate(st, m, RASTER_STEP);
@@ -371,21 +398,13 @@ fn paint_strokes(
     }
 }
 
-/// A textured vector stroke: stamped coverage, composited source-over in
-/// the stroke's swatch colour.
-fn paint_textured(
+/// Lay a stamped stroke's coverage down in its colour (source-over).
+fn composite_coverage(
     pix: &mut Pixmap,
     scene: &Scene,
     st: &symphony_core::stroke::Stroke,
-    tex: &symphony_core::stroke::StrokeTexture,
-    m: Affine,
+    c: &symphony_vector::stamp::Coverage,
 ) {
-    let clip = [0, 0, pix.width() as i32, pix.height() as i32];
-    let tip = tex.tip.and_then(|k| scene.textures.get(&k));
-    let grain = tex.grain.and_then(|k| scene.textures.get(&k));
-    let Some(c) = symphony_vector::stamp::rasterize(st, tex, tip, grain, m, clip) else {
-        return;
-    };
     let [r, g, b, alpha] = scene.swatch_rgba(st.swatch);
     let width = pix.width() as i32;
     let data = pix.data_mut();
@@ -432,14 +451,26 @@ pub struct ExportJob {
     pub movie_fps: Option<f32>,
 }
 
+/// How an export went.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Exported {
+    /// Frames kept from an earlier export of the same scene that didn't
+    /// finish (a crash, a full disk, Cancel), so not rendered again.
+    pub reused: u32,
+}
+
 /// Run an export. `progress` gets (done, total). Stops early, cleanly, when
 /// `cancel` is set. Errors are plain sentences (DESIGN D10.3).
+///
+/// Nothing finished is ever lost (see [`checkpoint`]): each frame is kept
+/// on disk as soon as it's rendered, and exporting the same scene again
+/// to the same place continues from there.
 pub fn export(
     scene: &Scene,
     job: &ExportJob,
     cancel: &AtomicBool,
     progress: &dyn Fn(u32, u32),
-) -> Result<(), String> {
+) -> Result<Exported, String> {
     let (w, h) = (
         ((scene.settings.width as f32 * job.scale).round() as u32).max(1),
         ((scene.settings.height as f32 * job.scale).round() as u32).max(1),
@@ -448,26 +479,42 @@ pub fn export(
     let total = last - first + 1;
     match job.format {
         Format::PngSequence => {
-            for (i, f) in (first..=last).enumerate() {
-                if cancel.load(Ordering::SeqCst) {
-                    return Err("Export cancelled.".into());
-                }
-                let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
-                let out = numbered(&job.path, f);
-                img.save(&out)
-                    .map_err(|e| format!("Couldn't write {} ({e}).", out.display()))?;
-                progress(i as u32 + 1, total);
-            }
-            Ok(())
+            let key = checkpoint::fingerprint(scene, w, h);
+            let ck = checkpoint::Checkpoint::sequence(&job.path, &key, w, h)?;
+            let frames: Vec<u32> = (first..=last).collect();
+            // The frames are the output: they're written (and compressed)
+            // across the cores as they render, so there's nothing to do in
+            // order but count.
+            let reused = in_order(
+                scene,
+                &frames,
+                w,
+                h,
+                &ck,
+                cancel,
+                |_| (),
+                |i, _, ()| {
+                    progress(i as u32 + 1, total);
+                    Ok(())
+                },
+            )?;
+            ck.finish();
+            Ok(Exported { reused })
         }
         Format::Mp4Movie => {
             let codec = job.codec.as_deref().ok_or(
                 "Movie export needs the OpenH264 codec. Download it in Preferences > Video.",
             )?;
-            movie::export_mp4(
+            // 4:2:0 video needs even sizes.
+            let (w, h) = ((w & !1).max(2), (h & !1).max(2));
+            let key = checkpoint::fingerprint(scene, w, h);
+            let ck = checkpoint::Checkpoint::folder(&job.path, &key, w, h)?;
+            let part = checkpoint::with_suffix(&job.path, ".part");
+            let reused = movie::export_mp4(
                 scene,
                 codec,
-                &job.path,
+                &part,
+                &ck,
                 first,
                 last,
                 w,
@@ -475,33 +522,163 @@ pub fn export(
                 job.movie_fps,
                 cancel,
                 progress,
-            )
+            )?;
+            finish_file(&part, &job.path)?;
+            ck.finish();
+            Ok(Exported { reused })
         }
         Format::AnimatedGif => {
-            let file = std::fs::File::create(&job.path)
-                .map_err(|e| format!("Couldn't create {} ({e}).", job.path.display()))?;
-            let mut enc =
-                image::codecs::gif::GifEncoder::new_with_speed(std::io::BufWriter::new(file), 10);
-            enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+            let (gw, gh) = (
+                u16::try_from(w).map_err(|_| "GIFs can be at most 65535 pixels wide.")?,
+                u16::try_from(h).map_err(|_| "GIFs can be at most 65535 pixels tall.")?,
+            );
+            let key = checkpoint::fingerprint(scene, w, h);
+            let ck = checkpoint::Checkpoint::folder(&job.path, &key, w, h)?;
+            let part = checkpoint::with_suffix(&job.path, ".part");
+            let file = std::fs::File::create(&part)
+                .map_err(|e| format!("Couldn't create {} ({e}).", part.display()))?;
+            let mut enc = gif::Encoder::new(std::io::BufWriter::new(file), gw, gh, &[])
+                .map_err(|e| format!("Couldn't start the GIF ({e})."))?;
+            enc.set_repeat(gif::Repeat::Infinite)
                 .map_err(|e| e.to_string())?;
-            let ms = (1000.0 / scene.settings.fps.max(1.0)).round() as u32;
-            for (i, f) in (first..=last).enumerate() {
-                if cancel.load(Ordering::SeqCst) {
-                    return Err("Export cancelled.".into());
-                }
-                let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
-                enc.encode_frame(Frame::from_parts(
-                    img,
-                    0,
-                    0,
-                    Delay::from_numer_denom_ms(ms, 1),
-                ))
-                .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
+            let delay = (100.0 / scene.settings.fps.max(1.0)).round() as u16;
+            let frames: Vec<u32> = (first..=last).collect();
+            // Reducing each frame to 256 colours and compressing it are the
+            // slow parts; both happen across the cores, ahead of writing.
+            let prepare = |img: RgbaImage| {
+                let mut raw = img.into_raw();
+                let mut frame = gif::Frame::from_rgba_speed(gw, gh, &mut raw, GIF_SPEED);
+                frame.delay = delay;
+                frame.dispose = gif::DisposalMethod::Background;
+                frame.make_lzw_pre_encoded();
+                frame
+            };
+            let reused = in_order(scene, &frames, w, h, &ck, cancel, prepare, |i, _, frame| {
+                enc.write_lzw_pre_encoded_frame(&frame)
+                    .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
                 progress(i as u32 + 1, total);
-            }
-            Ok(())
+                Ok(())
+            })?;
+            let unfinished = |e: String| format!("Couldn't finish the GIF ({e}).");
+            let file: std::fs::File = enc
+                .into_inner()
+                .map_err(|e| unfinished(e.to_string()))?
+                .into_inner()
+                .map_err(|e| unfinished(e.error().to_string()))?;
+            file.sync_all().map_err(|e| unfinished(e.to_string()))?;
+            drop(file);
+            finish_file(&part, &job.path)?;
+            ck.finish();
+            Ok(Exported { reused })
         }
     }
+}
+
+/// A finished movie or GIF takes its real name only once it's whole.
+fn finish_file(part: &Path, out: &Path) -> Result<(), String> {
+    std::fs::rename(part, out).map_err(|e| {
+        format!(
+            "Couldn't name the finished file {} ({e}). It is complete at {}.",
+            out.display(),
+            part.display()
+        )
+    })
+}
+
+/// Frames rendered at once while exporting: one per core, fewer for huge
+/// frames so a batch stays within about 256 MB.
+fn batch_len(w: u32, h: u32) -> usize {
+    let frame = (w as usize * h as usize * 4).max(1);
+    rayon::current_num_threads()
+        .min((256usize << 20) / frame)
+        .max(1)
+}
+
+/// GIF colour reduction speed (1 best .. 30 fastest), as before.
+const GIF_SPEED: i32 = 10;
+
+/// Render `frames` (or take them from `ck`, kept from an unfinished
+/// export), keep each in `ck`, `prepare` it, and hand them to `each` in
+/// order (index, frame, prepared). Batches render, save and prepare ahead
+/// across the cores on another thread while `each` runs (writing a movie
+/// or GIF has to go in order on one thread). Returns how many frames were
+/// reused from `ck`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn in_order<T: Send>(
+    scene: &Scene,
+    frames: &[u32],
+    w: u32,
+    h: u32,
+    ck: &checkpoint::Checkpoint,
+    cancel: &AtomicBool,
+    prepare: impl Fn(RgbaImage) -> T + Sync,
+    mut each: impl FnMut(usize, u32, T) -> Result<(), String>,
+) -> Result<u32, String> {
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
+    let batch = batch_len(w, h);
+    let reused = AtomicU32::new(0);
+    let kept = AtomicU32::new(0);
+    let one = |f: u32| -> Result<RgbaImage, String> {
+        if let Some(img) = ck.load(f) {
+            reused.fetch_add(1, Ordering::Relaxed);
+            kept.fetch_add(1, Ordering::Relaxed);
+            return Ok(img);
+        }
+        let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
+        ck.save(f, &img)?;
+        kept.fetch_add(1, Ordering::Relaxed);
+        Ok(img)
+    };
+    let stopped = || {
+        format!(
+            "Export cancelled. The {} frames done are kept: export again to continue.",
+            kept.load(Ordering::Relaxed)
+        )
+    };
+    let result = std::thread::scope(|scope| {
+        // One batch waiting while the next renders: at most three batches
+        // of images exist at once.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Result<T, String>>>(1);
+        let (prepare, one) = (&prepare, &one);
+        scope.spawn(move || {
+            for chunk in frames.chunks(batch) {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                // A movie at a higher rate repeats frames: each is made
+                // once (two threads must never write the same file).
+                let mut unique = chunk.to_vec();
+                unique.sort_unstable();
+                unique.dedup();
+                let images: HashMap<u32, Result<RgbaImage, String>> =
+                    unique.par_iter().map(|&f| (f, one(f))).collect();
+                let prepared = chunk
+                    .par_iter()
+                    .map(|f| images[f].clone().map(prepare))
+                    .collect();
+                if tx.send(prepared).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut i = 0;
+        for prepared in rx {
+            for item in prepared {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(stopped());
+                }
+                each(i, frames[i], item?)?;
+                i += 1;
+            }
+        }
+        if i < frames.len() {
+            return Err(stopped());
+        }
+        Ok(())
+    });
+    result.map(|()| reused.load(Ordering::Relaxed))
 }
 
 /// `shot.png` + frame 7 -> `shot_0007.png`.
@@ -959,6 +1136,84 @@ mod tests {
         assert_eq!(img.get_pixel(190, 90).0, [0, 0, 255, 255]);
         // The line stays in front of the image.
         assert_eq!(img.get_pixel(100, 50).0, [24, 24, 32, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An export that stops part way (Cancel here; a crash or a full disk
+    /// leave the same files) keeps every finished frame, leaves no broken
+    /// file under the real name, and exporting again reuses those frames.
+    /// A damaged frame is rendered again, and a changed scene starts over.
+    #[test]
+    fn an_interrupted_export_loses_nothing() {
+        // Batches of at least three frames on any machine, so all three
+        // are done when the Cancel lands.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(interrupted_export);
+    }
+
+    fn interrupted_export() {
+        let mut s = scene_with_line();
+        let dir = std::env::temp_dir().join(format!("symphony-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (format, name) in [
+            (Format::AnimatedGif, "a.gif"),
+            (Format::PngSequence, "f.png"),
+        ] {
+            let out = dir.join(name);
+            let job = ExportJob {
+                format,
+                path: out.clone(),
+                first: 1,
+                last: 3,
+                scale: 0.5,
+                codec: None,
+                movie_fps: None,
+            };
+            let cancel = AtomicBool::new(false);
+            let stop = |_: u32, _: u32| cancel.store(true, Ordering::SeqCst);
+            let err = export(&s, &job, &cancel, &stop).unwrap_err();
+            assert!(err.contains("kept"), "{err}");
+            let frame = |f: u32| match format {
+                Format::PngSequence => numbered(&out, f),
+                _ => checkpoint::with_suffix(&out, ".partial").join(format!("frame_{f:05}.png")),
+            };
+            if format == Format::AnimatedGif {
+                assert!(!out.exists(), "no unfinished GIF under the real name");
+            }
+            assert!(frame(1).is_file() && frame(3).is_file());
+            // A frame cut short (a power cut while writing).
+            std::fs::write(frame(2), b"\x89PNG").unwrap();
+            let go = AtomicBool::new(false);
+            let done = export(&s, &job, &go, &|_, _| {}).unwrap();
+            assert_eq!(done.reused, 2, "{name}: frames 1 and 3 reused, 2 redone");
+            assert!(out.is_file() || numbered(&out, 2).is_file());
+            assert!(image::open(frame(2)).is_ok() || format == Format::AnimatedGif);
+            if format == Format::AnimatedGif {
+                assert!(!checkpoint::with_suffix(&out, ".partial").exists());
+                assert!(!checkpoint::with_suffix(&out, ".part").exists());
+            }
+        }
+        // A changed scene doesn't reuse old frames.
+        let png = ExportJob {
+            format: Format::PngSequence,
+            path: dir.join("f.png"),
+            first: 1,
+            last: 3,
+            scale: 0.5,
+            codec: None,
+            movie_fps: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let _ = export(&s, &png, &cancel, &|_, _| {
+            cancel.store(true, Ordering::SeqCst)
+        });
+        s.settings.fps = 24.0;
+        let go = AtomicBool::new(false);
+        assert_eq!(export(&s, &png, &go, &|_, _| {}).unwrap().reused, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

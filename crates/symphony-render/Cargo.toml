@@ -6,7 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Stamping a drawing's textured strokes in parallel.
+rayon = "1"
 symphony-core = { path = "../symphony-core" }
+# Fingerprinting the scene so an unfinished export can continue.
+serde_json = "1"
 symphony-vector = { path = "../symphony-vector" }
 tiny-skia = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "webp", "bmp", "tiff", "tga", "exr"] }
@@ -17,3 +21,5 @@ mp4 = "0.14"
 # sRGB bytes without the two float copies `image` keeps; `rayon`
 # decompresses its blocks on all cores.
 exr = { version = "1.74.3", default-features = false, features = ["rayon"] }
+# GIF frames colour-reduced and compressed in parallel (same version image uses).
+gif = "0.14"

@@ -49,5 +49,9 @@ From crates.io. Symphony's change: a live backdrop blur.
 - `src/renderer.rs`: `Renderer::render_range` draws part of the frame
   against the buffers uploaded for all of it; `update_buffers` skips the
   marker without warning.
+- `src/lib.rs` and `src/winit.rs`: timing for performance runs, active
+  only with `SYMPHONY_PERF=1`. They time the paint stages (upload, wait
+  for drawable, record, submit, present) and the gaps around paint, and
+  log slow paints with their biggest mesh.
 
 The app side is `crates/symphony-app/src/backdrop.rs`.
