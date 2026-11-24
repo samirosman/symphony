@@ -199,7 +199,14 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
         ui.selectable_value(&mut presets.grid, false, "List");
         ui.selectable_value(&mut presets.grid, true, "Grid");
     });
-    let list = presets.list(tool).clone();
+    // Brush presets show in their own kind only: vector or bitmap.
+    let bitmap = current_settings.texture.is_some();
+    let list: Vec<Preset> = presets
+        .list(tool)
+        .iter()
+        .filter(|p| pencil || p.settings.texture.is_some() == bitmap)
+        .cloned()
+        .collect();
     let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
     let ink = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
     egui::ScrollArea::vertical()
@@ -416,6 +423,41 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
     } else {
         PresetTool::Brush
     };
+    // First the kind of line, since it decides everything below: vector
+    // (clean lines, a pen) or bitmap (textured stamps, a brush). Brushes
+    // that only make textured lines are listed under Bitmap only.
+    if !pencil {
+        let bitmap = s.brush.texture.is_some();
+        let mut want = bitmap;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut want, false, "Vector")
+                .on_hover_text("Clean, solid vector lines");
+            ui.selectable_value(&mut want, true, "Bitmap")
+                .on_hover_text("Textured lines from brush tips, like imported Krita brushes");
+        });
+        if want != bitmap {
+            // Pick up the first preset of that kind, if there is one.
+            let found = presets
+                .list(tool)
+                .iter()
+                .find(|p| p.settings.texture.is_some() == want)
+                .cloned();
+            match found {
+                Some(p) => {
+                    s.brush = p.settings;
+                    presets.set_current(tool, Some(p.name));
+                }
+                None => {
+                    s.brush.texture = want.then(|| symphony_core::stroke::StrokeTexture {
+                        spacing: 0.1,
+                        ..Default::default()
+                    });
+                    presets.set_current(tool, None);
+                }
+            }
+        }
+        ui.add_space(6.0);
+    }
     // The preview is pinned above (tool_properties); then the presets,
     // then the settings, as in Harmony.
     preset_list(ui, s, presets, tool);
@@ -435,28 +477,6 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
         },
     );
     if !pencil {
-        // Harmony's Brush Type.
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let mut textured = b.texture.is_some();
-            ui.selectable_value(&mut textured, false, "Solid vector");
-            ui.selectable_value(&mut textured, true, "Textured vector");
-            if textured != b.texture.is_some() {
-                b.texture = textured.then_some(symphony_core::stroke::StrokeTexture {
-                    tip: None,
-                    grain: None,
-                    spacing: 0.1,
-                    opacity: 1.0,
-                    angle: 0.0,
-                    follow: false,
-                    grain_scale: 1.0,
-                    flow: 1.0,
-                    hardness: 1.0,
-                    opacity_by_pressure: [1.0; 4],
-                    ..Default::default()
-                });
-            }
-        });
         if let Some(t) = &mut b.texture {
             slider(ui, "Spacing", &mut t.spacing, 0.01..=3.0);
             slider(ui, "Opacity", &mut t.opacity, 0.0..=1.0);
@@ -525,20 +545,7 @@ pub fn tool_properties(
     if matches!(s.tool, Tool::Brush | Tool::Pencil) {
         let pencil = s.tool == Tool::Pencil;
         padded(ui, |ui| {
-            if s.pen_modes {
-                // One Pen tool holding both: pick the mode here.
-                ui.horizontal(|ui| {
-                    section(ui, "Pen");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.selectable_value(&mut s.tool, Tool::Pencil, "Pencil")
-                            .on_hover_text("Even, editable centre lines with a thickness profile");
-                        ui.selectable_value(&mut s.tool, Tool::Brush, "Brush")
-                            .on_hover_text("Pressure-shaped lines, textured with imported brushes");
-                    });
-                });
-            } else {
-                section(ui, if pencil { "Pencil" } else { "Brush" });
-            }
+            section(ui, if pencil { "Pencil" } else { "Brush" });
             let pencil = s.tool == Tool::Pencil;
             let b = if pencil { s.pencil } else { s.brush };
             preview(ui, s, &b, pencil);

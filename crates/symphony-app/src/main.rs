@@ -1686,19 +1686,6 @@ impl SymphonyApp {
                         self.maximised = None;
                     }
                     ui.colored_label(theme::TEXT_SECONDARY, "Workspace");
-                    ui.add_space(14.0);
-                    // One import for everything (images, sequences, sound,
-                    // video, brushes, scenes); dropping files works too.
-                    if ui
-                        .button("Import…")
-                        .on_hover_text(
-                            "Images, image sequences, sound, video, brushes and scenes. You can also drop files on the window.",
-                        )
-                        .clicked()
-                    {
-                        let ctx = ui.ctx().clone();
-                        self.import_dialog(&ctx);
-                    }
                     let space = ui
                         .available_rect_before_wrap()
                         .shrink2(egui::vec2(6.0, 0.0));
@@ -1916,56 +1903,48 @@ impl SymphonyApp {
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
         const GROUPS: [&[Tool]; 4] = [
             &[Tool::Select, Tool::Transform],
-            &[Tool::Brush, Tool::Pencil, Tool::Eraser, Tool::LineEditor],
+            &[Tool::Brush, Tool::Eraser, Tool::LineEditor],
             &[Tool::Paint, Tool::CloseGap, Tool::Dropper],
             &[Tool::Hand, Tool::Zoom],
         ];
+        // Only the tools that can act on what you're working on (a smart
+        // toolbar): a selected peg offers Transform and the view tools.
+        let context = self.s.tool_context();
         ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
-        for (group, tools) in GROUPS.iter().enumerate() {
-            if group > 0 {
+        let mut first = true;
+        for tools in GROUPS {
+            let shown: Vec<Tool> = tools.iter().copied().filter(|t| t.fits(context)).collect();
+            if shown.is_empty() {
+                continue;
+            }
+            if !first {
                 ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
             }
-            for &tool in *tools {
-                // Symphony profile: Brush and Pencil share one Pen button,
-                // showing (and returning to) the mode last used.
-                let pen = self.s.pen_modes && matches!(tool, Tool::Brush | Tool::Pencil);
-                if pen && tool == Tool::Pencil {
-                    continue;
-                }
-                if pen {
-                    let mode = self.s.last_pen;
-                    let tip = format!(
-                        "Pen ({} mode)\nBrush: {}\nPencil: {}\nSwitch modes in Tool Properties",
-                        if mode == Tool::Pencil {
-                            "Pencil"
-                        } else {
-                            "Brush"
-                        },
-                        keymap::tooltip(self.profile, Action::ToolBrush),
-                        keymap::tooltip(self.profile, Action::ToolPencil),
-                    );
-                    let response = icons::tool_button(
-                        ui,
-                        tool_icon(mode),
-                        matches!(self.s.tool, Tool::Brush | Tool::Pencil),
-                        true,
-                        &tip,
-                    );
-                    if response.clicked() || response.double_clicked() {
-                        self.s.tool = mode;
-                    }
-                    if response.double_clicked() {
-                        self.open_tool_properties();
-                    }
-                    continue;
-                }
+            first = false;
+            for tool in shown {
                 let mut tip = keymap::tooltip(self.profile, tool_action(tool));
+                // Select shows that it also transforms what it selected.
+                let icon = match tool {
+                    Tool::Select if !self.s.selection.strokes.is_empty() => {
+                        tip.push_str("\nDrag, scale or rotate the selection");
+                        Icon::Transform
+                    }
+                    // The Brush shows its kind: a pen for vector lines, a
+                    // brush for bitmap (textured) ones.
+                    Tool::Brush if self.s.brush.texture.is_none() => Icon::Pen,
+                    Tool::Brush => Icon::Brush,
+                    Tool::Transform => {
+                        tip = format!("Transform the peg\n{tip}");
+                        Icon::Transform
+                    }
+                    _ => tool_icon(tool),
+                };
                 if let Some(milestone) = tool.planned_for() {
                     tip.push_str(&format!("\nComing in {milestone}"));
                 }
                 let response = icons::tool_button(
                     ui,
-                    tool_icon(tool),
+                    icon,
                     self.s.tool == tool,
                     tool.planned_for().is_none(),
                     &tip,
@@ -3725,6 +3704,8 @@ impl SymphonyApp {
                 .chrome(top.response.rect, wallpaper::ChromeSide::Top),
         );
 
+        // Tools follow what you're working on (a peg, or drawings).
+        self.s.fit_tool_to_context();
         self.cursor_feedback(&ctx);
         // Sound follows the playhead (and plays a slice when scrubbing).
         self.player

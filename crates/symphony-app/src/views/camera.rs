@@ -712,17 +712,6 @@ pub fn ui(
             })
             .unwrap_or_default()
     };
-    // An empty frame in the Drawing view says what to do next.
-    if drawing_only && items.is_empty() {
-        let name = s.layer_name(s.selected).to_owned();
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            format!("No drawing on {name} at this frame. Draw to start one."),
-            theme::body(),
-            theme::TEXT_SECONDARY,
-        );
-    }
     // While the Select tool drags, the selected strokes draw through the preview.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
     // Scenes of drawings, pegs and composites (most of them) draw straight

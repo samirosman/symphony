@@ -31,6 +31,15 @@ pub enum Tool {
     LineEditor,
 }
 
+/// What the tools would act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolContext {
+    /// A drawing layer (or nothing in particular).
+    Drawing,
+    /// A peg node: it only moves, rotates and scales what's under it.
+    Peg,
+}
+
 /// Harmony's four Paint tool modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaintMode {
@@ -69,6 +78,16 @@ impl Tool {
         Tool::Hand,
         Tool::Zoom,
     ];
+
+    /// The toolbar only offers tools that can act on what you're working on
+    /// (DESIGN: a smart toolbar). Drawing tools work on drawings; a peg
+    /// only moves, so on a peg it's Transform and the view tools.
+    pub fn fits(self, context: ToolContext) -> bool {
+        match context {
+            ToolContext::Drawing => !matches!(self, Tool::Transform | Tool::Pencil),
+            ToolContext::Peg => matches!(self, Tool::Transform | Tool::Hand | Tool::Zoom),
+        }
+    }
 
     /// Which milestone brings this tool, if it isn't built yet.
     pub fn planned_for(self) -> Option<&'static str> {
@@ -321,6 +340,8 @@ pub struct Session {
     pub playing: bool,
     pub selected: usize,
     pub selected_node: Option<NodeId>,
+    /// The drawing tool to return to after working on a peg.
+    pub last_drawing_tool: Tool,
     pub reveal_node_track: Option<NodeId>,
     pub tool: Tool,
     pub brush: BrushSettings,
@@ -426,6 +447,7 @@ impl Session {
             playing: false,
             selected: 0,
             selected_node: None,
+            last_drawing_tool: Tool::Brush,
             reveal_node_track: None,
             tool: Tool::Brush,
             brush: BrushSettings {
@@ -1415,6 +1437,36 @@ impl Session {
         self.selection = Selection {
             drawing: Some(drawing),
             strokes: ids,
+        };
+    }
+
+    /// What the tools act on now: a selected peg node, or drawings.
+    pub fn tool_context(&self) -> ToolContext {
+        let peg = self
+            .selected_node
+            .and_then(|id| self.doc.graph.node(id))
+            .is_some_and(|n| matches!(n.kind, symphony_core::graph::NodeKind::Peg(_)));
+        if peg {
+            ToolContext::Peg
+        } else {
+            ToolContext::Drawing
+        }
+    }
+
+    /// Keep the current tool one the context offers: picking a peg moves
+    /// to Transform, going back to drawings returns to the last drawing
+    /// tool.
+    pub fn fit_tool_to_context(&mut self) {
+        let context = self.tool_context();
+        if self.tool.fits(context) {
+            if context == ToolContext::Drawing {
+                self.last_drawing_tool = self.tool;
+            }
+            return;
+        }
+        self.tool = match context {
+            ToolContext::Peg => Tool::Transform,
+            ToolContext::Drawing => self.last_drawing_tool,
         };
     }
 

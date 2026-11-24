@@ -26,8 +26,8 @@ pub enum Kind {
     Unknown,
 }
 
-const IMAGES: [&str; 9] = [
-    "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif", "tga",
+const IMAGES: [&str; 10] = [
+    "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif", "tga", "svg",
 ];
 const SOUNDS: [&str; 8] = ["wav", "mp3", "ogg", "flac", "m4a", "aac", "aif", "aiff"];
 const VIDEOS: [&str; 3] = ["mp4", "mov", "m4v"];
@@ -177,11 +177,40 @@ pub fn stage_images_into(paths: &[PathBuf], cache: &Path) -> Outcome {
                 continue;
             }
         };
-        let size = match image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|r| r.into_dimensions().ok())
-        {
+        let mut ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| "png".into());
+        // SVG is drawn into a sharp picture here; the rest of Symphony
+        // then treats it like any other image.
+        let bytes = if ext == "svg" {
+            match rasterize_svg(&bytes) {
+                Ok(png) => {
+                    ext = "png".into();
+                    png
+                }
+                Err(e) => {
+                    problems.push(format!("{shown}: {e}"));
+                    continue;
+                }
+            }
+        } else {
+            bytes
+        };
+        // The extension says the format first: TGA has no signature to
+        // recognise it by, so guessing from the contents alone fails.
+        let reader = image::ImageReader::new(std::io::Cursor::new(&bytes));
+        let reader = match image::ImageFormat::from_extension(&ext) {
+            Some(f) => {
+                let mut r = reader;
+                r.set_format(f);
+                r
+            }
+            None => reader
+                .with_guessed_format()
+                .unwrap_or_else(|_| image::ImageReader::new(std::io::Cursor::new(&bytes))),
+        };
+        let size = match reader.into_dimensions().ok() {
             Some((w, h)) if w > 0 && h > 0 && w <= 16_384 && h <= 16_384 => [w, h],
             _ => {
                 problems.push(format!("{shown}: not an image Symphony can read"));
@@ -189,10 +218,6 @@ pub fn stage_images_into(paths: &[PathBuf], cache: &Path) -> Outcome {
             }
         };
         let key = content_key(&bytes);
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_else(|| "png".into());
         let file = format!("{key:016x}.{ext}");
         let dest = cache.join(&file);
         if !dest.is_file() {
@@ -264,6 +289,30 @@ fn group(staged: Vec<(PathBuf, Staged)>) -> Vec<ImageGroup> {
             g
         })
         .collect()
+}
+
+/// Longest side, in pixels, an SVG is drawn at: sharp on a 4K frame.
+const SVG_EDGE: f32 = 4096.0;
+
+/// Draw an SVG into a PNG, its longest side `SVG_EDGE`.
+fn rasterize_svg(svg: &[u8]) -> Result<Vec<u8>, String> {
+    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default())
+        .map_err(|_| "not an SVG Symphony can read".to_owned())?;
+    let size = tree.size();
+    let k = SVG_EDGE / size.width().max(size.height()).max(1.0);
+    let (w, h) = (
+        (size.width() * k).round().max(1.0) as u32,
+        (size.height() * k).round().max(1.0) as u32,
+    );
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or("the SVG has no size")?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(k, k),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("couldn't convert the SVG ({e})"))
 }
 
 /// A sound file, copied into the media cache and decoded.

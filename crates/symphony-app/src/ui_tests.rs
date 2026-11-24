@@ -613,39 +613,36 @@ fn line_edit_cost() {
     println!("line_edit_cost: {:?} per push step", start.elapsed() / 60);
 }
 
-/// Symphony profile: Brush and Pencil are modes of one Pen tool, switched
-/// at the top of Tool Properties; each mode keeps its own settings.
+/// The toolbar offers what fits the work: a peg gets Transform, and
+/// coming back to drawings returns to the last drawing tool.
 #[test]
-fn pen_tool_switches_between_brush_and_pencil_modes() {
-    use egui_kittest::kittest::Queryable;
-    let mut s = Session::new_scene();
-    s.pen_modes = true;
+fn tools_follow_what_you_work_on() {
+    use crate::session::{Tool, ToolContext};
+    let mut s = crate::session::Session::new_scene();
     s.tool = Tool::Brush;
-    s.pencil.max_width = 7.0;
-    s.brush.max_width = 19.0;
-    // The size sliders' value boxes have no accessible name yet (a known
-    // gap, tracked separately), so this test skips that check.
-    let mut h = Harness::builder()
-        .with_size(Vec2::new(360.0, 700.0))
-        .with_accessibility_check(false)
-        .build_ui_state(
-            |ui, st: &mut (Session, crate::presets::Presets)| {
-                crate::views::panels::tool_properties(ui, &mut st.0, &mut st.1, None);
-            },
-            (s, crate::presets::Presets::default()),
-        );
-    h.run_steps(2);
-    // One tool, named Pen, with both modes on offer.
-    h.get_by_label("Pen");
-    h.get_by_label("Pencil").click();
-    h.run_steps(2);
-    assert_eq!(h.state().0.tool, Tool::Pencil);
-    h.get_by_label("Brush").click();
-    h.run_steps(2);
-    assert_eq!(h.state().0.tool, Tool::Brush);
-    // Switching modes never mixes their settings.
-    assert_eq!(h.state().0.pencil.max_width, 7.0);
-    assert_eq!(h.state().0.brush.max_width, 19.0);
+    s.fit_tool_to_context();
+    assert_eq!(s.tool_context(), ToolContext::Drawing);
+    assert!(
+        !Tool::Transform.fits(ToolContext::Drawing),
+        "Select transforms selections"
+    );
+    assert!(
+        !Tool::Pencil.fits(ToolContext::Drawing),
+        "the Brush makes vector lines"
+    );
+    let peg = s.doc.layers[0].peg;
+    s.select_graph_node(peg, false);
+    s.fit_tool_to_context();
+    assert_eq!(s.tool_context(), ToolContext::Peg);
+    assert_eq!(s.tool, Tool::Transform);
+    assert!(
+        !Tool::Brush.fits(ToolContext::Peg),
+        "nothing to draw on a peg"
+    );
+    let node = s.doc.layers[0].node;
+    s.select_graph_node(node, false);
+    s.fit_tool_to_context();
+    assert_eq!(s.tool, Tool::Brush, "back to the drawing tool");
 }
 
 /// Searching a blend mode adds a Blend Modes node straight onto the
@@ -1180,4 +1177,31 @@ fn outline_cost() {
     let t = std::time::Instant::now();
     let _ = symphony_vector::shape::erase(&o[0], &eraser);
     println!("one cut: {:?}", t.elapsed());
+}
+
+/// TGA (no file signature) and SVG (vector) import as pictures.
+#[test]
+fn tga_and_svg_import() {
+    let dir = std::env::temp_dir().join(format!("symphony-tga-svg-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let tga = dir.join("bg.tga");
+    image::RgbImage::from_pixel(32, 18, image::Rgb([10, 200, 30]))
+        .save(&tga)
+        .unwrap();
+    let svg = dir.join("logo.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#e03020"/></svg>"##,
+    )
+    .unwrap();
+    let out = crate::import::stage_images_into(&[tga, svg], &cache);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    let frames: Vec<_> = out.groups.iter().flat_map(|g| g.frames.iter()).collect();
+    assert_eq!(frames.len(), 2);
+    let svg_frame = frames.iter().find(|f| f.name == "logo").unwrap();
+    assert_eq!(svg_frame.size, [4096, 2048], "drawn sharp, same shape");
+    let px = image::open(cache.join(&svg_frame.file)).unwrap().to_rgba8();
+    assert_eq!(px.get_pixel(100, 100).0, [224, 48, 32, 255]);
+    std::fs::remove_dir_all(&dir).ok();
 }
