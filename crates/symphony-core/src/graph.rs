@@ -83,6 +83,8 @@ pub enum Effect {
     },
     Blur {
         radius: f32,
+        #[serde(default)]
+        mode: BlurMode,
     },
     Grain {
         amount: f32,
@@ -97,6 +99,38 @@ pub enum Effect {
         mode: BlendMode,
         amount: f32,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum BlurMode {
+    #[default]
+    Box,
+    Gaussian,
+    Motion {
+        angle: f32,
+    },
+    RadialSpin,
+    RadialZoom,
+}
+
+impl BlurMode {
+    pub const ALL: [Self; 5] = [
+        Self::Box,
+        Self::Gaussian,
+        Self::Motion { angle: 0.0 },
+        Self::RadialSpin,
+        Self::RadialZoom,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Box => "Box",
+            Self::Gaussian => "Gaussian",
+            Self::Motion { .. } => "Motion",
+            Self::RadialSpin => "Radial Spin",
+            Self::RadialZoom => "Radial Zoom",
+        }
+    }
 }
 
 /// How an image combines with what's behind it. Formulas follow the W3C
@@ -261,8 +295,27 @@ impl NodeKey {
     fn between(self, next: Self, t: f32) -> Self {
         let lerp = |from: f32, to: f32| from + (to - from) * t;
         let effect = match (self.effect, next.effect) {
-            (Some(Effect::Blur { radius: a }), Some(Effect::Blur { radius: b })) => {
-                Some(Effect::Blur { radius: lerp(a, b) })
+            (
+                Some(Effect::Blur { radius: a, mode }),
+                Some(Effect::Blur {
+                    radius: b,
+                    mode: next,
+                }),
+            ) => {
+                let mode = match (mode, next) {
+                    (BlurMode::Motion { angle: a }, BlurMode::Motion { angle: b }) => {
+                        let delta = (b - a + 180.0).rem_euclid(360.0) - 180.0;
+                        BlurMode::Motion {
+                            angle: (a + delta * t).rem_euclid(360.0),
+                        }
+                    }
+                    _ if mode == next => mode,
+                    _ => return self,
+                };
+                Some(Effect::Blur {
+                    radius: lerp(a, b),
+                    mode,
+                })
             }
             (Some(Effect::Grain { amount: a, seed }), Some(Effect::Grain { amount: b, .. })) => {
                 Some(Effect::Grain {
@@ -709,6 +762,29 @@ impl Graph {
 mod tests {
     use super::*;
     use crate::xsheet::Column;
+
+    #[test]
+    fn blur_reads_legacy_box_settings_and_holds_modes_at_keys() {
+        let effect = serde_json::from_str::<Effect>(r#"{"Blur":{"radius":12.0}}"#).unwrap();
+        assert_eq!(
+            effect,
+            Effect::Blur {
+                radius: 12.0,
+                mode: BlurMode::Box
+            }
+        );
+        let key = |radius, mode| NodeKey {
+            enabled: true,
+            effect: Some(Effect::Blur { radius, mode }),
+            gradient: None,
+        };
+        let start = key(12.0, BlurMode::Box);
+        assert_eq!(start.between(key(24.0, BlurMode::Gaussian), 0.5), start);
+        assert_eq!(
+            start.between(key(24.0, BlurMode::Box), 0.5),
+            key(18.0, BlurMode::Box),
+        );
+    }
 
     /// Body (back) under a peg, Head (front); a Composite into a Display.
     fn scene() -> (Graph, Xsheet, NodeId, NodeId) {

@@ -154,8 +154,13 @@ continues.
 - 🟡 **Pencil**: centreline with thickness, pressure-driven thickness, editable afterwards (draws; editing comes with the Contour/Pencil editors)
 - 🟡 Pencil line textures and pencil presets (presets, Round/Flat tips and thickness stencils done; textures next)
 - 🟡 **Brush**: filled contour, pressure size and opacity, smoothing (size and smoothing done; opacity later)
-- ⬜ Textured vector brushes (greyscale bitmap mask)
-- ⬜ Bitmap layers and bitmap brushes (tip and paper textures, blending)
+- 🟡 **Textured vector brushes** retain editable points and use bitmap tips
+  or grain for appearance. Converted imported presets belong in the vector
+  brush list.
+- ⬜ **Bitmap painting** stores paint as pixels and uses a separate brush
+  category. Implement a pixel canvas with undoable dabs and erasing, then
+  map imported brush dynamics and blending for familiar source-app results.
+  Existing vector imports stay editable.
 - 🟡 Eraser (vector and bitmap): brush strokes and paint lose exactly the eraser's shape (outlines, polygon difference); pencil lines cut along the centreline with Round/Flat tips; pressure size; options for all art layers, all Timeline layers and all frames (done). Still to do: Bevel tip, eraser presets, bitmap.
 - ⬜ Line, Rectangle, Ellipse and Polyline tools
 - ⬜ Text tool

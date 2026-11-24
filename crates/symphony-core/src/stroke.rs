@@ -5,12 +5,65 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::Id;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
     /// 0..=1 after the pressure curve.
     pub pressure: f32,
+    /// How the pen was held here (tilt and rotation), so brushes that
+    /// follow them still do after the line is edited. Zero for mice and
+    /// for lines drawn before Symphony kept it.
+    #[serde(default, skip_serializing_if = "Pen::is_level")]
+    pub pen: Pen,
+}
+
+/// The pen's attitude at a point, in degrees.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pen {
+    /// How far the pen leans from upright, 0 (upright) ..= 90 (flat).
+    #[serde(default)]
+    pub tilt: f32,
+    /// Which way it leans, counter-clockwise from +x (Krita's "ascension").
+    #[serde(default)]
+    pub azimuth: f32,
+    /// Barrel rotation (pens that report it).
+    #[serde(default)]
+    pub rotation: f32,
+}
+
+impl Pen {
+    pub fn is_level(&self) -> bool {
+        *self == Pen::default()
+    }
+
+    /// From a tablet's tilt along x and y (degrees) and barrel rotation.
+    pub fn from_tilt(tilt_x: f32, tilt_y: f32, rotation: f32) -> Self {
+        let ok = |v: f32| if v.is_finite() { v } else { 0.0 };
+        let (tx, ty) = (ok(tilt_x), ok(tilt_y));
+        Pen {
+            tilt: tx.hypot(ty).min(90.0),
+            azimuth: if tx == 0.0 && ty == 0.0 {
+                0.0
+            } else {
+                ty.atan2(tx).to_degrees()
+            },
+            rotation: ok(rotation),
+        }
+    }
+
+    /// Between two pens; angles take the short way round.
+    pub fn lerp(a: Pen, b: Pen, t: f32) -> Pen {
+        let angle = |x: f32, y: f32| {
+            let d = (y - x + 540.0).rem_euclid(360.0) - 180.0;
+            x + d * t
+        };
+        Pen {
+            tilt: a.tilt + (b.tilt - a.tilt) * t,
+            azimuth: angle(a.azimuth, b.azimuth),
+            rotation: angle(a.rotation, b.rotation),
+        }
+    }
 }
 
 /// How a stroke is shaped (DESIGN/RESEARCH: Harmony's pencil vs brush).
@@ -120,6 +173,67 @@ pub struct StrokeTexture {
     /// instead of `spacing * size`. 0 is off.
     #[serde(default)]
     pub auto_spacing: f32,
+    /// Randomness and pressure shaping per stamp (Krita's Scatter,
+    /// Rotation and Ratio options, Photoshop's Shape Dynamics, Scattering
+    /// and Transfer). Seeded by the stroke, so a stroke looks the same on
+    /// every redraw.
+    #[serde(default, skip_serializing_if = "Dynamics::is_still")]
+    pub dynamics: Dynamics,
+    /// A vector brush made from this bitmap brush: the tip's shape is
+    /// stamped along the line and merged into one clean outline (no
+    /// pixels), instead of painting the tip image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vector: bool,
+}
+
+/// Per-stamp variation of a textured brush. All zero is a steady brush.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Dynamics {
+    /// Each stamp lands up to this many diameters from the line, in a
+    /// random direction (Krita Scatter, Photoshop Scattering).
+    #[serde(default)]
+    pub scatter: f32,
+    /// Scatter grows with pen pressure (Krita's pressure sensor on Scatter).
+    #[serde(default)]
+    pub scatter_pressure: bool,
+    /// Each stamp is up to this fraction smaller, at random, 0..=1.
+    #[serde(default)]
+    pub size_jitter: f32,
+    /// Each stamp turns up to this many degrees either way, at random.
+    #[serde(default)]
+    pub angle_jitter: f32,
+    /// The whole stroke turns up to this many degrees either way, at random
+    /// (Krita's "fuzzy stroke" rotation).
+    #[serde(default)]
+    pub stroke_angle_jitter: f32,
+    /// Tip roundness, height over width, 0..=1; 0 means round (1).
+    #[serde(default)]
+    pub roundness: f32,
+    /// Roundness follows pen pressure (Krita's pressure sensor on Ratio):
+    /// light pressure flattens the tip towards `roundness`.
+    #[serde(default)]
+    pub roundness_pressure: bool,
+    /// Each stamp's opacity and flow drop by up to these fractions.
+    #[serde(default)]
+    pub opacity_jitter: f32,
+    #[serde(default)]
+    pub flow_jitter: f32,
+    /// The tip turns to the way the pen leans (Krita's "ascension").
+    #[serde(default)]
+    pub angle_tilt: bool,
+    /// The tip turns with the pen's barrel rotation.
+    #[serde(default)]
+    pub angle_barrel: bool,
+    /// Leaning the pen flattens the tip towards `roundness` (Krita's
+    /// "declination" on Ratio): upright is round, flat is flattest.
+    #[serde(default)]
+    pub roundness_tilt: bool,
+}
+
+impl Dynamics {
+    pub fn is_still(&self) -> bool {
+        *self == Dynamics::default()
+    }
 }
 
 /// How the grain combines with each stamp. Formulas follow Krita 5.0's
@@ -214,6 +328,8 @@ impl Default for StrokeTexture {
             grain_strength: None,
             grain_offset: [0.0, 0.0],
             auto_spacing: 0.0,
+            dynamics: Dynamics::default(),
+            vector: false,
         }
     }
 }
@@ -326,9 +442,22 @@ pub struct Drawing {
     /// Painted colour zones, drawn under the strokes of their art layer.
     #[serde(default)]
     pub fills: Vec<Fill>,
-    /// An imported image shown under the strokes (Keep as Original Bitmap).
+    /// An imported picture (or one frame of a sequence or video), under the
+    /// fills and lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<crate::bitmap::ImageRef>,
+    pub image: Option<PlacedImage>,
+}
+
+/// An imported image placed in a drawing.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlacedImage {
+    /// Key into `Scene::media`.
+    pub media: u64,
+    /// Where it sits, in drawing units: left, top, width, height.
+    pub rect: [f32; 4],
+    /// How the file stored semi-transparent pixels.
+    #[serde(default)]
+    pub alpha: crate::bitmap::Alpha,
 }
 
 /// A painted zone (Harmony's Paint tool): the closed area found from the

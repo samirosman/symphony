@@ -65,7 +65,6 @@ pub const STATUS_BAR: f32 = 24.0;
 pub const TOOLBAR_BUTTON: f32 = 24.0;
 pub const TOOL_BUTTON: f32 = 32.0;
 pub const TOOL_ICON: f32 = 20.0;
-pub const TOOL_GROUP_GAP: f32 = 12.0;
 pub const TOOLS_STRIP: f32 = 44.0;
 pub const ROW: f32 = 28.0;
 pub const XSHEET_ROW: f32 = 20.0;
@@ -85,6 +84,7 @@ pub const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(23, 23, 23, 23)
 pub const GLASS_RADIUS: u8 = 12;
 pub const GLASS_TOOL_INSET: i8 = 6;
 pub const GLASS_CONTROL_RADIUS: u8 = GLASS_RADIUS - GLASS_TOOL_INSET as u8;
+#[cfg(feature = "dock")]
 const GLASS_TAB_INSET: i8 = 5;
 
 // §6.3 radii.
@@ -274,7 +274,7 @@ pub fn feather_panel(painter: &egui::Painter, rect: egui::Rect, colour: Color32,
 }
 
 /// Project dialogs use a denser glass surface over the artwork.
-pub fn glass_modal(ctx: &egui::Context, id: &'static str) -> egui::Modal {
+pub fn glass_modal(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Modal {
     let frame = egui::Frame::popup(&ctx.global_style())
         .fill(Color32::from_rgba_premultiplied(26, 28, 31, 220))
         .corner_radius(GLASS_RADIUS)
@@ -394,8 +394,8 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
         top: 0,
     };
     // Dragging a view: glass-style drop targets with soft fades.
-    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.22);
-    d.overlay.selection_stroke_width = 1.0;
+    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.30);
+    d.overlay.selection_stroke_width = 2.0;
     d.overlay.button_color = GLASS_PANEL;
     d.overlay.button_border_stroke = Stroke::new(1.0, ACCENT_SELECT.gamma_multiply(0.6));
     d.overlay.surface_fade_opacity = 0.45;

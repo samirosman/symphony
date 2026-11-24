@@ -1,8 +1,7 @@
 //! Textured vector strokes on the canvas. Each stroke's coverage comes
 //! from `symphony_vector::stamp` (the same code export uses) and is cached
-//! as a texture, so panning moves it without stamping it again. Zooming,
-//! rotating or editing the line re-stamps it, re-sampling the texture the
-//! way Harmony does for textured vector brushes.
+//! as a texture. Panning moves it, and small zoom changes scale the
+//! cached image until the next resolution band.
 //!
 //! Stamping can take tens of milliseconds for a big brush, so it never
 //! blocks a frame (DESIGN §17). Finished strokes are re-stamped on a
@@ -78,6 +77,51 @@ impl Image {
         mesh.indices = vec![0, 1, 2, 0, 2, 3];
         painter.add(egui::Shape::mesh(mesh));
     }
+
+    /// Show the original stamped texture through the surviving outline
+    /// while an exact re-stamp is in flight.
+    fn draw_clipped(
+        &self,
+        painter: &egui::Painter,
+        stroke: &Stroke,
+        screen: Affine,
+        colour: Color32,
+    ) -> bool {
+        let Some(to_drawing) = self.px.inverse() else {
+            return false;
+        };
+        let mapping = screen.compose(to_drawing);
+        // Cached images at other pan or zoom levels are usable here when
+        // their crop still maps to an axis-aligned rectangle.
+        if mapping.b.abs() > 0.001 || mapping.c.abs() > 0.001 {
+            return false;
+        }
+        let [x, y, w, h] = self.rect;
+        let rect = Rect::from_two_pos(to_screen(mapping, x, y), to_screen(mapping, x + w, y + h));
+        if !rect.intersects(painter.clip_rect()) {
+            return false;
+        }
+        let shape = symphony_vector::fill::fill_mesh(&stroke.shape, Affine::IDENTITY);
+        let mut mesh = egui::Mesh::with_texture(self.handle.id());
+        mesh.vertices.reserve(shape.vertices.len());
+        for [dx, dy] in shape.vertices {
+            let (sx, sy) = screen.apply(dx, dy);
+            let (tx, ty) = self.px.apply(dx, dy);
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: Pos2::new(sx, sy),
+                uv: Pos2::new((tx - x) / w, (ty - y) / h),
+                color: colour,
+            });
+        }
+        mesh.indices = shape.indices;
+        painter.with_clip_rect(rect).add(egui::Shape::mesh(mesh));
+        true
+    }
+}
+
+fn to_screen(m: Affine, x: f32, y: f32) -> Pos2 {
+    let (x, y) = m.apply(x, y);
+    Pos2::new(x, y)
 }
 
 struct Job {
@@ -94,6 +138,7 @@ struct Done {
     key: u64,
     id: Id,
     coverage: Option<Coverage>,
+    cancelled: bool,
     local: Affine,
 }
 
@@ -119,23 +164,24 @@ impl Worker {
                         .lock()
                         .map(|m| m.get(&job.stroke.id) == Some(&job.key))
                         .unwrap_or(true);
-                    if !current {
-                        continue;
-                    }
-                    let coverage = symphony_vector::stamp::rasterize(
-                        &job.stroke,
-                        &job.tex,
-                        job.tip.as_deref(),
-                        job.grain.as_deref(),
-                        job.local,
-                        job.clip,
-                    );
-                    let id = job.stroke.id;
+                    let coverage = current
+                        .then(|| {
+                            symphony_vector::stamp::rasterize(
+                                &job.stroke,
+                                &job.tex,
+                                job.tip.as_deref(),
+                                job.grain.as_deref(),
+                                job.local,
+                                job.clip,
+                            )
+                        })
+                        .flatten();
                     if tx
                         .send(Done {
                             key: job.key,
-                            id,
+                            id: job.stroke.id,
                             coverage,
+                            cancelled: !current,
                             local: job.local,
                         })
                         .is_err()
@@ -155,15 +201,31 @@ struct Entry {
     used: u64,
 }
 
+struct InkPreview {
+    image: Image,
+    used: u64,
+    uncut: bool,
+}
+
 #[derive(Default)]
 pub struct Cache {
     entries: HashMap<u64, Entry>,
     /// The last image shown for each stroke, to stand in while re-stamping.
     last: HashMap<Id, (Image, u64)>,
+    /// Recent texture by ink content, independent of view and stroke id.
+    /// Prefer the original, which can cover every surviving piece.
+    ink_history: HashMap<u64, InkPreview>,
     pending: HashSet<u64>,
     textures: HashMap<u64, Arc<Texture>>,
     worker: Option<Worker>,
     frame: u64,
+    sync_remaining: f32,
+    /// Quick low-resolution stamps shown while a stroke's new shape is
+    /// stamped in full in the background (editing), by full key.
+    low_res: HashMap<u64, (Image, u64)>,
+    /// Vector brush strokes: their merged stamp outline, triangulated in
+    /// drawing space, by content key.
+    stamped: HashMap<u64, (Arc<symphony_vector::Mesh>, u64)>,
     /// Plain vector lines' cached triangles (they draw through here too).
     pub vectors: super::vector_cache::VectorMeshes,
 }
@@ -173,30 +235,79 @@ pub struct Cache {
 const CLIP_GRID: f32 = 512.0;
 /// Most cached strokes; old ones are dropped first.
 const MAX_ENTRIES: usize = 512;
-/// Strokes cheaper than this (stamped pixels, roughly) are stamped at once
-/// the first time they appear, so they never pop in.
-const SYNC_BUDGET: f32 = 2_000_000.0;
+/// Total synchronous stamp work per canvas frame, in estimated pixels.
+const SYNC_BUDGET: f32 = 600_000.0;
+const UPLOADS_PER_FRAME: usize = 4;
+/// The smallest scale a quick edit preview is stamped at; below this it
+/// would be mush, so the full stamp is awaited instead.
+const MIN_PREVIEW_SCALE: f32 = 0.18;
+
+fn stamp_view(px: Affine, visible: Rect, ppp: f32) -> (Affine, [i32; 4]) {
+    let scale = symphony_vector::scale_of(px).max(1e-6);
+    let lod = ((scale.log2() * 2.0).round() * 0.5).exp2();
+    // Keep the orientation stable as zoom multiplies the affine matrix.
+    let step = |v: f32| ((v / scale) * 65_536.0).round() / 65_536.0 * lod;
+    let local = Affine {
+        a: step(px.a),
+        b: step(px.b),
+        c: step(px.c),
+        d: step(px.d),
+        tx: 0.0,
+        ty: 0.0,
+    };
+    let bounds = px
+        .inverse()
+        .map(|inverse| {
+            let project = local.compose(inverse);
+            Rect::from_points(
+                &[
+                    visible.left_top(),
+                    visible.right_top(),
+                    visible.right_bottom(),
+                    visible.left_bottom(),
+                ]
+                .map(|point| to_screen(project, point.x * ppp, point.y * ppp)),
+            )
+        })
+        .unwrap_or(Rect::ZERO);
+    let snap = |v: f32, up: bool| {
+        let g = (v / CLIP_GRID).floor() + if up { 2.0 } else { -1.0 };
+        (g * CLIP_GRID) as i32
+    };
+    (
+        local,
+        [
+            snap(bounds.left(), false),
+            snap(bounds.top(), false),
+            snap(bounds.right(), true),
+            snap(bounds.bottom(), true),
+        ],
+    )
+}
 
 impl Cache {
     /// Call once per frame before drawing: collect finished stamping and
     /// forget strokes not drawn lately.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
+        self.sync_remaining = SYNC_BUDGET;
         self.vectors.begin_frame();
         if let Some(w) = &self.worker {
-            while let Ok(d) = w.done.try_recv() {
+            for _ in 0..UPLOADS_PER_FRAME {
+                let Ok(d) = w.done.try_recv() else {
+                    break;
+                };
                 self.pending.remove(&d.key);
-                let image = d
-                    .coverage
-                    .as_ref()
-                    .map(|c| Image::upload(ctx, c, d.local, "stroke"));
-                // Ignore results for strokes that have changed again since.
                 let current = w
                     .latest
                     .lock()
                     .map(|l| l.get(&d.id) == Some(&d.key))
                     .unwrap_or(true);
-                if current {
+                if current && !d.cancelled {
+                    let image = d
+                        .coverage
+                        .as_ref()
+                        .map(|c| Image::upload(ctx, c, d.local, "stroke"));
                     self.entries.insert(
                         d.key,
                         Entry {
@@ -205,11 +316,20 @@ impl Cache {
                         },
                     );
                 }
+                // There may be more completions queued after the upload budget.
+                ctx.request_repaint();
             }
         }
         let keep_after = self.frame.saturating_sub(2);
         self.entries.retain(|_, e| e.used >= keep_after);
         self.last.retain(|_, (_, used)| *used >= keep_after);
+        self.low_res.retain(|_, (_, used)| *used >= keep_after);
+        let keep_stamped_after = self.frame.saturating_sub(120);
+        self.stamped
+            .retain(|_, (_, used)| *used >= keep_stamped_after);
+        let keep_preview_after = self.frame.saturating_sub(16);
+        self.ink_history
+            .retain(|_, preview| preview.used >= keep_preview_after);
         if self.entries.len() > MAX_ENTRIES {
             let mut ages: Vec<u64> = self.entries.values().map(|e| e.used).collect();
             ages.sort_unstable();
@@ -240,6 +360,27 @@ impl Cache {
         }
     }
 
+    fn remember_preview(&mut self, ink: u64, image: Image, uncut: bool) {
+        if let Some(previous) = self.ink_history.get_mut(&ink) {
+            if uncut || !previous.uncut {
+                *previous = InkPreview {
+                    image,
+                    used: self.frame,
+                    uncut,
+                };
+            }
+        } else if self.ink_history.len() < MAX_ENTRIES {
+            self.ink_history.insert(
+                ink,
+                InkPreview {
+                    image,
+                    used: self.frame,
+                    uncut,
+                },
+            );
+        }
+    }
+
     /// Draw `stroke` with its texture under `m` (drawing -> screen points).
     #[allow(clippy::too_many_arguments)]
     pub fn paint(
@@ -253,45 +394,34 @@ impl Cache {
         m: Affine,
     ) {
         let ppp = ctx.pixels_per_point();
-        // Drawing -> physical pixels, split into a whole-pixel offset and a
-        // remainder, so a pan only moves the cached image.
         let px = Affine::scale(ppp, ppp).compose(m);
-        let (ox, oy) = (px.tx.floor(), px.ty.floor());
-        let local = Affine {
-            tx: px.tx - ox,
-            ty: px.ty - oy,
-            ..px
-        };
-        let visible = painter.clip_rect();
-        let snap = |v: f32, up: bool| {
-            let g = (v / CLIP_GRID).floor() + if up { 2.0 } else { -1.0 };
-            (g * CLIP_GRID) as i32
-        };
-        let clip = [
-            snap(visible.left() * ppp - ox, false),
-            snap(visible.top() * ppp - oy, false),
-            snap(visible.right() * ppp - ox, true),
-            snap(visible.bottom() * ppp - oy, true),
-        ];
-        let key = key(stroke, tex, local, clip);
+        let (local, clip) = stamp_view(px, painter.clip_rect(), ppp);
+        let (key, uncut_key, ink) = keys(stroke, tex, local, clip);
+        if let Some(entry) = uncut_key.and_then(|key| self.entries.get_mut(&key)) {
+            entry.used = self.frame;
+        }
+        if let Some(preview) = self.ink_history.get_mut(&ink) {
+            preview.used = self.frame;
+        }
         let frame = self.frame;
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = frame;
-            if let Some(img) = &e.image {
+            if let Some(img) = e.image.clone() {
                 img.draw(painter, px, ppp, colour);
                 self.last.insert(stroke.id, (img.clone(), frame));
+                self.remember_preview(ink, img, uncut_key.is_none());
             }
             return;
         }
         let tip = self.texture(textures, tex.tip);
         let grain = self.texture(textures, tex.grain);
-        let stale = self.last.get_mut(&stroke.id);
         let cost = stroke.points.len() as f32
-            * (stroke.max_width * symphony_vector::scale_of(px)).powi(2)
+            * (stroke.max_width * symphony_vector::scale_of(local)).powi(2)
             / (tex.spacing.max(0.01) * 4.0);
         // Small strokes are stamped now, whether new or just edited (the
         // Line Editor reshaping a line), so they never lag behind.
-        if cost < SYNC_BUDGET {
+        if cost <= self.sync_remaining {
+            self.sync_remaining -= cost;
             let c = symphony_vector::stamp::rasterize(
                 stroke,
                 tex,
@@ -305,31 +435,88 @@ impl Cache {
                 img.draw(painter, px, ppp, colour);
                 self.last.insert(stroke.id, (img.clone(), frame));
             }
+            if let Some(img) = image.as_ref() {
+                self.remember_preview(ink, img.clone(), uncut_key.is_none());
+            }
             self.entries.insert(key, Entry { image, used: frame });
             return;
         }
-        // Otherwise stamp in the background and show the last image moved
-        // into place (or the plain vector shape) until it's ready.
-        match stale {
-            Some((img, used)) => {
+        // A shape this cache hasn't seen yet (a stroke being reshaped, or
+        // one just opened) gets a quick low-resolution stamp now, so it
+        // shows its new shape at once, never a stale or blank one. The full
+        // stamp replaces it when the background is done (once editing
+        // stops, the stroke looks as drawn).
+        let mut previewed = false;
+        if uncut_key.is_none() && !self.ink_history.contains_key(&ink) {
+            if let Some((img, used)) = self.low_res.get_mut(&key) {
                 *used = frame;
                 img.draw(painter, px, ppp, colour);
-            }
-            None => {
-                let mesh = symphony_vector::tessellate(stroke, m, 0.6);
-                let mut out = egui::Mesh::default();
-                for v in &mesh.vertices {
-                    out.colored_vertex(Pos2::new(v[0], v[1]), colour.gamma_multiply(0.35));
+                previewed = true;
+            } else {
+                let s = (self.sync_remaining / cost.max(1.0)).sqrt().min(0.5);
+                if s >= MIN_PREVIEW_SCALE {
+                    self.sync_remaining -= cost * s * s;
+                    let low = Affine::scale(s, s).compose(local);
+                    let clip_low = [
+                        (clip[0] as f32 * s).floor() as i32,
+                        (clip[1] as f32 * s).floor() as i32,
+                        (clip[2] as f32 * s).ceil() as i32,
+                        (clip[3] as f32 * s).ceil() as i32,
+                    ];
+                    if let Some(c) = symphony_vector::stamp::rasterize(
+                        stroke,
+                        tex,
+                        tip.as_deref(),
+                        grain.as_deref(),
+                        low,
+                        clip_low,
+                    ) {
+                        let img = Image::upload(ctx, &c, low, "stroke-preview");
+                        img.draw(painter, px, ppp, colour);
+                        self.low_res.insert(key, (img, frame));
+                        previewed = true;
+                    }
                 }
-                out.indices = mesh.indices;
-                painter.add(egui::Shape::mesh(out));
             }
         }
-        if self.pending.insert(key) {
-            let worker = self.worker.get_or_insert_with(|| Worker::start(ctx));
-            if let Ok(mut l) = worker.latest.lock() {
-                l.insert(stroke.id, key);
+        // Expensive strokes stamp in the background. Keep a cached texture
+        // visible when available, including a clipped preview for erasing.
+        let clipped = previewed
+            || uncut_key.is_some_and(|key| {
+                self.entries
+                    .get(&key)
+                    .and_then(|e| e.image.as_ref())
+                    .or_else(|| self.ink_history.get(&ink).map(|preview| &preview.image))
+                    .is_some_and(|image| image.draw_clipped(painter, stroke, m, colour))
+            });
+        if !clipped {
+            match self.last.get_mut(&stroke.id) {
+                Some((img, used)) => {
+                    *used = frame;
+                    img.draw(painter, px, ppp, colour);
+                    if uncut_key.is_none() {
+                        let image = img.clone();
+                        self.remember_preview(ink, image, true);
+                    }
+                }
+                None if stroke.shape.is_empty() => {
+                    let mesh = symphony_vector::tessellate(stroke, m, 0.6);
+                    let mut out = egui::Mesh::default();
+                    for v in &mesh.vertices {
+                        out.colored_vertex(Pos2::new(v[0], v[1]), colour.gamma_multiply(0.35));
+                    }
+                    out.indices = mesh.indices;
+                    painter.add(egui::Shape::mesh(out));
+                }
+                // A genuinely cold cache has no textured image to show yet.
+                None => {}
             }
+        }
+        let worker = self.worker.get_or_insert_with(|| Worker::start(ctx));
+        if let Ok(mut latest) = worker.latest.lock() {
+            latest.insert(stroke.id, key);
+        }
+        if self.pending.insert(key) {
             let _ = worker.jobs.send(Job {
                 key,
                 stroke: stroke.clone(),
@@ -340,6 +527,80 @@ impl Cache {
                 clip,
             });
         }
+    }
+}
+
+impl Cache {
+    /// A vector brush stroke: the tip's shape stamped along the line and
+    /// merged into one outline, drawn solid. The outline is worked out once
+    /// per shape of the stroke (in drawing space) and only moved after.
+    pub fn paint_stamped(
+        &mut self,
+        painter: &egui::Painter,
+        textures: &BTreeMap<u64, Texture>,
+        stroke: &Stroke,
+        tex: &StrokeTexture,
+        colour: Color32,
+        m: Affine,
+    ) {
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for p in &stroke.points {
+                (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
+                (
+                    p.pen.tilt.to_bits(),
+                    p.pen.azimuth.to_bits(),
+                    p.pen.rotation.to_bits(),
+                )
+                    .hash(&mut h);
+            }
+            (
+                stroke.min_width.to_bits(),
+                stroke.max_width.to_bits(),
+                stroke.id.0,
+            )
+                .hash(&mut h);
+            format!("{tex:?}").hash(&mut h);
+            for ring in &stroke.shape {
+                for &[x, y] in ring {
+                    (x.to_bits(), y.to_bits()).hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        let frame = self.frame;
+        let mesh = match self.stamped.get_mut(&key) {
+            Some((mesh, used)) => {
+                *used = frame;
+                mesh.clone()
+            }
+            None => {
+                let tip = self.texture(textures, tex.tip);
+                let shapes =
+                    symphony_vector::stamped::vector_brush_shapes(stroke, tex, tip.as_deref());
+                let mut all = symphony_vector::Mesh::default();
+                for shape in &shapes {
+                    let part = symphony_vector::fill::fill_mesh(shape, Affine::IDENTITY);
+                    let base = all.vertices.len() as u32;
+                    all.vertices.extend(part.vertices);
+                    all.indices.extend(part.indices.iter().map(|i| i + base));
+                }
+                let mesh = Arc::new(all);
+                self.stamped.insert(key, (mesh.clone(), frame));
+                mesh
+            }
+        };
+        if mesh.indices.is_empty() {
+            return;
+        }
+        let mut out = egui::Mesh::default();
+        out.vertices.reserve(mesh.vertices.len());
+        for &[x, y] in &mesh.vertices {
+            let (sx, sy) = m.apply(x, y);
+            out.colored_vertex(Pos2::new(sx, sy), colour);
+        }
+        out.indices = mesh.indices.clone();
+        painter.add(egui::Shape::mesh(out));
     }
 }
 
@@ -401,14 +662,15 @@ impl Live {
     }
 }
 
-fn key(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> u64 {
+fn keys(
+    stroke: &Stroke,
+    tex: &StrokeTexture,
+    m: Affine,
+    clip: [i32; 4],
+) -> (u64, Option<u64>, u64) {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for p in &stroke.points {
         (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
-    }
-    // An erased stroke's outline changes what shows.
-    for q in stroke.shape.iter().flatten() {
-        (q[0].to_bits(), q[1].to_bits()).hash(&mut h);
     }
     (stroke.min_width.to_bits(), stroke.max_width.to_bits()).hash(&mut h);
     (
@@ -423,11 +685,54 @@ fn key(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> u64 {
     for v in tex.opacity_by_pressure {
         v.to_bits().hash(&mut h);
     }
+    for curve in [
+        tex.opacity_curve,
+        tex.size_curve,
+        tex.flow_curve,
+        tex.grain_strength,
+    ] {
+        curve.map(|curve| curve.0.map(f32::to_bits)).hash(&mut h);
+    }
+    (
+        tex.grain_mode as u8,
+        tex.grain_offset.map(f32::to_bits),
+        tex.auto_spacing.to_bits(),
+    )
+        .hash(&mut h);
+    // How the pen was held, and the brush's dynamics: both change the
+    // stamps. With dynamics on, the stroke's own random seed (its id) does
+    // too, so look-alike strokes don't share one picture.
+    for p in &stroke.points {
+        if !p.pen.is_level() {
+            (
+                p.pen.tilt.to_bits(),
+                p.pen.azimuth.to_bits(),
+                p.pen.rotation.to_bits(),
+            )
+                .hash(&mut h);
+        }
+    }
+    if !tex.dynamics.is_still() {
+        format!("{:?}", tex.dynamics).hash(&mut h);
+        stroke.id.0.hash(&mut h);
+    }
+    tex.vector.hash(&mut h);
+    let ink = h.finish();
     for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
         v.to_bits().hash(&mut h);
     }
     clip.hash(&mut h);
-    h.finish()
+    let base = h.finish();
+    if stroke.shape.is_empty() {
+        return (base, None, ink);
+    }
+    for ring in &stroke.shape {
+        ring.len().hash(&mut h);
+        for &[x, y] in ring {
+            (x.to_bits(), y.to_bits()).hash(&mut h);
+        }
+    }
+    (h.finish(), Some(base), ink)
 }
 
 /// A sample stroke drawn with a textured brush, for Tool Properties and
@@ -455,6 +760,7 @@ pub fn sample(
                 x: 10.0 + t * (rect.width() - 20.0),
                 y: rect.height() * 0.5 + (t * std::f32::consts::TAU).sin() * wave,
                 pressure: (t * std::f32::consts::PI).sin(),
+                pen: Default::default(),
             }
         })
         .collect();
@@ -471,9 +777,38 @@ pub fn sample(
         shape: Vec::new(),
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    key(&stroke, tex, Affine::scale(ppp, ppp), [0, 0, 0, 0]).hash(&mut h);
+    keys(&stroke, tex, Affine::scale(ppp, ppp), [0, 0, 0, 0])
+        .0
+        .hash(&mut h);
     (rect.width().to_bits(), rect.height().to_bits()).hash(&mut h);
     let id = egui::Id::unique(("brush-sample", h.finish()));
+    // A vector brush: its merged stamp outline, drawn solid.
+    if tex.vector {
+        let mesh = ctx
+            .data(|d| d.get_temp::<Arc<symphony_vector::Mesh>>(id))
+            .unwrap_or_else(|| {
+                let tip = tex.tip.and_then(crate::brush_import::library_texture);
+                let mut all = symphony_vector::Mesh::default();
+                for shape in
+                    symphony_vector::stamped::vector_brush_shapes(&stroke, tex, tip.as_deref())
+                {
+                    let part = symphony_vector::fill::fill_mesh(&shape, Affine::IDENTITY);
+                    let base = all.vertices.len() as u32;
+                    all.vertices.extend(part.vertices);
+                    all.indices.extend(part.indices.iter().map(|i| i + base));
+                }
+                let mesh = Arc::new(all);
+                ctx.data_mut(|d| d.insert_temp(id, mesh.clone()));
+                mesh
+            });
+        let mut out = egui::Mesh::default();
+        for &[x, y] in &mesh.vertices {
+            out.colored_vertex(rect.min + egui::vec2(x, y), ink);
+        }
+        out.indices = mesh.indices.clone();
+        painter.add(egui::Shape::mesh(out));
+        return;
+    }
     let handle = ctx
         .data(|d| d.get_temp::<egui::TextureHandle>(id))
         .or_else(|| {
@@ -520,5 +855,277 @@ pub fn sample(
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             ink,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphony_core::stroke::StrokeKind;
+
+    #[test]
+    fn stamped_view_reuses_a_band_across_pan_and_zoom() {
+        let viewport = Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(810.0, 510.0));
+        let at = |zoom, x, y| Affine::translate(x, y).compose(Affine::scale(zoom, zoom));
+        let start = stamp_view(at(1.0, 70.0, 60.0), viewport, 1.0);
+        assert_eq!(start, stamp_view(at(1.0, 70.35, 61.7), viewport, 1.0));
+        assert_eq!(start, stamp_view(at(1.02, 70.35, 61.7), viewport, 1.0));
+        assert_ne!(start.0, stamp_view(at(1.4, 70.0, 60.0), viewport, 1.0).0);
+    }
+
+    #[test]
+    #[ignore = "CPU navigation benchmark"]
+    fn textured_navigation_cost() {
+        use std::time::{Duration, Instant};
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 640.0));
+        let strokes: Vec<_> = (0..24)
+            .map(|index| {
+                let x = (index % 4) as f32 * 150.0;
+                let y = (index / 4) as f32 * 60.0;
+                Stroke {
+                    id: Id(index + 1),
+                    kind: StrokeKind::Brush,
+                    art: Default::default(),
+                    swatch: Id(0),
+                    min_width: 21.0,
+                    max_width: 28.0,
+                    points: (0..60)
+                        .map(|i| {
+                            let t = i as f32;
+                            symphony_core::stroke::Point {
+                                x: x + t * 1.7,
+                                y: y + (t * 0.15).sin() * 12.0,
+                                pressure: 0.8,
+                                pen: Default::default(),
+                            }
+                        })
+                        .collect(),
+                    tips: Default::default(),
+                    texture: None,
+                    shape: Vec::new(),
+                }
+            })
+            .collect();
+        let tex = StrokeTexture::default();
+        let textures = BTreeMap::new();
+        let mut cache = Cache::default();
+        let mut draw = |m| {
+            let start = Instant::now();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                cache.begin_frame(&ctx);
+                let painter = ui.painter().with_clip_rect(viewport);
+                for stroke in &strokes {
+                    cache.paint(&ctx, &painter, &textures, stroke, &tex, Color32::WHITE, m);
+                }
+            });
+            output.textures_delta.clear();
+            start.elapsed()
+        };
+        let pose = |zoom, dx| Affine::translate(72.0 + dx, 55.0).compose(Affine::scale(zoom, zoom));
+        for _ in 0..24 {
+            draw(pose(1.0, 0.0));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for (label, moving) in [("pan", false), ("zoom", true)] {
+            let mut timings: Vec<_> = (0..40)
+                .map(|frame| {
+                    let zoom = if moving {
+                        1.0 + frame as f32 * 0.012
+                    } else {
+                        1.0
+                    };
+                    let time = draw(pose(zoom, frame as f32 * 0.41));
+                    std::thread::sleep(Duration::from_millis(4));
+                    time
+                })
+                .collect();
+            timings.sort_unstable();
+            println!(
+                "textured {label}: median {:?}, p95 {:?}",
+                timings[20], timings[37]
+            );
+        }
+    }
+
+    fn cut_stroke() -> Stroke {
+        Stroke {
+            id: Id(1),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: 20.0,
+            max_width: 20.0,
+            points: Vec::new(),
+            tips: Default::default(),
+            texture: None,
+            shape: vec![
+                vec![[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]],
+                vec![[15.0, 15.0], [15.0, 25.0], [25.0, 25.0], [25.0, 15.0]],
+            ],
+        }
+    }
+
+    /// A big stroke whose shape is new (being reshaped, or just opened)
+    /// shows a quick low-resolution stamp at once, textured and in its new
+    /// shape, while the full one is stamped in the background.
+    #[test]
+    fn a_reshaped_big_stroke_previews_at_low_resolution() {
+        let ctx = egui::Context::default();
+        let mut stroke = cut_stroke();
+        stroke.shape.clear();
+        stroke.max_width = 120.0;
+        stroke.min_width = 120.0;
+        stroke.points = (0..200)
+            .map(|i| symphony_core::stroke::Point {
+                x: i as f32 * 4.0,
+                y: (i as f32 * 0.1).sin() * 60.0,
+                pressure: 1.0,
+                pen: Default::default(),
+            })
+            .collect();
+        let mut cache = Cache::default();
+        cache.begin_frame(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cache.paint(
+                &ctx,
+                ui.painter(),
+                &BTreeMap::new(),
+                &stroke,
+                &StrokeTexture::default(),
+                Color32::WHITE,
+                Affine::IDENTITY,
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(cache.pending.len(), 1, "the full stamp is queued");
+        let textured = output.shapes.iter().any(|s| {
+            matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default())
+        });
+        assert!(textured, "a textured preview shows right away");
+        let (img, _) = cache.low_res.values().next().expect("a low-res preview");
+        // Full size here is 1 pixel per unit; the preview is at most half.
+        let scale = symphony_vector::scale_of(img.px);
+        assert!(scale <= 0.51, "stamped smaller than full size: {scale}");
+    }
+
+    #[test]
+    fn uncached_cut_waits_for_its_texture() {
+        let ctx = egui::Context::default();
+        let mut stroke = cut_stroke();
+        stroke.max_width = 100.0;
+        stroke.points = vec![
+            symphony_core::stroke::Point {
+                x: 20.0,
+                y: 20.0,
+                pressure: 1.0,
+                pen: Default::default(),
+            };
+            128
+        ];
+        let mut cache = Cache::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cache.paint(
+                &ctx,
+                ui.painter(),
+                &BTreeMap::new(),
+                &stroke,
+                &StrokeTexture::default(),
+                Color32::WHITE,
+                Affine::IDENTITY,
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(cache.pending.len(), 1);
+        assert!(!output
+            .shapes
+            .iter()
+            .any(|shape| matches!(shape.shape, egui::Shape::Mesh(_))));
+    }
+
+    #[test]
+    fn a_recent_texture_survives_a_new_stroke_id_and_zoom_level() {
+        let ctx = egui::Context::default();
+        let mut stroke = cut_stroke();
+        stroke.points = vec![symphony_core::stroke::Point {
+            x: 20.0,
+            y: 20.0,
+            pressure: 1.0,
+            pen: Default::default(),
+        }];
+
+        let tex = StrokeTexture::default();
+        let mut cache = Cache::default();
+        let (_, _, ink) = keys(&stroke, &tex, Affine::IDENTITY, [0; 4]);
+        let image = Image::upload(
+            &ctx,
+            &Coverage {
+                x: 10,
+                y: 10,
+                width: 20,
+                height: 20,
+                data: vec![180; 400],
+            },
+            Affine::IDENTITY,
+            "recent erase preview",
+        );
+        let texture_id = image.handle.id();
+        cache.remember_preview(ink, image, true);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cache.paint(
+                &ctx,
+                ui.painter(),
+                &BTreeMap::new(),
+                &stroke,
+                &tex,
+                Color32::WHITE,
+                Affine::scale(1.4, 1.4),
+            );
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Mesh(mesh) if mesh.texture_id == texture_id)
+        }));
+    }
+
+    #[test]
+    fn cached_erase_preview_keeps_the_texture_and_excludes_the_hole() {
+        let ctx = egui::Context::default();
+        let cut = cut_stroke();
+        let coverage = Coverage {
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            data: vec![180; 400],
+        };
+        let image = Image::upload(&ctx, &coverage, Affine::IDENTITY, "erase preview test");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            image.draw_clipped(ui.painter(), &cut, Affine::IDENTITY, Color32::WHITE);
+        });
+        output.textures_delta.clear();
+        let mesh = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == image.handle.id() => Some(mesh),
+                _ => None,
+            })
+            .expect("cut geometry must use the original texture");
+        assert!(mesh
+            .vertices
+            .iter()
+            .any(|v| v.pos == Pos2::new(15.0, 15.0) && v.uv == Pos2::new(0.25, 0.25)));
+        let area: f32 = mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|ids| {
+                let [a, b, c] = ids.map(|i| mesh.vertices[i as usize].pos);
+                ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
+            })
+            .sum();
+        assert_eq!(area, 300.0);
     }
 }

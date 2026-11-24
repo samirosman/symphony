@@ -156,7 +156,14 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                     if let Some(p) = current.as_ref().and_then(|name| {
                         presets.list_mut(tool).iter_mut().find(|p| &p.name == name)
                     }) {
+                        // Updating a bitmap brush from its vector version
+                        // keeps the brush's stamps.
+                        let texture = match current_settings.texture {
+                            Some(t) if !t.vector => Some(t),
+                            _ => p.settings.texture,
+                        };
                         p.settings = current_settings;
+                        p.settings.texture = texture;
                     }
                     ui.close();
                 }
@@ -196,10 +203,24 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
     // List (name beside its stroke) or Grid (more presets at a glance).
     ui.horizontal(|ui| {
         hint(ui, "View");
-        ui.selectable_value(&mut presets.grid, false, "List");
-        ui.selectable_value(&mut presets.grid, true, "Grid");
+        widgets::segmented(
+            ui,
+            "preset-view",
+            &mut presets.grid,
+            &[(false, "List"), (true, "Grid")],
+            false,
+        );
     });
-    let list = presets.list(tool).clone();
+    // Two kinds of brush, as Tristan set out: Bitmap lists the brushes
+    // made for bitmap painting (textured stamps, like Krita's and
+    // Photoshop's). Vector lists clean vector brushes plus a vector version
+    // of every bitmap brush: the same name, size and smoothing as a solid
+    // line (an approximation; stamps don't map exactly onto curves).
+    let list = if pencil {
+        presets.list(tool).to_vec()
+    } else {
+        brush_list(presets.list(tool), is_bitmap(&current_settings))
+    };
     let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
     let ink = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
     egui::ScrollArea::vertical()
@@ -410,12 +431,85 @@ fn export_presets(s: &mut Session, presets: &Presets) {
     });
 }
 
+/// The Brush presets of one kind: Bitmap is the textured (bitmap-native)
+/// ones; Vector is the clean ones plus a vector version of each bitmap one.
+pub fn brush_list(all: &[Preset], bitmap: bool) -> Vec<Preset> {
+    if bitmap {
+        all.iter()
+            .filter(|p| is_bitmap(&p.settings))
+            .cloned()
+            .collect()
+    } else {
+        all.iter().map(vector_version).collect()
+    }
+}
+
+/// Does this brush paint bitmap stamps (rather than vector lines)?
+pub fn is_bitmap(b: &BrushSettings) -> bool {
+    b.texture.is_some_and(|t| !t.vector)
+}
+
+/// A brush as a true vector brush: a bitmap brush keeps its name, size,
+/// tip and dynamics, but its tip's shape is stamped along the line and
+/// merged into one clean outline instead of painting pixels.
+fn vector_version(p: &Preset) -> Preset {
+    let mut v = p.clone();
+    if let Some(t) = &mut v.settings.texture {
+        t.vector = true;
+    }
+    v
+}
+
 fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pencil: bool) {
     let tool = if pencil {
         PresetTool::Pencil
     } else {
         PresetTool::Brush
     };
+    // First the kind of brush, since it decides the list below.
+    if !pencil {
+        let bitmap = is_bitmap(&s.brush);
+        let mut want = bitmap;
+        widgets::segmented(
+            ui,
+            "brush-kind",
+            &mut want,
+            &[(false, "Vector"), (true, "Bitmap")],
+            false,
+        );
+        if want != bitmap {
+            // Keep the same brush where it exists in the other kind: a
+            // bitmap brush's vector version, or back to the bitmap one.
+            let current = presets.current(tool).map(str::to_owned);
+            let same = current
+                .as_ref()
+                .and_then(|name| presets.list(tool).iter().find(|p| &p.name == name).cloned());
+            let pick = match (want, same) {
+                (false, Some(p)) => Some(vector_version(&p)),
+                (true, Some(p)) if is_bitmap(&p.settings) => Some(p),
+                _ => presets
+                    .list(tool)
+                    .iter()
+                    .find(|p| is_bitmap(&p.settings) == want)
+                    .cloned()
+                    .map(|p| if want { p } else { vector_version(&p) }),
+            };
+            match pick {
+                Some(p) => {
+                    s.brush = p.settings;
+                    presets.set_current(tool, Some(p.name));
+                }
+                None => {
+                    s.brush.texture = want.then(|| symphony_core::stroke::StrokeTexture {
+                        spacing: 0.1,
+                        ..Default::default()
+                    });
+                    presets.set_current(tool, None);
+                }
+            }
+        }
+        ui.add_space(6.0);
+    }
     // The preview is pinned above (tool_properties); then the presets,
     // then the settings, as in Harmony.
     preset_list(ui, s, presets, tool);
@@ -435,28 +529,6 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
         },
     );
     if !pencil {
-        // Harmony's Brush Type.
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let mut textured = b.texture.is_some();
-            ui.selectable_value(&mut textured, false, "Solid vector");
-            ui.selectable_value(&mut textured, true, "Textured vector");
-            if textured != b.texture.is_some() {
-                b.texture = textured.then_some(symphony_core::stroke::StrokeTexture {
-                    tip: None,
-                    grain: None,
-                    spacing: 0.1,
-                    opacity: 1.0,
-                    angle: 0.0,
-                    follow: false,
-                    grain_scale: 1.0,
-                    flow: 1.0,
-                    hardness: 1.0,
-                    opacity_by_pressure: [1.0; 4],
-                    ..Default::default()
-                });
-            }
-        });
         if let Some(t) = &mut b.texture {
             slider(ui, "Spacing", &mut t.spacing, 0.01..=3.0);
             slider(ui, "Opacity", &mut t.opacity, 0.0..=1.0);
@@ -522,23 +594,10 @@ pub fn tool_properties(
 ) {
     // Brush and Pencil: the name and stroke preview stay pinned at the top,
     // so changing any setting below shows its effect right away.
-    if matches!(s.tool, Tool::Brush | Tool::Pencil) {
+    if matches!(s.tool, Tool::Brush | Tool::Line | Tool::Pencil) {
         let pencil = s.tool == Tool::Pencil;
         padded(ui, |ui| {
-            if s.pen_modes {
-                // One Pen tool holding both: pick the mode here.
-                ui.horizontal(|ui| {
-                    section(ui, "Pen");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.selectable_value(&mut s.tool, Tool::Pencil, "Pencil")
-                            .on_hover_text("Even, editable centre lines with a thickness profile");
-                        ui.selectable_value(&mut s.tool, Tool::Brush, "Brush")
-                            .on_hover_text("Pressure-shaped lines, textured with imported brushes");
-                    });
-                });
-            } else {
-                section(ui, if pencil { "Pencil" } else { "Brush" });
-            }
+            section(ui, if pencil { "Pencil" } else { "Brush" });
             let pencil = s.tool == Tool::Pencil;
             let b = if pencil { s.pencil } else { s.brush };
             preview(ui, s, &b, pencil);
@@ -582,6 +641,14 @@ fn tool_properties_body(
     padded(ui, |ui| {
         match s.tool {
             Tool::Brush => brush_controls(ui, s, presets, false),
+            Tool::Line => {
+                hint(
+                    ui,
+                    "Drag a straight line in the Brush's style. Hold Shift to snap to 22.5° steps, hold Alt to bend it into a curve.",
+                );
+                ui.add_space(4.0);
+                brush_controls(ui, s, presets, false);
+            }
             Tool::Pencil => brush_controls(ui, s, presets, true),
             Tool::Eraser => {
                 section(ui, "Eraser");
@@ -594,8 +661,13 @@ fn tool_properties_body(
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     hint(ui, "Tip style");
-                    ui.selectable_value(&mut s.eraser_tip, Tip::Round, "Round");
-                    ui.selectable_value(&mut s.eraser_tip, Tip::Flat, "Flat");
+                    widgets::segmented(
+                        ui,
+                        "eraser-tip",
+                        &mut s.eraser_tip,
+                        &[(Tip::Round, "Round"), (Tip::Flat, "Flat")],
+                        false,
+                    );
                 });
                 hint(ui, "The shape left at the ends of a pencil line where you cut it. Brush lines and paint lose exactly the eraser's shape.");
                 ui.add_space(6.0);
@@ -609,10 +681,13 @@ fn tool_properties_body(
             Tool::Select | Tool::Transform => {
                 let select = s.tool == Tool::Select;
                 section(ui, if select { "Select" } else { "Transform" });
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut s.marquee_mode, false, "Lasso");
-                    ui.selectable_value(&mut s.marquee_mode, true, "Marquee");
-                });
+                widgets::segmented(
+                    ui,
+                    "select-mode",
+                    &mut s.marquee_mode,
+                    &[(false, "Lasso"), (true, "Marquee")],
+                    false,
+                );
                 hint(
                     ui,
                     "Hold Option/Alt to use the other mode for one selection.",
@@ -849,8 +924,10 @@ pub fn colour(ui: &mut egui::Ui, s: &mut Session) {
         let pending = ui.data(|d| d.get_temp::<(Id, Id)>(removal));
         if let Some((id, mut next)) = pending {
             if let Some(sw_name) = s.doc.palette.get(id).map(|sw| sw.name.clone()) {
-                egui::Modal::new(removal).show(ui.ctx(), |ui| {
+                theme::glass_modal(ui.ctx(), removal).show(ui.ctx(), |ui| {
+                    ui.set_max_width(400.0);
                     ui.heading(format!("Remove {}?", sw_name));
+                    ui.add_space(6.0);
                     ui.label("Use this colour for its strokes and fills:");
                     egui::ComboBox::from_id_salt("replacement")
                         .selected_text(s.doc.palette.get(next).map_or("", |sw| sw.name.as_str()))

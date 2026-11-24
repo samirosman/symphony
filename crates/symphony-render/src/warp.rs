@@ -20,10 +20,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use symphony_core::bitmap::ImageRef;
 use symphony_core::deform::{ChainPose, MeshDetail};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
+use symphony_core::stroke::PlacedImage;
 use tiny_skia::{FillRule, Mask, PathBuilder, Pixmap, Transform};
 
 use crate::bitmap;
@@ -42,7 +42,7 @@ pub struct Mesh {
 pub fn paint_image_bent(
     pix: &mut Pixmap,
     scene: &Scene,
-    r: ImageRef,
+    r: PlacedImage,
     m: Affine,
     pose: &ChainPose,
     detail: &MeshDetail,
@@ -51,9 +51,8 @@ pub fn paint_image_bent(
         bitmap::paint_image(pix, scene, r, m);
         return None;
     }
-    let file = scene.images.get(&r.key)?;
     let img = bitmap::cached(scene, r)?;
-    let [x0, y0, x1, y1] = r.rect(file, &scene.settings);
+    let [x0, y0, x1, y1] = bitmap::corners(r);
     // The same cap as the plain image, so a bend never changes its size.
     let m = bitmap::cap_zoom(m, [x1 - x0, y1 - y0], pix);
     let (iw, ih) = (img.width(), img.height());

@@ -1,5 +1,6 @@
 //! Decoding sound files to 32-bit float samples, and the check a file
-//! passes on import. WAV, AIFF and MP3, through Symphonia.
+//! passes on import. WAV, AIFF, MP3, FLAC, Ogg Vorbis and AAC or ALAC
+//! in MP4, through Symphonia.
 //!
 //! Every file is untrusted (E7.6). The size, rate, channel count and
 //! length are checked against the limits in [`symphony_core::sound`]
@@ -171,14 +172,15 @@ fn append(
 }
 
 /// Check a file the user chose to import, and read what the scene keeps
-/// about it. Returns its content key, the [`SoundFile`] for
-/// `Scene::sound_files`, and the decoded samples, so the caller doesn't
-/// decode it again. The format comes from the content, not the name.
+/// about it. Returns its content key, the [`SoundFile`] (its
+/// [`SoundFile::media`] goes in `Scene::media`), and the decoded
+/// samples, so the caller doesn't decode it again. The format comes
+/// from the content, not the name.
 pub fn import_bytes(bytes: Vec<u8>) -> Result<(u64, SoundFile, Samples), String> {
     if bytes.len() as u64 > sound::MAX_FILE_BYTES {
         return Err("the file is larger than 256 MB".into());
     }
-    let format = SoundFormat::sniff(&bytes).ok_or("it isn't a WAV, AIFF or MP3 file")?;
+    let format = SoundFormat::sniff(&bytes).ok_or("it isn't a sound file Symphony can read")?;
     let bytes = Arc::new(bytes);
     let samples = decode(&bytes)?;
     let key = sound::content_key(&bytes);
@@ -203,6 +205,16 @@ pub fn import(path: &Path) -> Result<(u64, SoundFile, Samples), String> {
     }
     let bytes = std::fs::read(path).map_err(|e| why(e.to_string()))?;
     import_bytes(bytes).map_err(why)
+}
+
+/// Decode the file at `path` (a scene's media file), within the same
+/// size limit as an import.
+pub fn decode_path(path: &Path) -> Result<Samples, String> {
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > sound::MAX_FILE_BYTES {
+        return Err("the file is larger than 256 MB".into());
+    }
+    decode(&Arc::new(std::fs::read(path).map_err(|e| e.to_string())?))
 }
 
 /// A 16-bit PCM WAV file, for tests.

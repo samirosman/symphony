@@ -7,7 +7,9 @@ mod app_icon;
 mod backdrop;
 mod brush_import;
 mod codec;
+mod crash;
 mod images;
+mod import;
 mod keymap;
 mod presets;
 mod save_dialog;
@@ -18,6 +20,7 @@ mod sound;
 #[cfg(test)]
 mod ui_tests;
 mod update;
+mod video;
 mod views;
 mod wallpaper;
 mod welcome;
@@ -103,6 +106,17 @@ impl ToolDock {
 
     fn horizontal(self) -> bool {
         matches!(self, Self::Top | Self::Bottom)
+    }
+
+    fn preview(self, workspace: egui::Rect) -> egui::Rect {
+        let mut rect = workspace.shrink(theme::GUTTER);
+        match self {
+            Self::Left => rect.max.x = rect.min.x + theme::TOOLS_STRIP,
+            Self::Right => rect.min.x = rect.max.x - theme::TOOLS_STRIP,
+            Self::Top => rect.max.y = rect.min.y + theme::TOOLS_STRIP,
+            Self::Bottom => rect.min.y = rect.max.y - theme::TOOLS_STRIP,
+        }
+        rect.intersect(workspace)
     }
 
     fn nearest(rect: egui::Rect, pos: egui::Pos2) -> Self {
@@ -305,7 +319,16 @@ struct SymphonyApp {
     codec_download: Option<CodecDownload>,
     /// Brush files dropped on the window, being read in the background.
     brush_import: Option<brush_import::BrushImport>,
+    /// Images being read and copied in the background.
+    image_import: Option<import::ImageImport>,
+    sound_import: Option<import::SoundImport>,
+    video_import: Option<video::VideoImport>,
+    /// The scene's sound, in step with the playhead.
+    /// Screenshot runs import their file once.
+    shot_imported: bool,
     show_licences: bool,
+    /// A crash report from last time, offered once (path, text).
+    crash_report: Option<(PathBuf, String)>,
     opening: Option<Opening>,
     notice_seen: Option<(String, f64)>,
 }
@@ -526,6 +549,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Select => Icon::Select,
         Tool::Transform => Icon::Transform,
         Tool::Brush => Icon::Brush,
+        Tool::Line => Icon::Line,
         Tool::Pencil => Icon::Pencil,
         Tool::Eraser => Icon::Eraser,
         Tool::Paint => Icon::Paint,
@@ -542,6 +566,7 @@ fn tool_action(t: Tool) -> Action {
         Tool::Select => Action::ToolSelect,
         Tool::Transform => Action::ToolTransform,
         Tool::Brush => Action::ToolBrush,
+        Tool::Line => Action::ToolLine,
         Tool::Pencil => Action::ToolPencil,
         Tool::Eraser => Action::ToolEraser,
         Tool::Paint => Action::ToolPaint,
@@ -653,6 +678,9 @@ impl SymphonyApp {
             }
         }
         let shot = shot::Shot::from_env();
+        // Screenshot runs never show a crash prompt.
+        let crash_offer = shot.is_none().then(crash::pending).flatten();
+        let shot_recover = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_RECOVER").is_some();
         let demo = shot.is_some() && std::env::var_os("SYMPHONY_SHOT_EMPTY").is_none();
         let mut s = if demo || std::env::var_os("SYMPHONY_DEMO_ART").is_some() {
             Session::demo()
@@ -693,6 +721,15 @@ impl SymphonyApp {
                         }
                     }
                 }
+            }
+            // SYMPHONY_SHOT_BARS=<aspect>,<radius>: black bars, for review.
+            if let Ok(v) = std::env::var("SYMPHONY_SHOT_BARS") {
+                let mut it = v.split(',').map(|x| x.trim().parse::<f32>().unwrap_or(0.0));
+                s.doc.settings.bars = symphony_core::doc::Bars {
+                    on: true,
+                    aspect: it.next().unwrap_or(0.0),
+                    radius: it.next().unwrap_or(0.0),
+                };
             }
             // SYMPHONY_SHOT_RANGE: a playback range (frames 10 to 30).
             if std::env::var_os("SYMPHONY_SHOT_RANGE").is_some() {
@@ -791,7 +828,12 @@ impl SymphonyApp {
             cursor_hint: None,
             shot,
             recovery,
-            recovered: Vec::new(),
+            // SYMPHONY_SHOT_RECOVER: show the recovery dialog, for review.
+            recovered: if shot_recover {
+                vec![(String::new(), None, Scene::new(Default::default()))]
+            } else {
+                Vec::new()
+            },
             pending: None,
             allow_close: false,
             error: None,
@@ -806,7 +848,12 @@ impl SymphonyApp {
             presets,
             codec_download: None,
             brush_import: None,
+            image_import: None,
+            sound_import: None,
+            video_import: None,
+            shot_imported: false,
             show_licences: false,
+            crash_report: crash_offer,
             opening: None,
             notice_seen: None,
         }
@@ -1224,6 +1271,7 @@ impl SymphonyApp {
             Action::Open => self.guard(ctx, Pending::Open),
             Action::Save => self.save(false),
             Action::SaveAs => self.save(true),
+            Action::Import => self.import_dialog(ctx),
             Action::ZoomIn
             | Action::ZoomOut
             | Action::RotateCw
@@ -1233,8 +1281,9 @@ impl SymphonyApp {
             | Action::ResetPan
             | Action::ResetView
             | Action::MirrorView => {
-                self.camera.apply(action);
-                self.drawing.apply(action);
+                let pointer = ctx.pointer_hover_pos();
+                self.camera.apply_at(action, pointer);
+                self.drawing.apply_at(action, pointer);
             }
             Action::Search => {
                 // Tab keeps moving keyboard focus between controls when one
@@ -1454,27 +1503,11 @@ impl SymphonyApp {
                 ui.close();
                 self.guard(ui.ctx(), Pending::ImportHarmony);
             }
-            ui.menu_button("Import", |ui| {
-                if ui
-                    .button("Sound...")
-                    .on_hover_text("Add WAV, AIFF or MP3 files as sound tracks")
-                    .clicked()
-                {
-                    ui.close();
-                    self.sound.import_dialog(&mut self.s, ui.ctx());
-                }
-                if ui
-                    .button("Images...")
-                    .on_hover_text("Add PNG, JPEG or OpenEXR files as an image layer")
-                    .clicked()
-                {
-                    ui.close();
-                    self.images.import_dialog(ui.ctx());
-                }
-            });
             ui.separator();
             self.menu_action(ui, Action::Save);
             self.menu_item(ui, Action::SaveAs, "Save as...".into());
+            ui.separator();
+            self.menu_item(ui, Action::Import, "Import…".into());
             ui.separator();
             ui.menu_button("Export", |ui| {
                 if ui.button("Animated GIF...").clicked() {
@@ -1623,6 +1656,7 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ToggleOnionSkin);
             let on = self.s.show_strokes;
             self.menu_toggle(ui, Action::ShowStrokes, on);
+            ui.checkbox(&mut self.camera.render_effects, "Render Camera Effects");
             ui.separator();
             self.menu_action(ui, Action::ZoomIn);
             self.menu_action(ui, Action::ZoomOut);
@@ -1655,7 +1689,8 @@ impl SymphonyApp {
                 self.show_licences = true;
                 ui.close();
             }
-            if ui.button("Icon sheet").clicked() {
+            // A developer tool, only in debug builds.
+            if cfg!(debug_assertions) && ui.button("Icon sheet").clicked() {
                 self.show_icon_sheet = true;
                 ui.close();
             }
@@ -1749,6 +1784,7 @@ impl SymphonyApp {
 
     fn tools_panel(&mut self, ui: &mut egui::Ui) {
         let dock = self.tool_dock;
+        let workspace = ui.available_rect_before_wrap();
         let panel = match dock {
             ToolDock::Left => egui::Panel::left("tools-left"),
             ToolDock::Right => egui::Panel::right("tools-right"),
@@ -1787,12 +1823,12 @@ impl SymphonyApp {
             .frame(egui::Frame::new().inner_margin(margins))
             .exact_size(theme::TOOLS_STRIP + theme::GUTTER)
             .resizable(false)
-            .show(ui, |ui| self.tools_strip(ui, dock.horizontal()));
+            .show(ui, |ui| self.tools_strip(ui, dock.horizontal(), workspace));
     }
 
     /// A grip moves the toolbar between window edges. The context menu
     /// offers the same docking choices for keyboard and pen users.
-    fn tools_strip(&mut self, ui: &mut egui::Ui, horizontal: bool) {
+    fn tools_strip(&mut self, ui: &mut egui::Ui, horizontal: bool, workspace: egui::Rect) {
         let frame = egui::Frame::new()
             .fill(theme::GLASS_PANEL)
             .corner_radius(theme::GLASS_RADIUS)
@@ -1830,10 +1866,36 @@ impl SymphonyApp {
                     let grip = grip.on_hover_text(
                         "Drag Tools to a window edge, or right-click to choose a side",
                     );
-                    if grip.drag_stopped() {
-                        if let Some(pos) = grip.interact_pointer_pos() {
-                            self.tool_dock = ToolDock::nearest(ui.ctx().content_rect(), pos);
+                    if let Some(pos) = grip
+                        .interact_pointer_pos()
+                        .or_else(|| ui.ctx().pointer_latest_pos())
+                        .filter(|_| grip.dragged() || grip.drag_stopped())
+                    {
+                        let side = ToolDock::nearest(workspace, pos);
+                        if grip.drag_stopped() {
+                            self.tool_dock = side;
                             ui.ctx().request_repaint();
+                        } else {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            let preview = side.preview(workspace);
+                            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                                egui::Order::Foreground,
+                                egui::Id::unique("tools-dock-preview"),
+                            ));
+                            painter.rect(
+                                preview,
+                                theme::GLASS_RADIUS,
+                                theme::ACCENT_SELECT.gamma_multiply(0.18),
+                                egui::Stroke::new(1.0, theme::ACCENT_SELECT),
+                                egui::StrokeKind::Inside,
+                            );
+                            painter.text(
+                                preview.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Tools",
+                                theme::dense(),
+                                theme::TEXT_PRIMARY,
+                            );
                         }
                     }
                     grip.context_menu(|ui| {
@@ -1902,19 +1964,25 @@ impl SymphonyApp {
         {
             self.cursor_hint = Some((format!("Size {:.1}", state.1), now));
         }
-        let Some((text, since)) = self.cursor_hint.clone() else {
+        let Some((text, since)) = self.cursor_hint.as_ref() else {
             return;
         };
         const HOLD: f64 = 0.8;
-        let age = now - since;
-        if age > HOLD + 0.25 {
+        let remaining = HOLD - (now - since);
+        let shown = remaining > 0.0;
+        let opacity = symphony_ui::motion::presence(
+            ctx,
+            egui::Id::unique("symphony-cursor-hint").with("presence"),
+            shown,
+        );
+        if shown {
+            // The shared motion helper requests frames during a fade.
+            // The steady part only needs a wake-up when the hint expires.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+        } else if opacity <= 0.0 {
             self.cursor_hint = None;
             return;
         }
-        ctx.request_repaint();
-        use symphony_ui::motion::Motion;
-        let opacity = Motion::Appear.ease((age / Motion::Appear.seconds()) as f32)
-            * (1.0 - Motion::Dismiss.ease(((age - HOLD) / 0.25).clamp(0.0, 1.0) as f32));
         let Some(p) = ctx.pointer_hover_pos() else {
             return;
         };
@@ -1940,69 +2008,55 @@ impl SymphonyApp {
     }
 
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        const GROUPS: [&[Tool]; 4] = [
-            &[Tool::Select, Tool::Transform],
-            &[Tool::Brush, Tool::Pencil, Tool::Eraser, Tool::LineEditor],
-            &[Tool::Paint, Tool::CloseGap, Tool::Dropper],
-            &[Tool::Hand, Tool::Zoom],
+        const TOOLS: [Tool; 11] = [
+            Tool::Select,
+            Tool::Transform,
+            Tool::Brush,
+            Tool::Line,
+            Tool::Eraser,
+            Tool::LineEditor,
+            Tool::Paint,
+            Tool::CloseGap,
+            Tool::Dropper,
+            Tool::Hand,
+            Tool::Zoom,
         ];
+        let context = self.s.tool_context();
         ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
-        for (group, tools) in GROUPS.iter().enumerate() {
-            if group > 0 {
-                ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
+        for tool in TOOLS.into_iter().filter(|tool| tool.fits(context)) {
+            let mut tip = keymap::tooltip(self.profile, tool_action(tool));
+            // Select shows that it also transforms what it selected.
+            let icon = match tool {
+                Tool::Select if !self.s.selection.strokes.is_empty() => {
+                    tip.push_str("\nDrag, scale or rotate the selection");
+                    Icon::Transform
+                }
+                // Both tips make vector strokes. The icon shows whether
+                // the current brush uses a texture.
+                Tool::Brush if !crate::views::panels::is_bitmap(&self.s.brush) => Icon::Pen,
+                Tool::Brush => Icon::Brush,
+                Tool::Transform => {
+                    tip = format!("Transform the peg\n{tip}");
+                    Icon::Transform
+                }
+                _ => tool_icon(tool),
+            };
+            if let Some(milestone) = tool.planned_for() {
+                tip.push_str(&format!("\nComing in {milestone}"));
             }
-            for &tool in *tools {
-                // Symphony profile: Brush and Pencil share one Pen button,
-                // showing (and returning to) the mode last used.
-                let pen = self.s.pen_modes && matches!(tool, Tool::Brush | Tool::Pencil);
-                if pen && tool == Tool::Pencil {
-                    continue;
-                }
-                if pen {
-                    let mode = self.s.last_pen;
-                    let tip = format!(
-                        "Pen ({} mode)\nBrush: {}\nPencil: {}\nSwitch modes in Tool Properties",
-                        if mode == Tool::Pencil {
-                            "Pencil"
-                        } else {
-                            "Brush"
-                        },
-                        keymap::tooltip(self.profile, Action::ToolBrush),
-                        keymap::tooltip(self.profile, Action::ToolPencil),
-                    );
-                    let response = icons::tool_button(
-                        ui,
-                        tool_icon(mode),
-                        matches!(self.s.tool, Tool::Brush | Tool::Pencil),
-                        true,
-                        &tip,
-                    );
-                    if response.clicked() || response.double_clicked() {
-                        self.s.tool = mode;
-                    }
-                    if response.double_clicked() {
-                        self.open_tool_properties();
-                    }
-                    continue;
-                }
-                let mut tip = keymap::tooltip(self.profile, tool_action(tool));
-                if let Some(milestone) = tool.planned_for() {
-                    tip.push_str(&format!("\nComing in {milestone}"));
-                }
-                let response = icons::tool_button(
-                    ui,
-                    tool_icon(tool),
-                    self.s.tool == tool,
-                    tool.planned_for().is_none(),
-                    &tip,
-                );
-                if response.clicked() {
-                    self.s.tool = tool;
-                }
-                if response.double_clicked() {
-                    self.s.tool = tool;
-                    self.open_tool_properties();
-                }
+            let response = icons::tool_button(
+                ui,
+                icon,
+                self.s.tool == tool,
+                tool.planned_for().is_none(),
+                &tip,
+            );
+            if response.clicked() {
+                self.s.tool = tool;
+            }
+            if response.double_clicked() {
+                self.s.tool = tool;
+                self.open_tool_properties();
             }
         }
     }
@@ -2106,6 +2160,29 @@ impl SymphonyApp {
                         d.total.map(|t| d.done as f32 / t.max(1) as f32),
                     ));
                 }
+                if let Some(v) = &self.video_import {
+                    jobs.push((format!("Importing {}", v.name), None));
+                }
+                if let Some(i) = &self.sound_import {
+                    jobs.push((
+                        if i.files == 1 {
+                            "Importing sound".into()
+                        } else {
+                            format!("Importing {} sounds", i.files)
+                        },
+                        None,
+                    ));
+                }
+                if let Some(i) = &self.image_import {
+                    jobs.push((
+                        if i.files == 1 {
+                            "Importing an image".into()
+                        } else {
+                            format!("Importing {} images", i.files)
+                        },
+                        None,
+                    ));
+                }
                 if let Some(b) = &self.brush_import {
                     jobs.push((
                         if b.files == 1 {
@@ -2183,6 +2260,7 @@ impl SymphonyApp {
                         x: -420.0 + t * 380.0,
                         y: y + (t * std::f32::consts::TAU).sin() * 14.0,
                         pressure: (t * std::f32::consts::PI).sin(),
+                        pen: Default::default(),
                     }
                 })
                 .collect();
@@ -2239,13 +2317,21 @@ impl SymphonyApp {
         }
         for kind in views::node::addable_nodes() {
             let name = views::node::kind_label(&kind);
+            let aliases = if matches!(
+                kind,
+                symphony_core::graph::NodeKind::Effect(symphony_core::graph::Effect::Blur { .. })
+            ) {
+                "node create insert effect box gaussian motion directional radial spin zoom blur"
+            } else {
+                "node create insert effect"
+            };
             let mut entry = Entry::new(
                 &format!("Add {name}"),
                 Kind::Node,
                 Command::AddNode(kind),
                 &format!("node.add.{name}"),
             )
-            .words("node create insert effect");
+            .words(aliases);
             entry.context.clone_from(&node_views);
             out.push(entry);
         }
@@ -2347,6 +2433,13 @@ impl SymphonyApp {
                 "node.properties",
                 "inspect layer settings",
                 &[View::Node, View::LayerProperties][..],
+            ),
+            (
+                "Toggle Camera Effects",
+                Command::ToggleCameraEffects,
+                "camera.effects",
+                "render camera preview draft bypass effects",
+                &[View::Camera][..],
             ),
             (
                 "Render Node Preview",
@@ -2718,6 +2811,9 @@ impl SymphonyApp {
             Command::ShowNodeProperties => {
                 views::node::show_selected_properties(&self.s, &mut self.node_view)
             }
+            Command::ToggleCameraEffects => {
+                self.camera.render_effects = !self.camera.render_effects
+            }
             Command::RenderNodePreview => views::node::show_render_preview(&mut self.node_view),
             Command::ResetNodeView => views::node::reset_view(&mut self.node_view),
             Command::ResetWorkspace => {
@@ -2783,7 +2879,209 @@ impl SymphonyApp {
         self.s.notice = Some(format!("Tool size {new:.1}"));
     }
 
+    /// File > Import…: pick any files Symphony can bring in.
+    fn import_dialog(&mut self, ctx: &egui::Context) {
+        let files = rfd::FileDialog::new()
+            .set_title("Import")
+            .add_filter("Everything Symphony can import", &import::extensions())
+            .pick_files();
+        if let Some(paths) = files {
+            self.import_paths(ctx, paths);
+        }
+    }
+
+    /// Bring in any files, from Import… or dropped on the window: each goes
+    /// to the importer for its kind.
+    fn import_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        use import::Kind;
+        let mut by_kind: std::collections::BTreeMap<u8, Vec<PathBuf>> = Default::default();
+        let mut notes = Vec::new();
+        for p in paths {
+            let slot = match import::classify(&p) {
+                Kind::Image => 0,
+                Kind::Brush => 1,
+                Kind::Preset => 2,
+                Kind::Project => 3,
+                Kind::HarmonyScene => 4,
+                Kind::Sound => 5,
+                Kind::Video => 6,
+                Kind::Unknown => 7,
+            };
+            by_kind.entry(slot).or_default().push(p);
+        }
+        let name = |p: &PathBuf| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        for (slot, paths) in by_kind {
+            match slot {
+                0 => {
+                    if self.image_import.is_some() {
+                        notes.push(
+                            "Still importing the last images. Try these again in a moment.".into(),
+                        );
+                    } else if self.shot.is_some() {
+                        self.image_import = Some(import::ImageImport::finished(paths));
+                    } else {
+                        self.image_import = Some(import::ImageImport::start(paths, ctx));
+                    }
+                }
+                1 => {
+                    if self.brush_import.is_some() {
+                        notes.push(
+                            "Still importing the last brushes. Try these again in a moment.".into(),
+                        );
+                    } else {
+                        self.brush_import = Some(brush_import::BrushImport::start(paths, ctx));
+                    }
+                }
+                2 => {
+                    for p in paths {
+                        notes.push(match self.presets.import(&p) {
+                            Ok(n) => format!("Imported {n} presets from {}.", name(&p)),
+                            Err(e) => format!("{}: {e}", name(&p)),
+                        });
+                    }
+                }
+                3 | 4 => {
+                    // Opening replaces the scene: never over unsaved work.
+                    if let Some(p) = paths.into_iter().next() {
+                        if self.s.dirty() {
+                            notes.push(format!(
+                                "Save or close this scene first, then import {} again.",
+                                name(&p)
+                            ));
+                        } else {
+                            self.open_path(p, slot == 4, ctx);
+                        }
+                    }
+                }
+                5 => {
+                    if self.sound_import.is_some() {
+                        notes.push(
+                            "Still importing the last sound. Try this again in a moment.".into(),
+                        );
+                    } else {
+                        self.sound_import = Some(import::SoundImport::start(paths, ctx));
+                    }
+                }
+                6 => {
+                    // Videos decode with Cisco's OpenH264, which the user
+                    // turns on themselves (Symphony never ships it).
+                    let Some(codec) = codec::installed() else {
+                        notes.push(
+                            "Video import needs Cisco's free OpenH264 codec. Download it once in Preferences > Video, then import again."
+                                .into(),
+                        );
+                        continue;
+                    };
+                    if self.video_import.is_some() {
+                        notes.push(
+                            "Still importing the last video. Try this again in a moment.".into(),
+                        );
+                        continue;
+                    }
+                    let mut paths = paths.into_iter();
+                    if let Some(p) = paths.next() {
+                        let st = &self.s.doc.settings;
+                        self.video_import = Some(video::VideoImport::start(
+                            p,
+                            codec,
+                            st.fps,
+                            [st.width, st.height],
+                            ctx,
+                        ));
+                    }
+                    for p in paths {
+                        notes.push(format!(
+                            "{}: one video at a time. Import it again after this one.",
+                            name(&p)
+                        ));
+                    }
+                }
+                _ => {
+                    for p in paths {
+                        notes.push(format!("{} isn't something Symphony can import.", name(&p)));
+                    }
+                }
+            }
+        }
+        if !notes.is_empty() {
+            self.s.notice = Some(notes.join(" "));
+        }
+    }
+
     fn file_drops(&mut self, ctx: &egui::Context) {
+        // A video finished decoding: its frames become a layer from the
+        // current frame, its sound a clip at the same frame.
+        if let Some(job) = &self.video_import {
+            if let Some(done) = job.poll() {
+                let shown = job.name.clone();
+                self.video_import = None;
+                let frames = done.frames.as_ref().map_or(0, |g| g.frames.len());
+                if let Some(g) = done.frames {
+                    self.s.import_images(vec![g]);
+                }
+                let sound = done.sound.is_some();
+                self.s.import_sounds(done.sound.into_iter().collect());
+                let mut text = if frames > 0 {
+                    format!(
+                        "Imported {shown}: {frames} frames{} at frame {}.",
+                        if sound { " and its sound" } else { "" },
+                        self.s.frame
+                    )
+                } else {
+                    String::new()
+                };
+                if !done.problems.is_empty() {
+                    text.push(' ');
+                    text.push_str(&done.problems.join(". "));
+                }
+                if !text.is_empty() {
+                    self.s.notice = Some(text.trim().to_owned());
+                }
+            }
+        }
+        // Sounds finished decoding: put them on the timeline.
+        if let Some(job) = &self.sound_import {
+            if let Some(done) = job.poll() {
+                self.sound_import = None;
+                let names: Vec<String> = done.sounds.iter().map(|s| s.name.clone()).collect();
+                let placed = self.s.import_sounds(done.sounds);
+                let mut text = match placed {
+                    0 => String::new(),
+                    1 => format!("Imported {} at frame {}.", names[0], self.s.frame),
+                    n => format!("Imported {n} sounds at frame {}.", self.s.frame),
+                };
+                if !done.problems.is_empty() {
+                    text.push(' ');
+                    text.push_str(&done.problems.join(". "));
+                }
+                if !text.is_empty() {
+                    self.s.notice = Some(text.trim().to_owned());
+                }
+            }
+        }
+        // Images finished reading in the background: place them.
+        if let Some(job) = &self.image_import {
+            if let Some(done) = job.poll() {
+                self.image_import = None;
+                let placed = self.s.import_images(done.groups);
+                let mut text = match placed {
+                    0 => String::new(),
+                    1 => "Imported an image.".to_owned(),
+                    n => format!("Imported {n} images."),
+                };
+                if !done.problems.is_empty() {
+                    text.push(' ');
+                    text.push_str(&done.problems.join(". "));
+                }
+                if !text.is_empty() {
+                    self.s.notice = Some(text.trim().to_owned());
+                }
+            }
+        }
         if let Some(job) = &self.brush_import {
             if let Some(done) = job.poll() {
                 self.brush_import = None;
@@ -2872,13 +3170,13 @@ impl SymphonyApp {
                         .inner_margin(egui::Margin::same(18))
                         .show(ui, |ui| {
                             ui.label(
-                                egui::RichText::new("Drop to import brushes")
+                                egui::RichText::new("Drop to import")
                                     .font(egui::FontId::proportional(theme::SIZE_HEADING))
                                     .color(theme::TEXT_PRIMARY),
                             );
                             ui.label(
                                 egui::RichText::new(
-                                    "Photoshop, Krita, MyPaint, Procreate, Clip Studio and GIMP brushes, or Symphony presets",
+                                    "Images and image sequences, sound, video, brushes from other apps, Symphony presets and projects, Harmony scenes",
                                 )
                                 .font(theme::dense())
                                 .color(theme::TEXT_SECONDARY),
@@ -2902,38 +3200,7 @@ impl SymphonyApp {
         if paths.is_empty() {
             return;
         }
-        let (brushes, rest): (Vec<_>, Vec<_>) = paths
-            .into_iter()
-            .partition(|p| symphony_brushes::is_brush_file(p));
-        let mut notes = Vec::new();
-        for p in rest {
-            let is_preset = p
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case(presets::EXTENSION));
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            notes.push(if is_preset {
-                match self.presets.import(&p) {
-                    Ok(n) => format!("Imported {n} presets from {name}."),
-                    Err(e) => format!("{name}: {e}"),
-                }
-            } else {
-                format!("{name} isn't a brush file Symphony can import.")
-            });
-        }
-        if !notes.is_empty() {
-            self.s.notice = Some(notes.join(" "));
-        }
-        if !brushes.is_empty() {
-            if self.brush_import.is_some() {
-                self.s.notice =
-                    Some("Still importing the last brushes. Drop these again in a moment.".into());
-            } else {
-                self.brush_import = Some(brush_import::BrushImport::start(brushes, ctx));
-            }
-        }
+        self.import_paths(ctx, paths);
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -2941,7 +3208,7 @@ impl SymphonyApp {
             let name = symphony_io::project_name(&o.path);
             let elapsed = self.last_time.unwrap_or(0.0) - o.started;
             let mut cancel = false;
-            egui::Modal::new(egui::Id::unique("symphony-opening")).show(ctx, |ui| {
+            theme::glass_modal(ctx, "symphony-opening").show(ctx, |ui| {
                 ui.set_width(320.0);
                 ui.horizontal(|ui| {
                     feedback::spinner(ui, 16.0);
@@ -3038,13 +3305,15 @@ impl SymphonyApp {
         if !self.recovered.is_empty() {
             let n = self.recovered.len();
             let mut choice = None;
-            egui::Modal::new(egui::Id::unique("symphony-recover")).show(ctx, |ui| {
+            theme::glass_modal(ctx, "symphony-recover").show(ctx, |ui| {
+                ui.set_max_width(400.0);
                 ui.heading("Recover unsaved work?");
+                ui.add_space(6.0);
                 let what = if n == 1 { "a scene".to_owned() } else { format!("{n} scenes") };
                 ui.label(format!("Symphony didn't close properly last time. It autosaved {what} you hadn't saved."));
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Recover").clicked() {
+                    if symphony_ui::widgets::primary_button(ui, "Recover", true).clicked() {
                         choice = Some(true);
                     }
                     if ui.button("Discard").clicked() {
@@ -3072,10 +3341,12 @@ impl SymphonyApp {
         }
 
         if let Some(e) = self.error.clone() {
-            egui::Modal::new(egui::Id::unique("symphony-error")).show(ctx, |ui| {
+            theme::glass_modal(ctx, "symphony-error").show(ctx, |ui| {
+                ui.set_max_width(400.0);
                 ui.heading("That didn't work");
+                ui.add_space(6.0);
                 ui.label(e);
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 if ui.button("OK").clicked() {
                     self.error = None;
                 }
@@ -3262,6 +3533,22 @@ impl egui_dock::TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut View) {
+        // Switching tabs fades the new view in (Appear), rather than it
+        // popping in: a view that wasn't drawn last frame starts from clear.
+        let ctx = ui.ctx().clone();
+        let pass = ctx.cumulative_pass_nr();
+        let seen_id = egui::Id::unique(("tab-last-drawn", *tab));
+        let fade_id = egui::Id::unique(("tab-fade", *tab));
+        let last: Option<u64> = ctx.data(|d| d.get_temp(seen_id));
+        ctx.data_mut(|d| d.insert_temp(seen_id, pass));
+        if last.is_some_and(|l| l + 1 < pass) {
+            symphony_ui::motion::start(&ctx, fade_id, 0.0);
+        }
+        let opacity =
+            symphony_ui::motion::value(&ctx, fade_id, 1.0, symphony_ui::motion::Motion::Appear);
+        if opacity < 1.0 {
+            ui.multiply_opacity(opacity);
+        }
         self.view(ui, *tab);
     }
 
@@ -3541,6 +3828,14 @@ impl SymphonyApp {
         if self.shot.is_some() && std::env::var_os("SYMPHONY_SHOT_GRID").is_some() {
             self.presets.grid = true;
         }
+        // SYMPHONY_SHOT_IMPORT=<file>: import any file as if dropped.
+        if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_IMPORT")) {
+            if !self.shot_imported {
+                self.shot_imported = true;
+                let ctx = ui.ctx().clone();
+                self.import_paths(&ctx, vec![p.into()]);
+            }
+        }
         if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_DROP")) {
             if self.brush_import.is_none() && !self.presets.brush.iter().any(|p| p.source.is_some())
             {
@@ -3663,36 +3958,14 @@ impl SymphonyApp {
                 .chrome(top.response.rect, wallpaper::ChromeSide::Top),
         );
 
+        // Tools follow what you're working on (a peg, or drawings).
+        self.s.fit_tool_to_context();
         self.cursor_feedback(&ctx);
-        // SYMPHONY_SHOT_FLASH: draw a line and undo it just before the
-        // screenshot, so the undo flash shows.
-        if self.shot.is_some()
-            && std::env::var_os("SYMPHONY_SHOT_FLASH").is_some()
-            && ctx.input(|i| i.time) > 0.35
-            && self.s.flash.is_none()
-        {
-            use symphony_core::stroke::{Point, Stroke, StrokeKind};
-            let st = Stroke {
-                id: self.s.doc.ids.fresh(),
-                kind: StrokeKind::Pencil,
-                art: Default::default(),
-                swatch: self.s.swatch,
-                min_width: 6.0,
-                max_width: 6.0,
-                points: (0..20)
-                    .map(|k| Point {
-                        x: 120.0 + k as f32 * 12.0,
-                        y: -120.0 + (k as f32 * 0.5).sin() * 30.0,
-                        pressure: 1.0,
-                    })
-                    .collect(),
-                tips: Default::default(),
-                texture: None,
-                shape: Vec::new(),
-            };
-            let layer = self.s.selected;
-            self.s.commit_stroke(layer, self.s.frame, st);
-            self.s.undo();
+        // Unsaved and recovered scenes find imported files in the cache.
+        if let Some(cache) = import::cache_dir() {
+            if !self.s.doc.media_dirs.contains(&cache) {
+                self.s.doc.media_dirs.push(cache);
+            }
         }
         // Autosave finishing says so; a faded notice is cleared.
         let autosaving = self.autosaving.load(Ordering::SeqCst);
@@ -3761,8 +4034,13 @@ impl SymphonyApp {
                 0.0,
                 egui::Color32::from_black_alpha((90.0 * dim) as u8),
             );
-            // Keep the window above its scrim.
             ctx.move_to_top(scrim);
+        }
+        // Keep the window above its scrim and every other window, from the
+        // first frame it opens. egui only paints the grey title bar on the
+        // top window, so it went missing when Preferences first opened
+        // under another window.
+        if open || dim > 0.0 {
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, prefs_id));
         }
         let glass = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, prefs_id));
@@ -4008,6 +4286,43 @@ impl SymphonyApp {
             self.start_codec_download(&ctx);
         }
         self.soundtrack.ui(&ctx, &self.s);
+        // Last session crashed: offer to send the report (the tester sees
+        // it in a pre-filled issue before anything is sent).
+        if let Some((path, report)) = self.crash_report.clone() {
+            let mut done = false;
+            theme::glass_modal(&ctx, "symphony-crash-report").show(&ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading("Symphony closed unexpectedly");
+                ui.add_space(6.0);
+                ui.label(
+                    "Sorry about that. A report of what went wrong was saved. Sending it \
+                     opens a pre-filled bug report in your browser, so you can read it and \
+                     add what you were doing before you submit it.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if symphony_ui::widgets::primary_button(ui, "Send report…", true).clicked() {
+                        ctx.open_url(egui::OpenUrl::new_tab(crash::issue_url(&report)));
+                        done = true;
+                    }
+                    if ui.button("Show report").clicked() {
+                        if let Some(dir) = path.parent() {
+                            ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                "file://{}",
+                                dir.display()
+                            )));
+                        }
+                    }
+                    if ui.button("Don't send").clicked() {
+                        done = true;
+                    }
+                });
+            });
+            if done {
+                crash::handled(&path);
+                self.crash_report = None;
+            }
+        }
         let mut open = self.show_licences;
         egui::Window::new("Licences")
             .open(&mut open)
@@ -4055,9 +4370,11 @@ impl SymphonyApp {
                 self.shot_search_opened = true;
             }
         }
-        let wallpaper_pixels = self.camera.wallpaper_pixels(&self.s);
-        self.wallpaper
-            .update_camera(&ctx, &self.s, wallpaper_pixels);
+        if self.camera.render_effects {
+            let wallpaper_pixels = self.camera.wallpaper_pixels(&self.s);
+            self.wallpaper
+                .update_camera(&ctx, &self.s, wallpaper_pixels);
+        }
         views::node::windows(&ctx, &mut self.s, &mut self.node_view);
         self.search_box(&ctx);
         self.dialogs(&ctx);
@@ -4150,6 +4467,7 @@ fn viewport() -> egui::ViewportBuilder {
 }
 
 fn main() -> eframe::Result {
+    crash::install();
     let _version_lock = std::env::current_exe()
         .and_then(|exe| symphony_launcher::editor_lock(&exe))
         .map_err(|e| eframe::Error::AppCreation(Box::new(e)))?;

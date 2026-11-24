@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 
 use symphony_core::anim::Value;
-use symphony_core::bitmap::{self, ImageFile};
+use symphony_core::bitmap;
+use symphony_core::doc::SoundClip;
 use symphony_core::doc::{Scene, Settings};
 use symphony_core::graph::{NodeId, NodeKind, PegParams};
 use symphony_core::history::{Edit, History};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
-use symphony_core::sound::{self, SoundFile, SoundTrack};
+use symphony_core::sound;
 use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind, Tips};
 
 /// Drawing tools, in Tools-toolbar order.
@@ -21,6 +22,9 @@ pub enum Tool {
     Select,
     Transform,
     Brush,
+    /// Straight lines in the Brush's style: Shift snaps the angle, Alt
+    /// bends it into a curve (all while still pressing).
+    Line,
     Pencil,
     Eraser,
     Paint,
@@ -31,6 +35,15 @@ pub enum Tool {
     /// Reshape vector lines: push points with a soft brush, or Shift-paint
     /// to select points and move only those.
     LineEditor,
+}
+
+/// What the tools would act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolContext {
+    /// A drawing layer (or nothing in particular).
+    Drawing,
+    /// A peg node: it only moves, rotates and scales what's under it.
+    Peg,
 }
 
 /// Harmony's four Paint tool modes.
@@ -58,10 +71,11 @@ impl PaintMode {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 11] = [
+    pub const ALL: [Tool; 12] = [
         Tool::Select,
         Tool::Transform,
         Tool::Brush,
+        Tool::Line,
         Tool::Pencil,
         Tool::Eraser,
         Tool::Paint,
@@ -72,10 +86,21 @@ impl Tool {
         Tool::Zoom,
     ];
 
+    /// The toolbar only offers tools that can act on what you're working on
+    /// (DESIGN: a smart toolbar). Drawing tools work on drawings; a peg
+    /// only moves, so on a peg it's Transform and the view tools.
+    pub fn fits(self, context: ToolContext) -> bool {
+        match context {
+            ToolContext::Drawing => !matches!(self, Tool::Transform | Tool::Pencil),
+            ToolContext::Peg => matches!(self, Tool::Transform | Tool::Hand | Tool::Zoom),
+        }
+    }
+
     /// Which milestone brings this tool, if it isn't built yet.
     pub fn planned_for(self) -> Option<&'static str> {
         match self {
             Tool::Brush
+            | Tool::Line
             | Tool::Pencil
             | Tool::Eraser
             | Tool::Hand
@@ -138,6 +163,7 @@ fn densify_near(points: &[Point], at: [f32; 2], radius: f32, step: f32) -> Vec<P
                     x: p.x + (q.x - p.x) * t,
                     y: p.y + (q.y - p.y) * t,
                     pressure: p.pressure + (q.pressure - p.pressure) * t,
+                    pen: symphony_core::stroke::Pen::lerp(p.pen, q.pen, t),
                 });
             }
         }
@@ -330,6 +356,8 @@ pub struct Session {
     /// follows it.
     pub transform_for: Option<NodeId>,
     pub selected_node: Option<NodeId>,
+    /// The drawing tool to return to after working on a peg.
+    pub last_drawing_tool: Tool,
     pub reveal_node_track: Option<NodeId>,
     pub tool: Tool,
     pub brush: BrushSettings,
@@ -362,10 +390,6 @@ pub struct Session {
     /// (one toolbar button, a mode switch in Tool Properties). Each mode
     /// keeps its own settings and presets. Set from the profile each frame.
     pub pen_modes: bool,
-    /// The area the last undo or redo changed (drawing, bounds), for the
-    /// canvas to flash; `flash_serial` counts flashes so each one plays.
-    pub flash: Option<(Id, [f32; 2], [f32; 2])>,
-    pub flash_serial: u64,
     /// Light table: the other layers' drawings show faintly behind the
     /// one being drawn, in the Drawing view.
     pub light_table: bool,
@@ -441,6 +465,7 @@ impl Session {
             transform_layers: Vec::new(),
             transform_for: None,
             selected_node: None,
+            last_drawing_tool: Tool::Brush,
             reveal_node_track: None,
             tool: Tool::Brush,
             brush: BrushSettings {
@@ -485,8 +510,6 @@ impl Session {
             },
             brush_size_cursor: true,
             pen_modes: false,
-            flash: None,
-            flash_serial: 0,
             light_table: false,
             play_range: None,
             loop_playback: true,
@@ -524,6 +547,7 @@ impl Session {
                         x: cx + r * t.cos(),
                         y: cy + r * t.sin(),
                         pressure: 0.55 + 0.45 * (t * 1.5).sin().abs(),
+                        pen: Default::default(),
                     }
                 })
                 .collect()
@@ -535,6 +559,7 @@ impl Session {
                     x,
                     y,
                     pressure: 0.3 + 0.7 * ((i as f32) * 0.9).sin().abs(),
+                    pen: Default::default(),
                 })
                 .collect()
         };
@@ -677,48 +702,7 @@ impl Session {
 
     // ---- Sound -----------------------------------------------------------
 
-    /// Add an imported sound as a new track at the bottom of the sound
-    /// tracks. Undo removes the track; the file stays until the next save,
-    /// which keeps only the files a track uses.
-    pub fn import_sound(&mut self, name: &str, key: u64, file: SoundFile) {
-        self.doc.sound_files.entry(key).or_insert(file);
-        let edit = sound::add_track(&mut self.doc, name, key);
-        self.history
-            .apply(&mut self.doc, "Import sound", vec![edit]);
-        self.note(format!("Imported {name}"));
-    }
-
-    // ---- Images ----------------------------------------------------------
-
-    /// Add imported images as a new layer above the selected one, kept as
-    /// the original files and fitted to the stage. One image shows from
-    /// the current frame to the end; several show one a frame from it.
-    /// Undo removes the layer; the files stay until the next save, which
-    /// keeps only the files a drawing shows.
-    pub fn import_images(&mut self, name: &str, files: Vec<(u64, ImageFile)>) {
-        let Some(alpha) = files.first().map(|(_, f)| f.format.usual_alpha()) else {
-            return;
-        };
-        let keys: Vec<u64> = files.iter().map(|(k, _)| *k).collect();
-        for (key, file) in files {
-            self.doc.images.entry(key).or_insert(file);
-        }
-        let index = self.selected.min(self.layer_count());
-        let edits = bitmap::layer_edits(
-            &mut self.doc,
-            name,
-            index,
-            &keys,
-            self.frame,
-            bitmap::Alignment::Fit,
-            alpha,
-        );
-        self.history.apply(&mut self.doc, "Import images", edits);
-        self.selected = index;
-        self.note(format!("Imported {name}"));
-    }
-
-    fn change_sound(&mut self, id: Id, name: &str, change: impl FnOnce(&mut SoundTrack)) {
+    fn change_sound(&mut self, id: Id, name: &str, change: impl FnOnce(&mut SoundClip)) {
         if let Some(edit) = sound::change_track(&self.doc, id, change) {
             self.history.apply(&mut self.doc, name, vec![edit]);
         }
@@ -731,17 +715,17 @@ impl Session {
             .sounds
             .iter()
             .find(|t| t.id == id)
-            .map(|t| t.enabled)
+            .map(|t| !t.muted)
         else {
             return;
         };
         let name = if on { "Mute sound" } else { "Unmute sound" };
-        self.change_sound(id, name, |t| t.enabled = !on);
+        self.change_sound(id, name, |t| t.muted = on);
     }
 
     /// Move or trim a sound track while it is dragged. The whole drag is
     /// one undo step, until `end_gesture`.
-    pub fn drag_sound(&mut self, after: SoundTrack, name: &str) {
+    pub fn drag_sound(&mut self, after: SoundClip, name: &str) {
         let Some(before) = self.doc.sounds.iter().find(|t| t.id == after.id).cloned() else {
             return;
         };
@@ -781,91 +765,27 @@ impl Session {
 
     // ---- Undo ------------------------------------------------------------
 
-    /// Snapshot `drawings`, run `f`, and flash the area that changed.
-    fn flash_changes(&mut self, drawings: Vec<Id>, f: impl FnOnce(&mut Self)) {
-        let before: Vec<(Id, Option<symphony_core::stroke::Drawing>)> = drawings
-            .iter()
-            .map(|d| (*d, self.doc.drawings.get(d).cloned()))
-            .collect();
-        f(self);
-        let mut lo = [f32::INFINITY; 2];
-        let mut hi = [f32::NEG_INFINITY; 2];
-        let mut grow = |b: Option<([f32; 2], [f32; 2])>| {
-            if let Some((a, c)) = b {
-                lo = [lo[0].min(a[0]), lo[1].min(a[1])];
-                hi = [hi[0].max(c[0]), hi[1].max(c[1])];
-            }
-        };
-        let fill_bounds = |f: &symphony_core::stroke::Fill| {
-            f.contours
-                .iter()
-                .flatten()
-                .fold(None, |acc: Option<([f32; 2], [f32; 2])>, p| {
-                    Some(match acc {
-                        None => (*p, *p),
-                        Some((a, c)) => (
-                            [a[0].min(p[0]), a[1].min(p[1])],
-                            [c[0].max(p[0]), c[1].max(p[1])],
-                        ),
-                    })
-                })
-        };
-        let mut target = None;
-        for (id, old) in &before {
-            let new = self.doc.drawings.get(id);
-            let (os, ns): (&[Stroke], &[Stroke]) = (
-                old.as_ref().map_or(&[], |d| &d.strokes),
-                new.map_or(&[], |d| &d.strokes),
-            );
-            let (of, nf): (
-                &[symphony_core::stroke::Fill],
-                &[symphony_core::stroke::Fill],
-            ) = (
-                old.as_ref().map_or(&[], |d| &d.fills),
-                new.map_or(&[], |d| &d.fills),
-            );
-            let mut changed = false;
-            for st in os.iter().chain(ns) {
-                let in_old = os.iter().find(|s| s.id == st.id);
-                let in_new = ns.iter().find(|s| s.id == st.id);
-                if in_old != in_new {
-                    grow(symphony_vector::bounds(st));
-                    changed = true;
-                }
-            }
-            for fl in of.iter().chain(nf) {
-                let in_old = of.iter().find(|f| f.id == fl.id);
-                let in_new = nf.iter().find(|f| f.id == fl.id);
-                if in_old != in_new {
-                    grow(fill_bounds(fl));
-                    changed = true;
-                }
-            }
-            if changed && target.is_none() {
-                target = Some(*id);
-            }
-        }
-        if let (Some(d), true) = (target, lo[0] <= hi[0]) {
-            self.flash_serial += 1;
-            self.flash = Some((d, lo, hi));
-        }
-    }
-
     pub fn undo(&mut self) {
-        let drawings = self.history.undo_drawings();
-        self.flash_changes(drawings, |s| match s.history.undo(&mut s.doc) {
-            Some(name) => s.note(format!("Undo {name}")),
-            None => s.note("Nothing to undo"),
-        });
+        // The status bar says what was undone and how much history is left.
+        match self.history.undo(&mut self.doc) {
+            Some(name) => {
+                let left = self.history.undo_len();
+                self.note(if left == 0 {
+                    format!("Undid {name} · nothing more to undo")
+                } else {
+                    format!("Undid {name} · {left} more")
+                });
+            }
+            None => self.note("Nothing to undo"),
+        }
         self.clamp_selection();
     }
 
     pub fn redo(&mut self) {
-        let drawings = self.history.redo_drawings();
-        self.flash_changes(drawings, |s| match s.history.redo(&mut s.doc) {
-            Some(name) => s.note(format!("Redo {name}")),
-            None => s.note("Nothing to redo"),
-        });
+        match self.history.redo(&mut self.doc) {
+            Some(name) => self.note(format!("Redid {name}")),
+            None => self.note("Nothing to redo"),
+        }
         self.clamp_selection();
     }
 
@@ -962,7 +882,15 @@ impl Session {
             // shape; a textured one keeps its texture, clipped to it.
             let by_shape = st.kind == StrokeKind::Brush;
             if by_shape {
-                let outlines = shape::outline(st);
+                // A vector brush's outline is its merged stamps.
+                let outlines = match st.texture.filter(|t| t.vector) {
+                    Some(tex) => symphony_vector::stamped::vector_brush_shapes(
+                        st,
+                        &tex,
+                        tex.tip.and_then(|k| self.doc.textures.get(&k)),
+                    ),
+                    None => shape::outline(st),
+                };
                 let mut hit = false;
                 let mut left: Vec<shape::Shape> = Vec::new();
                 for o in &outlines {
@@ -1631,6 +1559,36 @@ impl Session {
         };
     }
 
+    /// What the tools act on now: a selected peg node, or drawings.
+    pub fn tool_context(&self) -> ToolContext {
+        let peg = self
+            .selected_node
+            .and_then(|id| self.doc.graph.node(id))
+            .is_some_and(|n| matches!(n.kind, symphony_core::graph::NodeKind::Peg(_)));
+        if peg {
+            ToolContext::Peg
+        } else {
+            ToolContext::Drawing
+        }
+    }
+
+    /// Keep the current tool one the context offers: picking a peg moves
+    /// to Transform, going back to drawings returns to the last drawing
+    /// tool.
+    pub fn fit_tool_to_context(&mut self) {
+        let context = self.tool_context();
+        if self.tool.fits(context) {
+            if context == ToolContext::Drawing {
+                self.last_drawing_tool = self.tool;
+            }
+            return;
+        }
+        self.tool = match context {
+            ToolContext::Peg => Tool::Transform,
+            ToolContext::Drawing => self.last_drawing_tool,
+        };
+    }
+
     pub fn select_graph_node(&mut self, id: NodeId, reveal: bool) {
         self.selected_node = Some(id);
         if reveal {
@@ -2112,6 +2070,151 @@ impl Session {
         );
     }
 
+    /// Place imported images: each group becomes a layer above the
+    /// selected one. A single image is a drawing held for the whole scene
+    /// (a background or reference); a sequence is a drawing per frame from
+    /// the current frame, lengthening the scene if needed. Pictures fit the
+    /// camera frame, centred. One undo step for everything.
+    pub fn import_images(&mut self, groups: Vec<crate::import::ImageGroup>) -> usize {
+        use symphony_core::doc::{Media, MediaKind};
+        use symphony_core::stroke::PlacedImage;
+        let (sw, sh) = (
+            self.doc.settings.width.max(1) as f32,
+            self.doc.settings.height.max(1) as f32,
+        );
+        let mut edits = Vec::new();
+        let mut placed = 0;
+        let mut length = self.length();
+        let index = self.selected.min(self.layer_count());
+        for g in &groups {
+            if g.frames.is_empty() {
+                continue;
+            }
+            // A single picture filling most of the frame is a background:
+            // it goes to the bottom. Anything else goes above the
+            // selected layer.
+            let fills_frame = g.frames.len() == 1 && {
+                let [iw, ih] = g.frames[0].size;
+                let (iw, ih) = (iw as f32, ih as f32);
+                let k = (sw / iw).min(sh / ih);
+                iw * k * ih * k >= 0.9 * sw * sh
+            };
+            // (Insertion clamps, so "past the end" is the bottom.)
+            let at = if fills_frame { usize::MAX } else { index };
+            let snap = self.doc.make_layer(&g.name, at);
+            let column = snap.layer.column;
+            edits.push(Edit::AddLayer(Box::new(snap)));
+            let single = g.frames.len() == 1;
+            let start = if single { 1 } else { self.frame };
+            let mut cells: Vec<Option<Id>> = Vec::new();
+            for f in &g.frames {
+                self.doc.media.entry(f.key).or_insert(Media {
+                    kind: MediaKind::Image,
+                    file: f.file.clone(),
+                    name: f.name.clone(),
+                    size: f.size,
+                    seconds: 0.0,
+                    rate: 0,
+                    channels: 0,
+                    samples: 0,
+                });
+                let (iw, ih) = (f.size[0] as f32, f.size[1] as f32);
+                let k = (sw / iw).min(sh / ih);
+                let (w, h) = (iw * k, ih * k);
+                let mut d = self.doc.make_drawing(column);
+                d.image = Some(PlacedImage {
+                    media: f.key,
+                    rect: [-w / 2.0, -h / 2.0, w, h],
+                    alpha: bitmap::usual_alpha(&f.file),
+                });
+                cells.push(Some(d.id));
+                edits.push(Edit::AddDrawing { drawing: d });
+                placed += 1;
+            }
+            if single {
+                cells = vec![cells[0]; length.max(1) as usize];
+            }
+            let end = start + cells.len() as u32 - 1;
+            if end > length {
+                edits.push(Edit::SetLength {
+                    before: length,
+                    after: end,
+                });
+                length = end;
+            }
+            edits.push(Edit::SetCells {
+                column,
+                from: start,
+                before: vec![None; cells.len()],
+                after: cells,
+            });
+        }
+        if !edits.is_empty() {
+            let name = if placed == 1 {
+                "Import image"
+            } else {
+                "Import images"
+            };
+            self.history.apply(&mut self.doc, name, edits);
+        }
+        placed
+    }
+
+    /// Change the camera frame's black bars (one undo step per change).
+    pub fn set_bars(&mut self, after: symphony_core::doc::Bars) {
+        let before = self.doc.settings.bars;
+        if before != after {
+            self.history.apply(
+                &mut self.doc,
+                "Black bars",
+                vec![Edit::SetBars { before, after }],
+            );
+        }
+    }
+
+    /// Place imported sounds on the timeline from the current frame,
+    /// lengthening the scene to fit. One undo step.
+    pub fn import_sounds(&mut self, sounds: Vec<crate::import::StagedSound>) -> usize {
+        if sounds.is_empty() {
+            return 0;
+        }
+        let before = self.doc.sounds.clone();
+        let mut after = before.clone();
+        let fps = self.doc.settings.fps.max(1.0);
+        let mut end = self.length();
+        for s in &sounds {
+            self.doc
+                .media
+                .entry(s.key)
+                .or_insert_with(|| s.media.clone());
+            after.push(SoundClip {
+                id: self.doc.ids.fresh(),
+                media: s.key,
+                name: s.name.clone(),
+                start: self.frame,
+                muted: false,
+                trim_start: 0,
+                trim_end: 0,
+            });
+            let last = self.frame + (s.media.seconds * fps).ceil() as u32;
+            end = end.max(last.saturating_sub(1));
+        }
+        let mut edits = vec![Edit::SetSounds { before, after }];
+        if end > self.length() {
+            edits.push(Edit::SetLength {
+                before: self.length(),
+                after: end,
+            });
+        }
+        let name = if sounds.len() == 1 {
+            "Import sound"
+        } else {
+            "Import sounds"
+        };
+        self.history.apply(&mut self.doc, name, edits);
+        sounds.len()
+    }
+
     /// Add a layer above the selected one, like Harmony's Add Drawing Layer.
     pub fn add_layer(&mut self) {
         let n = (1..)
@@ -2481,6 +2584,7 @@ impl Session {
                         x: (w[0].x + w[1].x) * 0.5,
                         y: (w[0].y + w[1].y) * 0.5,
                         pressure: 1.0,
+                        pen: Default::default(),
                     };
                     weight(&mid) > 0.0
                 })
@@ -2775,20 +2879,25 @@ mod tests {
     #[test]
     fn sound_tracks_import_mute_rename_and_delete_with_undo() {
         let mut s = Session::new_scene();
-        let file = SoundFile {
+        let file = sound::SoundFile {
             format: sound::SoundFormat::Wav,
             rate: 8_000,
             channels: 1,
             samples: 8_000,
             bytes: std::sync::Arc::new(Vec::new()),
         };
-        s.import_sound("Dialogue", 7, file);
+        let staged = crate::import::StagedSound {
+            key: 7,
+            name: "Dialogue".into(),
+            media: file.media(7, "Dialogue"),
+        };
+        s.import_sounds(vec![staged]);
         assert_eq!(s.doc.sounds.len(), 1);
-        assert!(s.doc.sound_files.contains_key(&7));
+        assert!(s.doc.media.contains_key(&7));
         let id = s.doc.sounds[0].id;
 
         s.toggle_sound(id);
-        assert!(!s.doc.sounds[0].enabled);
+        assert!(s.doc.sounds[0].muted);
         s.rename_sound(id, "  Lines ");
         assert_eq!(s.doc.sounds[0].name, "Lines");
         s.rename_sound(id, "   ");
@@ -2800,7 +2909,7 @@ mod tests {
         assert_eq!(s.doc.sounds[0].name, "Lines");
         s.undo();
         s.undo();
-        assert!(s.doc.sounds[0].enabled);
+        assert!(!s.doc.sounds[0].muted);
         s.undo();
         // The track goes; the file stays for redo, and save drops it.
         assert!(s.doc.sounds.is_empty());
@@ -2851,11 +2960,13 @@ mod tests {
                     x: x0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 Point {
                     x: x1,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
             ],
             tips: Default::default(),
@@ -2935,6 +3046,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -3026,6 +3138,7 @@ mod tests {
                         x: t * 100.0,
                         y: 0.0,
                         pressure: pressure(t),
+                        pen: Default::default(),
                     }
                 })
                 .collect(),
@@ -3114,11 +3227,13 @@ mod tests {
                     x: 0.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 Point {
                     x: 200.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
             ],
             tips: Default::default(),
@@ -3198,6 +3313,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -3361,6 +3477,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -3376,11 +3493,13 @@ mod tests {
                 x: 14.0,
                 y: 20.0,
                 pressure: 1.0,
+                pen: Default::default(),
             },
             Point {
                 x: 14.0,
                 y: 80.0,
                 pressure: 1.0,
+                pen: Default::default(),
             },
         ];
         s.close_gap(0, 1, &rough, 40.0);

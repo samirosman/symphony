@@ -3,12 +3,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use symphony_core::{
-    graph::{BlendMode, Effect, Link, Node, NodeId, NodeKey, NodeKind},
+    graph::{BlendMode, BlurMode, Effect, Link, Node, NodeId, NodeKey, NodeKind},
     history::Edit,
 };
 
+use super::rope::Cable;
 use crate::session::Session;
+
+const CABLE_WIDTH: f32 = 2.0;
+const ACTIVE_CABLE_WIDTH: f32 = 2.4;
 use symphony_ui::{theme, widgets};
+
+/// Node corner radius at 100% zoom: well rounded, scaled with zoom.
+const NODE_RADIUS: f32 = 9.0;
 
 type Input = (NodeId, usize);
 
@@ -40,6 +47,14 @@ pub struct NodeViewState {
     drawn_links: Vec<(Link, Pos2, Pos2)>,
     drawn_scene: String,
     link_anims: Vec<LinkAnim>,
+    /// Where (and when) a dragged cable was last let go, so the cable's
+    /// animation starts from there.
+    released: Option<(Pos2, f64)>,
+    /// The live drag curve and its shape at release.
+    drag_cable: Option<Cable>,
+    released_cable: Option<Cable>,
+    /// When the drag curve last updated.
+    cable_time: Option<f64>,
     /// The hover thumbnail: what it shows (drawing, scene version, frame)
     /// and its texture, plus the last card it was shown beside (for its
     /// fade-out).
@@ -50,12 +65,52 @@ pub struct NodeViewState {
     thumb_at: Option<(Rect, String)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LinkAnim {
-    link: Link,
+    link: Option<Link>,
     start: f64,
-    /// None: appearing. Some(ends): disappearing from where it was.
-    gone: Option<(Pos2, Pos2)>,
+    motion: CableMotion,
+    curve: Cable,
+}
+
+/// What a cable is doing, like a real one.
+#[derive(Clone, Copy)]
+enum CableMotion {
+    /// A new connection: its end goes onto the port from where it was let
+    /// go, or shoots out of the output for connections made elsewhere.
+    Connect { from_end: Option<Pos2> },
+    /// Moved or swapped to another input: the end travels from the old
+    /// input to the new one.
+    Move { from_end: Pos2 },
+    /// Disconnected or dropped loose: the cable winds into its output.
+    Retract { source: NodeId, from: Pos2 },
+}
+
+impl CableMotion {
+    fn seconds(self) -> f64 {
+        match self {
+            CableMotion::Connect { .. } | CableMotion::Move { .. } => 0.42,
+            CableMotion::Retract { .. } => 0.24,
+        }
+    }
+}
+
+impl LinkAnim {
+    fn retract(
+        link: Option<Link>,
+        source: NodeId,
+        ends: (Pos2, Pos2),
+        curve: Option<Cable>,
+        now: f64,
+    ) -> Self {
+        let (from, end) = ends;
+        Self {
+            link,
+            start: now,
+            motion: CableMotion::Retract { source, from },
+            curve: curve.unwrap_or_else(|| Cable::new(from, end)),
+        }
+    }
 }
 
 /// Can a node pass its input straight through (peg to peg, image to
@@ -89,23 +144,6 @@ fn detached_links(graph: &symphony_core::graph::Graph, id: NodeId) -> Vec<Link> 
         }
     }
     after
-}
-
-/// Points along a cable from its output to `upto` (0..=1) of the way.
-fn cable_path(from: Pos2, to: Pos2, upto: f32) -> Vec<Pos2> {
-    let [a, b, c, d] = cable_points(from, to);
-    let n = 32;
-    (0..=n)
-        .map(|i| {
-            let t = upto.clamp(0.0, 1.0) * i as f32 / n as f32;
-            let u = 1.0 - t;
-            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
-            Pos2::new(
-                a.x * w[0] + b.x * w[1] + c.x * w[2] + d.x * w[3],
-                a.y * w[0] + b.y * w[1] + c.y * w[2] + d.y * w[3],
-            )
-        })
-        .collect()
 }
 
 struct PropertyDraft {
@@ -154,7 +192,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
         NodeKind::Effect(Effect::Mask { .. }) => "Mask",
-        NodeKind::Effect(Effect::Blur { .. }) => "Box Blur",
+        NodeKind::Effect(Effect::Blur { .. }) => "Blur",
         NodeKind::Effect(Effect::Grain { .. }) => "Grain",
         NodeKind::Effect(Effect::Opacity { .. }) => "Opacity",
         NodeKind::Effect(Effect::Blend { .. }) => "Blend Modes",
@@ -165,7 +203,10 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
 fn effect_nodes() -> [NodeKind; 6] {
     [
         NodeKind::Effect(Effect::Mask { inverted: false }),
-        NodeKind::Effect(Effect::Blur { radius: 12.0 }),
+        NodeKind::Effect(Effect::Blur {
+            radius: 12.0,
+            mode: BlurMode::Gaussian,
+        }),
         NodeKind::Effect(Effect::Grain {
             amount: 0.16,
             seed: 0,
@@ -281,7 +322,113 @@ fn insert_after_selected_layer(s: &mut Session, state: &mut NodeViewState, kind:
     true
 }
 
+/// Add a node next to `target` in the nearest place in the hierarchy that
+/// fits, in one undo step: a peg becomes the target's new parent (between
+/// it and its old one); an effect or composite goes after the drawing the
+/// target leads to (between it and where its image went). Anything else,
+/// or a target with no such place, is added unconnected beside it.
+pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
+    let graph = &s.doc.graph;
+    let kind_of = |id: NodeId| graph.node(id).map(|n| n.kind.clone());
+    let at = s
+        .doc
+        .node_positions
+        .get(&target)
+        .copied()
+        .unwrap_or([0.0, 0.0]);
+    // (link to replace, its source, its destination) for the new node.
+    let splice: Option<(Option<Link>, Option<NodeId>, Input)> = match &kind {
+        NodeKind::Peg(_)
+            if matches!(
+                kind_of(target),
+                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_))
+            ) =>
+        {
+            let parent = graph.input(target, 0);
+            let old = parent.map(|from| Link {
+                from,
+                to: target,
+                port: 0,
+            });
+            Some((old, parent, (target, 0)))
+        }
+        NodeKind::Effect(_) | NodeKind::Composite => {
+            // From a peg, go down to the drawing it carries.
+            let mut src = target;
+            let mut guard = 0;
+            while matches!(kind_of(src), Some(NodeKind::Peg(_))) && guard < 32 {
+                guard += 1;
+                match graph.links().iter().find(|l| l.from == src && l.port == 0) {
+                    Some(l) => src = l.to,
+                    None => break,
+                }
+            }
+            graph
+                .links()
+                .iter()
+                .find(|l| l.from == src)
+                .copied()
+                .map(|old| (Some(old), Some(src), (old.to, old.port)))
+        }
+        _ => None,
+    };
+    let Some((old, from, to)) = splice else {
+        add_node(s, kind, [at[0] + W + 30.0, at[1]]);
+        return;
+    };
+    let id = s.doc.graph.next_id();
+    let position = if matches!(kind, NodeKind::Peg(_)) {
+        [at[0], at[1] - (H + 30.0)]
+    } else {
+        [at[0], at[1] + H + 30.0]
+    };
+    let position = free_spot(s, position, W);
+    let before = s.doc.graph.links().to_vec();
+    let mut after: Vec<Link> = before
+        .iter()
+        .filter(|l| Some(**l) != old && (l.to, l.port) != to)
+        .copied()
+        .collect();
+    if let Some(from) = from {
+        after.push(Link {
+            from,
+            to: id,
+            port: 0,
+        });
+    }
+    after.push(Link {
+        from: id,
+        to: to.0,
+        port: to.1,
+    });
+    let label = kind_label(&kind);
+    let was_custom = s.doc.custom_wiring;
+    s.history.apply(
+        &mut s.doc,
+        "Add node",
+        vec![
+            Edit::AddNode {
+                id,
+                node: Node {
+                    name: label.into(),
+                    kind,
+                    enabled: true,
+                },
+                position,
+            },
+            Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            },
+        ],
+    );
+    s.select_graph_node(id, true);
+}
+
 fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
+    // Placed clear of the others from the start (one undo step).
+    let position = free_spot(s, position, W);
     let id = s.doc.graph.next_id();
     s.history.apply(
         &mut s.doc,
@@ -369,6 +516,74 @@ pub fn inspector(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) 
     }
 }
 
+/// How far (points) a lifted cable must be pulled from its input before
+/// letting go disconnects it.
+const SNAP_BACK: f32 = 56.0;
+
+/// Connect `source` to `input`, keeping connections where it can rather
+/// than silently dropping them:
+/// - an input that's already used, on a node with a free input that fits
+///   (a Composite's spare port), takes the free one instead;
+/// - moving a cable onto a used input swaps: the cable that was there
+///   moves to the input this one came from.
+///
+/// Otherwise it replaces the connection, as before.
+fn connect_smart(
+    s: &mut Session,
+    source: NodeId,
+    input: Input,
+    old_input: Option<Input>,
+    all_inputs: &[Input],
+) {
+    let graph = &s.doc.graph;
+    let taken_by = graph.input(input.0, input.1).filter(|&from| from != source);
+    let Some(previous) = taken_by else {
+        return edit_link(s, Some(source), input, old_input);
+    };
+    // A free input on the same node that fits: use it, keep the old one.
+    if old_input.is_none() {
+        if let Some(&free) = all_inputs.iter().find(|&&(node, port)| {
+            node == input.0
+                && graph.input(node, port).is_none()
+                && graph.can_connect_to(source, node, port)
+        }) {
+            return edit_link(s, Some(source), free, None);
+        }
+    }
+    // Moving a cable onto a used input: swap them.
+    if let Some(from_input) = old_input {
+        if graph.can_connect_to(source, input.0, input.1)
+            && graph.can_connect_to(previous, from_input.0, from_input.1)
+        {
+            let before = graph.links().to_vec();
+            let mut after = before.clone();
+            after.retain(|l| (l.to, l.port) != input && (l.to, l.port) != from_input);
+            after.push(Link {
+                from: source,
+                to: input.0,
+                port: input.1,
+            });
+            after.push(Link {
+                from: previous,
+                to: from_input.0,
+                port: from_input.1,
+            });
+            let was_custom = s.doc.custom_wiring;
+            s.history.apply(
+                &mut s.doc,
+                "Swap connections",
+                vec![Edit::RewireNodes {
+                    before,
+                    after,
+                    was_custom,
+                }],
+            );
+            return;
+        }
+    }
+    edit_link(s, Some(source), input, old_input);
+}
+
 fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: Option<Input>) {
     if let Some(from) = source {
         if !s.doc.graph.can_connect_to(from, input.0, input.1) {
@@ -409,18 +624,10 @@ fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: O
     }
 }
 
-fn cable_points(from: Pos2, to: Pos2) -> [Pos2; 4] {
-    let bend = ((to.y - from.y).abs() * 0.5).clamp(16.0, 120.0);
-    [from, from + Vec2::Y * bend, to - Vec2::Y * bend, to]
-}
-
 fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
-    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        cable_points(from, to),
-        false,
-        egui::Color32::TRANSPARENT,
-        stroke,
-    ));
+    Cable::new(from, to)
+        .shape_for_ports(1.0)
+        .paint(painter, stroke);
 }
 
 #[derive(Clone, Copy)]
@@ -474,13 +681,11 @@ impl AutoWire {
 }
 
 fn near_cable(point: Pos2, from: Pos2, to: Pos2) -> f32 {
-    let [a, b, c, d] = cable_points(from, to).map(Pos2::to_vec2);
-    let mut previous = a;
+    let cable = Cable::new(from, to).shape_for_ports(1.0);
+    let mut previous = from.to_vec2();
     let mut best = f32::INFINITY;
     for step in 1..=20 {
-        let t = step as f32 / 20.0;
-        let u = 1.0 - t;
-        let next = a * u.powi(3) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * t.powi(3);
+        let next = cable.prefix(step as f32 / 20.0).end.to_vec2();
         let edge = next - previous;
         let along =
             ((point.to_vec2() - previous).dot(edge) / edge.length_sq().max(0.0001)).clamp(0.0, 1.0);
@@ -732,14 +937,42 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 });
             }
         }
-        NodeKind::Effect(Effect::Blur { radius }) => {
+        NodeKind::Effect(Effect::Blur { radius, mode }) => {
+            egui::ComboBox::from_label("Blur type")
+                .selected_text(mode.title())
+                .show_ui(ui, |ui| {
+                    for choice in BlurMode::ALL {
+                        if ui
+                            .selectable_label(mode.title() == choice.title(), choice.title())
+                            .clicked()
+                            && mode.title() != choice.title()
+                        {
+                            *mode = choice;
+                        }
+                    }
+                });
+            let (label, suffix) = match mode {
+                BlurMode::Motion { .. } => ("Distance", " px"),
+                BlurMode::RadialSpin => ("Rotation", "°"),
+                BlurMode::RadialZoom => ("Zoom amount", "%"),
+                _ => ("Radius", " px"),
+            };
             widgets::precise_slider(
                 ui,
                 egui::Slider::new(radius, 0.0..=128.0)
                     .step_by(0.1)
-                    .text("Radius")
-                    .suffix(" px"),
+                    .text(label)
+                    .suffix(suffix),
             );
+            if let BlurMode::Motion { angle } = mode {
+                widgets::precise_slider(
+                    ui,
+                    egui::Slider::new(angle, 0.0..=360.0)
+                        .step_by(1.0)
+                        .text("Angle")
+                        .suffix("°"),
+                );
+            }
         }
         NodeKind::Effect(Effect::Grain { amount, seed }) => {
             widgets::precise_slider(
@@ -1064,6 +1297,269 @@ fn preview(ctx: &egui::Context, s: &Session, state: &mut NodeViewState) {
         });
 }
 
+/// The space kept between node cards.
+const NODE_GAP: f32 = 18.0;
+
+/// Where nodes sit before they're moved: pegs over their drawings in a
+/// row, then the Composite and the Camera.
+fn default_positions(s: &Session) -> BTreeMap<NodeId, Vec2> {
+    let mut positions = BTreeMap::new();
+    let middle = s.doc.layers.len().saturating_sub(1) as f32 / 2.0;
+    for (index, layer) in s.doc.layers.iter().enumerate() {
+        let x = (index as f32 - middle) * (W + 26.0);
+        positions.insert(layer.peg, Vec2::new(x, 43.0));
+        positions.insert(layer.node, Vec2::new(x, 120.0));
+    }
+    positions.insert(s.doc.composite, Vec2::new(0.0, 209.0));
+    positions.insert(s.doc.display, Vec2::new(0.0, 291.0));
+    positions
+}
+
+/// A node's centre in graph space: stored, else its default place.
+fn node_position(s: &Session, id: NodeId, defaults: &BTreeMap<NodeId, Vec2>) -> Vec2 {
+    s.doc
+        .node_positions
+        .get(&id)
+        .map(|p| Vec2::new(p[0], p[1]))
+        .or_else(|| defaults.get(&id).copied())
+        .unwrap_or_else(|| Vec2::new(W + 36.0, 43.0 + id.0 as f32 * 58.0))
+}
+
+/// Push overlapping cards apart (along whichever way they overlap less)
+/// until none overlap, with a gap. `fixed` cards stay; a pair with one
+/// fixed card moves only the other.
+fn relax(
+    positions: &mut BTreeMap<NodeId, Vec2>,
+    width: impl Fn(NodeId) -> f32,
+    fixed: &BTreeSet<NodeId>,
+) {
+    let ids: Vec<NodeId> = positions.keys().copied().collect();
+    let widths: Vec<f32> = ids.iter().map(|&id| width(id)).collect();
+    for _ in 0..80 {
+        let mut moved = false;
+        for i in 0..ids.len() {
+            for j in i + 1..ids.len() {
+                let (a, b) = (positions[&ids[i]], positions[&ids[j]]);
+                let d = b - a;
+                let ox = (widths[i] + widths[j]) / 2.0 + NODE_GAP - d.x.abs();
+                let oy = H + NODE_GAP - d.y.abs();
+                if ox <= 0.0 || oy <= 0.0 {
+                    continue;
+                }
+                // Out along the smaller overlap (ties go sideways).
+                let push = if ox <= oy * 1.2 {
+                    let side = if d.x != 0.0 {
+                        d.x.signum()
+                    } else if i < j {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    Vec2::new(ox * side, 0.0)
+                } else {
+                    let side = if d.y != 0.0 { d.y.signum() } else { 1.0 };
+                    Vec2::new(0.0, oy * side)
+                };
+                let (fa, fb) = (fixed.contains(&ids[i]), fixed.contains(&ids[j]));
+                let (ka, kb) = match (fa, fb) {
+                    (true, true) => continue,
+                    (true, false) => (0.0, 1.0),
+                    (false, true) => (1.0, 0.0),
+                    (false, false) => (0.5, 0.5),
+                };
+                *positions.get_mut(&ids[i]).unwrap() -= push * ka;
+                *positions.get_mut(&ids[j]).unwrap() += push * kb;
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    // A card squeezed between others can bounce between them: give any
+    // free card still overlapping the nearest clear spot, trying sideways
+    // first (the graph flows top to bottom).
+    let clear = |positions: &BTreeMap<NodeId, Vec2>, k: usize, at: Vec2| {
+        ids.iter().enumerate().all(|(j, id)| {
+            if j == k {
+                return true;
+            }
+            let d = positions[id] - at;
+            d.x.abs() >= (widths[k] + widths[j]) / 2.0 + NODE_GAP - 0.01
+                || d.y.abs() >= H + NODE_GAP - 0.01
+        })
+    };
+    for k in 0..ids.len() {
+        if fixed.contains(&ids[k]) {
+            continue;
+        }
+        let here = positions[&ids[k]];
+        if clear(positions, k, here) {
+            continue;
+        }
+        let step = 12.0;
+        let spot = (1..200)
+            .flat_map(|n| {
+                let d = n as f32 * step;
+                [
+                    Vec2::new(d, 0.0),
+                    Vec2::new(-d, 0.0),
+                    Vec2::new(0.0, d),
+                    Vec2::new(0.0, -d),
+                ]
+            })
+            .map(|offset| here + offset)
+            .find(|&at| clear(positions, k, at));
+        if let Some(at) = spot {
+            positions.insert(ids[k], at);
+        }
+    }
+}
+
+/// The moves (as edits) that clear every overlap, with `overrides`
+/// standing in for those nodes' positions and `fixed` nodes staying put.
+fn make_room(
+    s: &Session,
+    fixed: &BTreeSet<NodeId>,
+    overrides: &BTreeMap<NodeId, Vec2>,
+) -> Vec<Edit> {
+    let defaults = default_positions(s);
+    let before: BTreeMap<NodeId, Vec2> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, _)| (id, node_position(s, id, &defaults)))
+        .collect();
+    let mut after = before.clone();
+    after.extend(overrides.iter().map(|(&id, &p)| (id, p)));
+    relax(&mut after, |id| card_width(&s.doc.graph, id), fixed);
+    after
+        .into_iter()
+        .filter(|(id, p)| !overrides.contains_key(id) && (before[id] - *p).length() > 0.5)
+        .map(|(id, p)| Edit::MoveNode {
+            id,
+            before: s.doc.node_positions.get(&id).copied(),
+            after: [p.x, p.y],
+        })
+        .collect()
+}
+
+/// The nearest place to `at` where a new card of `width` overlaps none
+/// of the existing ones (it moves; they don't).
+fn free_spot(s: &Session, at: [f32; 2], width: f32) -> [f32; 2] {
+    let defaults = default_positions(s);
+    let mut positions: BTreeMap<NodeId, Vec2> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, _)| (id, node_position(s, id, &defaults)))
+        .collect();
+    let fixed: BTreeSet<NodeId> = positions.keys().copied().collect();
+    let new = NodeId(usize::MAX);
+    positions.insert(new, Vec2::new(at[0], at[1]));
+    relax(
+        &mut positions,
+        |id| {
+            if id == new {
+                width
+            } else {
+                card_width(&s.doc.graph, id)
+            }
+        },
+        &fixed,
+    );
+    let p = positions[&new];
+    [p.x, p.y]
+}
+
+/// Across-positions for a layered graph (rows top to bottom) that keep
+/// cables short and uncrossed: each node goes under the average of the
+/// nodes feeding it, then a pass back up centres parents over their
+/// children, a few times over. Each row keeps its order by those targets
+/// and never overlaps. Rows are reordered in place.
+fn arrange_columns(
+    rows: &mut [Vec<NodeId>],
+    links: &[Link],
+    width: impl Fn(NodeId) -> f32,
+) -> BTreeMap<NodeId, f32> {
+    let space = |id: NodeId| width(id) + NODE_GAP * 2.0;
+    let mut x = BTreeMap::<NodeId, f32>::new();
+    // Start: each row side by side, centred.
+    for row in rows.iter() {
+        let total: f32 = row.iter().map(|&id| space(id)).sum();
+        let mut at = -total / 2.0;
+        for &id in row {
+            x.insert(id, at + space(id) / 2.0);
+            at += space(id);
+        }
+    }
+    let place = |row: &mut Vec<NodeId>,
+                 x: &mut BTreeMap<NodeId, f32>,
+                 target: &dyn Fn(NodeId, f32) -> f32| {
+        let targets: BTreeMap<NodeId, f32> =
+            row.iter().map(|&id| (id, target(id, x[&id]))).collect();
+        row.sort_by(|a, b| targets[a].total_cmp(&targets[b]));
+        // Left to right at the targets, but never overlapping.
+        let mut placed: Vec<f32> = Vec::with_capacity(row.len());
+        for (k, &id) in row.iter().enumerate() {
+            let mut at = targets[&id];
+            if k > 0 {
+                let prev = row[k - 1];
+                at = at.max(placed[k - 1] + (space(prev) + space(id)) / 2.0);
+            }
+            placed.push(at);
+        }
+        // Then centre the row on its targets.
+        let shift = row
+            .iter()
+            .zip(&placed)
+            .map(|(id, at)| targets[id] - at)
+            .sum::<f32>()
+            / row.len().max(1) as f32;
+        for (&id, at) in row.iter().zip(placed) {
+            x.insert(id, at + shift);
+        }
+    };
+    let mean = |ids: Vec<NodeId>, x: &BTreeMap<NodeId, f32>, or: f32| {
+        let xs: Vec<f32> = ids.iter().filter_map(|id| x.get(id).copied()).collect();
+        if xs.is_empty() {
+            or
+        } else {
+            xs.iter().sum::<f32>() / xs.len() as f32
+        }
+    };
+    let parents = |id: NodeId| {
+        links
+            .iter()
+            .filter(|l| l.to == id)
+            .map(|l| l.from)
+            .collect::<Vec<_>>()
+    };
+    let children = |id: NodeId| {
+        links
+            .iter()
+            .filter(|l| l.from == id)
+            .map(|l| l.to)
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..4 {
+        for row in rows.iter_mut().skip(1) {
+            let snapshot = x.clone();
+            place(row, &mut x, &|id, here| mean(parents(id), &snapshot, here));
+        }
+        let last = rows.len().saturating_sub(1);
+        for row in rows.iter_mut().take(last).rev() {
+            let snapshot = x.clone();
+            place(row, &mut x, &|id, here| mean(children(id), &snapshot, here));
+        }
+    }
+    for row in rows.iter_mut().skip(1) {
+        let snapshot = x.clone();
+        place(row, &mut x, &|id, here| mean(parents(id), &snapshot, here));
+    }
+    x
+}
+
 pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
     let mut depth = BTreeMap::new();
     let mut pending: BTreeMap<_, usize> = s.doc.graph.nodes().map(|(id, _)| (id, 0)).collect();
@@ -1094,27 +1590,24 @@ pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
             }
         }
     }
-    let mut rows = BTreeMap::<usize, Vec<NodeId>>::new();
+    let mut by_depth = BTreeMap::<usize, Vec<NodeId>>::new();
     for (id, _) in s.doc.graph.nodes() {
-        rows.entry(depth.get(&id).copied().unwrap_or_default())
+        by_depth
+            .entry(depth.get(&id).copied().unwrap_or_default())
             .or_default()
             .push(id);
     }
+    let mut rows: Vec<Vec<NodeId>> = by_depth.into_values().collect();
+    let links = s.doc.graph.links().to_vec();
+    let x = arrange_columns(&mut rows, &links, |id| card_width(&s.doc.graph, id));
     let mut edits = Vec::new();
     let mut bounds = Rect::NOTHING;
-    for (row, ids) in rows {
-        let mut offset = 0.0;
-        let widths: Vec<_> = ids
-            .iter()
-            .map(|&id| card_width(&s.doc.graph, id) + 32.0)
-            .collect();
-        let centre = widths.iter().sum::<f32>() * 0.5;
-        for (id, width) in ids.into_iter().zip(widths) {
-            let after = [offset + width * 0.5 - centre, 43.0 + row as f32 * 98.0];
-            offset += width;
+    for (row, ids) in rows.iter().enumerate() {
+        for &id in ids {
+            let after = [x[&id], 43.0 + row as f32 * 98.0];
             bounds = bounds.union(Rect::from_center_size(
                 Pos2::new(after[0], after[1]),
-                Vec2::new(width - 32.0, H),
+                Vec2::new(card_width(&s.doc.graph, id), H),
             ));
             let before = s.doc.node_positions.get(&id).copied();
             if before != Some(after) {
@@ -1150,7 +1643,7 @@ pub fn kind_colour(kind: &NodeKind) -> egui::Color32 {
         ("Composite", (128, 182, 214)),
         ("Camera", (214, 214, 220)),
         ("Write", (168, 172, 180)),
-        ("Box Blur", (222, 143, 160)),
+        ("Blur", (222, 143, 160)),
         ("Grain", (196, 176, 128)),
         ("Opacity", (150, 206, 222)),
         ("Blend Modes", (232, 156, 122)),
@@ -1284,33 +1777,51 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         y += grid;
     }
 
-    let mut positions = BTreeMap::new();
-    let middle = s.doc.layers.len().saturating_sub(1) as f32 / 2.0;
-    for (index, layer) in s.doc.layers.iter().enumerate() {
-        let x = (index as f32 - middle) * (W + 26.0);
-        positions.insert(layer.peg, Vec2::new(x, 43.0));
-        positions.insert(layer.node, Vec2::new(x, 120.0));
+    // Where every node sits: stored, or the default layout. Dragged nodes
+    // follow the pointer; the others make room (they push apart so no two
+    // cards overlap) and glide to where they're going.
+    let defaults = default_positions(s);
+    let mut placed: BTreeMap<NodeId, Vec2> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, _)| (id, node_position(s, id, &defaults)))
+        .collect();
+    let mut held = BTreeSet::new();
+    if let Some(Drag::Node(moving, delta)) = state.drag {
+        for (id, position) in placed.iter_mut() {
+            if *id == moving || state.selection.contains(id) {
+                *position += delta;
+                held.insert(*id);
+            }
+        }
+        relax(&mut placed, |id| card_width(&s.doc.graph, id), &held);
     }
-    positions.insert(s.doc.composite, Vec2::new(0.0, 209.0));
-    positions.insert(s.doc.display, Vec2::new(0.0, 291.0));
+    for (id, position) in placed.iter_mut() {
+        if !held.contains(id) {
+            let key = resp.id.with(("node-glide", *id));
+            *position = Vec2::new(
+                symphony_ui::motion::value(
+                    ui.ctx(),
+                    key.with(0),
+                    position.x,
+                    symphony_ui::motion::Motion::Select,
+                ),
+                symphony_ui::motion::value(
+                    ui.ctx(),
+                    key.with(1),
+                    position.y,
+                    symphony_ui::motion::Motion::Select,
+                ),
+            );
+        }
+    }
 
     let mut cards = BTreeMap::new();
     let mut inputs = BTreeMap::<Input, Pos2>::new();
     let mut outputs = BTreeMap::new();
     for (id, node) in s.doc.graph.nodes() {
-        let mut position = s
-            .doc
-            .node_positions
-            .get(&id)
-            .copied()
-            .map(|p| Vec2::new(p[0], p[1]))
-            .or_else(|| positions.get(&id).copied())
-            .unwrap_or_else(|| Vec2::new(W + 36.0, 43.0 + id.0 as f32 * 58.0));
-        if let Some(Drag::Node(moving, delta)) = state.drag {
-            if id == moving || state.selection.contains(&id) {
-                position += delta;
-            }
-        }
+        let position = placed.get(&id).copied().unwrap_or_default();
         let center = origin + position * zoom;
         let ports = if matches!(node.kind, NodeKind::Composite) {
             let mut used: Vec<_> = s
@@ -1412,6 +1923,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .find(|(_, at)| at.distance(p) <= hit_radius)
             .map(|(&key, _)| key)
     };
+    // Every input, by node, in port order (for picking a free one).
+    let cards_inputs: Vec<Input> = inputs.keys().copied().collect();
     let output_at = |p: Pos2| {
         outputs
             .iter()
@@ -1514,6 +2027,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
         _ => None,
     };
+    let now = ui.input(|i| i.time);
+    let animated = symphony_ui::motion::enabled(ui.ctx());
     if resp.drag_stopped() {
         match state.drag.take() {
             Some(Drag::Node(id, delta)) if delta.length_sq() > 0.0 => {
@@ -1528,6 +2043,14 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                             after: [position.x, position.y],
                         })
                         .collect();
+                    // Neighbours it pushed aside move in the same step.
+                    let overrides: BTreeMap<NodeId, Vec2> = cards
+                        .iter()
+                        .filter(|(moving, _)| **moving == id || state.selection.contains(moving))
+                        .map(|(&id, (_, position))| (id, *position))
+                        .collect();
+                    let fixed: BTreeSet<NodeId> = overrides.keys().copied().collect();
+                    edits.extend(make_room(s, &fixed, &overrides));
                     let action = if let Some(wiring) = auto_wire.take() {
                         edits.push(wiring.edit(s));
                         "Move and connect node"
@@ -1549,18 +2072,61 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 }
             }
             Some(Drag::Cable { source, old_input }) => {
-                if let Some(point) = resp
+                let release = resp
                     .interact_pointer_pos()
-                    .filter(|point| viewport.contains(*point))
-                {
-                    if let Some(input) = drop_target(&s.doc.graph, source, point) {
-                        if old_input != Some(input) {
-                            edit_link(s, Some(source), input, old_input);
+                    .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+                let target = release
+                    .filter(|p| viewport.contains(*p))
+                    .and_then(|p| drop_target(&s.doc.graph, source, p));
+                if old_input.is_none() && target.is_none() {
+                    let end = release.or_else(|| state.drag_cable.map(|cable| cable.end));
+                    if animated {
+                        if let (Some(&from), Some(end)) = (outputs.get(&source), end) {
+                            state.link_anims.push(LinkAnim::retract(
+                                None,
+                                source,
+                                (from, end),
+                                state.drag_cable.take(),
+                                now,
+                            ));
                         }
-                    } else if node_at(point).is_none() && output_at(point).is_none() {
+                    }
+                } else if let Some(point) = release.filter(|point| viewport.contains(*point)) {
+                    state.released = Some((point, now));
+                    state.released_cable = state.drag_cable.take();
+                    // A cable lifted off an input and let go close to where
+                    // it was (a slip, or grabbing the port while aiming for
+                    // the node) snaps back instead of disconnecting.
+                    let slipped = old_input
+                        .and_then(|input| inputs.get(&input))
+                        .is_some_and(|&at| at.distance(point) < SNAP_BACK);
+                    if let Some(input) = target.filter(|&i| old_input != Some(i)) {
+                        connect_smart(s, source, input, old_input, &cards_inputs);
+                    } else if target.is_none()
+                        && !slipped
+                        && node_at(point).is_none()
+                        && output_at(point).is_none()
+                    {
+                        // Pulled clearly away into empty space: disconnect.
                         if let Some(input) = old_input {
                             edit_link(s, None, input, None);
                         }
+                    } else if let Some(input) = old_input {
+                        // Kept: the cable springs back onto its port.
+                        let link = Link {
+                            from: source,
+                            to: input.0,
+                            port: input.1,
+                        };
+                        state.link_anims.retain(|a| a.link != Some(link));
+                        state.link_anims.push(LinkAnim {
+                            link: Some(link),
+                            start: now,
+                            motion: CableMotion::Move { from_end: point },
+                            curve: state.released_cable.take().unwrap_or_else(|| {
+                                Cable::new(outputs.get(&source).copied().unwrap_or(point), point)
+                            }),
+                        });
                     }
                 }
             }
@@ -1610,10 +2176,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
 
-    // Connections animate: new ones draw out from their output (Expand),
-    // removed ones fade where they were (Dismiss).
-    let now = ui.input(|i| i.time);
-    let animated = symphony_ui::motion::enabled(ui.ctx());
+    let dt = state.cable_time.map_or(0.0, |last| (now - last) as f32);
+    state.cable_time = Some(now);
     let mut ends: Vec<(Link, Pos2, Pos2)> = Vec::new();
     for link in s.doc.graph.links() {
         if let (Some(&from), Some(&to)) =
@@ -1622,76 +2186,150 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             ends.push((*link, from, to));
         }
     }
+    // Where a cable was just let go, and its rope (a fraction of a second).
+    let recent = state.released.is_some_and(|(_, at)| now - at < 0.25);
+    let released = state.released.filter(|_| recent).map(|(p, _)| p);
+    if !recent {
+        state.released_cable = None;
+    }
     if state.drawn_scene != s.key {
         // A different scene: nothing to animate from.
         state.drawn_scene = s.key.clone();
         state.link_anims.clear();
-    } else if animated {
-        for &(link, ..) in &ends {
-            if !state.drawn_links.iter().any(|(l, ..)| *l == link) {
-                state.link_anims.retain(|a| a.link != link);
-                state.link_anims.push(LinkAnim {
-                    link,
-                    start: now,
-                    gone: None,
-                });
-            }
+    } else if animated
+        && state
+            .drawn_links
+            .iter()
+            .map(|(link, ..)| link)
+            .ne(ends.iter().map(|(link, ..)| link))
+    {
+        let appeared: Vec<(Link, Pos2, Pos2)> = ends
+            .iter()
+            .copied()
+            .filter(|(l, ..)| !state.drawn_links.iter().any(|(d, ..)| d == l))
+            .collect();
+        let mut gone: Vec<(Link, Pos2, Pos2)> = state
+            .drawn_links
+            .iter()
+            .copied()
+            .filter(|(l, ..)| !ends.iter().any(|(e, ..)| e == l))
+            .collect();
+        for (link, from, _) in appeared {
+            // The same output lost a link this frame: it moved (or swapped).
+            let (motion, start_end) = match gone.iter().position(|(g, ..)| g.from == link.from) {
+                Some(i) => {
+                    let old_end = gone.remove(i).2;
+                    let start = released.unwrap_or(old_end);
+                    (CableMotion::Move { from_end: start }, Some(start))
+                }
+                None => (CableMotion::Connect { from_end: released }, released),
+            };
+            let curve = state
+                .released_cable
+                .take()
+                .unwrap_or_else(|| Cable::new(from, start_end.unwrap_or(from)));
+            state.link_anims.retain(|a| a.link != Some(link));
+            state.link_anims.push(LinkAnim {
+                link: Some(link),
+                start: now,
+                motion,
+                curve,
+            });
         }
-        for &(link, from, to) in &state.drawn_links {
-            if !ends.iter().any(|(l, ..)| *l == link) {
-                state.link_anims.retain(|a| a.link != link);
-                state.link_anims.push(LinkAnim {
-                    link,
-                    start: now,
-                    gone: Some((from, to)),
-                });
-            }
+        for (link, from, to) in gone {
+            state.link_anims.retain(|a| a.link != Some(link));
+            state.link_anims.push(LinkAnim::retract(
+                Some(link),
+                link.from,
+                (from, released.unwrap_or(to)),
+                state.released_cable.take(),
+                now,
+            ));
         }
     }
+    if !animated {
+        state.link_anims.clear();
+        state.drag_cable = None;
+        state.released_cable = None;
+    }
     state.drawn_links = ends;
-    let grow = symphony_ui::motion::Motion::Expand;
-    let fade = symphony_ui::motion::Motion::Dismiss;
-    state.link_anims.retain(|a| {
-        let length = if a.gone.is_some() {
-            fade.seconds() * 1.8
-        } else {
-            grow.seconds()
-        };
-        now - a.start < length
-    });
+    state
+        .link_anims
+        .retain(|a| now - a.start < a.motion.seconds());
     if !state.link_anims.is_empty() {
         ui.ctx().request_repaint();
     }
+    let link_selected =
+        |link: Link| state.selection.contains(&link.from) || state.selection.contains(&link.to);
+    let selected_outputs: BTreeSet<_> = s
+        .doc
+        .graph
+        .links()
+        .iter()
+        .filter(|link| link_selected(**link))
+        .map(|link| link.from)
+        .collect();
+    let cable_style = |link: Link, removing: bool| {
+        let colour = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
+        if removing {
+            Stroke::new(ACTIVE_CABLE_WIDTH, theme::STATE_DANGER)
+        } else if link_selected(link) {
+            Stroke::new(
+                ACTIVE_CABLE_WIDTH,
+                colour.lerp_to_gamma(theme::ACCENT_SELECT, 0.7),
+            )
+        } else {
+            Stroke::new(CABLE_WIDTH, colour)
+        }
+    };
+    // Step and draw every moving cable.
+    let mut moving: Vec<Link> = Vec::new();
     for a in &state.link_anims {
-        if let Some((from, to)) = a.gone {
-            let t = ((now - a.start) / (fade.seconds() * 1.8)) as f32;
-            let ink = peg_colour(&s.doc.graph, a.link.from)
-                .unwrap_or(theme::LINE_CONTROL)
-                .gamma_multiply(1.0 - fade.ease(t));
-            curve(&painter, from, to, Stroke::new(1.5, ink));
+        let progress = ((now - a.start) / a.motion.seconds()).clamp(0.0, 1.0) as f32;
+        match a.motion {
+            CableMotion::Retract { source, from } => {
+                let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::LINE_CONTROL);
+                let from = outputs.get(&source).copied().unwrap_or(from);
+                a.curve.retract(from, progress).paint_moving(
+                    &painter,
+                    Stroke::new(CABLE_WIDTH, ink.gamma_multiply(1.0 - 0.5 * progress)),
+                    (progress * std::f32::consts::TAU).sin() * (1.0 - progress) * 13.0,
+                );
+            }
+            CableMotion::Connect { .. } | CableMotion::Move { .. } => {
+                let Some(link) = a.link else { continue };
+                let (Some(&from), Some(&to)) =
+                    (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
+                else {
+                    continue;
+                };
+                moving.push(link);
+                let start = match a.motion {
+                    CableMotion::Move { from_end } => Some(from_end),
+                    CableMotion::Connect { from_end } => from_end,
+                    CableMotion::Retract { .. } => None,
+                };
+                let remaining = (1.0 - progress).powi(3);
+                let routed = progress * progress * (3.0 - 2.0 * progress);
+                let cable = if let Some(start) = start {
+                    Cable::new(from, to.lerp(start, remaining))
+                        .shape_for_ports(routed)
+                        .with_offset(a.curve.offset() * remaining)
+                } else {
+                    Cable::new(from, to)
+                        .shape_for_ports(1.0)
+                        .prefix(1.0 - remaining)
+                };
+                let flex = (progress * std::f32::consts::TAU).sin() * (1.0 - progress) * 9.0;
+                cable.paint_moving(&painter, cable_style(link, false), flex);
+            }
         }
     }
-    let growing = |link: &Link| {
-        state
-            .link_anims
-            .iter()
-            .find(|a| a.link == *link && a.gone.is_none())
-            .map(|a| grow.ease(((now - a.start) / grow.seconds()) as f32))
-    };
     for link in s.doc.graph.links() {
         if auto_wire.and_then(AutoWire::replaced) == Some(*link) {
             continue;
         }
-        if let Some(upto) = growing(link) {
-            if let (Some(&from), Some(&to)) =
-                (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
-            {
-                let ink = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
-                painter.add(egui::Shape::line(
-                    cable_path(from, to, upto),
-                    Stroke::new(1.5, ink),
-                ));
-            }
+        if moving.contains(link) {
             continue;
         }
         let input = (link.to, link.port);
@@ -1701,12 +2339,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         if let (Some(&from), Some(&to)) = (outputs.get(&link.from), inputs.get(&input)) {
             let removing =
                 cut == Some(*link) || detach.is_some_and(|id| link.from == id || link.to == id);
-            let ink = if removing {
-                theme::STATE_DANGER
-            } else {
-                peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL)
-            };
-            curve(&painter, from, to, Stroke::new(1.5, ink));
+            curve(&painter, from, to, cable_style(*link, removing));
         }
     }
     if let Some(Drag::Cable { source, .. }) = state.drag {
@@ -1718,8 +2351,29 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 .and_then(|input| inputs.get(&input).copied())
                 .unwrap_or(pointer);
             let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::ACCENT_SELECT);
-            curve(&painter, from, to, Stroke::new(2.0, ink));
+            if animated {
+                let previous = state.drag_cable.unwrap_or_else(|| {
+                    let picked = match state.drag {
+                        Some(Drag::Cable {
+                            old_input: Some(input),
+                            ..
+                        }) => inputs.get(&input).copied(),
+                        _ => None,
+                    };
+                    Cable::new(from, picked.unwrap_or(from))
+                });
+                let cable = previous.follow(from, to, dt);
+                state.drag_cable = Some(cable);
+                cable.paint(&painter, Stroke::new(ACTIVE_CABLE_WIDTH, ink));
+                if cable.offset().length_sq() > 0.01 {
+                    ui.ctx().request_repaint();
+                }
+            } else {
+                curve(&painter, from, to, Stroke::new(ACTIVE_CABLE_WIDTH, ink));
+            }
         }
+    } else {
+        state.drag_cable = None;
     }
     // While pulling a node out, show the chain closing up behind it.
     if let Some(id) = detach {
@@ -1744,11 +2398,20 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             }
         }
     }
-    for (id, (card, _)) in &cards {
+    // Selected nodes draw last, so their lift and shadow sit above the rest.
+    let mut order: Vec<(&NodeId, &(Rect, _))> = cards.iter().collect();
+    order.sort_by_key(|(id, _)| state.selection.contains(id));
+    for (id, (card, _)) in order {
         let Some(node) = s.doc.graph.node(*id) else {
             continue;
         };
         let selected = state.selection.contains(id);
+        // Selecting eases the card up a little, with a shadow under it and
+        // a thicker rim (Motion presence, so it eases out again too).
+        let lift = symphony_ui::motion::presence(ui.ctx(), resp.id.with(("lift", *id)), selected);
+        let card = &Rect::from_center_size(card.center(), card.size() * (1.0 + 0.12 * lift));
+        // Rounded, and the same shape at any zoom: corners scale with the card.
+        let radius = NODE_RADIUS * zoom;
         let peg = peg_colour(&s.doc.graph, *id);
         let matte = s.doc.graph.is_drawing_matte(*id);
         let title = if matte {
@@ -1756,19 +2419,37 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         } else {
             node_name(node).to_owned()
         };
-        let edge = if selected {
-            theme::ACCENT_SELECT
-        } else {
-            peg.unwrap_or(theme::LINE_STRONG)
-        };
+        // Selection keeps the node's own colour; the rim just thickens.
+        let edge = peg.unwrap_or(theme::LINE_STRONG);
         let face = peg.map_or(theme::BG_RAISED, |colour| {
             theme::BG_RAISED.lerp_to_gamma(colour, 0.12)
         });
+        // Unselected nodes sit a little darker, so the selected one stands
+        // out; a disabled node is grey with no border.
+        let face = if !node.enabled {
+            theme::BG_INPUT
+        } else {
+            face.lerp_to_gamma(theme::BG_BASE, 0.35 * (1.0 - lift))
+        };
+        let edge = if node.enabled {
+            edge
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        if lift > 0.0 {
+            let shadow = egui::epaint::Shadow {
+                offset: [0, (6.0 * zoom * lift) as i8],
+                blur: (16.0 * zoom * lift).min(255.0) as u8,
+                spread: 0,
+                color: egui::Color32::from_black_alpha((110.0 * lift) as u8),
+            };
+            painter.add(shadow.as_shape(*card, radius));
+        }
         painter.rect(
             *card,
-            theme::RADIUS_CONTROL,
+            radius,
             face,
-            Stroke::new(if selected { 2.0 } else { 1.0 }, edge),
+            Stroke::new(1.0 + 2.0 * lift, edge),
             StrokeKind::Inside,
         );
         let mut font = theme::body();
@@ -1780,7 +2461,11 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             Align2::CENTER_CENTER,
             &title,
             font,
-            theme::TEXT_PRIMARY,
+            if node.enabled {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_DISABLED
+            },
             card.width() - 16.0 * zoom,
         );
     }
@@ -1861,7 +2546,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             }
             _ => hover.is_some_and(|p| p.distance(point) <= hit_radius),
         };
-        let highlighted = target && compatible;
+        let highlighted = (target && compatible)
+            || state.selection.contains(&input.0)
+            || s.doc
+                .graph
+                .input(input.0, input.1)
+                .is_some_and(|source| state.selection.contains(&source));
         let ink = s
             .doc
             .graph
@@ -1875,7 +2565,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .graph
             .node(id)
             .is_some_and(|n| matches!(n.kind, NodeKind::Peg(_)));
-        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius);
+        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius)
+            || state.selection.contains(&id)
+            || selected_outputs.contains(&id);
         socket(
             &painter,
             point,
@@ -2098,6 +2790,122 @@ pub fn convert_drawing(s: &mut Session, id: NodeId) {
 mod tests {
     use super::*;
 
+    fn overlapping(s: &Session) -> Vec<(NodeId, NodeId)> {
+        let defaults = default_positions(s);
+        let ids: Vec<NodeId> = s.doc.graph.nodes().map(|(id, _)| id).collect();
+        let mut out = Vec::new();
+        for (k, &a) in ids.iter().enumerate() {
+            for &b in &ids[k + 1..] {
+                let (pa, pb) = (
+                    node_position(s, a, &defaults),
+                    node_position(s, b, &defaults),
+                );
+                let (wa, wb) = (card_width(&s.doc.graph, a), card_width(&s.doc.graph, b));
+                if (pa.x - pb.x).abs() < (wa + wb) / 2.0 && (pa.y - pb.y).abs() < H {
+                    out.push((a, b));
+                }
+            }
+        }
+        out
+    }
+
+    /// Cards pushed apart: none overlap, and held cards stay put.
+    #[test]
+    fn relaxing_clears_overlaps_and_keeps_held_cards() {
+        let ids = [NodeId(1), NodeId(2), NodeId(3)];
+        let mut p: BTreeMap<NodeId, Vec2> =
+            ids.iter().map(|&id| (id, Vec2::new(5.0, 5.0))).collect();
+        let held: BTreeSet<NodeId> = [NodeId(2)].into();
+        relax(&mut p, |_| W, &held);
+        assert_eq!(p[&NodeId(2)], Vec2::new(5.0, 5.0));
+        for a in ids {
+            for b in ids {
+                if a < b {
+                    let d = p[&a] - p[&b];
+                    assert!(
+                        d.x.abs() >= W + NODE_GAP - 0.5 || d.y.abs() >= H + NODE_GAP - 0.5,
+                        "{a:?} {b:?} {d:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Arrange: nothing overlaps, each peg sits straight above its drawing,
+    /// and cables between rows don't cross.
+    #[test]
+    fn arrange_is_tidy_and_uncrossed() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        s.add_layer();
+        let mut state = NodeViewState::default();
+        arrange(&mut s, &mut state);
+        assert!(overlapping(&s).is_empty(), "{:?}", overlapping(&s));
+        let defaults = default_positions(&s);
+        let at = |id| node_position(&s, id, &defaults);
+        for layer in &s.doc.layers {
+            assert!(
+                (at(layer.peg).x - at(layer.node).x).abs() < 1.0,
+                "peg straight above its drawing"
+            );
+        }
+        // No two links between the same pair of rows cross.
+        let links = s.doc.graph.links().to_vec();
+        for a in &links {
+            for b in &links {
+                let (a0, a1, b0, b1) = (at(a.from), at(a.to), at(b.from), at(b.to));
+                if (a0.y - b0.y).abs() < 1.0
+                    && (a1.y - b1.y).abs() < 1.0
+                    && a.from != b.from
+                    && a.to != b.to
+                {
+                    assert!(
+                        (a0.x - b0.x) * (a1.x - b1.x) >= 0.0,
+                        "cables cross: {a:?} {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A node added where another sits moves clear of it.
+    #[test]
+    fn added_nodes_make_room() {
+        let mut s = Session::new_scene();
+        let peg = s.doc.layers[0].peg;
+        let p = node_position(&s, peg, &default_positions(&s));
+        add_node(&mut s, NodeKind::Composite, [p.x, p.y]);
+        assert!(overlapping(&s).is_empty(), "{:?}", overlapping(&s));
+    }
+
+    #[test]
+    fn connecting_keeps_connections_where_it_can() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        let comp = s.doc.composite;
+        let from = |s: &Session, port| s.doc.graph.input(comp, port);
+        // Two sources wired into the Composite's first two ports.
+        let (a, b) = (s.doc.layers[0].node, s.doc.layers[1].node);
+        let ports: Vec<Input> = (0..6).map(|p| (comp, p)).collect();
+        for &(_, p) in &ports {
+            edit_link(&mut s, None, (comp, p), None);
+        }
+        edit_link(&mut s, Some(a), (comp, 0), None);
+        edit_link(&mut s, Some(b), (comp, 1), None);
+        assert_eq!((from(&s, 0), from(&s, 1)), (Some(a), Some(b)));
+        // Move a's cable onto b's input: they swap.
+        connect_smart(&mut s, a, (comp, 1), Some((comp, 0)), &ports);
+        assert_eq!((from(&s, 0), from(&s, 1)), (Some(b), Some(a)));
+        s.undo();
+        assert_eq!((from(&s, 0), from(&s, 1)), (Some(a), Some(b)));
+        // Free b, then connect it again onto a's (used) input: it takes a
+        // free port and a stays connected.
+        edit_link(&mut s, None, (comp, 1), None);
+        connect_smart(&mut s, b, (comp, 0), None, &ports);
+        assert_eq!(from(&s, 0), Some(a), "a kept its connection");
+        assert!(ports.iter().any(|&(_, p)| p != 0 && from(&s, p) == Some(b)));
+    }
+
     #[test]
     fn drawing_conversion_is_reversible_and_ignores_other_nodes() {
         let mut s = Session::new_scene();
@@ -2139,6 +2947,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -2210,7 +3019,13 @@ mod tests {
         // Drawing -> Blur -> whatever the drawing fed.
         let layer = s.doc.layers[0];
         let old = *g.links().iter().find(|l| l.from == layer.node).unwrap();
-        let blur = g.add("Blur", NodeKind::Effect(Effect::Blur { radius: 4.0 }));
+        let blur = g.add(
+            "Blur",
+            NodeKind::Effect(Effect::Blur {
+                radius: 4.0,
+                mode: BlurMode::Box,
+            }),
+        );
         g.disconnect_inputs(old.to);
         g.connect(layer.node, blur, 0);
         g.connect(blur, old.to, old.port);
@@ -2246,6 +3061,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -2327,6 +3143,37 @@ mod tests {
                 });
             }
             harness.run_steps(1);
+        }
+    }
+
+    #[test]
+    fn loose_cable_retracts_without_creating_a_link() {
+        for animated in [true, false] {
+            let mut harness = Harness::builder()
+                .with_size(Vec2::new(760.0, 560.0))
+                .build_ui_state(
+                    |ui, (s, state)| canvas(ui, s, state, None),
+                    (Session::new_scene(), NodeViewState::default()),
+                );
+            theme::set_motion(&harness.ctx, animated);
+            harness.run_steps(2);
+            let (s, state) = harness.state();
+            let before = s.doc.graph.links().to_vec();
+            let source = s.doc.layers[0].peg;
+            let from = state
+                .drawn_links
+                .iter()
+                .find(|(link, ..)| link.from == source)
+                .unwrap()
+                .1;
+            let away = from + Vec2::new(190.0, 35.0);
+            pointer_gesture(&mut harness, [from, away, away], egui::Modifiers::NONE);
+            let (s, state) = harness.state();
+            assert_eq!(s.doc.graph.links(), before);
+            assert_eq!(state.link_anims.iter().any(|animation| {
+                animation.link.is_none()
+                    && matches!(animation.motion, CableMotion::Retract { source: id, .. } if id == source)
+            }), animated);
         }
     }
 

@@ -105,6 +105,7 @@ fn deform_line(points: &[Point], pose: &ChainPose, step: f32) -> Vec<Point> {
         x: a0[0],
         y: a0[1],
         pressure: first.pressure,
+        pen: first.pen,
     });
     for w in curve.windows(2) {
         let (a, b) = (w[0], w[1]);
@@ -119,6 +120,7 @@ fn deform_line(points: &[Point], pose: &ChainPose, step: f32) -> Vec<Point> {
                 x: m[0],
                 y: m[1],
                 pressure: a.pressure + (b.pressure - a.pressure) * t,
+                pen: if t < 0.5 { a.pen } else { b.pen },
             })
         });
     }
@@ -241,6 +243,7 @@ mod tests {
                     x: p[0],
                     y: p[1],
                     pressure: 1.0,
+                    ..Point::default()
                 })
                 .collect(),
             tips: Tips::default(),

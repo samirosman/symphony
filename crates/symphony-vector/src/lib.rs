@@ -12,6 +12,7 @@ pub mod cut;
 pub mod fill;
 pub mod shape;
 pub mod stamp;
+pub mod stamped;
 
 use symphony_core::math::Affine;
 use symphony_core::stroke::{Point, Stroke, Tip};
@@ -55,6 +56,7 @@ impl Smoother {
             y: prev.y + (raw.y - prev.y) * a,
             // Pressure is smoothed more lightly, so taper still reacts quickly.
             pressure: prev.pressure + (raw.pressure - prev.pressure) * a.max(0.5),
+            pen: symphony_core::stroke::Pen::lerp(prev.pen, raw.pen, a.max(0.5)),
         };
         if (p.x - prev.x).hypot(p.y - prev.y) < min_dist {
             return None;
@@ -293,6 +295,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -333,6 +336,7 @@ mod tests {
                     x: x as f32 * 10.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 0.1,
             ));

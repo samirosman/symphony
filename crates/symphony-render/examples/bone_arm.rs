@@ -124,6 +124,7 @@ fn arm_scene() -> (Scene, Id) {
         height: H,
         fps: 24.0,
         length: 1,
+        ..Settings::default()
     });
     let mut h = History::default();
     let snap = s.make_layer("Arm", 0);
@@ -207,6 +208,7 @@ fn stroke(id: Id, swatch: Id, width: f32, points: &[[f32; 2]]) -> Stroke {
                 x: p[0],
                 y: p[1],
                 pressure: 1.0,
+                ..Point::default()
             })
             .collect(),
         tips: Tips {

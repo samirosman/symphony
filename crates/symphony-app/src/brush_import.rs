@@ -120,6 +120,21 @@ fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
                 .then(|| PressureCurve::sample(|p| b.grain_strength_at(p))),
             grain_offset: b.grain_offset,
             auto_spacing: b.auto_spacing,
+            dynamics: symphony_core::stroke::Dynamics {
+                scatter: b.dynamics.scatter,
+                scatter_pressure: b.dynamics.scatter_pressure,
+                size_jitter: b.dynamics.size_jitter,
+                angle_jitter: b.dynamics.angle_jitter,
+                stroke_angle_jitter: b.dynamics.stroke_angle_jitter,
+                roundness: b.dynamics.roundness,
+                roundness_pressure: b.dynamics.roundness_pressure,
+                opacity_jitter: b.dynamics.opacity_jitter,
+                flow_jitter: b.dynamics.flow_jitter,
+                angle_tilt: b.dynamics.angle_tilt,
+                angle_barrel: b.dynamics.angle_barrel,
+                roundness_tilt: b.dynamics.roundness_tilt,
+            },
+            vector: false,
         }),
     }
 }
@@ -240,6 +255,82 @@ fn run(paths: &[PathBuf], library: Option<&Path>) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design review: a real brush file's brushes drawn as Bitmap (left)
+    /// and as Vector (right), rendered by the export renderer.
+    /// `SYMPHONY_BRUSH_FILE=<file> SYMPHONY_BRUSH_SHEET=<out.png> cargo test
+    /// -p symphony-app brush_sheet_bitmap_vs_vector -- --ignored`.
+    #[test]
+    #[ignore = "needs a real brush file"]
+    fn brush_sheet_bitmap_vs_vector() {
+        let (Some(file), Some(out)) = (
+            std::env::var_os("SYMPHONY_BRUSH_FILE"),
+            std::env::var_os("SYMPHONY_BRUSH_SHEET"),
+        ) else {
+            return;
+        };
+        let lib = std::env::temp_dir().join(format!("symphony-sheet-{}", std::process::id()));
+        std::fs::create_dir_all(&lib).unwrap();
+        let got = run(&[PathBuf::from(&file)], Some(&lib));
+        let mut s = crate::session::Session::new_scene();
+        s.add_layer();
+        let layer = s.selected;
+        for entry in std::fs::read_dir(&lib).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let (Some(key), Ok(img)) = (key_of(&name), image::open(entry.path())) {
+                let g = img.to_luma8();
+                s.doc.textures.insert(
+                    key,
+                    symphony_core::stroke::Texture {
+                        width: g.width(),
+                        height: g.height(),
+                        pixels: g.into_raw(),
+                    },
+                );
+            }
+        }
+        let rows = got.presets.iter().take(10).count().max(1) as f32;
+        for (row, p) in got.presets.iter().take(10).enumerate() {
+            let y = -480.0 + (row as f32 + 0.5) * 960.0 / rows;
+            for (col, vector) in [(0.0f32, false), (1.0, true)] {
+                let mut tex = p.settings.texture;
+                if let Some(t) = &mut tex {
+                    t.vector = vector;
+                }
+                let width = p.settings.max_width.clamp(4.0, 40.0);
+                let points = (0..=80)
+                    .map(|i| {
+                        let t = i as f32 / 80.0;
+                        symphony_core::stroke::Point {
+                            x: -880.0 + col * 900.0 + t * 780.0,
+                            y: y + (t * std::f32::consts::TAU).sin() * 20.0,
+                            pressure: (t * std::f32::consts::PI).sin().max(0.15),
+                            pen: Default::default(),
+                        }
+                    })
+                    .collect();
+                let st = symphony_core::stroke::Stroke {
+                    id: s.doc.ids.fresh(),
+                    kind: symphony_core::stroke::StrokeKind::Brush,
+                    art: Default::default(),
+                    swatch: s.swatch,
+                    min_width: width * (p.settings.min_width / p.settings.max_width.max(0.01)),
+                    max_width: width,
+                    points,
+                    tips: Default::default(),
+                    texture: tex,
+                    shape: Vec::new(),
+                };
+                s.commit_stroke(layer, 1, st);
+            }
+        }
+        let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+        img.save(&out).unwrap();
+        for p in got.presets.iter().take(10) {
+            println!("{}", p.name);
+        }
+        std::fs::remove_dir_all(&lib).ok();
+    }
 
     #[test]
     fn sizes_fit_symphony_tools() {

@@ -26,7 +26,8 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Transform};
 /// Render `frame` at `width` x `height` pixels (the scene's aspect is
 /// kept; the stage fills the image). Background is white paper.
 pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Option<RgbaImage> {
-    let pixmap = render_display(scene, frame, width, height, true, None)?;
+    let mut pixmap = render_display(scene, frame, width, height, true, None)?;
+    paint_bars(&mut pixmap, &scene.settings);
     RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
 }
 
@@ -101,7 +102,45 @@ pub fn render_camera(
     height: u32,
     preview: Option<StrokePreview<'_>>,
 ) -> Option<Pixmap> {
-    render_display(scene, frame, width, height, false, preview)
+    let mut pix = render_display(scene, frame, width, height, false, preview)?;
+    paint_bars(&mut pix, &scene.settings);
+    Some(pix)
+}
+
+/// The camera frame's black bars, over everything: the frame minus the
+/// (rounded) picture opening, filled black.
+pub fn paint_bars(pix: &mut Pixmap, settings: &symphony_core::doc::Settings) {
+    let (sw, sh) = (settings.width.max(1) as f32, settings.height.max(1) as f32);
+    let Some(outline) = settings.bars.outline(sw, sh) else {
+        return;
+    };
+    let k = pix.width() as f32 / sw;
+    let (cx, cy) = (pix.width() as f32 / 2.0, pix.height() as f32 / 2.0);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.push_rect(
+        tiny_skia::Rect::from_xywh(0.0, 0.0, pix.width() as f32, pix.height() as f32).unwrap(),
+    );
+    for (i, p) in outline.iter().enumerate() {
+        let (x, y) = (cx + p[0] * k, cy + p[1] * k);
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(tiny_skia::Color::BLACK);
+        paint.anti_alias = true;
+        pix.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::EvenOdd,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
 }
 
 fn render_display(
@@ -191,9 +230,9 @@ fn paint_drawing(
         return;
     };
     let m = view.compose(project).compose(item.transform);
-    // An imported image sits under every art layer.
-    if let Some(r) = d.image {
-        bitmap::paint_image(pix, scene, r, m);
+    // An imported image sits under everything else in the drawing.
+    if let Some(img) = d.image {
+        bitmap::paint_image(pix, scene, img, m);
     }
     // Art layers back to front; within each, paint under ink.
     for art in ArtLayer::STACK {
@@ -258,6 +297,39 @@ fn paint_strokes(
                 Some(p) if p.strokes.contains(&st.id) => m.compose(p.transform),
                 _ => m,
             };
+            if let Some(tex) = st.texture.filter(|t| t.vector) {
+                // A vector brush: its merged stamp shapes, filled solid.
+                let tip = tex.tip.and_then(|k| scene.textures.get(&k));
+                let shapes = symphony_vector::stamped::vector_brush_shapes(st, &tex, tip);
+                let mut pb = PathBuilder::new();
+                for shape in &shapes {
+                    for ring in shape {
+                        for (i, &[x, y]) in ring.iter().enumerate() {
+                            let (x, y) = m.apply(x, y);
+                            if i == 0 {
+                                pb.move_to(x, y);
+                            } else {
+                                pb.line_to(x, y);
+                            }
+                        }
+                        pb.close();
+                    }
+                }
+                if let Some(path) = pb.finish() {
+                    let [r, g, b, a] = scene.swatch_rgba(st.swatch);
+                    let mut paint = tiny_skia::Paint::default();
+                    paint.set_color_rgba8(r, g, b, a);
+                    paint.anti_alias = true;
+                    pix.fill_path(
+                        &path,
+                        &paint,
+                        tiny_skia::FillRule::EvenOdd,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                continue;
+            }
             if let Some(tex) = &st.texture {
                 paint_textured(pix, scene, st, tex, m);
                 continue;
@@ -455,6 +527,7 @@ mod tests {
             height: 100,
             fps: 12.0,
             length: 3,
+            ..Default::default()
         });
         let mut h = History::default();
         let snap = s.make_layer("Drawing", 0);
@@ -475,11 +548,13 @@ mod tests {
                     x: -50.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 Point {
                     x: 50.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
             ],
             tips: Default::default(),
@@ -735,9 +810,13 @@ mod tests {
         let opacity = scene
             .graph
             .add("Opacity", NodeKind::Effect(Effect::Opacity { amount: 0.0 }));
-        let blur = scene
-            .graph
-            .add("Box Blur", NodeKind::Effect(Effect::Blur { radius: 16.0 }));
+        let blur = scene.graph.add(
+            "Box Blur",
+            NodeKind::Effect(Effect::Blur {
+                radius: 16.0,
+                mode: symphony_core::graph::BlurMode::Box,
+            }),
+        );
         let grain = scene.graph.add(
             "Grain",
             NodeKind::Effect(Effect::Grain {
@@ -825,7 +904,9 @@ mod tests {
 
     #[test]
     fn renders_an_imported_image_behind_the_drawing() {
-        use symphony_core::bitmap::{layer_edits, Alignment, Alpha, ImageFile, ImageFormat};
+        use symphony_core::doc::{Media, MediaKind};
+        use symphony_core::history::Edit;
+        use symphony_core::stroke::PlacedImage;
         let mut s = scene_with_line();
         let mut bytes = Vec::new();
         image::RgbaImage::from_pixel(2, 1, image::Rgba([0, 0, 255, 255]))
@@ -834,22 +915,82 @@ mod tests {
                 image::ImageFormat::Png,
             )
             .unwrap();
-        s.images.insert(
+        let dir =
+            std::env::temp_dir().join(format!("symphony-render-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("5.png"), bytes).unwrap();
+        s.media_dirs = vec![dir.clone()];
+        s.media.insert(
             5,
-            ImageFile {
-                format: ImageFormat::Png,
-                width: 2,
-                height: 1,
-                bytes: std::sync::Arc::new(bytes),
+            Media {
+                kind: MediaKind::Image,
+                file: "5.png".into(),
+                name: "BG".into(),
+                size: [2, 1],
+                seconds: 0.0,
+                rate: 0,
+                channels: 0,
+                samples: 0,
             },
         );
-        // Index 1 is behind the line's layer. Fit: a 2:1 image fills the 2:1 stage.
-        let edits = layer_edits(&mut s, "BG", 1, &[5], 1, Alignment::Fit, Alpha::Straight);
+        // Index 1 is behind the line's layer. A 2:1 image fills the 2:1 stage.
+        let snap = s.make_layer("BG", 1);
+        let column = snap.layer.column;
+        let mut d = s.make_drawing(column);
+        let (w, h) = (s.settings.width as f32, s.settings.height as f32);
+        d.image = Some(PlacedImage {
+            media: 5,
+            rect: [-w / 2.0, -h / 2.0, w, h],
+            alpha: Default::default(),
+        });
+        let edits = vec![
+            Edit::AddLayer(Box::new(snap)),
+            Edit::SetCells {
+                column,
+                from: 1,
+                before: Vec::new(),
+                after: vec![Some(d.id); 2],
+            },
+            Edit::AddDrawing { drawing: d },
+        ];
         History::default().apply(&mut s, "Import image", edits);
         let img = render_frame(&s, 2, 200, 100).unwrap();
         assert_eq!(img.get_pixel(10, 10).0, [0, 0, 255, 255]);
         assert_eq!(img.get_pixel(190, 90).0, [0, 0, 255, 255]);
         // The line stays in front of the image.
         assert_eq!(img.get_pixel(100, 50).0, [24, 24, 32, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Black bars are part of the exported picture: a 2.39 shape blacks out
+    /// the top and bottom, rounded corners black out the corners, and the
+    /// middle is untouched.
+    #[test]
+    fn exports_draw_the_black_bars() {
+        let mut scene = Scene::new(Settings {
+            width: 200,
+            height: 100,
+            fps: 12.0,
+            length: 1,
+            ..Default::default()
+        });
+        scene.settings.bars = symphony_core::doc::Bars {
+            on: true,
+            aspect: 2.39,
+            radius: 10.0,
+        };
+        let img = render_frame(&scene, 1, 200, 100).unwrap();
+        let px = |x, y| img.get_pixel(x, y).0;
+        assert_eq!(px(100, 2), [0, 0, 0, 255], "top bar");
+        assert_eq!(px(100, 97), [0, 0, 0, 255], "bottom bar");
+        assert_eq!(px(1, 50 - 41 + 1), [0, 0, 0, 255], "rounded corner");
+        assert_eq!(px(100, 50), [255, 255, 255, 255], "the picture");
+        scene.settings.bars.on = false;
+        let img = render_frame(&scene, 1, 200, 100).unwrap();
+        assert_eq!(
+            img.get_pixel(100, 2).0,
+            [255, 255, 255, 255],
+            "off: no bars"
+        );
     }
 }

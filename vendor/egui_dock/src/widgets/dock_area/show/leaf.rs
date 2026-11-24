@@ -1183,11 +1183,28 @@ impl<Tab> DockArea<'_, Tab> {
             &tab_style.inactive
         };
 
+        // Symphony: the active tab's fill slides from the previously active
+        // tab to this one (one highlight per tab bar), measured from the
+        // bar's left edge so it doesn't trail when the window resizes.
+        let fill_rect = if (active || focused) && !is_being_dragged {
+            let bar = ui.scope_id().with("symphony-active-tab");
+            let left = ui.max_rect().left();
+            let time = if ui.style().animation_time > 0.0 { 0.2 } else { 0.0 };
+            let x = ui
+                .ctx()
+                .animate_value_with_time(bar.with("x"), tab_rect.min.x - left, time);
+            let w = ui
+                .ctx()
+                .animate_value_with_time(bar.with("w"), tab_rect.width(), time);
+            Rect::from_min_size(pos2(left + x, tab_rect.min.y), vec2(w, tab_rect.height()))
+        } else {
+            tab_rect
+        };
         // Draw the full tab first and then the stroke on top to avoid the stroke
         // mixing with the background color.
         ui.painter()
-            .rect_filled(tab_rect, tab_style.corner_radius, tab_style.bg_fill);
-        let stroke_rect = rect_stroke_box(tab_rect, 1.0);
+            .rect_filled(fill_rect, tab_style.corner_radius, tab_style.bg_fill);
+        let stroke_rect = rect_stroke_box(fill_rect, 1.0);
         ui.painter().rect_stroke(
             stroke_rect,
             tab_style.corner_radius,

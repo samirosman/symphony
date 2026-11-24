@@ -114,7 +114,7 @@ impl SoundtrackDialog {
             channels: self.channels,
             merge: self.merge,
         };
-        let total = s.doc.sounds.iter().filter(|t| t.enabled).count() as u32;
+        let total = s.doc.sounds.iter().filter(|t| !t.muted).count() as u32;
         let scene = s.doc.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
@@ -192,7 +192,7 @@ impl SoundtrackDialog {
                     }
                     None => {}
                 }
-                let has_sound = s.doc.sounds.iter().any(|t| t.enabled);
+                let has_sound = s.doc.sounds.iter().any(|t| !t.muted);
                 let ready = self.path.is_some() && has_sound;
                 let why = if !has_sound {
                     "The scene has no sound tracks that play. Muted tracks are left out."

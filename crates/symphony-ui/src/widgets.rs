@@ -300,3 +300,96 @@ pub fn fitted_text(
     }
     rect
 }
+
+/// A row (or, `vertical`, a column) of choices. One highlight marks the
+/// chosen option and slides to the new one when it changes (Select motion),
+/// instead of jumping. Returns true when the choice changed.
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    current: &mut T,
+    options: &[(T, &str)],
+    vertical: bool,
+) -> bool {
+    let id = ui.scope_id().with(("segmented", id_salt));
+    let mut changed = false;
+    // Size to the choices: a horizontal layout given the rest of a panel
+    // would stretch to fill its height.
+    let body = |ui: &mut egui::Ui| {
+        if !vertical {
+            ui.spacing_mut().item_spacing.x = 2.0;
+        }
+        // Track the highlight in the control's space so parent scrolling
+        // moves the entire control and any in-flight transition together.
+        let origin = ui.next_widget_position().to_vec2();
+        let highlight = ui.painter().add(egui::Shape::Noop);
+        let mut chosen = None;
+        for &(value, label) in options {
+            let selected = *current == value;
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(label.to_owned(), theme::body(), theme::TEXT_PRIMARY);
+            let pad = Vec2::new(8.0, 4.0);
+            let size = if vertical {
+                Vec2::new(ui.available_width(), galley.size().y + pad.y * 2.0)
+            } else {
+                galley.size() + pad * 2.0
+            };
+            let enabled = ui.is_enabled();
+            let (rect, response) = ui.allocate_exact_size(
+                size,
+                if enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
+            );
+            if response.hovered() && !selected && enabled {
+                ui.painter()
+                    .rect_filled(rect, theme::RADIUS_CONTROL, theme::BG_HOVER);
+            }
+            if selected {
+                chosen = Some(rect);
+            }
+            let colour = if !enabled {
+                theme::TEXT_DISABLED
+            } else if selected {
+                theme::ON_ACCENT
+            } else {
+                theme::TEXT_PRIMARY
+            };
+            let at = if vertical {
+                Pos2::new(rect.left() + pad.x, rect.center().y - galley.size().y / 2.0)
+            } else {
+                rect.center() - galley.size() / 2.0
+            };
+            ui.painter().galley(at, galley, colour);
+            theme::focus_ring(ui, &response);
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::RadioButton, enabled, selected, label)
+            });
+            if response.clicked() && !selected {
+                *current = value;
+                changed = true;
+            }
+        }
+        if let Some(rect) = chosen {
+            let r = crate::motion::slide(ui.ctx(), id, rect.translate(-origin)).translate(origin);
+            let fill = if ui.is_enabled() {
+                theme::ACCENT_SELECT_FILL
+            } else {
+                theme::BG_RAISED
+            };
+            ui.painter().set(
+                highlight,
+                egui::Shape::rect_filled(r, theme::RADIUS_CONTROL, fill),
+            );
+        }
+    };
+    if vertical {
+        ui.vertical(body);
+    } else {
+        ui.horizontal(body);
+    }
+    changed
+}

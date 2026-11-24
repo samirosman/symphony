@@ -1,20 +1,11 @@
 //! Raster effects operate on premultiplied RGBA so transparent edges stay clean.
 
-use symphony_core::graph::{BlendMode, Effect, Gradient};
+use symphony_core::graph::{BlendMode, BlurMode, Effect, Gradient};
 use tiny_skia::Pixmap;
 
 pub fn apply(image: &mut Pixmap, effect: Effect, scale: f32) {
     match effect {
-        Effect::Blur { radius } => {
-            let radius = (radius * scale).round().clamp(0.0, 256.0) as usize;
-            if radius > 0 {
-                let width = image.width() as usize;
-                let height = image.height() as usize;
-                let mut scratch = vec![0; image.data().len()];
-                box_pass(image.data(), &mut scratch, width, height, 1, width, radius);
-                box_pass(&scratch, image.data_mut(), height, width, width, 1, radius);
-            }
-        }
+        Effect::Blur { radius, mode } => blur(image, radius, mode, scale),
         Effect::Grain { amount, seed } => {
             let amount = amount.clamp(0.0, 1.0);
             for (index, pixel) in image
@@ -45,6 +36,107 @@ pub fn apply(image: &mut Pixmap, effect: Effect, scale: f32) {
         }
         // Blending happens when the layer lands (`blend`).
         Effect::Blend { .. } | Effect::Mask { .. } => {}
+    }
+}
+
+fn blur(image: &mut Pixmap, radius: f32, mode: BlurMode, scale: f32) {
+    if !radius.is_finite() || radius <= 0.0 {
+        return;
+    }
+    let pixels = (radius * scale).clamp(0.0, 256.0);
+    match mode {
+        BlurMode::Box | BlurMode::Gaussian => {
+            let box_radius = if mode == BlurMode::Gaussian {
+                // Three box kernels approximate a Gaussian. Their
+                // combined variance is r*(r+1), with sigma = pixels/2.
+                ((1.0 + pixels * pixels).sqrt() - 1.0) / 2.0
+            } else {
+                pixels
+            }
+            .round() as usize;
+            if box_radius == 0 {
+                return;
+            }
+            let (w, h) = (image.width() as usize, image.height() as usize);
+            let mut scratch = vec![0; image.data().len()];
+            for _ in 0..if mode == BlurMode::Gaussian { 3 } else { 1 } {
+                box_pass(image.data(), &mut scratch, w, h, 1, w, box_radius);
+                box_pass(&scratch, image.data_mut(), h, w, w, 1, box_radius);
+            }
+        }
+        BlurMode::Motion { angle } if angle.is_finite() && pixels >= 0.5 => {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let steps = ((pixels.ceil() as usize) | 1).clamp(3, 25);
+            let transforms: Vec<_> = (0..steps)
+                .map(|i| {
+                    let d = pixels * (i as f32 / (steps - 1) as f32 - 0.5);
+                    [1.0, 0.0, d * cos, d * sin]
+                })
+                .collect();
+            sample_blur(image, &transforms);
+        }
+        BlurMode::RadialSpin | BlurMode::RadialZoom => {
+            let (cx, cy) = (
+                (image.width() as f32 - 1.0) * 0.5,
+                (image.height() as f32 - 1.0) * 0.5,
+            );
+            let transforms: Vec<_> = (0..17)
+                .map(|i| {
+                    let t = i as f32 / 16.0;
+                    let (a, b) = if mode == BlurMode::RadialSpin {
+                        let (sin, cos) = ((t - 0.5) * radius.min(180.0).to_radians()).sin_cos();
+                        (cos, sin)
+                    } else {
+                        (1.0 / (1.0 + t * radius.min(200.0) / 100.0), 0.0)
+                    };
+                    [a, b, cx - a * cx + b * cy, cy - b * cx - a * cy]
+                })
+                .collect();
+            sample_blur(image, &transforms);
+        }
+        BlurMode::Motion { .. } => {}
+    }
+}
+
+/// Sample affine paths in premultiplied RGBA. Pixels beyond the image
+/// contribute transparent black, just as they do in a box pass.
+fn sample_blur(image: &mut Pixmap, transforms: &[[f32; 4]]) {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let source = image.data().to_vec();
+    let source = source.as_chunks::<4>().0;
+    let count = transforms.len() as f32;
+    for (index, dest) in image
+        .data_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        let (x, y) = ((index % w) as f32, (index / w) as f32);
+        let mut sum = [0.0; 4];
+        for &[a, b, u, v] in transforms {
+            let (sx, sy) = (a * x - b * y + u, b * x + a * y + v);
+            if sx <= -1.0 || sy <= -1.0 || sx >= w as f32 || sy >= h as f32 {
+                continue;
+            }
+            let (ix, iy) = (sx.floor() as isize, sy.floor() as isize);
+            let (fx, fy) = (sx - ix as f32, sy - iy as f32);
+            for (py, wy) in [(iy, 1.0 - fy), (iy + 1, fy)] {
+                if !(0..h as isize).contains(&py) {
+                    continue;
+                }
+                for (px, wx) in [(ix, 1.0 - fx), (ix + 1, fx)] {
+                    if (0..w as isize).contains(&px) {
+                        for (acc, value) in
+                            sum.iter_mut().zip(source[py as usize * w + px as usize])
+                        {
+                            *acc += value as f32 * wx * wy;
+                        }
+                    }
+                }
+            }
+        }
+        *dest = sum.map(|value| (value / count).round() as u8);
     }
 }
 
@@ -279,6 +371,34 @@ pub fn mask(image: &mut Pixmap, matte: &Pixmap, inverted: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blur_modes_spread_ink_in_the_expected_direction() {
+        let mut source = Pixmap::new(49, 49).unwrap();
+        source.data_mut()[(24 * 49 + 12) * 4..][..4].copy_from_slice(&[255; 4]);
+        let alpha = |image: &Pixmap, x: usize, y: usize| image.data()[(y * 49 + x) * 4 + 3];
+        for mode in BlurMode::ALL {
+            let mut blurred = source.clone();
+            let radius = match mode {
+                BlurMode::RadialSpin | BlurMode::RadialZoom => 60.0,
+                _ => 8.0,
+            };
+            apply(&mut blurred, Effect::Blur { radius, mode }, 1.0);
+            assert_ne!(blurred, source, "{}", mode.title());
+            match mode {
+                BlurMode::Motion { .. } => {
+                    assert!(alpha(&blurred, 14, 24) > 0);
+                    assert_eq!(alpha(&blurred, 12, 26), 0);
+                }
+                BlurMode::RadialSpin => assert!(alpha(&blurred, 12, 27) > 0),
+                BlurMode::RadialZoom => assert!(alpha(&blurred, 9, 24) > 0),
+                _ => {
+                    assert!(alpha(&blurred, 14, 24) > 0);
+                    assert_eq!(alpha(&blurred, 14, 24), alpha(&blurred, 12, 26));
+                }
+            }
+        }
+    }
 
     /// One opaque pixel of `rgb` (0..=255).
     fn px(rgb: [u8; 3], a: u8) -> Pixmap {

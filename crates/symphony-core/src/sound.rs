@@ -1,19 +1,19 @@
-//! Sound tracks: imported soundtracks and dialogue that play with the
-//! picture (PLAN §4.6, §4.11). A sound track is not a layer. It has no
-//! column, node, peg or drawing, and the Node view doesn't show it, as in
-//! Harmony. Tracks are listed top to bottom; an import goes to the bottom.
+//! Sound clips: imported soundtracks and dialogue that play with the
+//! picture (PLAN §4.6, §4.11). A clip is not a layer. It has no column,
+//! node, peg or drawing, and the Node view doesn't show it, as in Harmony.
+//! Clips are listed top to bottom in `Scene::sounds`; an import goes to
+//! the bottom.
 //!
-//! Core holds the original file bytes and what the file says about itself
-//! (sample rate, channels, length), never decoded samples: decoding needs
-//! an audio library, which core doesn't depend on (E1.2). `symphony-audio`
-//! checks and decodes files; `symphony-io` copies them into the project's
-//! `media/` folder (E7.1).
+//! Core holds what a file says about itself (sample rate, channels,
+//! length) in `Scene::media`, never decoded samples: decoding needs an
+//! audio library, which core doesn't depend on (E1.2). `symphony-audio`
+//! checks and decodes files. The files stay in the media folders.
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc::Scene;
+use crate::doc::{Media, MediaKind, Scene, SoundClip};
 use crate::history::Edit;
 use crate::id::Id;
 
@@ -32,28 +32,48 @@ pub enum SoundFormat {
     Wav,
     Aiff,
     Mp3,
+    Flac,
+    /// Ogg Vorbis.
+    Ogg,
+    /// An MP4 container (M4A, MP4, MOV): AAC or ALAC sound.
+    Mp4,
+    /// Raw AAC in ADTS frames.
+    Aac,
 }
 
 impl SoundFormat {
-    /// File extension used in `media/`.
+    /// File extension used in the media folders.
     pub fn extension(self) -> &'static str {
         match self {
             SoundFormat::Wav => "wav",
             SoundFormat::Aiff => "aiff",
             SoundFormat::Mp3 => "mp3",
+            SoundFormat::Flac => "flac",
+            SoundFormat::Ogg => "ogg",
+            SoundFormat::Mp4 => "m4a",
+            SoundFormat::Aac => "aac",
         }
     }
 
     /// The format from the first bytes of a file, not from its name.
     pub fn sniff(bytes: &[u8]) -> Option<SoundFormat> {
         let riff = |kind: &[u8]| bytes.len() >= 12 && &bytes[8..12] == kind;
+        let sync = bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0;
         if (bytes.starts_with(b"RIFF") || bytes.starts_with(b"RF64")) && riff(b"WAVE") {
             Some(SoundFormat::Wav)
         } else if bytes.starts_with(b"FORM") && (riff(b"AIFF") || riff(b"AIFC")) {
             Some(SoundFormat::Aiff)
-        } else if bytes.starts_with(b"ID3")
-            || (bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0)
-        {
+        } else if bytes.starts_with(b"fLaC") {
+            Some(SoundFormat::Flac)
+        } else if bytes.starts_with(b"OggS") {
+            Some(SoundFormat::Ogg)
+        } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+            Some(SoundFormat::Mp4)
+        } else if sync && bytes[1] & 0x06 == 0 {
+            // An ADTS frame: the MPEG sync with layer bits 00, which MP3
+            // never uses (ISO/IEC 13818-7).
+            Some(SoundFormat::Aac)
+        } else if bytes.starts_with(b"ID3") || sync {
             // An ID3 tag, or an MPEG audio frame sync.
             Some(SoundFormat::Mp3)
         } else {
@@ -62,9 +82,9 @@ impl SoundFormat {
     }
 }
 
-/// One sound file used by the scene, stored by content key in
-/// `Scene::sound_files`. The bytes are the original file, unchanged.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A sound file read for import: what its header says, and the original
+/// bytes, unchanged. The scene keeps only [`SoundFile::media`].
+#[derive(Clone, Debug)]
 pub struct SoundFile {
     pub format: SoundFormat,
     /// Samples a second, per channel.
@@ -72,8 +92,6 @@ pub struct SoundFile {
     pub channels: u16,
     /// Length in samples per channel.
     pub samples: u64,
-    /// Loaded from `media/` on open; not part of `scene.json`.
-    #[serde(skip)]
     pub bytes: Arc<Vec<u8>>,
 }
 
@@ -86,6 +104,21 @@ impl SoundFile {
     /// Length in seconds.
     pub fn seconds(&self) -> f64 {
         self.samples as f64 / f64::from(self.rate.max(1))
+    }
+
+    /// The scene's record of this file, stored as `<key>.<ext>` in the
+    /// media folders.
+    pub fn media(&self, key: u64, name: &str) -> Media {
+        Media {
+            kind: MediaKind::Sound,
+            file: self.file_name(key),
+            name: name.into(),
+            size: [0, 0],
+            seconds: self.seconds() as f32,
+            rate: self.rate,
+            channels: self.channels,
+            samples: self.samples,
+        }
     }
 
     /// The header values are within the limits (hostile files, E7.6).
@@ -107,54 +140,34 @@ pub fn content_key(bytes: &[u8]) -> u64 {
     h
 }
 
-/// A track in the Timeline that plays one sound file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SoundTrack {
-    pub id: Id,
-    /// A label (E2.2); the file name without its extension on import.
-    pub name: String,
-    /// Key in `Scene::sound_files`.
-    pub key: u64,
-    /// Off: the track is muted.
-    #[serde(default = "on")]
-    pub enabled: bool,
-    /// The scene frame (1-based, E2.4) where the sound starts.
-    #[serde(default = "first_frame")]
-    pub start: u32,
-    /// Samples (per channel, at the file's rate) left out at the start of
-    /// the file. The file itself is never changed.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub trim_start: u64,
-    /// Samples left out at the end of the file.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub trim_end: u64,
+impl Media {
+    /// A sound's length in seconds, to the sample.
+    pub fn sound_seconds(&self) -> f64 {
+        self.samples as f64 / f64::from(self.rate.max(1))
+    }
 }
 
-fn is_zero(n: &u64) -> bool {
-    *n == 0
-}
-
-impl SoundTrack {
+impl SoundClip {
     /// Samples of `file` the track plays, after its trims.
-    pub fn played(&self, file: &SoundFile) -> u64 {
+    pub fn played(&self, file: &Media) -> u64 {
         file.samples
             .saturating_sub(self.trim_start)
             .saturating_sub(self.trim_end)
     }
 
     /// Length the track plays, in seconds.
-    pub fn seconds(&self, file: &SoundFile) -> f64 {
+    pub fn seconds(&self, file: &Media) -> f64 {
         self.played(file) as f64 / f64::from(file.rate.max(1))
     }
 
     /// Where in the file the track starts playing, in seconds.
-    pub fn offset(&self, file: &SoundFile) -> f64 {
+    pub fn offset(&self, file: &Media) -> f64 {
         self.trim_start as f64 / f64::from(file.rate.max(1))
     }
 
     /// The track moved to start at `start` (never before frame 1).
-    pub fn moved_to(&self, start: u32) -> SoundTrack {
-        SoundTrack {
+    pub fn moved_to(&self, start: u32) -> SoundClip {
+        SoundClip {
             start: start.max(1),
             ..self.clone()
         }
@@ -165,7 +178,7 @@ impl SoundTrack {
     /// keeps its place in the scene, so the start frame moves with the
     /// trim. At least one frame of sound stays, and nothing starts before
     /// frame 1.
-    pub fn trimmed_start(&self, file: &SoundFile, fps: f32, frames: i64) -> SoundTrack {
+    pub fn trimmed_start(&self, file: &Media, fps: f32, frames: i64) -> SoundClip {
         let per = samples_per_frame(file, fps);
         // Frames the trim can take back (file start, scene start) and give.
         let back = (self.trim_start as f64 / per).floor() as i64;
@@ -173,7 +186,7 @@ impl SoundTrack {
         let ahead = (self.played(file) as f64 / per).ceil() as i64 - 1;
         let frames = frames.clamp(-back, ahead.max(0));
         let trim = (self.trim_start as f64 + frames as f64 * per).round();
-        SoundTrack {
+        SoundClip {
             trim_start: (trim.max(0.0) as u64).min(file.samples.saturating_sub(self.trim_end)),
             start: (i64::from(self.start) + frames).max(1) as u32,
             ..self.clone()
@@ -183,31 +196,31 @@ impl SoundTrack {
     /// The track with its end trimmed by `frames` scene frames: negative
     /// cuts sound away, positive brings it back, up to the end of the
     /// file. At least one frame of sound stays.
-    pub fn trimmed_end(&self, file: &SoundFile, fps: f32, frames: i64) -> SoundTrack {
+    pub fn trimmed_end(&self, file: &Media, fps: f32, frames: i64) -> SoundClip {
         let per = samples_per_frame(file, fps);
         let back = (self.trim_end as f64 / per).ceil() as i64;
         let cut = (self.played(file) as f64 / per).ceil() as i64 - 1;
         let frames = frames.clamp(-cut.max(0), back);
         let trim = (self.trim_end as f64 - frames as f64 * per).round();
-        SoundTrack {
+        SoundClip {
             trim_end: (trim.max(0.0) as u64).min(file.samples.saturating_sub(self.trim_start)),
             ..self.clone()
         }
     }
 }
 
-impl SoundTrack {
+impl SoundClip {
     /// The track with exactly `samples` left out at the start of the file,
     /// as the Sound editor trims: the start frame stays where it is, so
     /// the sound after the cut begins there. At least one frame of sound
     /// stays.
-    pub fn with_trim_start(&self, file: &SoundFile, fps: f32, samples: u64) -> SoundTrack {
+    pub fn with_trim_start(&self, file: &Media, fps: f32, samples: u64) -> SoundClip {
         let keep = samples_per_frame(file, fps).ceil() as u64;
         let most = file
             .samples
             .saturating_sub(self.trim_end)
             .saturating_sub(keep);
-        SoundTrack {
+        SoundClip {
             trim_start: samples.min(most),
             ..self.clone()
         }
@@ -215,13 +228,13 @@ impl SoundTrack {
 
     /// The track with exactly `samples` left out at the end of the file.
     /// At least one frame of sound stays.
-    pub fn with_trim_end(&self, file: &SoundFile, fps: f32, samples: u64) -> SoundTrack {
+    pub fn with_trim_end(&self, file: &Media, fps: f32, samples: u64) -> SoundClip {
         let keep = samples_per_frame(file, fps).ceil() as u64;
         let most = file
             .samples
             .saturating_sub(self.trim_start)
             .saturating_sub(keep);
-        SoundTrack {
+        SoundClip {
             trim_end: samples.min(most),
             ..self.clone()
         }
@@ -229,16 +242,8 @@ impl SoundTrack {
 }
 
 /// Samples of `file` in one scene frame at `fps`.
-fn samples_per_frame(file: &SoundFile, fps: f32) -> f64 {
+fn samples_per_frame(file: &Media, fps: f32) -> f64 {
     f64::from(file.rate.max(1)) / f64::from(fps.max(1.0))
-}
-
-fn on() -> bool {
-    true
-}
-
-fn first_frame() -> u32 {
-    1
 }
 
 /// Seconds into a sound that starts at frame `start` where scene frame
@@ -250,29 +255,29 @@ pub fn seconds_at(start: u32, frame: u32, fps: f32) -> f64 {
 /// The last scene frame that `track` reaches. A sound longer than the
 /// scene doesn't make the scene longer; callers clip to the scene length
 /// themselves.
-pub fn last_frame(track: &SoundTrack, file: &SoundFile, fps: f32) -> u32 {
+pub fn last_frame(track: &SoundClip, file: &Media, fps: f32) -> u32 {
     let frames = (track.seconds(file) * f64::from(fps.max(1.0))).ceil() as u32;
     track.start.saturating_add(frames.max(1) - 1)
 }
 
-/// The edit that adds a track at the bottom of the list, playing the file
-/// under `key`. The file must already be in `Scene::sound_files`.
+/// The edit that adds a clip at the bottom of the list, playing the file
+/// under `key`. The file must already be in `Scene::media`.
 pub fn add_track(scene: &mut Scene, name: &str, key: u64) -> Edit {
     Edit::AddSound {
         index: scene.sounds.len(),
-        track: SoundTrack {
+        track: SoundClip {
             id: scene.ids.fresh(),
+            media: key,
             name: name.into(),
-            key,
-            enabled: true,
             start: 1,
+            muted: false,
             trim_start: 0,
             trim_end: 0,
         },
     }
 }
 
-/// The edit that removes track `id`.
+/// The edit that removes clip `id`.
 pub fn remove_track(scene: &Scene, id: Id) -> Option<Edit> {
     let index = scene.sounds.iter().position(|t| t.id == id)?;
     Some(Edit::RemoveSound {
@@ -281,9 +286,9 @@ pub fn remove_track(scene: &Scene, id: Id) -> Option<Edit> {
     })
 }
 
-/// The edit that changes track `id` with `change` (rename, mute). `None`
+/// The edit that changes clip `id` with `change` (rename, mute). `None`
 /// when the track doesn't exist or nothing changes.
-pub fn change_track(scene: &Scene, id: Id, change: impl FnOnce(&mut SoundTrack)) -> Option<Edit> {
+pub fn change_track(scene: &Scene, id: Id, change: impl FnOnce(&mut SoundClip)) -> Option<Edit> {
     let before = scene.sounds.iter().find(|t| t.id == id)?.clone();
     let mut after = before.clone();
     change(&mut after);
@@ -296,7 +301,7 @@ mod tests {
     use crate::doc::Settings;
     use crate::history::History;
 
-    fn file(rate: u32, samples: u64) -> SoundFile {
+    fn probed(rate: u32, samples: u64) -> SoundFile {
         SoundFile {
             format: SoundFormat::Wav,
             rate,
@@ -306,13 +311,17 @@ mod tests {
         }
     }
 
-    fn track(start: u32) -> SoundTrack {
-        SoundTrack {
+    fn file(rate: u32, samples: u64) -> Media {
+        probed(rate, samples).media(1, "A")
+    }
+
+    fn track(start: u32) -> SoundClip {
+        SoundClip {
             id: Id(1),
+            media: 1,
             name: "A".into(),
-            key: 1,
-            enabled: true,
             start,
+            muted: false,
             trim_start: 0,
             trim_end: 0,
         }
@@ -330,7 +339,7 @@ mod tests {
         let b = a.trimmed_start(&f, 24.0, -10);
         assert_eq!((b.start, b.trim_start), (10, 0));
         // Not before frame 1 either.
-        let late = SoundTrack {
+        let late = SoundClip {
             trim_start: 20_000,
             ..track(2)
         };
@@ -379,11 +388,11 @@ mod tests {
 
     #[test]
     fn limits() {
-        assert!(file(48_000, 48_000).is_valid());
-        assert!(!file(0, 1).is_valid());
-        assert!(!file(MAX_RATE + 1, 1).is_valid());
-        assert!(!file(8_000, MAX_SECONDS * 8_000 + 1).is_valid());
-        let mut f = file(48_000, 1);
+        assert!(probed(48_000, 48_000).is_valid());
+        assert!(!probed(0, 1).is_valid());
+        assert!(!probed(MAX_RATE + 1, 1).is_valid());
+        assert!(!probed(8_000, MAX_SECONDS * 8_000 + 1).is_valid());
+        let mut f = probed(48_000, 1);
         f.channels = 0;
         assert!(!f.is_valid());
     }
@@ -403,6 +412,16 @@ mod tests {
             SoundFormat::sniff(&[0xFF, 0xFB, 0x90]),
             Some(SoundFormat::Mp3)
         );
+        assert_eq!(SoundFormat::sniff(b"fLaC\0"), Some(SoundFormat::Flac));
+        assert_eq!(SoundFormat::sniff(b"OggS\0"), Some(SoundFormat::Ogg));
+        assert_eq!(
+            SoundFormat::sniff(b"\0\0\0\x20ftypM4A "),
+            Some(SoundFormat::Mp4)
+        );
+        assert_eq!(
+            SoundFormat::sniff(&[0xFF, 0xF1, 0x50]),
+            Some(SoundFormat::Aac)
+        );
         assert_eq!(SoundFormat::sniff(b"RIFF\0\0\0\0AVI "), None);
         assert_eq!(SoundFormat::sniff(b"\x89PNG"), None);
     }
@@ -418,10 +437,10 @@ mod tests {
         h.apply(&mut s, "Import Sound", vec![add2]);
         assert_eq!(s.sounds[1].name, "Music");
 
-        let mute = change_track(&s, id, |t| t.enabled = false).unwrap();
+        let mute = change_track(&s, id, |t| t.muted = true).unwrap();
         h.apply(&mut s, "Mute Sound", vec![mute]);
-        assert!(!s.sounds[0].enabled);
-        assert!(change_track(&s, id, |t| t.enabled = false).is_none());
+        assert!(s.sounds[0].muted);
+        assert!(change_track(&s, id, |t| t.muted = true).is_none());
 
         let rename = change_track(&s, id, |t| t.name = "Lines".into()).unwrap();
         h.apply(&mut s, "Rename Sound", vec![rename]);
@@ -435,29 +454,11 @@ mod tests {
         h.undo(&mut s);
         assert_eq!(s.sounds[0].name, "Dialogue");
         h.undo(&mut s);
-        assert!(s.sounds[0].enabled);
+        assert!(!s.sounds[0].muted);
         h.undo(&mut s);
         h.undo(&mut s);
         assert!(s.sounds.is_empty());
         h.redo(&mut s);
         assert_eq!(s.sounds[0].id, id);
-    }
-
-    #[test]
-    fn old_scene_files_have_no_sound() {
-        let s = Scene::new(Settings::default());
-        let mut v = serde_json::to_value(&s).unwrap();
-        v.as_object_mut().unwrap().remove("sounds");
-        v.as_object_mut().unwrap().remove("sound_files");
-        let back: Scene = serde_json::from_value(v).unwrap();
-        assert!(back.sounds.is_empty() && back.sound_files.is_empty());
-    }
-
-    #[test]
-    fn a_track_without_enabled_or_start_reads_as_on_from_frame_1() {
-        let t: SoundTrack = serde_json::from_str(r#"{"id":3,"name":"A","key":9}"#).unwrap();
-        assert!(t.enabled);
-        assert_eq!(t.start, 1);
-        assert_eq!((t.trim_start, t.trim_end), (0, 0));
     }
 }

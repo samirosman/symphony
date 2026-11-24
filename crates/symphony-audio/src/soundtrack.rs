@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use symphony_core::doc::Scene;
 
-use crate::decode::decode;
+use crate::decode::decode_path;
 use crate::play::{prepare, Clip};
 
 /// Rates offered in the export dialog, in Hz.
@@ -52,7 +52,7 @@ pub fn export(
     let tracks: Vec<_> = scene
         .sounds
         .iter()
-        .filter(|t| t.enabled && scene.sound_files.contains_key(&t.key))
+        .filter(|t| !t.muted && scene.media.contains_key(&t.media))
         .collect();
     if tracks.is_empty() {
         return Err("The scene has no sound to export. Muted tracks are left out.".into());
@@ -73,9 +73,12 @@ pub fn export(
         if cancel.load(Ordering::SeqCst) {
             return Err("Export cancelled.".into());
         }
-        let file = &scene.sound_files[&t.key];
+        let file = &scene.media[&t.media];
         let fail = |why: String| format!("Couldn't read the sound \"{}\": {why}.", t.name);
-        let samples = decode(&file.bytes).map_err(fail)?;
+        let path = scene
+            .media_path(t.media)
+            .ok_or_else(|| fail("the file is missing".into()))?;
+        let samples = decode_path(&path).map_err(fail)?;
         let pcm = prepare(&samples, rate, channels).map_err(fail)?;
         let start = f64::from(t.start.saturating_sub(1)) / fps;
         let clip = Clip::new(pcm, start, true, rate).trimmed(t.offset(file), t.seconds(file), rate);
@@ -213,8 +216,13 @@ mod tests {
             ..Settings::default()
         });
         let bytes = crate::decode::wav(samples, 1, 8_000);
-        let (key, file, _) = import_bytes(bytes).unwrap();
-        scene.sound_files.insert(key, file);
+        let (key, file, _) = import_bytes(bytes.clone()).unwrap();
+        let media = file.media(key, "Dialogue");
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = temp(&format!("media-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::write(dir.join(&media.file), &bytes).unwrap();
+        scene.media_dirs = vec![dir];
+        scene.media.insert(key, media);
         add(&mut scene, key);
         scene
     }
@@ -301,7 +309,7 @@ mod tests {
         assert!((d[0] - 0.2).abs() < 1e-3, "the trimmed start is left out");
         assert!(d[1_000..].iter().all(|&x| x == 0.0));
 
-        sc.sounds[0].enabled = false;
+        sc.sounds[0].muted = true;
         let err = run(&sc, &job(p, 1, 2)).unwrap_err();
         assert!(err.contains("no sound"), "{err}");
     }
@@ -309,7 +317,7 @@ mod tests {
     #[test]
     fn merging_adds_and_clips_while_individual_files_stay_apart() {
         let mut sc = scene(8.0, &vec![24_000i16; 1_000]);
-        let key = sc.sounds[0].key;
+        let key = sc.sounds[0].media;
         add(&mut sc, key);
         let dir = temp("merge");
         let p = dir.join("Scene.wav");

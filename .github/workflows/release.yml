@@ -30,12 +30,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      # cpal (symphony-audio) links ALSA on Linux.
-      - if: runner.os == 'Linux'
+      - name: Linux audio headers (sound playback)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --workspace
         if: matrix.target != 'x86_64-apple-darwin'
       - run: cargo build --release --locked --target ${{ matrix.target }} -p symphony-app -p symphony-launcher
+      # One Mac launcher for both chips (browsers can't tell an Apple-chip
+      # Mac from an Intel one, so testers shouldn't have to choose). Each
+      # half still downloads the Symphony build for its own chip.
+      - name: Universal Mac launcher
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin -p symphony-launcher
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create -output target/universal-apple-darwin/release/symphony-launcher \
+            target/aarch64-apple-darwin/release/symphony-launcher \
+            target/x86_64-apple-darwin/release/symphony-launcher
+          lipo -archs target/universal-apple-darwin/release/symphony-launcher
       - name: Package
         shell: bash
         run: scripts/package.sh "${GITHUB_REF_NAME#v}" "${{ matrix.target }}"

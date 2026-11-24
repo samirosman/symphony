@@ -102,6 +102,49 @@ pub struct Brush {
     pub grain_strength_curve: Vec<[f32; 2]>,
     /// Grain offset in grain pixels.
     pub grain_offset: [f32; 2],
+    /// What the brush is made for in its own app: vector lines or bitmap
+    /// painting. Bitmap brushes are offered as both (a vector version is
+    /// an approximation).
+    pub native: Native,
+    /// Per-dab variation (see `Dynamics`).
+    pub dynamics: Dynamics,
+}
+
+/// Is a brush made for vector lines or for bitmap painting in its app?
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Native {
+    Vector,
+    #[default]
+    Bitmap,
+}
+
+/// Per-dab variation, in Symphony's terms (Krita Scatter/Rotation/Ratio,
+/// Photoshop Shape Dynamics/Scattering/Transfer). All zero is steady.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Dynamics {
+    /// Up to this many diameters off the line, at random.
+    pub scatter: f32,
+    /// Scatter scales with pen pressure.
+    pub scatter_pressure: bool,
+    /// Up to this fraction smaller, at random, 0..=1.
+    pub size_jitter: f32,
+    /// Up to this many degrees either way per dab, at random.
+    pub angle_jitter: f32,
+    /// Up to this many degrees either way for the whole stroke.
+    pub stroke_angle_jitter: f32,
+    /// Tip height over width, 0..=1 (0 = round).
+    pub roundness: f32,
+    /// Light pressure flattens the tip towards `roundness`.
+    pub roundness_pressure: bool,
+    /// Up to these fractions less opacity / flow, at random.
+    pub opacity_jitter: f32,
+    pub flow_jitter: f32,
+    /// The tip turns to the way the pen leans.
+    pub angle_tilt: bool,
+    /// The tip turns with barrel rotation.
+    pub angle_barrel: bool,
+    /// Leaning the pen flattens the tip.
+    pub roundness_tilt: bool,
 }
 
 /// How a grain shapes each stamp (Krita's texturing modes; other apps
@@ -141,6 +184,8 @@ impl Brush {
             grain_strength: 1.0,
             grain_strength_curve: Vec::new(),
             grain_offset: [0.0, 0.0],
+            native: Native::Bitmap,
+            dynamics: Dynamics::default(),
         }
     }
 
@@ -184,6 +229,14 @@ impl Brush {
             c.sort_by(|a, b| a[0].total_cmp(&b[0]));
         }
         self.smoothing = fix(self.smoothing, 0.0, 1.0, 0.0);
+        let d = &mut self.dynamics;
+        d.scatter = fix(d.scatter, 0.0, 10.0, 0.0);
+        d.size_jitter = fix(d.size_jitter, 0.0, 1.0, 0.0);
+        d.angle_jitter = fix(d.angle_jitter, 0.0, 180.0, 0.0);
+        d.stroke_angle_jitter = fix(d.stroke_angle_jitter, 0.0, 180.0, 0.0);
+        d.roundness = fix(d.roundness, 0.0, 1.0, 0.0);
+        d.opacity_jitter = fix(d.opacity_jitter, 0.0, 1.0, 0.0);
+        d.flow_jitter = fix(d.flow_jitter, 0.0, 1.0, 0.0);
         self.angle = fix(self.angle, -360.0, 360.0, 0.0);
         self.size_curve
             .retain(|p| p[0].is_finite() && p[1].is_finite());
@@ -581,5 +634,28 @@ mod tests {
             import_bytes("png", "x", b""),
             Err(Error::Unknown(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod real_files {
+    /// Design check on real brush files: `SYMPHONY_BRUSH_FILE=<path> cargo
+    /// test -p symphony-brushes dump_real -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs a real brush file"]
+    fn dump_real() {
+        let Some(path) = std::env::var_os("SYMPHONY_BRUSH_FILE") else {
+            return;
+        };
+        let out = super::import(std::path::Path::new(&path)).unwrap();
+        for b in &out.brushes {
+            println!(
+                "{:<32} follow={} spacing={:.2} {:?}",
+                b.name, b.follow, b.spacing, b.dynamics
+            );
+        }
+        for s in &out.problems {
+            println!("skipped: {s:?}");
+        }
     }
 }

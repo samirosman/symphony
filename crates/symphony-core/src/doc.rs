@@ -18,6 +18,10 @@ pub struct Settings {
     pub height: u32,
     pub fps: f32,
     pub length: u32,
+    /// Black bars over the camera frame: rounded edges or a cinematic
+    /// shape. Drawn in the Camera view and in exports.
+    #[serde(default, skip_serializing_if = "Bars::is_off")]
+    pub bars: Bars,
 }
 
 impl Default for Settings {
@@ -27,7 +31,68 @@ impl Default for Settings {
             height: 1080,
             fps: 24.0,
             length: 48,
+            bars: Bars::default(),
         }
+    }
+}
+
+/// Black bars framing the picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bars {
+    pub on: bool,
+    /// Width / height of the picture left between the bars; 0 = the
+    /// frame's own shape (bars only round the corners).
+    pub aspect: f32,
+    /// Corner radius of the picture, in frame pixels.
+    pub radius: f32,
+}
+
+impl Bars {
+    pub fn is_off(&self) -> bool {
+        !self.on
+    }
+
+    /// The picture left between the bars in a `w` x `h` frame centred on
+    /// the origin: (x, y, width, height, corner radius). None when there
+    /// are no bars to draw.
+    pub fn opening(&self, w: f32, h: f32) -> Option<([f32; 4], f32)> {
+        if !self.on || w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let (mut ow, mut oh) = (w, h);
+        if self.aspect.is_finite() && self.aspect > 0.0 {
+            if self.aspect > w / h {
+                oh = w / self.aspect;
+            } else {
+                ow = h * self.aspect;
+            }
+        }
+        let r = self.radius.clamp(0.0, ow.min(oh) / 2.0);
+        if (ow - w).abs() < 0.01 && (oh - h).abs() < 0.01 && r <= 0.0 {
+            return None;
+        }
+        Some(([-ow / 2.0, -oh / 2.0, ow, oh], r))
+    }
+
+    /// The opening's outline as points (corners rounded), centred on the
+    /// origin, clockwise from the top-left.
+    pub fn outline(&self, w: f32, h: f32) -> Option<Vec<[f32; 2]>> {
+        let ([x, y, ow, oh], r) = self.opening(w, h)?;
+        let steps = if r > 0.0 { 10 } else { 0 };
+        let mut pts = Vec::new();
+        let corners = [
+            ([x + ow - r, y + r], -90.0f32),
+            ([x + ow - r, y + oh - r], 0.0),
+            ([x + r, y + oh - r], 90.0),
+            ([x + r, y + r], 180.0),
+        ];
+        for (c, start) in corners {
+            for i in 0..=steps {
+                let a = (start + 90.0 * i as f32 / steps.max(1) as f32).to_radians();
+                pts.push([c[0] + r * a.cos(), c[1] + r * a.sin()]);
+            }
+        }
+        Some(pts)
     }
 }
 
@@ -111,17 +176,19 @@ pub struct Scene {
     /// key, so a scene carries its brushes with it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub textures: BTreeMap<u64, crate::stroke::Texture>,
-    /// Sound tracks, top to bottom in the Timeline ([`crate::sound`]).
+    /// Imported files (images, sound), by content key. The files live in
+    /// the project's `media/` folder (or the app's media cache before the
+    /// first save); see `media_dirs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub media: BTreeMap<u64, Media>,
+    /// Where to look for media files, in order (the project's `media/`
+    /// folder, then the app's cache). Set when a scene is opened or
+    /// created; not saved.
+    #[serde(skip)]
+    pub media_dirs: Vec<std::path::PathBuf>,
+    /// Sound clips on the timeline, in the order they were added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sounds: Vec<crate::sound::SoundTrack>,
-    /// Sound files by content key. The bytes live in the project's
-    /// `media/` folder, not in scene.json.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sound_files: BTreeMap<u64, crate::sound::SoundFile>,
-    /// Imported image files by content key ([`crate::bitmap`]). The bytes
-    /// live in the project's `media/` folder, not in scene.json.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub images: BTreeMap<u64, crate::bitmap::ImageFile>,
+    pub sounds: Vec<SoundClip>,
     pub composite: NodeId,
     pub display: NodeId,
     #[serde(default = "default_camera_fov")]
@@ -134,7 +201,83 @@ pub struct Scene {
     pub version: u64,
 }
 
+/// An imported file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Media {
+    pub kind: MediaKind,
+    /// File name inside the media folders ("<content key>.<ext>").
+    pub file: String,
+    /// The name it was imported under, for display.
+    pub name: String,
+    /// Pixel size (images).
+    #[serde(default)]
+    pub size: [u32; 2],
+    /// Length in seconds (sound).
+    #[serde(default)]
+    pub seconds: f32,
+    /// Samples a second, per channel (sound).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub rate: u32,
+    /// Channels (sound).
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub channels: u16,
+    /// Length in samples per channel (sound). With `rate`, it places
+    /// trims to the sample ([`crate::sound`]).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub samples: u64,
+}
+
+fn is_zero_u16(n: &u16) -> bool {
+    *n == 0
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// A sound placed on the timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoundClip {
+    /// Names the clip for edits that change one clip ([`crate::sound`]).
+    pub id: crate::id::Id,
+    /// Key into `Scene::media`.
+    pub media: u64,
+    pub name: String,
+    /// The frame its first sample plays on.
+    pub start: u32,
+    #[serde(default)]
+    pub muted: bool,
+    /// Samples (per channel, at the file's rate) left out at the start of
+    /// the file. The file itself is never changed.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub trim_start: u64,
+    /// Samples left out at the end of the file.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub trim_end: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKind {
+    Image,
+    Sound,
+}
+
 impl Scene {
+    /// Where an imported file is on disk, if it's anywhere we know. A
+    /// link is never followed, so a project can't point at files outside
+    /// its media folder (E7.6).
+    pub fn media_path(&self, key: u64) -> Option<std::path::PathBuf> {
+        let m = self.media.get(&key)?;
+        self.media_dirs
+            .iter()
+            .map(|d| d.join(&m.file))
+            .find(|p| std::fs::symlink_metadata(p).is_ok_and(|md| md.file_type().is_file()))
+    }
+
     /// Horizontal framing for the 2D camera. The original framing is 60°.
     pub fn camera_scale(&self, frame: u32) -> f32 {
         let fov = self.camera_fov.at(frame);
@@ -213,9 +356,9 @@ impl Scene {
             drawings: BTreeMap::new(),
             palette,
             textures: BTreeMap::new(),
+            media: BTreeMap::new(),
+            media_dirs: Vec::new(),
             sounds: Vec::new(),
-            sound_files: BTreeMap::new(),
-            images: BTreeMap::new(),
             composite,
             display,
             camera_fov: default_camera_fov(),
