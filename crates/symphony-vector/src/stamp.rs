@@ -46,10 +46,12 @@ fn sample(t: &Texture, u: f32, v: f32) -> f32 {
 }
 
 fn tiled(t: &Texture, u: f32, v: f32) -> f32 {
-    let (w, h) = (t.width as f32, t.height as f32);
-    let (x, y) = (u.rem_euclid(w), v.rem_euclid(h));
-    let i = (y as u32).min(t.height - 1) * t.width + (x as u32).min(t.width - 1);
-    t.pixels[i as usize] as f32 / 255.0
+    // Integer wrap: the same texel as rem_euclid on the float, without a
+    // float remainder per pixel (it was a hot spot in big strokes).
+    let (w, h) = (t.width as i64, t.height as i64);
+    let x = (u.floor() as i64).rem_euclid(w) as u32;
+    let y = (v.floor() as i64).rem_euclid(h) as u32;
+    t.pixels[(y * t.width + x) as usize] as f32 / 255.0
 }
 
 /// Coverage of a textured stroke under transform `m` (drawing -> output
@@ -104,13 +106,101 @@ pub fn rasterize(
         points: crate::curve::spline(&stroke.points, step),
         ..stroke.clone()
     };
-    let mut s = Stamper::new(*tex, m, clip);
-    s.extend(&curved, tip, grain);
-    let mut c = s.coverage()?;
+    let mut c = stamp_parallel(&curved, tex, tip, grain, m, clip)?;
     if !outline.is_empty() {
         mask_coverage(&mut c, &outline);
     }
     Some(c)
+}
+
+/// Below this many pixels of stroke area, one thread is quicker.
+const PARALLEL_AREA: f32 = 512.0 * 512.0;
+/// Rows per band when stamping in parallel (small enough to share out,
+/// big enough that walking the line per band stays cheap).
+const BAND_ROWS: i32 = 96;
+
+/// Stamp `stroke` into `clip`, in parallel horizontal bands when it's big.
+/// Each band walks the whole line and stamps only its own rows, so every
+/// pixel sees the same stamps in the same order (with the same random
+/// dynamics) as one pass would: the result is identical, just faster.
+fn stamp_parallel(
+    stroke: &Stroke,
+    tex: &StrokeTexture,
+    tip: Option<&Texture>,
+    grain: Option<&Texture>,
+    m: Affine,
+    clip: [i32; 4],
+) -> Option<Coverage> {
+    use rayon::prelude::*;
+    // Where the stroke can reach on screen: its points' bounds, widened by
+    // its widest stamp and any scatter.
+    let k = scale_of(m);
+    let reach =
+        stroke.max_width.max(stroke.min_width) * k * (0.75 + tex.dynamics.scatter.clamp(0.0, 10.0))
+            + 2.0;
+    let mut b = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for p in &stroke.points {
+        let (x, y) = m.apply(p.x, p.y);
+        b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+    }
+    let area = [
+        clip[0].max((b[0] - reach).floor() as i32),
+        clip[1].max((b[1] - reach).floor() as i32),
+        clip[2].min((b[2] + reach).ceil() as i32),
+        clip[3].min((b[3] + reach).ceil() as i32),
+    ];
+    if area[0] >= area[2] || area[1] >= area[3] {
+        return None;
+    }
+    let (w, h) = ((area[2] - area[0]) as f32, (area[3] - area[1]) as f32);
+    if w * h < PARALLEL_AREA || h < (BAND_ROWS * 2) as f32 {
+        let mut s = Stamper::new(*tex, m, clip);
+        s.extend(stroke, tip, grain);
+        return s.coverage();
+    }
+    let bands: Vec<[i32; 4]> = (area[1]..area[3])
+        .step_by(BAND_ROWS as usize)
+        .map(|y| [area[0], y, area[2], (y + BAND_ROWS).min(area[3])])
+        .collect();
+    let parts: Vec<Coverage> = bands
+        .par_iter()
+        .filter_map(|band| {
+            let mut s = Stamper::new(*tex, m, *band);
+            s.extend(stroke, tip, grain);
+            s.coverage()
+        })
+        .collect();
+    merge(&parts)
+}
+
+/// One coverage from non-overlapping pieces.
+fn merge(parts: &[Coverage]) -> Option<Coverage> {
+    let x0 = parts.iter().map(|c| c.x).min()?;
+    let y0 = parts.iter().map(|c| c.y).min()?;
+    let x1 = parts.iter().map(|c| c.x + c.width as i32).max()?;
+    let y1 = parts.iter().map(|c| c.y + c.height as i32).max()?;
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let mut data = vec![0u8; w * h];
+    for c in parts {
+        let (cw, ox, oy) = (c.width as usize, (c.x - x0) as usize, (c.y - y0) as usize);
+        for row in 0..c.height as usize {
+            let src = &c.data[row * cw..(row + 1) * cw];
+            let at = (oy + row) * w + ox;
+            data[at..at + cw].copy_from_slice(src);
+        }
+    }
+    Some(Coverage {
+        x: x0,
+        y: y0,
+        width: w as u32,
+        height: h as u32,
+        data,
+    })
 }
 
 /// Even–odd clipping at pixel centres. Intersect edges once per scanline,
@@ -910,6 +1000,42 @@ mod tests {
             painted_rows(&cd).len() * 2 < painted_rows(&cu).len(),
             "a leaning pen flattens it"
         );
+    }
+
+    /// A big stroke stamped in parallel bands is byte-for-byte the stroke
+    /// stamped in one pass, dynamics and all, and quicker.
+    #[test]
+    fn parallel_bands_match_one_pass_exactly() {
+        let mut big = line(60.0);
+        big.points = (0..300)
+            .map(|i| Point {
+                x: i as f32 * 5.0,
+                y: (i as f32 * 0.02).sin() * 400.0 + 500.0,
+                pressure: 0.3 + 0.7 * (i as f32 * 0.05).sin().abs(),
+                pen: Default::default(),
+            })
+            .collect();
+        let mut t = tex();
+        t.spacing = 0.08;
+        t.dynamics.scatter = 0.4;
+        t.dynamics.size_jitter = 0.3;
+        t.dynamics.angle_jitter = 40.0;
+        t.dynamics.roundness = 0.6;
+        let one = {
+            let start = std::time::Instant::now();
+            let mut s = Stamper::new(t, Affine::IDENTITY, ALL);
+            s.extend(&big, None, None);
+            (s.coverage().unwrap(), start.elapsed())
+        };
+        let start = std::time::Instant::now();
+        let bands = stamp_parallel(&big, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let took = start.elapsed();
+        assert_eq!(
+            (bands.x, bands.y, bands.width, bands.height),
+            (one.0.x, one.0.y, one.0.width, one.0.height)
+        );
+        assert!(bands.data == one.0.data, "identical pixels");
+        println!("one pass {:?}, parallel bands {:?}", one.1, took);
     }
 
     #[test]

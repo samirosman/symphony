@@ -342,6 +342,30 @@ fn paint_strokes(
     preview: Option<StrokePreview<'_>>,
 ) {
     {
+        // Stamp every textured stroke at once across the cores, then lay
+        // them down in order (the picture is the same as one at a time).
+        let stamped: std::collections::HashMap<
+            symphony_core::id::Id,
+            symphony_vector::stamp::Coverage,
+        > = {
+            use rayon::prelude::*;
+            let clip = [0, 0, pix.width() as i32, pix.height() as i32];
+            d.strokes
+                .par_iter()
+                .filter(|s| s.art == art && s.kind != StrokeKind::Invisible)
+                .filter_map(|st| {
+                    let tex = st.texture.filter(|t| !t.vector)?;
+                    let m = match preview {
+                        Some(p) if p.strokes.contains(&st.id) => m.compose(p.transform),
+                        _ => m,
+                    };
+                    let tip = tex.tip.and_then(|k| scene.textures.get(&k));
+                    let grain = tex.grain.and_then(|k| scene.textures.get(&k));
+                    symphony_vector::stamp::rasterize(st, &tex, tip, grain, m, clip)
+                        .map(|c| (st.id, c))
+                })
+                .collect()
+        };
         for st in d
             .strokes
             .iter()
@@ -384,8 +408,10 @@ fn paint_strokes(
                 }
                 continue;
             }
-            if let Some(tex) = &st.texture {
-                paint_textured(pix, scene, st, tex, m);
+            if st.texture.is_some() {
+                if let Some(c) = stamped.get(&st.id) {
+                    composite_coverage(pix, scene, st, c);
+                }
                 continue;
             }
             let mesh = tessellate(st, m, RASTER_STEP);
@@ -425,21 +451,13 @@ fn paint_strokes(
     }
 }
 
-/// A textured vector stroke: stamped coverage, composited source-over in
-/// the stroke's swatch colour.
-fn paint_textured(
+/// Lay a stamped stroke's coverage down in its colour (source-over).
+fn composite_coverage(
     pix: &mut Pixmap,
     scene: &Scene,
     st: &symphony_core::stroke::Stroke,
-    tex: &symphony_core::stroke::StrokeTexture,
-    m: Affine,
+    c: &symphony_vector::stamp::Coverage,
 ) {
-    let clip = [0, 0, pix.width() as i32, pix.height() as i32];
-    let tip = tex.tip.and_then(|k| scene.textures.get(&k));
-    let grain = tex.grain.and_then(|k| scene.textures.get(&k));
-    let Some(c) = symphony_vector::stamp::rasterize(st, tex, tip, grain, m, clip) else {
-        return;
-    };
     let [r, g, b, alpha] = scene.swatch_rgba(st.swatch);
     let width = pix.width() as i32;
     let data = pix.data_mut();
