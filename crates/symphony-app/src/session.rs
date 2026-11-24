@@ -348,6 +348,9 @@ pub struct Session {
     pub frame: u32,
     pub playing: bool,
     pub selected: usize,
+    /// A layer with work on it, waiting on "Delete layer?" (by column, so
+    /// it survives layers moving).
+    pub confirm_delete: Option<symphony_core::id::Id>,
     /// The layers the Transform tool works on, by layer node, so the list
     /// survives layers moving. Empty: no box.
     pub transform_layers: Vec<NodeId>,
@@ -462,6 +465,7 @@ impl Session {
             frame: 1,
             playing: false,
             selected: 0,
+            confirm_delete: None,
             transform_layers: Vec::new(),
             transform_for: None,
             selected_node: None,
@@ -2259,7 +2263,35 @@ impl Session {
         self.note(format!("Moved {name}"));
     }
 
+    /// How many of layer `i`'s drawings hold strokes or an image.
+    pub fn drawings_with_work(&self, i: usize) -> usize {
+        let Some(column) = self.doc.column(i).map(|c| c.id) else {
+            return 0;
+        };
+        self.doc
+            .drawings
+            .values()
+            .filter(|d| d.column == column && (!d.strokes.is_empty() || d.image.is_some()))
+            .count()
+    }
+
+    /// Delete layer `i`. A layer with work on it asks first (see
+    /// `confirm_delete`): undo brings a layer back, but a hidden layer
+    /// deleted by mistake can go unnoticed until the undo is long gone.
     pub fn delete_layer(&mut self, i: usize) {
+        if self.layer_count() <= 1 {
+            self.note("A scene needs at least one layer");
+            return;
+        }
+        if self.drawings_with_work(i) > 0 {
+            self.confirm_delete = self.doc.column(i).map(|c| c.id);
+            return;
+        }
+        self.delete_layer_now(i);
+    }
+
+    /// Delete layer `i` without asking.
+    pub fn delete_layer_now(&mut self, i: usize) {
         if self.layer_count() <= 1 {
             self.note("A scene needs at least one layer");
             return;
@@ -2990,6 +3022,32 @@ mod tests {
             texture: None,
             shape: Vec::new(),
         }
+    }
+
+    /// An empty layer goes at once; a layer with drawings on it waits for
+    /// "Delete layer?" and is only deleted on Delete.
+    #[test]
+    fn deleting_a_layer_with_work_asks_first() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        s.add_layer();
+        let count = s.layer_count();
+        let st = line(&mut s, 0.0, 10.0);
+        s.commit_stroke(0, 1, st);
+        let worked = s.doc.column(0).unwrap().id;
+
+        s.delete_layer(1);
+        assert_eq!(s.layer_count(), count - 1, "an empty layer goes at once");
+        assert_eq!(s.confirm_delete, None);
+
+        s.delete_layer(0);
+        assert_eq!(s.layer_count(), count - 1, "kept until confirmed");
+        assert_eq!(s.confirm_delete, Some(worked));
+        s.confirm_delete = None;
+        s.delete_layer_now(0);
+        assert_eq!(s.layer_count(), count - 2);
+        s.undo();
+        assert_eq!(s.doc.column(0).map(|c| c.id), Some(worked));
     }
 
     #[test]

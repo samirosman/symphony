@@ -914,6 +914,55 @@ impl SymphonyApp {
 
     /// Run `p` now, or ask to save unsaved work first. Losing work can't be
     /// undone, so this is one of the few confirmations (D8.4).
+    /// "Delete layer?" for a layer with work on it (DESIGN D8.4: an
+    /// exception, since a deleted hidden layer can go unnoticed).
+    fn confirm_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(column) = self.s.confirm_delete else {
+            return;
+        };
+        let Some(i) = self.s.doc.layer_of(column) else {
+            self.s.confirm_delete = None;
+            return;
+        };
+        let name = self.s.layer_name(i).to_owned();
+        let n = self.s.drawings_with_work(i);
+        let hidden = !self.s.layer_visible(i);
+        let mut choice = None;
+        let modal = theme::glass_modal(ctx, "symphony-delete-layer").show(ctx, |ui| {
+            ui.heading(format!("Delete layer \u{201c}{name}\u{201d}?"));
+            let drawings = if n == 1 {
+                "1 drawing".to_owned()
+            } else {
+                format!("{n} drawings")
+            };
+            ui.label(format!("It has {drawings} on it."));
+            if hidden {
+                ui.label("The layer is hidden, so its drawings aren't on screen now.");
+            }
+            ui.label("Undo brings it back.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+                if symphony_ui::widgets::primary_button(ui, "Delete layer", true).clicked() {
+                    choice = Some(true);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                self.s.confirm_delete = None;
+                self.s.delete_layer_now(i);
+            }
+            Some(false) => self.s.confirm_delete = None,
+            None => {}
+        }
+    }
+
     fn guard(&mut self, ctx: &egui::Context, p: Pending) {
         if self.s.dirty() {
             self.pending = Some(p);
@@ -3272,6 +3321,8 @@ impl SymphonyApp {
                 self.opening = None;
             }
         }
+
+        self.confirm_delete_dialog(ctx);
 
         if let Some(p) = self.pending {
             let name = self.s.name();

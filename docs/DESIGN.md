@@ -312,7 +312,10 @@ and animation state.
   for setup, not for work.
 - **D8.4 Undo, don't ask.** Destructive actions are undoable and never ask
   "Are you sure?". Confirmation is only for things that *can't* be undone,
-  such as deleting files on disk.
+  such as deleting files on disk. One exception: deleting a layer that
+  has drawings on it asks first. A deleted layer, a hidden one most of
+  all, can go unnoticed until the undo is long gone, and with it a day
+  of work. An empty layer is deleted at once.
 - **D8.5 Visible modes.** Any mode that changes what an action does
   (Animate mode, onion skin, a locked layer) shows on screen all the time
   while it's on, in its token colour.
