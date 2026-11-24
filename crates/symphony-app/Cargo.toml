@@ -21,7 +21,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
 mp4 = "0.14"
 # SVG import: drawn to a picture (MPL-2.0).
-resvg = { version = "0.45", default-features = false, features = ["text"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
 # Sound import: pure-Rust decoding (MPL-2.0) and playback (Apache-2.0).
 symphonia = { version = "0.5", features = ["aac", "isomp4", "mp3", "wav", "pcm", "flac", "vorbis", "ogg", "aiff", "alac"] }
 cpal = "0.15"

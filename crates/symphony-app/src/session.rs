@@ -2057,6 +2057,124 @@ impl Session {
         placed
     }
 
+    /// Add vector drawings made from imported files (SVG, or vectorized
+    /// pictures): one layer per group, a drawing per frame, fitted to the
+    /// scene like a picture. Colour zones go on Colour Art, lines on Line
+    /// Art; their colours join the palette (an existing swatch of the same
+    /// colour is reused). One undo step. Returns the drawings added.
+    pub fn import_vectors(&mut self, groups: Vec<crate::import::VectorGroup>) -> usize {
+        use crate::vector_import::Part;
+        use symphony_core::stroke::{ArtLayer, Fill};
+        let (sw, sh) = (
+            self.doc.settings.width.max(1) as f32,
+            self.doc.settings.height.max(1) as f32,
+        );
+        let mut palette = self.doc.palette.clone();
+        let mut palette_changed = false;
+        let mut edits = Vec::new();
+        let mut placed = 0;
+        let mut length = self.length();
+        let index = self.selected.min(self.layer_count());
+        for g in &groups {
+            if g.frames.is_empty() {
+                continue;
+            }
+            let snap = self.doc.make_layer(&g.name, index);
+            let column = snap.layer.column;
+            edits.push(Edit::AddLayer(Box::new(snap)));
+            let single = g.frames.len() == 1;
+            let start = if single { 1 } else { self.frame };
+            let mut cells: Vec<Option<Id>> = Vec::new();
+            for art in &g.frames {
+                let [w, h] = art.size;
+                let k = (sw / w.max(1e-3)).min(sh / h.max(1e-3));
+                let place = |p: [f32; 2]| [(p[0] - w / 2.0) * k, (p[1] - h / 2.0) * k];
+                let mut d = self.doc.make_drawing(column);
+                for piece in &art.pieces {
+                    let [r, gg, b, a] = piece.rgba;
+                    let swatch = match palette
+                        .swatches
+                        .iter()
+                        .find(|sw| sw.rgb == [r, gg, b] && sw.opacity == a)
+                    {
+                        Some(sw) => sw.id,
+                        None => {
+                            let id = self.doc.ids.fresh();
+                            palette.swatches.push(symphony_core::palette::Swatch {
+                                id,
+                                name: format!("Imported #{r:02X}{gg:02X}{b:02X}"),
+                                rgb: [r, gg, b],
+                                opacity: a,
+                                protected: false,
+                            });
+                            palette_changed = true;
+                            id
+                        }
+                    };
+                    let shape: Vec<Vec<[f32; 2]>> = piece
+                        .shape
+                        .iter()
+                        .map(|ring| ring.iter().map(|&p| place(p)).collect())
+                        .collect();
+                    match piece.part {
+                        Part::Zone => d.fills.push(Fill {
+                            id: self.doc.ids.fresh(),
+                            swatch,
+                            art: ArtLayer::ColourArt,
+                            contours: shape,
+                        }),
+                        Part::Line => d.strokes.push(Stroke {
+                            id: self.doc.ids.fresh(),
+                            kind: StrokeKind::Brush,
+                            art: ArtLayer::LineArt,
+                            swatch,
+                            min_width: 1.0,
+                            max_width: 1.0,
+                            points: Vec::new(),
+                            tips: Default::default(),
+                            texture: None,
+                            shape,
+                        }),
+                    }
+                }
+                cells.push(Some(d.id));
+                edits.push(Edit::AddDrawing { drawing: d });
+                placed += 1;
+            }
+            if single {
+                cells = vec![cells[0]; length.max(1) as usize];
+            }
+            let end = start + cells.len() as u32 - 1;
+            if end > length {
+                edits.push(Edit::SetLength {
+                    before: length,
+                    after: end,
+                });
+                length = end;
+            }
+            edits.push(Edit::SetCells {
+                column,
+                from: start,
+                before: vec![None; cells.len()],
+                after: cells,
+            });
+        }
+        if palette_changed {
+            edits.insert(
+                0,
+                Edit::SetPalette {
+                    before: self.doc.palette.clone(),
+                    after: palette,
+                },
+            );
+        }
+        if !edits.is_empty() {
+            self.history
+                .apply(&mut self.doc, "Import as vector drawing", edits);
+        }
+        placed
+    }
+
     /// Change the camera frame's black bars (one undo step per change).
     pub fn set_bars(&mut self, after: symphony_core::doc::Bars) {
         let before = self.doc.settings.bars;

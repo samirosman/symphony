@@ -20,6 +20,7 @@ mod shot;
 #[cfg(test)]
 mod ui_tests;
 mod update;
+mod vector_import;
 mod video;
 mod views;
 mod wallpaper;
@@ -140,6 +141,9 @@ impl ToolDock {
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
+    /// How pictures were last imported (Picture or Vector drawing).
+    #[serde(default)]
+    import_options: Option<import::ImportOptions>,
     #[serde(default)]
     tool_dock: ToolDock,
     #[serde(default)]
@@ -318,6 +322,10 @@ struct SymphonyApp {
     brush_import: Option<brush_import::BrushImport>,
     /// Images being read and copied in the background.
     image_import: Option<import::ImageImport>,
+    /// Pictures waiting for the Import Images question.
+    image_import_asking: Option<Vec<PathBuf>>,
+    /// How pictures were last imported (remembered).
+    import_options: import::ImportOptions,
     sound_import: Option<import::SoundImport>,
     video_import: Option<video::VideoImport>,
     /// The scene's sound, in step with the playhead.
@@ -649,6 +657,10 @@ impl SymphonyApp {
         let tool_dock = saved
             .as_ref()
             .map_or(ToolDock::Left, |saved| saved.tool_dock);
+        let import_options = saved
+            .as_ref()
+            .and_then(|s| s.import_options)
+            .unwrap_or_default();
         keymap::set_remaps(saved.as_ref().map(|s| s.remaps.clone()).unwrap_or_default());
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
@@ -856,6 +868,8 @@ impl SymphonyApp {
             codec_download: None,
             brush_import: None,
             image_import: None,
+            image_import_asking: None,
+            import_options,
             sound_import: None,
             video_import: None,
             player: Default::default(),
@@ -2865,14 +2879,35 @@ impl SymphonyApp {
         for (slot, paths) in by_kind {
             match slot {
                 0 => {
-                    if self.image_import.is_some() {
+                    let only_svg = paths
+                        .iter()
+                        .all(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")));
+                    if self.image_import.is_some() || self.image_import_asking.is_some() {
                         notes.push(
                             "Still importing the last images. Try these again in a moment.".into(),
                         );
-                    } else if self.shot.is_some() {
-                        self.image_import = Some(import::ImageImport::finished(paths));
+                    } else if self.shot.is_some()
+                        && std::env::var_os("SYMPHONY_SHOT_IMPORT_ASK").is_none()
+                    {
+                        self.image_import = Some(import::ImageImport::finished(
+                            paths,
+                            import::ImportOptions::default(),
+                        ));
+                    } else if only_svg {
+                        // Nothing to ask: SVG is always a vector drawing.
+                        self.image_import =
+                            Some(import::ImageImport::start(paths, self.import_options, ctx));
                     } else {
-                        self.image_import = Some(import::ImageImport::start(paths, ctx));
+                        // SYMPHONY_SHOT_IMPORT_ASK=colour shows the question
+                        // in a screenshot run, set to Vector drawing.
+                        if let Ok(how) = std::env::var("SYMPHONY_SHOT_IMPORT_ASK") {
+                            self.import_options.as_vectors = true;
+                            if how == "colour" {
+                                self.import_options.vectorize =
+                                    vector_import::Vectorize::Colour { colours: 8 };
+                            }
+                        }
+                        self.image_import_asking = Some(paths);
                     }
                 }
                 1 => {
@@ -3011,11 +3046,24 @@ impl SymphonyApp {
                 }
             }
         }
+        // Pictures waiting on the Import Images question.
+        if let Some(paths) = &self.image_import_asking {
+            match import::options_ui(ctx, paths, &mut self.import_options) {
+                Some(true) => {
+                    let paths = self.image_import_asking.take().unwrap_or_default();
+                    self.image_import =
+                        Some(import::ImageImport::start(paths, self.import_options, ctx));
+                }
+                Some(false) => self.image_import_asking = None,
+                None => {}
+            }
+        }
         // Images finished reading in the background: place them.
         if let Some(job) = &self.image_import {
             if let Some(done) = job.poll() {
                 self.image_import = None;
-                let placed = self.s.import_images(done.groups);
+                let placed =
+                    self.s.import_images(done.groups) + self.s.import_vectors(done.vectors);
                 let mut text = match placed {
                     0 => String::new(),
                     1 => "Imported an image.".to_owned(),
@@ -3696,6 +3744,7 @@ impl eframe::App for SymphonyApp {
             use_openh264: self.use_openh264,
             presets: Some(self.presets.clone()),
             search_uses: self.search_uses.clone(),
+            import_options: Some(self.import_options),
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

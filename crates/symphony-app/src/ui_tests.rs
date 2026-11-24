@@ -1226,12 +1226,16 @@ fn tga_and_svg_import() {
     .unwrap();
     let out = crate::import::stage_images_into(&[tga, svg], &cache);
     assert!(out.problems.is_empty(), "{:?}", out.problems);
+    // The TGA is a picture; the SVG is a vector drawing (editable).
     let frames: Vec<_> = out.groups.iter().flat_map(|g| g.frames.iter()).collect();
-    assert_eq!(frames.len(), 2);
-    let svg_frame = frames.iter().find(|f| f.name == "logo").unwrap();
-    assert_eq!(svg_frame.size, [4096, 2048], "drawn sharp, same shape");
-    let px = image::open(cache.join(&svg_frame.file)).unwrap().to_rgba8();
-    assert_eq!(px.get_pixel(100, 100).0, [224, 48, 32, 255]);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].name, "bg");
+    assert_eq!(out.vectors.len(), 1);
+    assert_eq!(out.vectors[0].name, "logo");
+    let art = &out.vectors[0].frames[0];
+    assert_eq!(art.size, [100.0, 50.0]);
+    assert_eq!(art.pieces.len(), 1);
+    assert_eq!(art.pieces[0].rgba, [224, 48, 32, 255]);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1619,4 +1623,194 @@ fn export_after_a_crash() {
     )
     .unwrap();
     println!("export finished, {} frames reused", done.reused);
+}
+
+/// SVG files and vectorized pictures come in as drawings the tools work
+/// on: lines on Line Art and colour zones on Colour Art, in palette
+/// colours. The eraser cuts both, the Paint tool repaints a zone, and one
+/// undo takes the whole import back.
+#[test]
+fn imported_svg_and_traced_pictures_are_editable() {
+    use crate::import::{stage_into, ImportOptions};
+    use crate::vector_import::Vectorize;
+    use symphony_core::stroke::ArtLayer;
+    let dir = std::env::temp_dir().join(format!("symphony-vec-import-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let svg = dir.join("badge.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90">
+            <rect x="20" y="15" width="120" height="60" fill="#3366cc"/>
+            <path d="M 20 45 L 140 45" stroke="#111111" stroke-width="6"/>
+        </svg>"##,
+    )
+    .unwrap();
+    // Line art on paper, as a scan would be.
+    let png = dir.join("sketch.png");
+    let mut img = image::RgbaImage::from_pixel(160, 90, image::Rgba([250, 248, 240, 255]));
+    for x in 10..150 {
+        for y in 60..64 {
+            img.put_pixel(x, y, image::Rgba([15, 15, 15, 255]));
+        }
+    }
+    img.save(&png).unwrap();
+
+    let mut s = crate::session::Session::new_scene();
+    let swatches = s.doc.palette.swatches.len();
+    let opts = ImportOptions {
+        as_vectors: true,
+        vectorize: Vectorize::LineArt { threshold: 0.5 },
+    };
+    let out = stage_into(&[svg, png], &cache, opts);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert!(out.groups.is_empty(), "nothing came in as a locked picture");
+    assert_eq!(out.vectors.len(), 2);
+    let layers = s.layer_count();
+    assert_eq!(s.import_vectors(out.vectors), 2);
+    assert_eq!(s.layer_count(), layers + 2);
+    assert!(
+        s.doc.palette.swatches.len() > swatches,
+        "imported colours joined the palette"
+    );
+
+    // The SVG's drawing: one zone, one line, placed in the scene.
+    let svg_layer = (0..s.layer_count())
+        .find(|&l| {
+            s.doc
+                .exposed(l, 1)
+                .and_then(|d| s.doc.drawings.get(&d))
+                .is_some_and(|d| !d.fills.is_empty())
+        })
+        .expect("the SVG's layer");
+    let d = s.doc.exposed(svg_layer, 1).unwrap();
+    let dr = &s.doc.drawings[&d];
+    assert_eq!(dr.fills.len(), 1);
+    assert_eq!(dr.fills[0].art, ArtLayer::ColourArt);
+    assert_eq!(dr.strokes.len(), 1);
+    assert_eq!(dr.strokes[0].art, ArtLayer::LineArt);
+    assert!(dr.image.is_none());
+    let zone_area = |s: &crate::session::Session| -> f32 {
+        s.doc.drawings[&d]
+            .fills
+            .iter()
+            .map(|f| symphony_vector::shape::shape_area(&f.contours).abs())
+            .sum()
+    };
+    let before = zone_area(&s);
+    // The eraser cuts the line and the zone at the middle.
+    s.art = ArtLayer::LineArt;
+    s.erase(d, &[([0.0, 0.0], 40.0)]);
+    s.end_gesture();
+    let dr = &s.doc.drawings[&d];
+    assert!(dr.strokes.len() >= 2, "the line was cut in two");
+    s.art = ArtLayer::ColourArt;
+    s.erase(d, &[([0.0, 0.0], 40.0)]);
+    s.end_gesture();
+    assert!(
+        zone_area(&s) < before - 3000.0,
+        "the zone lost the eraser's shape"
+    );
+    // The Paint tool repaints the zone.
+    let red = s.doc.palette.swatches[0].id;
+    s.swatch = red;
+    let corner = s.doc.drawings[&d].fills[0].contours[0][0];
+    let inside = [corner[0] * 0.9, corner[1] * 0.9];
+    s.paint_at(svg_layer, 1, inside[0], inside[1], 1.0);
+    assert!(s.doc.drawings[&d].fills.iter().any(|f| f.swatch == red));
+
+    // The traced sketch: lines only, no paper.
+    let sketch = (0..s.layer_count())
+        .find(|&l| {
+            l != svg_layer
+                && s.doc.exposed(l, 1).is_some_and(|d| {
+                    s.doc
+                        .drawings
+                        .get(&d)
+                        .is_some_and(|d| !d.strokes.is_empty())
+                })
+        })
+        .expect("the sketch's layer");
+    let sd = &s.doc.drawings[&s.doc.exposed(sketch, 1).unwrap()];
+    assert!(sd.fills.is_empty());
+    assert!(sd.strokes.iter().all(|st| st.art == ArtLayer::LineArt));
+
+    // Undo the edits: the imported zone renders in its colour; one more
+    // undo takes the whole import back.
+    while s.history.undo_name() != Some("Import as vector drawing") {
+        assert!(
+            s.history.undo_len() > 0,
+            "the import step is in the history"
+        );
+        s.undo();
+    }
+    let img = symphony_render::render_frame(&s.doc, 1, 320, 180).unwrap();
+    assert!(
+        img.pixels().any(|p| p.0[2] > 150 && p.0[0] < 100),
+        "the blue zone shows"
+    );
+    s.undo();
+    assert_eq!(s.layer_count(), layers, "the import is one undo step");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// See how a picture traces: `SYMPHONY_TRACE_IN=<image> SYMPHONY_TRACE_OUT=
+/// <png> [SYMPHONY_TRACE_COLOURS=8] cargo test --release -p symphony-app
+/// trace_a_picture -- --ignored --nocapture`. Prints the time and pieces.
+#[test]
+#[ignore = "needs a picture"]
+fn trace_a_picture() {
+    use crate::vector_import::Vectorize;
+    let (Some(input), Some(out)) = (
+        std::env::var_os("SYMPHONY_TRACE_IN"),
+        std::env::var_os("SYMPHONY_TRACE_OUT"),
+    ) else {
+        return;
+    };
+    let how = match std::env::var("SYMPHONY_TRACE_COLOURS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+    {
+        Some(colours) => Vectorize::Colour { colours },
+        None => Vectorize::LineArt { threshold: 0.5 },
+    };
+    let opts = crate::import::ImportOptions {
+        as_vectors: true,
+        vectorize: how,
+    };
+    let dir = std::env::temp_dir().join("symphony-trace-cache");
+    let mut input = std::path::PathBuf::from(input);
+    // An SVG is drawn into a picture first (a stand-in for a scan).
+    if input.extension().is_some_and(|e| e == "svg") {
+        let tree = resvg::usvg::Tree::from_data(
+            &std::fs::read(&input).unwrap(),
+            &resvg::usvg::Options::default(),
+        )
+        .unwrap();
+        let (w, h) = (tree.size().width() as u32, tree.size().height() as u32);
+        let mut pix = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+        pix.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(&tree, Default::default(), &mut pix.as_mut());
+        input = dir.join("drawn.png");
+        std::fs::create_dir_all(&dir).unwrap();
+        pix.save_png(&input).unwrap();
+    }
+    let start = std::time::Instant::now();
+    let got = crate::import::stage_into(&[input], &dir, opts);
+    let traced = start.elapsed();
+    assert!(got.problems.is_empty(), "{:?}", got.problems);
+    let pieces: usize = got
+        .vectors
+        .iter()
+        .flat_map(|g| &g.frames)
+        .map(|a| a.pieces.len())
+        .sum();
+    let mut s = crate::session::Session::new_scene();
+    for l in (0..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    s.import_vectors(got.vectors);
+    let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+    img.save(out).unwrap();
+    println!("traced in {traced:?}: {pieces} pieces");
 }

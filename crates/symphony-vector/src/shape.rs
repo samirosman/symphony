@@ -164,6 +164,19 @@ fn outline_key(stroke: &Stroke) -> u64 {
     h.finish()
 }
 
+/// Polygons (filled by the non-zero rule, or even-odd) as clean shapes:
+/// overlaps and self-crossings resolved, each an outside with its holes.
+/// For importing vector files.
+pub fn from_polygons(polygons: Vec<Vec<[f32; 2]>>, even_odd: bool) -> Vec<Shape> {
+    let rule = if even_odd {
+        FillRule::EvenOdd
+    } else {
+        FillRule::NonZero
+    };
+    let empty: Vec<[f32; 2]> = Vec::new();
+    to_f32(polygons.overlay(&empty, OverlayRule::Subject, rule))
+}
+
 /// Polygons merged per group before the groups are merged together.
 pub(crate) const MERGE_GROUP: usize = 128;
 

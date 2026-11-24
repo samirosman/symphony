@@ -14,6 +14,7 @@ mod recent;
 pub mod shape;
 pub mod stamp;
 pub mod stamped;
+pub mod trace;
 
 use symphony_core::math::Affine;
 use symphony_core::stroke::{Point, Stroke, Tip};

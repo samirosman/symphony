@@ -100,9 +100,27 @@ pub struct ImageGroup {
     pub frames: Vec<Staged>,
 }
 
+/// Vector drawings to place (SVG files, vectorized pictures): one layer
+/// per group, a drawing per frame.
+#[derive(Clone, Debug)]
+pub struct VectorGroup {
+    pub name: String,
+    pub frames: Vec<crate::vector_import::VectorArt>,
+}
+
 pub struct Outcome {
     pub groups: Vec<ImageGroup>,
+    pub vectors: Vec<VectorGroup>,
     pub problems: Vec<String>,
+}
+
+/// How pictures come in (Harmony 27's import modes): kept as they are
+/// (a locked picture), or vectorized into a drawing every tool can edit.
+/// SVG files always come in as vector drawings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportOptions {
+    pub as_vectors: bool,
+    pub vectorize: crate::vector_import::Vectorize,
 }
 
 pub struct ImageImport {
@@ -111,22 +129,22 @@ pub struct ImageImport {
 }
 
 impl ImageImport {
-    pub fn start(paths: Vec<PathBuf>, ctx: &eframe::egui::Context) -> Self {
+    pub fn start(paths: Vec<PathBuf>, opts: ImportOptions, ctx: &eframe::egui::Context) -> Self {
         let (tx, rx) = channel();
         let files = paths.len();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(stage_images(&paths));
+            let _ = tx.send(stage_images(&paths, opts));
             ctx.request_repaint();
         });
         ImageImport { rx, files }
     }
 
     /// Screenshot runs import on this thread.
-    pub fn finished(paths: Vec<PathBuf>) -> Self {
+    pub fn finished(paths: Vec<PathBuf>, opts: ImportOptions) -> Self {
         let (tx, rx) = channel();
         let files = paths.len();
-        let _ = tx.send(stage_images(&paths));
+        let _ = tx.send(stage_images(&paths, opts));
         ImageImport { rx, files }
     }
 
@@ -145,19 +163,106 @@ fn numbered(stem: &str) -> Option<(String, u64)> {
     Some((head.to_owned(), tail.parse().ok()?))
 }
 
-fn stage_images(paths: &[PathBuf]) -> Outcome {
+fn stage_images(paths: &[PathBuf], opts: ImportOptions) -> Outcome {
     match cache_dir() {
-        Some(cache) => stage_images_into(paths, &cache),
+        Some(cache) => stage_into(paths, &cache, opts),
         None => Outcome {
             groups: Vec::new(),
+            vectors: Vec::new(),
             problems: vec!["There's nowhere to keep imported files on this computer.".into()],
         },
     }
 }
 
-/// Read `paths`, copy them into `cache` under their content key, and group
-/// numbered ones into sequences.
+/// Read `paths` as pictures, copy them into `cache` under their content
+/// key, and group numbered ones into sequences.
+#[cfg(test)]
 pub fn stage_images_into(paths: &[PathBuf], cache: &Path) -> Outcome {
+    stage_into(paths, cache, ImportOptions::default())
+}
+
+/// Read `paths` as `opts` says: SVG files (and, with `as_vectors`, every
+/// picture) become vector drawings; the rest are copied into `cache` as
+/// pictures. Numbered files group into sequences either way.
+pub fn stage_into(paths: &[PathBuf], cache: &Path, opts: ImportOptions) -> Outcome {
+    use rayon::prelude::*;
+    let is_svg = |p: &PathBuf| {
+        p.extension()
+            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("svg"))
+    };
+    let (vector_paths, picture_paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
+        .iter()
+        .cloned()
+        .partition(|p| is_svg(p) || opts.as_vectors);
+    // Each file traces on its own (and each trace uses the cores too).
+    let traced: Vec<(PathBuf, Result<crate::vector_import::VectorArt, String>)> = vector_paths
+        .par_iter()
+        .map(|p| (p.clone(), read_vectors(p, opts)))
+        .collect();
+    let mut problems = Vec::new();
+    let mut fallback = Vec::new();
+    let mut arts = Vec::new();
+    for (path, r) in traced {
+        let shown = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match r {
+            Ok(art) => arts.push((path, art)),
+            // An SVG made only of pictures comes in as a picture.
+            Err(e) if is_svg(&path) && e.contains("pictures") => fallback.push(path),
+            Err(e) => problems.push(format!("{shown}: {e}")),
+        }
+    }
+    let vectors = group_numbered(arts.into_iter().map(|(p, a)| {
+        let name = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (p, name, a)
+    }))
+    .into_iter()
+    .map(|(name, frames)| VectorGroup { name, frames })
+    .collect();
+    let mut out = stage_pictures(&[picture_paths, fallback].concat(), cache);
+    out.vectors = vectors;
+    problems.append(&mut out.problems);
+    out.problems = problems;
+    out
+}
+
+/// One file as a vector drawing.
+fn read_vectors(
+    path: &Path,
+    opts: ImportOptions,
+) -> Result<crate::vector_import::VectorArt, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read it ({e})"))?;
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext == "svg" {
+        return crate::vector_import::from_svg(&bytes);
+    }
+    let img = decode(&bytes, &ext).ok_or("not an image Symphony can read")?;
+    let art = crate::vector_import::vectorize(&img.into_rgba8(), opts.vectorize);
+    if art.pieces.is_empty() {
+        return Err("nothing to trace in it (try a lower threshold, or Colour)".into());
+    }
+    Ok(art)
+}
+
+/// Decode a picture, trusting its extension first (TGA has no signature).
+fn decode(bytes: &[u8], ext: &str) -> Option<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    match image::ImageFormat::from_extension(ext) {
+        Some(f) => reader.set_format(f),
+        None => reader = reader.with_guessed_format().ok()?,
+    }
+    reader.decode().ok()
+}
+
+fn stage_pictures(paths: &[PathBuf], cache: &Path) -> Outcome {
     let mut problems = Vec::new();
     let mut staged: Vec<(PathBuf, Staged)> = Vec::new();
     let _ = std::fs::create_dir_all(cache);
@@ -238,56 +343,50 @@ pub fn stage_images_into(paths: &[PathBuf], cache: &Path) -> Outcome {
     }
     Outcome {
         groups: group(staged),
+        vectors: Vec::new(),
         problems,
     }
 }
 
-/// Numbered files with the same name before the number form one sequence
+/// Numbered items with the same name before the number form one sequence
 /// (in number order); everything else is a group of its own.
-fn group(staged: Vec<(PathBuf, Staged)>) -> Vec<ImageGroup> {
-    let mut groups: Vec<(Option<String>, ImageGroup, Vec<u64>)> = Vec::new();
-    for (path, s) in staged {
-        let seq = numbered(&s.name).filter(|_| path.parent().is_some());
-        match seq {
+fn group_numbered<T>(
+    items: impl IntoIterator<Item = (PathBuf, String, T)>,
+) -> Vec<(String, Vec<T>)> {
+    // (sequence name before the number, shown name, numbered items)
+    type Group<T> = (Option<String>, String, Vec<(u64, T)>);
+    let mut groups: Vec<Group<T>> = Vec::new();
+    for (path, name, item) in items {
+        match numbered(&name).filter(|_| path.parent().is_some()) {
             Some((head, n)) => {
                 if let Some(g) = groups.iter_mut().find(|g| g.0.as_deref() == Some(&head)) {
-                    g.1.frames.push(s);
-                    g.2.push(n);
+                    g.2.push((n, item));
                 } else {
-                    let name = head.trim_end_matches(['_', '-', '.', ' ']).to_owned();
-                    let name = if name.is_empty() {
-                        s.name.clone()
+                    let shown = head.trim_end_matches(['_', '-', '.', ' ']).to_owned();
+                    let shown = if shown.is_empty() {
+                        name.clone()
                     } else {
-                        name
+                        shown
                     };
-                    groups.push((
-                        Some(head),
-                        ImageGroup {
-                            name,
-                            frames: vec![s],
-                        },
-                        vec![n],
-                    ));
+                    groups.push((Some(head), shown, vec![(n, item)]));
                 }
             }
-            None => groups.push((
-                None,
-                ImageGroup {
-                    name: s.name.clone(),
-                    frames: vec![s],
-                },
-                vec![0],
-            )),
+            None => groups.push((None, name, vec![(0, item)])),
         }
     }
     groups
         .into_iter()
-        .map(|(_, mut g, numbers)| {
-            let mut order: Vec<(u64, Staged)> = numbers.into_iter().zip(g.frames).collect();
-            order.sort_by_key(|(n, _)| *n);
-            g.frames = order.into_iter().map(|(_, s)| s).collect();
-            g
+        .map(|(_, name, mut items)| {
+            items.sort_by_key(|(n, _)| *n);
+            (name, items.into_iter().map(|(_, t)| t).collect())
         })
+        .collect()
+}
+
+fn group(staged: Vec<(PathBuf, Staged)>) -> Vec<ImageGroup> {
+    group_numbered(staged.into_iter().map(|(p, s)| (p, s.name.clone(), s)))
+        .into_iter()
+        .map(|(name, frames)| ImageGroup { name, frames })
         .collect()
 }
 
@@ -313,6 +412,123 @@ fn rasterize_svg(svg: &[u8]) -> Result<Vec<u8>, String> {
     pixmap
         .encode_png()
         .map_err(|e| format!("couldn't convert the SVG ({e})"))
+}
+
+/// File > Import's question for pictures (Harmony 27's Import Images
+/// modes): keep each as it is, or vectorize it into a drawing every tool
+/// can edit. Returns Some(true) to import, Some(false) to cancel.
+pub fn options_ui(
+    ctx: &eframe::egui::Context,
+    paths: &[PathBuf],
+    opts: &mut ImportOptions,
+) -> Option<bool> {
+    use crate::vector_import::Vectorize;
+    use eframe::egui;
+    use symphony_ui::{theme, widgets};
+    let pictures = paths
+        .iter()
+        .filter(|p| !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")))
+        .count();
+    let svgs = paths.len() - pictures;
+    let mut answer = None;
+    let note = |ui: &mut egui::Ui, text: &str| {
+        ui.label(
+            egui::RichText::new(text)
+                .font(theme::dense())
+                .color(theme::TEXT_SECONDARY),
+        );
+    };
+    let modal = theme::glass_modal(ctx, "symphony-import-images").show(ctx, |ui| {
+        ui.set_width(400.0);
+        ui.heading("Import Images");
+        ui.add_space(4.0);
+        note(
+            ui,
+            &match (pictures, svgs) {
+                (1, 0) => "1 picture".to_owned(),
+                (n, 0) => format!("{n} pictures"),
+                (n, s) => format!(
+                    "{n} picture{}, and {s} SVG file{} (SVG always comes in as a vector drawing)",
+                    if n == 1 { "" } else { "s" },
+                    if s == 1 { "" } else { "s" }
+                ),
+            },
+        );
+        ui.add_space(8.0);
+        ui.label("Import as");
+        widgets::segmented(
+            ui,
+            "import-as",
+            &mut opts.as_vectors,
+            &[(false, "Picture"), (true, "Vector drawing")],
+            false,
+        );
+        if opts.as_vectors {
+            note(
+                ui,
+                "Traced into lines and colour zones that every tool can edit: select, \
+                 transform, erase, paint and recolour.",
+            );
+            ui.add_space(6.0);
+            ui.label("Vectorize");
+            let mut colour = matches!(opts.vectorize, Vectorize::Colour { .. });
+            if widgets::segmented(
+                ui,
+                "vectorize",
+                &mut colour,
+                &[(false, "Line art"), (true, "Colour")],
+                false,
+            ) {
+                opts.vectorize = if colour {
+                    Vectorize::Colour { colours: 8 }
+                } else {
+                    Vectorize::LineArt { threshold: 0.5 }
+                };
+            }
+            match &mut opts.vectorize {
+                Vectorize::LineArt { threshold } => {
+                    note(ui, "Dark marks become lines; the paper becomes clear.");
+                    ui.horizontal(|ui| {
+                        ui.label("Threshold");
+                        widgets::precise_slider(
+                            ui,
+                            egui::Slider::new(threshold, 0.1..=0.9).fixed_decimals(2),
+                        )
+                        .on_hover_text("Lower keeps fainter marks; higher keeps only dark ink.");
+                    });
+                }
+                Vectorize::Colour { colours } => {
+                    note(
+                        ui,
+                        "Each main colour becomes colour zones (on Colour Art); the darkest \
+                         becomes lines; white paper becomes clear. Its colours join the palette.",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Colours");
+                        widgets::precise_slider(ui, egui::Slider::new(colours, 2..=24));
+                    });
+                }
+            }
+        } else {
+            note(
+                ui,
+                "Kept exactly as it is, under the drawing. Draw over it on the same layer.",
+            );
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if widgets::primary_button(ui, "Import", true).clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
 }
 
 /// A sound file, copied into the media cache and decoded.
