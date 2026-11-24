@@ -10,6 +10,8 @@ name = "symphony"
 path = "src/main.rs"
 
 [dependencies]
+# Heavy pure work (erasing many strokes) across the cores (ENGINEERING E6.1).
+rayon = "1"
 bzip2 = "0.6"
 dirs = "7"
 symphony-brushes = { path = "../symphony-brushes" }

@@ -769,22 +769,32 @@ impl Session {
         let near = |lo: [f32; 2], hi: [f32; 2]| {
             lo[0] <= reach.1[0] && lo[1] <= reach.1[1] && hi[0] >= reach.0[0] && hi[1] >= reach.0[1]
         };
-        // What changes, worked out first, then applied one edit at a time.
-        let mut strokes: Vec<(Id, Vec<Stroke>)> = Vec::new();
-        for st in d.strokes.iter().filter(|st| on(st.art)) {
-            if !symphony_vector::bounds(st).is_some_and(|(lo, hi)| near(lo, hi)) {
-                continue;
-            }
-            // Brush strokes, textured or not, lose exactly the eraser's
-            // shape; a textured one keeps its texture, clipped to it.
-            let by_shape = st.kind == StrokeKind::Brush;
-            if by_shape {
+        // What changes, worked out first (each stroke on its own, so
+        // across the cores: building a stroke's outline the first time the
+        // eraser touches it is the slow part), then applied one edit at a
+        // time in drawing order.
+        use rayon::prelude::*;
+        let textures = &self.doc.textures;
+        let candidates: Vec<&Stroke> = d
+            .strokes
+            .iter()
+            .filter(|st| on(st.art))
+            .filter(|st| symphony_vector::bounds(st).is_some_and(|(lo, hi)| near(lo, hi)))
+            .collect();
+        let work = |st: &&Stroke| -> Option<(Id, Vec<Stroke>)> {
+            let st = *st;
+            {
+                // Brush strokes, textured or not, lose exactly the eraser's
+                // shape; a textured one keeps its texture, clipped to it.
+                if st.kind != StrokeKind::Brush {
+                    return symphony_vector::cut::cut(st, eraser, tip).map(|p| (st.id, p));
+                }
                 // A vector brush's outline is its merged stamps.
                 let outlines = match st.texture.filter(|t| t.vector) {
                     Some(tex) => symphony_vector::stamped::vector_brush_shapes(
                         st,
                         &tex,
-                        tex.tip.and_then(|k| self.doc.textures.get(&k)),
+                        tex.tip.and_then(|k| textures.get(&k)),
                     ),
                     None => shape::outline(st),
                 };
@@ -799,7 +809,7 @@ impl Session {
                         None => left.push(o.clone()),
                     }
                 }
-                if hit {
+                hit.then(|| {
                     let pieces = left
                         .into_iter()
                         .map(|sh| Stroke {
@@ -807,15 +817,22 @@ impl Session {
                             ..st.clone()
                         })
                         .collect();
-                    strokes.push((st.id, pieces));
-                }
-            } else if let Some(pieces) = symphony_vector::cut::cut(st, eraser, tip) {
-                strokes.push((st.id, pieces));
+                    (st.id, pieces)
+                })
             }
-        }
-        let mut fills: Vec<(Id, Vec<symphony_core::stroke::Fill>)> = Vec::new();
-        for f in d.fills.iter().filter(|f| on(f.art)) {
-            if let Some(parts) = shape::erase(&f.contours, &poly) {
+        };
+        // A single stroke isn't worth waking the other cores for.
+        let strokes: Vec<(Id, Vec<Stroke>)> = if candidates.len() > 1 {
+            candidates.par_iter().filter_map(work).collect()
+        } else {
+            candidates.iter().filter_map(work).collect()
+        };
+        let fills: Vec<(Id, Vec<symphony_core::stroke::Fill>)> = d
+            .fills
+            .iter()
+            .filter(|f| on(f.art))
+            .filter_map(|f| {
+                let parts = shape::erase(&f.contours, &poly)?;
                 let pieces = parts
                     .into_iter()
                     .map(|contours| symphony_core::stroke::Fill {
@@ -823,9 +840,9 @@ impl Session {
                         ..f.clone()
                     })
                     .collect();
-                fills.push((f.id, pieces));
-            }
-        }
+                Some((f.id, pieces))
+            })
+            .collect();
         for (id, mut pieces) in strokes {
             let Some(index) = self
                 .doc
