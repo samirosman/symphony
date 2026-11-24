@@ -1,8 +1,8 @@
-//! A shallow resting curve with room for a second bend during a drag.
+//! Cables bend while moving, then settle into a route aligned to the ports.
 
 use eframe::egui::{self, Pos2, Stroke, Vec2};
 
-const MAX_TRAIL: f32 = 15.0;
+const MAX_TRAIL: f32 = 21.0;
 
 #[derive(Clone, Copy)]
 pub struct Cable {
@@ -22,6 +22,14 @@ impl Cable {
         }
     }
 
+    /// Ease the loose curve into the port directions when connected.
+    pub fn shape_for_ports(mut self, amount: f32) -> Self {
+        let reach = (self.from.distance(self.end) * 0.34).min(86.0);
+        self.controls[0] = self.controls[0].lerp(self.from + Vec2::Y * reach, amount);
+        self.controls[1] = self.controls[1].lerp(self.end - Vec2::Y * reach, amount);
+        self
+    }
+
     pub fn offset(self) -> Vec2 {
         let [a, b] = Self::new(self.from, self.end).controls;
         (self.controls[0] - a) + (self.controls[1] - b)
@@ -35,8 +43,8 @@ impl Cable {
 
     pub fn follow(self, from: Pos2, end: Pos2, dt: f32) -> Self {
         let movement = (end - from) - (self.end - self.from);
-        let decay = (-13.0 * dt.clamp(0.0, 0.1)).exp();
-        let offset = (self.offset() - movement * 0.19) * decay;
+        let decay = (-11.0 * dt.clamp(0.0, 0.1)).exp();
+        let offset = (self.offset() - movement * 0.23) * decay;
         let limit = MAX_TRAIL.min(from.distance(end) * 0.2);
         Self::new(from, end).with_offset(offset * (limit / offset.length().max(limit).max(0.001)))
     }
@@ -59,15 +67,35 @@ impl Cable {
         let remaining = 1.0 - progress * progress * (3.0 - 2.0 * progress);
         let span = self.end - self.from;
         let sideways = Vec2::new(-span.y, span.x).normalized();
-        let wiggle = (progress * std::f32::consts::TAU).sin()
+        let wiggle = (progress * std::f32::consts::TAU * 1.4).sin()
             * (1.0 - progress).powi(2)
-            * (span.length() * 0.12).min(9.0);
+            * (span.length() * 0.18).min(15.0);
         Self {
             from,
             controls: self.controls.map(|p| from + (p - self.from) * remaining),
             end: from + span * remaining + sideways * (wiggle * 0.5),
         }
         .with_offset(sideways * wiggle)
+    }
+
+    /// Add two small alternating bends to a moving cable, with fixed ends.
+    pub fn paint_moving(self, painter: &egui::Painter, stroke: Stroke, flex: f32) {
+        if flex.abs() < 0.1 {
+            self.paint(painter, stroke);
+            return;
+        }
+        let span = self.end - self.from;
+        let normal = Vec2::new(-span.y, span.x).normalized();
+        let flex = flex.clamp(-span.length() * 0.1, span.length() * 0.1);
+        let points = (0..=24)
+            .map(|step| {
+                let t = step as f32 / 24.0;
+                let envelope = (std::f32::consts::PI * t).sin().powi(2);
+                self.prefix(t).end
+                    + normal * (flex * envelope * (std::f32::consts::TAU * 2.0 * t).sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, stroke));
     }
 
     pub fn paint(self, painter: &egui::Painter, stroke: Stroke) {

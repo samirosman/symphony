@@ -89,8 +89,8 @@ enum CableMotion {
 impl CableMotion {
     fn seconds(self) -> f64 {
         match self {
-            CableMotion::Connect { .. } | CableMotion::Move { .. } => 0.28,
-            CableMotion::Retract { .. } => 0.32,
+            CableMotion::Connect { .. } | CableMotion::Move { .. } => 0.42,
+            CableMotion::Retract { .. } => 0.24,
         }
     }
 }
@@ -622,7 +622,9 @@ fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: O
 }
 
 fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
-    Cable::new(from, to).paint(painter, stroke);
+    Cable::new(from, to)
+        .shape_for_ports(1.0)
+        .paint(painter, stroke);
 }
 
 #[derive(Clone, Copy)]
@@ -676,7 +678,7 @@ impl AutoWire {
 }
 
 fn near_cable(point: Pos2, from: Pos2, to: Pos2) -> f32 {
-    let cable = Cable::new(from, to);
+    let cable = Cable::new(from, to).shape_for_ports(1.0);
     let mut previous = from.to_vec2();
     let mut best = f32::INFINITY;
     for step in 1..=20 {
@@ -1968,6 +1970,29 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     if !state.link_anims.is_empty() {
         ui.ctx().request_repaint();
     }
+    let link_selected =
+        |link: Link| state.selection.contains(&link.from) || state.selection.contains(&link.to);
+    let selected_outputs: BTreeSet<_> = s
+        .doc
+        .graph
+        .links()
+        .iter()
+        .filter(|link| link_selected(**link))
+        .map(|link| link.from)
+        .collect();
+    let cable_style = |link: Link, removing: bool| {
+        let colour = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
+        if removing {
+            Stroke::new(ACTIVE_CABLE_WIDTH, theme::STATE_DANGER)
+        } else if link_selected(link) {
+            Stroke::new(
+                ACTIVE_CABLE_WIDTH,
+                colour.lerp_to_gamma(theme::ACCENT_SELECT, 0.7),
+            )
+        } else {
+            Stroke::new(CABLE_WIDTH, colour)
+        }
+    };
     // Step and draw every moving cable.
     let mut moving: Vec<Link> = Vec::new();
     for a in &state.link_anims {
@@ -1976,9 +2001,10 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             CableMotion::Retract { source, from } => {
                 let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::LINE_CONTROL);
                 let from = outputs.get(&source).copied().unwrap_or(from);
-                a.curve.retract(from, progress).paint(
+                a.curve.retract(from, progress).paint_moving(
                     &painter,
                     Stroke::new(CABLE_WIDTH, ink.gamma_multiply(1.0 - 0.5 * progress)),
+                    (progress * std::f32::consts::TAU).sin() * (1.0 - progress) * 13.0,
                 );
             }
             CableMotion::Connect { .. } | CableMotion::Move { .. } => {
@@ -1988,7 +2014,6 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 else {
                     continue;
                 };
-                let ink = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
                 moving.push(link);
                 let start = match a.motion {
                     CableMotion::Move { from_end } => Some(from_end),
@@ -1996,13 +2021,18 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     CableMotion::Retract { .. } => None,
                 };
                 let remaining = (1.0 - progress).powi(3);
+                let routed = progress * progress * (3.0 - 2.0 * progress);
                 let cable = if let Some(start) = start {
                     Cable::new(from, to.lerp(start, remaining))
+                        .shape_for_ports(routed)
                         .with_offset(a.curve.offset() * remaining)
                 } else {
-                    Cable::new(from, to).prefix(1.0 - remaining)
+                    Cable::new(from, to)
+                        .shape_for_ports(1.0)
+                        .prefix(1.0 - remaining)
                 };
-                cable.paint(&painter, Stroke::new(CABLE_WIDTH, ink));
+                let flex = (progress * std::f32::consts::TAU).sin() * (1.0 - progress) * 9.0;
+                cable.paint_moving(&painter, cable_style(link, false), flex);
             }
         }
     }
@@ -2020,12 +2050,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         if let (Some(&from), Some(&to)) = (outputs.get(&link.from), inputs.get(&input)) {
             let removing =
                 cut == Some(*link) || detach.is_some_and(|id| link.from == id || link.to == id);
-            let ink = if removing {
-                theme::STATE_DANGER
-            } else {
-                peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL)
-            };
-            curve(&painter, from, to, Stroke::new(CABLE_WIDTH, ink));
+            curve(&painter, from, to, cable_style(*link, removing));
         }
     }
     if let Some(Drag::Cable { source, .. }) = state.drag {
@@ -2050,7 +2075,10 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 });
                 let cable = previous.follow(from, to, dt);
                 state.drag_cable = Some(cable);
-                cable.paint(&painter, Stroke::new(ACTIVE_CABLE_WIDTH, ink));
+                let span = to - from;
+                let transverse = Vec2::new(-span.y, span.x).normalized();
+                let flex = cable.offset().dot(transverse) * 0.32;
+                cable.paint_moving(&painter, Stroke::new(ACTIVE_CABLE_WIDTH, ink), flex);
                 if cable.offset().length_sq() > 0.01 {
                     ui.ctx().request_repaint();
                 }
@@ -2232,7 +2260,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             }
             _ => hover.is_some_and(|p| p.distance(point) <= hit_radius),
         };
-        let highlighted = target && compatible;
+        let highlighted = (target && compatible)
+            || state.selection.contains(&input.0)
+            || s.doc
+                .graph
+                .input(input.0, input.1)
+                .is_some_and(|source| state.selection.contains(&source));
         let ink = s
             .doc
             .graph
@@ -2246,7 +2279,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .graph
             .node(id)
             .is_some_and(|n| matches!(n.kind, NodeKind::Peg(_)));
-        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius);
+        let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius)
+            || state.selection.contains(&id)
+            || selected_outputs.contains(&id);
         socket(
             &painter,
             point,
