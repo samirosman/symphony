@@ -33,6 +33,15 @@ pub(super) struct Cache {
 }
 
 impl Cache {
+    /// The scene version the image on screen was rendered from, if it is
+    /// this session's.
+    pub(super) fn shown_version(&self, s: &Session) -> Option<u64> {
+        self.key
+            .as_ref()
+            .filter(|k| k.session == s.key)
+            .map(|k| k.version)
+    }
+
     pub(super) fn capture_wallpaper(&mut self, capture: bool) {
         self.capture_wallpaper = capture;
         if !capture {

@@ -914,6 +914,55 @@ impl SymphonyApp {
 
     /// Run `p` now, or ask to save unsaved work first. Losing work can't be
     /// undone, so this is one of the few confirmations (D8.4).
+    /// "Delete layer?" for a layer with work on it (DESIGN D8.4: an
+    /// exception, since a deleted hidden layer can go unnoticed).
+    fn confirm_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(column) = self.s.confirm_delete else {
+            return;
+        };
+        let Some(i) = self.s.doc.layer_of(column) else {
+            self.s.confirm_delete = None;
+            return;
+        };
+        let name = self.s.layer_name(i).to_owned();
+        let n = self.s.drawings_with_work(i);
+        let hidden = !self.s.layer_visible(i);
+        let mut choice = None;
+        let modal = theme::glass_modal(ctx, "symphony-delete-layer").show(ctx, |ui| {
+            ui.heading(format!("Delete layer \u{201c}{name}\u{201d}?"));
+            let drawings = if n == 1 {
+                "1 drawing".to_owned()
+            } else {
+                format!("{n} drawings")
+            };
+            ui.label(format!("It has {drawings} on it."));
+            if hidden {
+                ui.label("The layer is hidden, so its drawings aren't on screen now.");
+            }
+            ui.label("Undo brings it back.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+                if symphony_ui::widgets::primary_button(ui, "Delete layer", true).clicked() {
+                    choice = Some(true);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                self.s.confirm_delete = None;
+                self.s.delete_layer_now(i);
+            }
+            Some(false) => self.s.confirm_delete = None,
+            None => {}
+        }
+    }
+
     fn guard(&mut self, ctx: &egui::Context, p: Pending) {
         if self.s.dirty() {
             self.pending = Some(p);
@@ -1341,6 +1390,7 @@ impl SymphonyApp {
                 let s = &mut self.s;
                 match other {
                     Action::Undo => s.undo(),
+                    Action::SetKeyframe => views::timing::TimelineAction::SetKey.run(s),
                     Action::SelectAll => {
                         s.tool = Tool::Select;
                         s.select_all();
@@ -1462,10 +1512,14 @@ impl SymphonyApp {
                     .find_active_focused()
                     .map(|(_, view)| *view)
             });
-            if here == Some(View::Timeline)
-                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
-            {
-                views::timing::TimelineAction::SetKey.run(&mut self.s);
+            // A view's own keys win over the same keys everywhere else.
+            for a in Action::ALL {
+                if matches!(a.scope(), keymap::Scope::Views(_))
+                    && a.scope().covers(here)
+                    && keymap::consume(ctx, self.profile, a)
+                {
+                    self.run(ctx, a);
+                }
             }
         }
         if ctx.egui_wants_keyboard_input() {
@@ -1486,7 +1540,7 @@ impl SymphonyApp {
             }
         }
         for a in Action::ALL {
-            if keymap::pressed(ctx, self.profile, a) {
+            if a.scope() == keymap::Scope::Everywhere && keymap::pressed(ctx, self.profile, a) {
                 self.run(ctx, a);
             }
         }
@@ -2406,7 +2460,7 @@ impl SymphonyApp {
                     Kind::Tool,
                     vec![View::Camera, View::Drawing, View::ToolProperties],
                 ),
-                "timing" | "frame" | "playback" | "layer" => {
+                "timing" | "timeline" | "frame" | "playback" | "layer" => {
                     (Kind::Action, vec![View::Timeline, View::Xsheet])
                 }
                 "view" | "drawing" | "onion" => (Kind::Action, canvas.to_vec()),
@@ -2415,12 +2469,16 @@ impl SymphonyApp {
             let mut e = Entry::new(a.name(), kind, Command::Action(a), id)
                 .words(&id.replace(['.', '_'], " "))
                 .ctx(&ctx);
-            e.shortcut = keymap::label(self.profile, a);
+            e.shortcut = keymap::label_where(self.profile, a);
             out.push(e);
         }
         let timing_views = [View::Timeline, View::Xsheet];
         for action in views::timing::TimelineAction::ALL {
-            let mut entry = Entry::new(
+            // Listed above as a keymap action, with its shortcut.
+            if action == views::timing::TimelineAction::SetKey {
+                continue;
+            }
+            let entry = Entry::new(
                 action.label(),
                 Kind::Action,
                 Command::Timeline(action),
@@ -2428,9 +2486,6 @@ impl SymphonyApp {
             )
             .words(action.keywords())
             .ctx(&timing_views);
-            if action == views::timing::TimelineAction::SetKey {
-                entry.shortcut = "K in Timeline".into();
-            }
             out.push(entry);
         }
         for (id, name) in self.s.element_drawings(self.s.selected) {
@@ -3266,6 +3321,8 @@ impl SymphonyApp {
                 self.opening = None;
             }
         }
+
+        self.confirm_delete_dialog(ctx);
 
         if let Some(p) = self.pending {
             let name = self.s.name();

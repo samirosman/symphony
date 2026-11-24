@@ -57,6 +57,9 @@ pub struct CanvasState {
     /// Stamped textured strokes, reused while only panning.
     strokes: super::textured::Cache,
     display: camera_render::Cache,
+    /// Strokes just committed, drawn over the rendered Display image until
+    /// a render that has them lands (it renders in the background).
+    settling: Vec<Settling>,
     pub render_effects: bool,
 }
 
@@ -77,6 +80,7 @@ impl Default for CanvasState {
             select: SelectState::default(),
             strokes: Default::default(),
             display: Default::default(),
+            settling: Vec::new(),
             render_effects: true,
         }
     }
@@ -141,6 +145,35 @@ struct Active {
     /// The Line tool's line, drawing-local: its points are rebuilt from
     /// this each move rather than following the pen's path.
     line: Option<LineDraft>,
+}
+
+/// A committed stroke the rendered Display image doesn't show yet.
+struct Settling {
+    /// The scene's edit counter once the stroke was in it.
+    version: u64,
+    frame: u32,
+    stroke: Stroke,
+    /// Drawing-local -> scene.
+    back: Affine,
+}
+
+/// Commit the stroke just drawn. Its live image stands in until it's
+/// stamped, and it stays on screen until the Display render has it, so
+/// it never flickers at pen up.
+fn commit(state: &mut CanvasState, s: &mut Session, mut a: Active) {
+    if let Some(live) = a.live.take() {
+        state.strokes.adopt(a.stroke.id, live);
+    }
+    let (frame, back, stroke) = (a.frame, a.to_local.inverse(), a.stroke.clone());
+    s.commit_stroke(a.layer, a.frame, a.stroke);
+    if let Some(back) = back {
+        state.settling.push(Settling {
+            version: s.doc.version,
+            frame,
+            stroke,
+            back,
+        });
+    }
 }
 
 /// A line being dragged: start, end, the point a bend passes through
@@ -1003,6 +1036,23 @@ pub fn ui(
                 theme::TEXT_PRIMARY,
             );
         }
+        // Strokes the rendered image doesn't have yet, as they were drawn.
+        let shown = state.display.shown_version(s);
+        state
+            .settling
+            .retain(|st| st.frame == s.frame && shown.is_none_or(|v| v < st.version));
+        for st in &state.settling {
+            paint_stroke(
+                &painter,
+                &mut state.strokes,
+                &s.doc.textures,
+                &st.stroke,
+                colour(s, st.stroke.swatch),
+                view.compose(st.back),
+            );
+        }
+    } else {
+        state.settling.clear();
     }
     if s.show_strokes {
         for (_, d, m) in &items {
@@ -1353,10 +1403,7 @@ pub fn ui(
                     }
                     // A line is exactly its draft: no smoothing or thinning.
                     if a.stroke.points.len() >= 2 {
-                        if let Some(live) = a.live.take() {
-                            state.strokes.adopt(a.stroke.id, live);
-                        }
-                        s.commit_stroke(a.layer, a.frame, a.stroke);
+                        commit(state, s, a);
                     }
                 } else if let Some(mut a) = state.active.take() {
                     // Where the pen lifted is part of the line: without it,
@@ -1404,12 +1451,7 @@ pub fn ui(
                         let reach = 40.0 * a.min_step / 0.5;
                         s.close_gap(a.layer, a.frame, &a.stroke.points, reach);
                     } else {
-                        // The live image stands in until the committed
-                        // stroke is stamped, so it never flickers.
-                        if let Some(live) = a.live.take() {
-                            state.strokes.adopt(a.stroke.id, live);
-                        }
-                        s.commit_stroke(a.layer, a.frame, a.stroke);
+                        commit(state, s, a);
                     }
                 }
                 if state.erasing.take().is_some() {

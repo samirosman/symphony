@@ -791,6 +791,118 @@ mod tests {
         }
     }
 
+    /// After the user rewires the Node view, a new layer still stacks
+    /// where the Timeline shows it (port 0 = front), and undo and redo
+    /// put the other inputs back where they were.
+    #[test]
+    fn a_new_layer_stacks_in_timeline_order_after_custom_wiring() {
+        let mut s = Scene::new(Settings::default());
+        let mut h = History::default();
+        for (name, at) in [("Back", 0), ("Front", 0)] {
+            let snap = s.make_layer(name, at);
+            h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        }
+        s.custom_wiring = true;
+        let ports = |s: &Scene| -> Vec<Option<NodeId>> {
+            (0..4).map(|p| s.graph.input(s.composite, p)).collect()
+        };
+        let (front, back) = (s.layers[0].node, s.layers[1].node);
+        assert_eq!(ports(&s), [Some(front), Some(back), None, None]);
+
+        let snap = s.make_layer("Top", 0);
+        let top = snap.layer.node;
+        h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        assert_eq!(ports(&s), [Some(top), Some(front), Some(back), None]);
+        h.undo(&mut s);
+        assert_eq!(ports(&s), [Some(front), Some(back), None, None]);
+        h.redo(&mut s);
+        assert_eq!(ports(&s), [Some(top), Some(front), Some(back), None]);
+
+        let snap = s.make_layer("Middle", 2);
+        let middle = snap.layer.node;
+        h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        assert_eq!(
+            ports(&s),
+            [Some(top), Some(front), Some(middle), Some(back)]
+        );
+
+        // Moving a layer in the Timeline moves it in the stack.
+        h.apply(
+            &mut s,
+            "Move layer",
+            vec![Edit::MoveLayer { from: 0, to: 3 }],
+        );
+        assert_eq!(
+            ports(&s),
+            [Some(front), Some(middle), Some(back), Some(top)]
+        );
+        h.undo(&mut s);
+        assert_eq!(
+            ports(&s),
+            [Some(top), Some(front), Some(middle), Some(back)]
+        );
+    }
+
+    /// A layer's effect stays with that layer in the stack.
+    #[test]
+    fn an_effect_moves_with_its_layer() {
+        use crate::graph::{BlurMode, Effect, Link, NodeKind};
+        let mut s = Scene::new(Settings::default());
+        let mut h = History::default();
+        for name in ["B", "A"] {
+            let snap = s.make_layer(name, 0);
+            h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        }
+        let (a, b) = (s.layers[0].node, s.layers[1].node);
+        // Rewire by hand: B goes through a Blur into port 0, in front of A.
+        let blur = s.graph.add(
+            "Blur",
+            NodeKind::Effect(Effect::Blur {
+                radius: 4.0,
+                mode: BlurMode::Gaussian,
+            }),
+        );
+        let before = s.graph.links().to_vec();
+        let mut after: Vec<Link> = before
+            .iter()
+            .copied()
+            .filter(|l| l.to != s.composite)
+            .collect();
+        after.extend([
+            Link {
+                from: b,
+                to: blur,
+                port: 0,
+            },
+            Link {
+                from: blur,
+                to: s.composite,
+                port: 0,
+            },
+            Link {
+                from: a,
+                to: s.composite,
+                port: 1,
+            },
+        ]);
+        h.apply(
+            &mut s,
+            "Rewire",
+            vec![Edit::RewireNodes {
+                before,
+                after,
+                was_custom: false,
+            }],
+        );
+        // The next layer change puts the stack back in Timeline order,
+        // and the Blur goes with B.
+        let snap = s.make_layer("C", 2);
+        let c = snap.layer.node;
+        h.apply(&mut s, "Add layer", vec![Edit::AddLayer(Box::new(snap))]);
+        let ports: Vec<_> = (0..3).map(|p| s.graph.input(s.composite, p)).collect();
+        assert_eq!(ports, [Some(a), Some(blur), Some(c)]);
+    }
+
     #[test]
     fn stroke_on_new_drawing_undoes_in_one_step() {
         let (mut s, mut h) = scene_with_layer();
