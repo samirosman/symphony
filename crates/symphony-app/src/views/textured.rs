@@ -220,6 +220,9 @@ pub struct Cache {
     worker: Option<Worker>,
     frame: u64,
     sync_remaining: f32,
+    /// Quick low-resolution stamps shown while a stroke's new shape is
+    /// stamped in full in the background (editing), by full key.
+    low_res: HashMap<u64, (Image, u64)>,
     /// Plain vector lines' cached triangles (they draw through here too).
     pub vectors: super::vector_cache::VectorMeshes,
 }
@@ -232,6 +235,9 @@ const MAX_ENTRIES: usize = 512;
 /// Total synchronous stamp work per canvas frame, in estimated pixels.
 const SYNC_BUDGET: f32 = 600_000.0;
 const UPLOADS_PER_FRAME: usize = 4;
+/// The smallest scale a quick edit preview is stamped at; below this it
+/// would be mush, so the full stamp is awaited instead.
+const MIN_PREVIEW_SCALE: f32 = 0.18;
 
 fn stamp_view(px: Affine, visible: Rect, ppp: f32) -> (Affine, [i32; 4]) {
     let scale = symphony_vector::scale_of(px).max(1e-6);
@@ -314,6 +320,7 @@ impl Cache {
         let keep_after = self.frame.saturating_sub(2);
         self.entries.retain(|_, e| e.used >= keep_after);
         self.last.retain(|_, (_, used)| *used >= keep_after);
+        self.low_res.retain(|_, (_, used)| *used >= keep_after);
         let keep_preview_after = self.frame.saturating_sub(16);
         self.ink_history
             .retain(|_, preview| preview.used >= keep_preview_after);
@@ -428,15 +435,54 @@ impl Cache {
             self.entries.insert(key, Entry { image, used: frame });
             return;
         }
+        // A shape this cache hasn't seen yet (a stroke being reshaped, or
+        // one just opened) gets a quick low-resolution stamp now, so it
+        // shows its new shape at once, never a stale or blank one. The full
+        // stamp replaces it when the background is done (once editing
+        // stops, the stroke looks as drawn).
+        let mut previewed = false;
+        if uncut_key.is_none() && !self.ink_history.contains_key(&ink) {
+            if let Some((img, used)) = self.low_res.get_mut(&key) {
+                *used = frame;
+                img.draw(painter, px, ppp, colour);
+                previewed = true;
+            } else {
+                let s = (self.sync_remaining / cost.max(1.0)).sqrt().min(0.5);
+                if s >= MIN_PREVIEW_SCALE {
+                    self.sync_remaining -= cost * s * s;
+                    let low = Affine::scale(s, s).compose(local);
+                    let clip_low = [
+                        (clip[0] as f32 * s).floor() as i32,
+                        (clip[1] as f32 * s).floor() as i32,
+                        (clip[2] as f32 * s).ceil() as i32,
+                        (clip[3] as f32 * s).ceil() as i32,
+                    ];
+                    if let Some(c) = symphony_vector::stamp::rasterize(
+                        stroke,
+                        tex,
+                        tip.as_deref(),
+                        grain.as_deref(),
+                        low,
+                        clip_low,
+                    ) {
+                        let img = Image::upload(ctx, &c, low, "stroke-preview");
+                        img.draw(painter, px, ppp, colour);
+                        self.low_res.insert(key, (img, frame));
+                        previewed = true;
+                    }
+                }
+            }
+        }
         // Expensive strokes stamp in the background. Keep a cached texture
         // visible when available, including a clipped preview for erasing.
-        let clipped = uncut_key.is_some_and(|key| {
-            self.entries
-                .get(&key)
-                .and_then(|e| e.image.as_ref())
-                .or_else(|| self.ink_history.get(&ink).map(|preview| &preview.image))
-                .is_some_and(|image| image.draw_clipped(painter, stroke, m, colour))
-        });
+        let clipped = previewed
+            || uncut_key.is_some_and(|key| {
+                self.entries
+                    .get(&key)
+                    .and_then(|e| e.image.as_ref())
+                    .or_else(|| self.ink_history.get(&ink).map(|preview| &preview.image))
+                    .is_some_and(|image| image.draw_clipped(painter, stroke, m, colour))
+            });
         if !clipped {
             match self.last.get_mut(&stroke.id) {
                 Some((img, used)) => {
@@ -573,6 +619,23 @@ fn keys(
         tex.auto_spacing.to_bits(),
     )
         .hash(&mut h);
+    // How the pen was held, and the brush's dynamics: both change the
+    // stamps. With dynamics on, the stroke's own random seed (its id) does
+    // too, so look-alike strokes don't share one picture.
+    for p in &stroke.points {
+        if !p.pen.is_level() {
+            (
+                p.pen.tilt.to_bits(),
+                p.pen.azimuth.to_bits(),
+                p.pen.rotation.to_bits(),
+            )
+                .hash(&mut h);
+        }
+    }
+    if !tex.dynamics.is_still() {
+        format!("{:?}", tex.dynamics).hash(&mut h);
+        stroke.id.0.hash(&mut h);
+    }
     let ink = h.finish();
     for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
         v.to_bits().hash(&mut h);
@@ -793,6 +856,49 @@ mod tests {
                 vec![[15.0, 15.0], [15.0, 25.0], [25.0, 25.0], [25.0, 15.0]],
             ],
         }
+    }
+
+    /// A big stroke whose shape is new (being reshaped, or just opened)
+    /// shows a quick low-resolution stamp at once, textured and in its new
+    /// shape, while the full one is stamped in the background.
+    #[test]
+    fn a_reshaped_big_stroke_previews_at_low_resolution() {
+        let ctx = egui::Context::default();
+        let mut stroke = cut_stroke();
+        stroke.shape.clear();
+        stroke.max_width = 120.0;
+        stroke.min_width = 120.0;
+        stroke.points = (0..200)
+            .map(|i| symphony_core::stroke::Point {
+                x: i as f32 * 4.0,
+                y: (i as f32 * 0.1).sin() * 60.0,
+                pressure: 1.0,
+                pen: Default::default(),
+            })
+            .collect();
+        let mut cache = Cache::default();
+        cache.begin_frame(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cache.paint(
+                &ctx,
+                ui.painter(),
+                &BTreeMap::new(),
+                &stroke,
+                &StrokeTexture::default(),
+                Color32::WHITE,
+                Affine::IDENTITY,
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(cache.pending.len(), 1, "the full stamp is queued");
+        let textured = output.shapes.iter().any(|s| {
+            matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default())
+        });
+        assert!(textured, "a textured preview shows right away");
+        let (img, _) = cache.low_res.values().next().expect("a low-res preview");
+        // Full size here is 1 pixel per unit; the preview is at most half.
+        let scale = symphony_vector::scale_of(img.px);
+        assert!(scale <= 0.51, "stamped smaller than full size: {scale}");
     }
 
     #[test]
