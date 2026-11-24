@@ -620,7 +620,8 @@ fn line_edit_cost() {
 }
 
 /// The toolbar offers what fits the work: a peg gets Transform, and
-/// coming back to drawings returns to the last drawing tool.
+/// coming back to drawings returns to the last drawing tool. Drawings
+/// keep Transform too, to pick and move whole layers and images.
 #[test]
 fn tools_follow_what_you_work_on() {
     use crate::session::{Tool, ToolContext};
@@ -629,9 +630,14 @@ fn tools_follow_what_you_work_on() {
     s.fit_tool_to_context();
     assert_eq!(s.tool_context(), ToolContext::Drawing);
     assert!(
-        !Tool::Transform.fits(ToolContext::Drawing),
-        "Select transforms selections"
+        Tool::Transform.fits(ToolContext::Drawing),
+        "Transform moves layers and images"
     );
+    s.tool = Tool::Transform;
+    s.fit_tool_to_context();
+    assert_eq!(s.tool, Tool::Transform, "a drawing keeps Transform");
+    s.tool = Tool::Brush;
+    s.fit_tool_to_context();
     assert!(
         !Tool::Pencil.fits(ToolContext::Drawing),
         "the Brush makes vector lines"

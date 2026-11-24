@@ -2121,7 +2121,11 @@ impl SymphonyApp {
                 Tool::Brush if !crate::views::panels::is_bitmap(&self.s.brush) => Icon::Pen,
                 Tool::Brush => Icon::Brush,
                 Tool::Transform => {
-                    tip = format!("Transform the peg\n{tip}");
+                    let what = match context {
+                        session::ToolContext::Peg => "Transform the peg",
+                        session::ToolContext::Drawing => "Pick, move, scale and rotate layers",
+                    };
+                    tip = format!("{what}\n{tip}");
                     Icon::Transform
                 }
                 _ => tool_icon(tool),
