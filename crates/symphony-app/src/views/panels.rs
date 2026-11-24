@@ -1083,7 +1083,7 @@ pub fn prefs_workflow(ui: &mut egui::Ui, profile: &mut Profile) {
         .striped(true)
         .show(ui, |ui| {
             for a in Action::ALL {
-                let l = crate::keymap::label(*profile, a);
+                let l = crate::keymap::label_where(*profile, a);
                 let hay = format!("{} {} {}", a.name(), a.id(), l).to_lowercase();
                 if !needle.is_empty() && !hay.contains(&needle) {
                     continue;

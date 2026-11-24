@@ -9,6 +9,8 @@
 use eframe::egui::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
+use crate::workspace::View;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Profile {
     #[default]
@@ -117,10 +119,50 @@ pub enum Action {
     ToolLineEditor,
     ToolHand,
     ToolZoom,
+    /// Timeline only: key the selected layer or node here.
+    SetKeyframe,
+}
+
+/// Where a shortcut works. A key that works in a view wins there over the
+/// same key everywhere else (Show Strokes is K, but K in the Timeline sets
+/// a keyframe). Keep keys the same across views where possible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Everywhere,
+    /// Only while the pointer is over (or focus is in) one of these views.
+    Views(&'static [View]),
+}
+
+impl Scope {
+    pub fn covers(self, view: Option<View>) -> bool {
+        match self {
+            Scope::Everywhere => true,
+            Scope::Views(vs) => view.is_some_and(|v| vs.contains(&v)),
+        }
+    }
+
+    /// Two commands with these scopes can't share a key. A view key on top
+    /// of an everywhere key is allowed: the view key wins in its view.
+    pub fn overlaps(self, other: Scope) -> bool {
+        match (self, other) {
+            (Scope::Everywhere, Scope::Everywhere) => true,
+            (Scope::Views(a), Scope::Views(b)) => a.iter().any(|v| b.contains(v)),
+            _ => false,
+        }
+    }
 }
 
 impl Action {
-    pub const ALL: [Action; 80] = [
+    pub fn scope(self) -> Scope {
+        match self {
+            Action::SetKeyframe => Scope::Views(&[View::Timeline]),
+            _ => Scope::Everywhere,
+        }
+    }
+}
+
+impl Action {
+    pub const ALL: [Action; 81] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -201,6 +243,7 @@ impl Action {
         Action::ToolLineEditor,
         Action::ToolHand,
         Action::ToolZoom,
+        Action::SetKeyframe,
     ];
 
     /// Stable ID, used for settings and scripting.
@@ -286,6 +329,7 @@ impl Action {
             Action::ToolLineEditor => "tool.line_editor",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
+            Action::SetKeyframe => "timeline.set_keyframe",
         }
     }
 
@@ -371,6 +415,7 @@ impl Action {
             Action::ToolLineEditor => "Line Editor",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
+            Action::SetKeyframe => "Set Keyframe",
         }
     }
 }
@@ -505,6 +550,13 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolLineEditor => None,
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),
+        // Not Harmony's key (Harmony 27 sets a motion keyframe with
+        // Ctrl+K); kept from before shortcuts had views.
+        Action::SetKeyframe => Some(Binding {
+            key: Key::K,
+            mods: NONE,
+            verified: false,
+        }),
     }
 }
 
@@ -643,7 +695,7 @@ pub fn clashes(profile: Profile, action: Action, key: Key, mods: Modifiers) -> V
     let wanted = (key, Mods::of(mods));
     Action::ALL
         .into_iter()
-        .filter(|a| *a != action)
+        .filter(|a| *a != action && a.scope().overlaps(action.scope()))
         .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
         .collect()
 }
@@ -676,7 +728,7 @@ pub fn remap(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec
     let wanted = (key, Mods::of(mods));
     let taken: Vec<Action> = Action::ALL
         .into_iter()
-        .filter(|a| *a != action)
+        .filter(|a| *a != action && a.scope().overlaps(action.scope()))
         .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
         .collect();
     for other in &taken {
@@ -700,6 +752,18 @@ pub fn reset(profile: Profile, action: Action) {
     if let Ok(mut r) = REMAPS.write() {
         r.retain(|x| !(x.profile == profile && x.action == action.id()));
     }
+}
+
+/// [`pressed`], and if so take the key press so no other shortcut sees it
+/// this frame (a view's key over the same key everywhere).
+pub fn consume(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
+    if !pressed(ctx, profile, action) {
+        return false;
+    }
+    if let Some(b) = binding(profile, action) {
+        ctx.input_mut(|i| i.consume_key(b.mods, b.key));
+    }
+    true
 }
 
 /// Did the user just trigger `action`? Modifiers must match exactly, so
@@ -768,6 +832,19 @@ pub fn label(profile: Profile, action: Action) -> String {
     s
 }
 
+/// The shortcut with the views it works in, for lists that show every
+/// command: "K in Timeline". Same as [`label`] for an everywhere key.
+pub fn label_where(profile: Profile, action: Action) -> String {
+    let l = label(profile, action);
+    match action.scope() {
+        Scope::Views(vs) if !l.is_empty() => {
+            let names: Vec<&str> = vs.iter().map(|v| v.title()).collect();
+            format!("{l} in {}", names.join(", "))
+        }
+        _ => l,
+    }
+}
+
 /// "Name (shortcut)" for tooltips (D7.5).
 pub fn tooltip(profile: Profile, action: Action) -> String {
     match label(profile, action) {
@@ -780,20 +857,107 @@ pub fn tooltip(profile: Profile, action: Action) -> String {
 mod tests {
     use super::*;
 
-    /// E11.3: no two actions share a binding within a profile.
+    /// E11.3: no two actions share a binding where their views overlap.
     #[test]
     fn no_duplicate_bindings() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
-            let mut seen = Vec::new();
+            let mut seen: Vec<(Key, Modifiers, Action)> = Vec::new();
             for a in Action::ALL {
                 if let Some(bind) = binding(profile, a) {
-                    let k = (bind.key, bind.mods);
-                    assert!(!seen.contains(&k), "{profile:?}: {} clashes", a.id());
-                    seen.push(k);
+                    for (k, m, other) in &seen {
+                        assert!(
+                            !(*k == bind.key
+                                && *m == bind.mods
+                                && other.scope().overlaps(a.scope())),
+                            "{profile:?}: {} clashes with {}",
+                            a.id(),
+                            other.id()
+                        );
+                    }
+                    seen.push((bind.key, bind.mods, a));
                 }
             }
         }
+    }
+
+    /// Keep keys consistent across views: a view key may cover an
+    /// everywhere key only where this list says so.
+    #[test]
+    fn view_keys_cover_only_the_listed_everywhere_keys() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let allowed = [(Action::SetKeyframe, Action::ShowStrokes)];
+        for profile in [Profile::Harmony, Profile::Symphony] {
+            for a in Action::ALL
+                .into_iter()
+                .filter(|a| a.scope() != Scope::Everywhere)
+            {
+                let Some(bind) = binding(profile, a) else {
+                    continue;
+                };
+                for other in clashes_everywhere(profile, bind) {
+                    assert!(
+                        allowed.contains(&(a, other)),
+                        "{profile:?}: {} covers {}",
+                        a.id(),
+                        other.id()
+                    );
+                }
+            }
+        }
+    }
+
+    fn clashes_everywhere(profile: Profile, bind: Binding) -> Vec<Action> {
+        Action::ALL
+            .into_iter()
+            .filter(|o| o.scope() == Scope::Everywhere)
+            .filter(|o| {
+                binding(profile, *o).is_some_and(|b| b.key == bind.key && b.mods == bind.mods)
+            })
+            .collect()
+    }
+
+    /// K sets a keyframe in the Timeline and shows strokes elsewhere.
+    #[test]
+    fn a_view_key_wins_in_its_view() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        reset(Profile::Harmony, Action::SetKeyframe);
+        reset(Profile::Harmony, Action::ShowStrokes);
+        let fire = |here: Option<View>| {
+            let ctx = egui::Context::default();
+            let mut got = Vec::new();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: Key::K,
+                    physical_key: Some(Key::K),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: NONE,
+                }],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                // The order main.rs uses: view keys first, then the rest.
+                for a in Action::ALL {
+                    if a.scope() != Scope::Everywhere
+                        && a.scope().covers(here)
+                        && consume(ui.ctx(), Profile::Harmony, a)
+                    {
+                        got.push(a);
+                    }
+                }
+                for a in Action::ALL {
+                    if a.scope() == Scope::Everywhere && pressed(ui.ctx(), Profile::Harmony, a) {
+                        got.push(a);
+                    }
+                }
+            });
+            out.textures_delta.clear();
+            got
+        };
+        assert_eq!(fire(Some(View::Timeline)), vec![Action::SetKeyframe]);
+        assert_eq!(fire(Some(View::Camera)), vec![Action::ShowStrokes]);
+        assert_eq!(fire(None), vec![Action::ShowStrokes]);
     }
 
     /// Which actions fire for one key press with `mods`.

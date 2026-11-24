@@ -1341,6 +1341,7 @@ impl SymphonyApp {
                 let s = &mut self.s;
                 match other {
                     Action::Undo => s.undo(),
+                    Action::SetKeyframe => views::timing::TimelineAction::SetKey.run(s),
                     Action::SelectAll => {
                         s.tool = Tool::Select;
                         s.select_all();
@@ -1462,10 +1463,14 @@ impl SymphonyApp {
                     .find_active_focused()
                     .map(|(_, view)| *view)
             });
-            if here == Some(View::Timeline)
-                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
-            {
-                views::timing::TimelineAction::SetKey.run(&mut self.s);
+            // A view's own keys win over the same keys everywhere else.
+            for a in Action::ALL {
+                if matches!(a.scope(), keymap::Scope::Views(_))
+                    && a.scope().covers(here)
+                    && keymap::consume(ctx, self.profile, a)
+                {
+                    self.run(ctx, a);
+                }
             }
         }
         if ctx.egui_wants_keyboard_input() {
@@ -1486,7 +1491,7 @@ impl SymphonyApp {
             }
         }
         for a in Action::ALL {
-            if keymap::pressed(ctx, self.profile, a) {
+            if a.scope() == keymap::Scope::Everywhere && keymap::pressed(ctx, self.profile, a) {
                 self.run(ctx, a);
             }
         }
@@ -2406,7 +2411,7 @@ impl SymphonyApp {
                     Kind::Tool,
                     vec![View::Camera, View::Drawing, View::ToolProperties],
                 ),
-                "timing" | "frame" | "playback" | "layer" => {
+                "timing" | "timeline" | "frame" | "playback" | "layer" => {
                     (Kind::Action, vec![View::Timeline, View::Xsheet])
                 }
                 "view" | "drawing" | "onion" => (Kind::Action, canvas.to_vec()),
@@ -2415,12 +2420,16 @@ impl SymphonyApp {
             let mut e = Entry::new(a.name(), kind, Command::Action(a), id)
                 .words(&id.replace(['.', '_'], " "))
                 .ctx(&ctx);
-            e.shortcut = keymap::label(self.profile, a);
+            e.shortcut = keymap::label_where(self.profile, a);
             out.push(e);
         }
         let timing_views = [View::Timeline, View::Xsheet];
         for action in views::timing::TimelineAction::ALL {
-            let mut entry = Entry::new(
+            // Listed above as a keymap action, with its shortcut.
+            if action == views::timing::TimelineAction::SetKey {
+                continue;
+            }
+            let entry = Entry::new(
                 action.label(),
                 Kind::Action,
                 Command::Timeline(action),
@@ -2428,9 +2437,6 @@ impl SymphonyApp {
             )
             .words(action.keywords())
             .ctx(&timing_views);
-            if action == views::timing::TimelineAction::SetKey {
-                entry.shortcut = "K in Timeline".into();
-            }
             out.push(entry);
         }
         for (id, name) in self.s.element_drawings(self.s.selected) {
