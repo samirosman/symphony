@@ -1,8 +1,7 @@
 //! Textured vector strokes on the canvas. Each stroke's coverage comes
 //! from `symphony_vector::stamp` (the same code export uses) and is cached
-//! as a texture, so panning moves it without stamping it again. Zooming,
-//! rotating or editing the line re-stamps it, re-sampling the texture the
-//! way Harmony does for textured vector brushes.
+//! as a texture. Panning moves it, and small zoom changes scale the
+//! cached image until the next resolution band.
 //!
 //! Stamping can take tens of milliseconds for a big brush, so it never
 //! blocks a frame (DESIGN §17). Finished strokes are re-stamped on a
@@ -134,6 +133,7 @@ struct Done {
     key: u64,
     id: Id,
     coverage: Option<Coverage>,
+    cancelled: bool,
     local: Affine,
 }
 
@@ -159,23 +159,24 @@ impl Worker {
                         .lock()
                         .map(|m| m.get(&job.stroke.id) == Some(&job.key))
                         .unwrap_or(true);
-                    if !current {
-                        continue;
-                    }
-                    let coverage = symphony_vector::stamp::rasterize(
-                        &job.stroke,
-                        &job.tex,
-                        job.tip.as_deref(),
-                        job.grain.as_deref(),
-                        job.local,
-                        job.clip,
-                    );
-                    let id = job.stroke.id;
+                    let coverage = current
+                        .then(|| {
+                            symphony_vector::stamp::rasterize(
+                                &job.stroke,
+                                &job.tex,
+                                job.tip.as_deref(),
+                                job.grain.as_deref(),
+                                job.local,
+                                job.clip,
+                            )
+                        })
+                        .flatten();
                     if tx
                         .send(Done {
                             key: job.key,
-                            id,
+                            id: job.stroke.id,
                             coverage,
+                            cancelled: !current,
                             local: job.local,
                         })
                         .is_err()
@@ -204,6 +205,7 @@ pub struct Cache {
     textures: HashMap<u64, Arc<Texture>>,
     worker: Option<Worker>,
     frame: u64,
+    sync_remaining: f32,
     /// Plain vector lines' cached triangles (they draw through here too).
     pub vectors: super::vector_cache::VectorMeshes,
 }
@@ -213,30 +215,76 @@ pub struct Cache {
 const CLIP_GRID: f32 = 512.0;
 /// Most cached strokes; old ones are dropped first.
 const MAX_ENTRIES: usize = 512;
-/// Strokes cheaper than this (stamped pixels, roughly) are stamped at once
-/// the first time they appear, so they never pop in.
-const SYNC_BUDGET: f32 = 2_000_000.0;
+/// Total synchronous stamp work per canvas frame, in estimated pixels.
+const SYNC_BUDGET: f32 = 600_000.0;
+const UPLOADS_PER_FRAME: usize = 4;
+
+fn stamp_view(px: Affine, visible: Rect, ppp: f32) -> (Affine, [i32; 4]) {
+    let scale = symphony_vector::scale_of(px).max(1e-6);
+    let lod = ((scale.log2() * 2.0).round() * 0.5).exp2();
+    // Keep the orientation stable as zoom multiplies the affine matrix.
+    let step = |v: f32| ((v / scale) * 65_536.0).round() / 65_536.0 * lod;
+    let local = Affine {
+        a: step(px.a),
+        b: step(px.b),
+        c: step(px.c),
+        d: step(px.d),
+        tx: 0.0,
+        ty: 0.0,
+    };
+    let bounds = px
+        .inverse()
+        .map(|inverse| {
+            let project = local.compose(inverse);
+            Rect::from_points(
+                &[
+                    visible.left_top(),
+                    visible.right_top(),
+                    visible.right_bottom(),
+                    visible.left_bottom(),
+                ]
+                .map(|point| to_screen(project, point.x * ppp, point.y * ppp)),
+            )
+        })
+        .unwrap_or(Rect::ZERO);
+    let snap = |v: f32, up: bool| {
+        let g = (v / CLIP_GRID).floor() + if up { 2.0 } else { -1.0 };
+        (g * CLIP_GRID) as i32
+    };
+    (
+        local,
+        [
+            snap(bounds.left(), false),
+            snap(bounds.top(), false),
+            snap(bounds.right(), true),
+            snap(bounds.bottom(), true),
+        ],
+    )
+}
 
 impl Cache {
     /// Call once per frame before drawing: collect finished stamping and
     /// forget strokes not drawn lately.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
+        self.sync_remaining = SYNC_BUDGET;
         self.vectors.begin_frame();
         if let Some(w) = &self.worker {
-            while let Ok(d) = w.done.try_recv() {
+            for _ in 0..UPLOADS_PER_FRAME {
+                let Ok(d) = w.done.try_recv() else {
+                    break;
+                };
                 self.pending.remove(&d.key);
-                let image = d
-                    .coverage
-                    .as_ref()
-                    .map(|c| Image::upload(ctx, c, d.local, "stroke"));
-                // Ignore results for strokes that have changed again since.
                 let current = w
                     .latest
                     .lock()
                     .map(|l| l.get(&d.id) == Some(&d.key))
                     .unwrap_or(true);
-                if current {
+                if current && !d.cancelled {
+                    let image = d
+                        .coverage
+                        .as_ref()
+                        .map(|c| Image::upload(ctx, c, d.local, "stroke"));
                     self.entries.insert(
                         d.key,
                         Entry {
@@ -245,6 +293,8 @@ impl Cache {
                         },
                     );
                 }
+                // There may be more completions queued after the upload budget.
+                ctx.request_repaint();
             }
         }
         let keep_after = self.frame.saturating_sub(2);
@@ -293,26 +343,8 @@ impl Cache {
         m: Affine,
     ) {
         let ppp = ctx.pixels_per_point();
-        // Drawing -> physical pixels, split into a whole-pixel offset and a
-        // remainder, so a pan only moves the cached image.
         let px = Affine::scale(ppp, ppp).compose(m);
-        let (ox, oy) = (px.tx.floor(), px.ty.floor());
-        let local = Affine {
-            tx: px.tx - ox,
-            ty: px.ty - oy,
-            ..px
-        };
-        let visible = painter.clip_rect();
-        let snap = |v: f32, up: bool| {
-            let g = (v / CLIP_GRID).floor() + if up { 2.0 } else { -1.0 };
-            (g * CLIP_GRID) as i32
-        };
-        let clip = [
-            snap(visible.left() * ppp - ox, false),
-            snap(visible.top() * ppp - oy, false),
-            snap(visible.right() * ppp - ox, true),
-            snap(visible.bottom() * ppp - oy, true),
-        ];
+        let (local, clip) = stamp_view(px, painter.clip_rect(), ppp);
         let (key, uncut_key) = keys(stroke, tex, local, clip);
         if let Some(entry) = uncut_key.and_then(|key| self.entries.get_mut(&key)) {
             entry.used = self.frame;
@@ -330,11 +362,12 @@ impl Cache {
         let grain = self.texture(textures, tex.grain);
         let stale = self.last.get_mut(&stroke.id);
         let cost = stroke.points.len() as f32
-            * (stroke.max_width * symphony_vector::scale_of(px)).powi(2)
+            * (stroke.max_width * symphony_vector::scale_of(local)).powi(2)
             / (tex.spacing.max(0.01) * 4.0);
         // Small strokes are stamped now, whether new or just edited (the
         // Line Editor reshaping a line), so they never lag behind.
-        if cost < SYNC_BUDGET {
+        if cost <= self.sync_remaining {
+            self.sync_remaining -= cost;
             let c = symphony_vector::stamp::rasterize(
                 stroke,
                 tex,
@@ -378,11 +411,11 @@ impl Cache {
                 None => {}
             }
         }
+        let worker = self.worker.get_or_insert_with(|| Worker::start(ctx));
+        if let Ok(mut latest) = worker.latest.lock() {
+            latest.insert(stroke.id, key);
+        }
         if self.pending.insert(key) {
-            let worker = self.worker.get_or_insert_with(|| Worker::start(ctx));
-            if let Ok(mut l) = worker.latest.lock() {
-                l.insert(stroke.id, key);
-            }
             let _ = worker.jobs.send(Job {
                 key,
                 stroke: stroke.clone(),
@@ -602,6 +635,90 @@ pub fn sample(
 mod tests {
     use super::*;
     use symphony_core::stroke::StrokeKind;
+
+    #[test]
+    fn stamped_view_reuses_a_band_across_pan_and_zoom() {
+        let viewport = Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(810.0, 510.0));
+        let at = |zoom, x, y| Affine::translate(x, y).compose(Affine::scale(zoom, zoom));
+        let start = stamp_view(at(1.0, 70.0, 60.0), viewport, 1.0);
+        assert_eq!(start, stamp_view(at(1.0, 70.35, 61.7), viewport, 1.0));
+        assert_eq!(start, stamp_view(at(1.02, 70.35, 61.7), viewport, 1.0));
+        assert_ne!(start.0, stamp_view(at(1.4, 70.0, 60.0), viewport, 1.0).0);
+    }
+
+    #[test]
+    #[ignore = "CPU navigation benchmark"]
+    fn textured_navigation_cost() {
+        use std::time::{Duration, Instant};
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 640.0));
+        let strokes: Vec<_> = (0..24)
+            .map(|index| {
+                let x = (index % 4) as f32 * 150.0;
+                let y = (index / 4) as f32 * 60.0;
+                Stroke {
+                    id: Id(index + 1),
+                    kind: StrokeKind::Brush,
+                    art: Default::default(),
+                    swatch: Id(0),
+                    min_width: 21.0,
+                    max_width: 28.0,
+                    points: (0..60)
+                        .map(|i| {
+                            let t = i as f32;
+                            symphony_core::stroke::Point {
+                                x: x + t * 1.7,
+                                y: y + (t * 0.15).sin() * 12.0,
+                                pressure: 0.8,
+                            }
+                        })
+                        .collect(),
+                    tips: Default::default(),
+                    texture: None,
+                    shape: Vec::new(),
+                }
+            })
+            .collect();
+        let tex = StrokeTexture::default();
+        let textures = BTreeMap::new();
+        let mut cache = Cache::default();
+        let mut draw = |m| {
+            let start = Instant::now();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                cache.begin_frame(&ctx);
+                let painter = ui.painter().with_clip_rect(viewport);
+                for stroke in &strokes {
+                    cache.paint(&ctx, &painter, &textures, stroke, &tex, Color32::WHITE, m);
+                }
+            });
+            output.textures_delta.clear();
+            start.elapsed()
+        };
+        let pose = |zoom, dx| Affine::translate(72.0 + dx, 55.0).compose(Affine::scale(zoom, zoom));
+        for _ in 0..24 {
+            draw(pose(1.0, 0.0));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for (label, moving) in [("pan", false), ("zoom", true)] {
+            let mut timings: Vec<_> = (0..40)
+                .map(|frame| {
+                    let zoom = if moving {
+                        1.0 + frame as f32 * 0.012
+                    } else {
+                        1.0
+                    };
+                    let time = draw(pose(zoom, frame as f32 * 0.41));
+                    std::thread::sleep(Duration::from_millis(4));
+                    time
+                })
+                .collect();
+            timings.sort_unstable();
+            println!(
+                "textured {label}: median {:?}, p95 {:?}",
+                timings[20], timings[37]
+            );
+        }
+    }
 
     fn cut_stroke() -> Stroke {
         Stroke {
