@@ -382,6 +382,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
     } else {
         [at[0], at[1] + H + 30.0]
     };
+    let position = free_spot(s, position, W);
     let before = s.doc.graph.links().to_vec();
     let mut after: Vec<Link> = before
         .iter()
@@ -426,6 +427,8 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
 }
 
 fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
+    // Placed clear of the others from the start (one undo step).
+    let position = free_spot(s, position, W);
     let id = s.doc.graph.next_id();
     s.history.apply(
         &mut s.doc,
@@ -1294,6 +1297,269 @@ fn preview(ctx: &egui::Context, s: &Session, state: &mut NodeViewState) {
         });
 }
 
+/// The space kept between node cards.
+const NODE_GAP: f32 = 18.0;
+
+/// Where nodes sit before they're moved: pegs over their drawings in a
+/// row, then the Composite and the Camera.
+fn default_positions(s: &Session) -> BTreeMap<NodeId, Vec2> {
+    let mut positions = BTreeMap::new();
+    let middle = s.doc.layers.len().saturating_sub(1) as f32 / 2.0;
+    for (index, layer) in s.doc.layers.iter().enumerate() {
+        let x = (index as f32 - middle) * (W + 26.0);
+        positions.insert(layer.peg, Vec2::new(x, 43.0));
+        positions.insert(layer.node, Vec2::new(x, 120.0));
+    }
+    positions.insert(s.doc.composite, Vec2::new(0.0, 209.0));
+    positions.insert(s.doc.display, Vec2::new(0.0, 291.0));
+    positions
+}
+
+/// A node's centre in graph space: stored, else its default place.
+fn node_position(s: &Session, id: NodeId, defaults: &BTreeMap<NodeId, Vec2>) -> Vec2 {
+    s.doc
+        .node_positions
+        .get(&id)
+        .map(|p| Vec2::new(p[0], p[1]))
+        .or_else(|| defaults.get(&id).copied())
+        .unwrap_or_else(|| Vec2::new(W + 36.0, 43.0 + id.0 as f32 * 58.0))
+}
+
+/// Push overlapping cards apart (along whichever way they overlap less)
+/// until none overlap, with a gap. `fixed` cards stay; a pair with one
+/// fixed card moves only the other.
+fn relax(
+    positions: &mut BTreeMap<NodeId, Vec2>,
+    width: impl Fn(NodeId) -> f32,
+    fixed: &BTreeSet<NodeId>,
+) {
+    let ids: Vec<NodeId> = positions.keys().copied().collect();
+    let widths: Vec<f32> = ids.iter().map(|&id| width(id)).collect();
+    for _ in 0..80 {
+        let mut moved = false;
+        for i in 0..ids.len() {
+            for j in i + 1..ids.len() {
+                let (a, b) = (positions[&ids[i]], positions[&ids[j]]);
+                let d = b - a;
+                let ox = (widths[i] + widths[j]) / 2.0 + NODE_GAP - d.x.abs();
+                let oy = H + NODE_GAP - d.y.abs();
+                if ox <= 0.0 || oy <= 0.0 {
+                    continue;
+                }
+                // Out along the smaller overlap (ties go sideways).
+                let push = if ox <= oy * 1.2 {
+                    let side = if d.x != 0.0 {
+                        d.x.signum()
+                    } else if i < j {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    Vec2::new(ox * side, 0.0)
+                } else {
+                    let side = if d.y != 0.0 { d.y.signum() } else { 1.0 };
+                    Vec2::new(0.0, oy * side)
+                };
+                let (fa, fb) = (fixed.contains(&ids[i]), fixed.contains(&ids[j]));
+                let (ka, kb) = match (fa, fb) {
+                    (true, true) => continue,
+                    (true, false) => (0.0, 1.0),
+                    (false, true) => (1.0, 0.0),
+                    (false, false) => (0.5, 0.5),
+                };
+                *positions.get_mut(&ids[i]).unwrap() -= push * ka;
+                *positions.get_mut(&ids[j]).unwrap() += push * kb;
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    // A card squeezed between others can bounce between them: give any
+    // free card still overlapping the nearest clear spot, trying sideways
+    // first (the graph flows top to bottom).
+    let clear = |positions: &BTreeMap<NodeId, Vec2>, k: usize, at: Vec2| {
+        ids.iter().enumerate().all(|(j, id)| {
+            if j == k {
+                return true;
+            }
+            let d = positions[id] - at;
+            d.x.abs() >= (widths[k] + widths[j]) / 2.0 + NODE_GAP - 0.01
+                || d.y.abs() >= H + NODE_GAP - 0.01
+        })
+    };
+    for k in 0..ids.len() {
+        if fixed.contains(&ids[k]) {
+            continue;
+        }
+        let here = positions[&ids[k]];
+        if clear(positions, k, here) {
+            continue;
+        }
+        let step = 12.0;
+        let spot = (1..200)
+            .flat_map(|n| {
+                let d = n as f32 * step;
+                [
+                    Vec2::new(d, 0.0),
+                    Vec2::new(-d, 0.0),
+                    Vec2::new(0.0, d),
+                    Vec2::new(0.0, -d),
+                ]
+            })
+            .map(|offset| here + offset)
+            .find(|&at| clear(positions, k, at));
+        if let Some(at) = spot {
+            positions.insert(ids[k], at);
+        }
+    }
+}
+
+/// The moves (as edits) that clear every overlap, with `overrides`
+/// standing in for those nodes' positions and `fixed` nodes staying put.
+fn make_room(
+    s: &Session,
+    fixed: &BTreeSet<NodeId>,
+    overrides: &BTreeMap<NodeId, Vec2>,
+) -> Vec<Edit> {
+    let defaults = default_positions(s);
+    let before: BTreeMap<NodeId, Vec2> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, _)| (id, node_position(s, id, &defaults)))
+        .collect();
+    let mut after = before.clone();
+    after.extend(overrides.iter().map(|(&id, &p)| (id, p)));
+    relax(&mut after, |id| card_width(&s.doc.graph, id), fixed);
+    after
+        .into_iter()
+        .filter(|(id, p)| !overrides.contains_key(id) && (before[id] - *p).length() > 0.5)
+        .map(|(id, p)| Edit::MoveNode {
+            id,
+            before: s.doc.node_positions.get(&id).copied(),
+            after: [p.x, p.y],
+        })
+        .collect()
+}
+
+/// The nearest place to `at` where a new card of `width` overlaps none
+/// of the existing ones (it moves; they don't).
+fn free_spot(s: &Session, at: [f32; 2], width: f32) -> [f32; 2] {
+    let defaults = default_positions(s);
+    let mut positions: BTreeMap<NodeId, Vec2> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, _)| (id, node_position(s, id, &defaults)))
+        .collect();
+    let fixed: BTreeSet<NodeId> = positions.keys().copied().collect();
+    let new = NodeId(usize::MAX);
+    positions.insert(new, Vec2::new(at[0], at[1]));
+    relax(
+        &mut positions,
+        |id| {
+            if id == new {
+                width
+            } else {
+                card_width(&s.doc.graph, id)
+            }
+        },
+        &fixed,
+    );
+    let p = positions[&new];
+    [p.x, p.y]
+}
+
+/// Across-positions for a layered graph (rows top to bottom) that keep
+/// cables short and uncrossed: each node goes under the average of the
+/// nodes feeding it, then a pass back up centres parents over their
+/// children, a few times over. Each row keeps its order by those targets
+/// and never overlaps. Rows are reordered in place.
+fn arrange_columns(
+    rows: &mut [Vec<NodeId>],
+    links: &[Link],
+    width: impl Fn(NodeId) -> f32,
+) -> BTreeMap<NodeId, f32> {
+    let space = |id: NodeId| width(id) + NODE_GAP * 2.0;
+    let mut x = BTreeMap::<NodeId, f32>::new();
+    // Start: each row side by side, centred.
+    for row in rows.iter() {
+        let total: f32 = row.iter().map(|&id| space(id)).sum();
+        let mut at = -total / 2.0;
+        for &id in row {
+            x.insert(id, at + space(id) / 2.0);
+            at += space(id);
+        }
+    }
+    let place = |row: &mut Vec<NodeId>,
+                 x: &mut BTreeMap<NodeId, f32>,
+                 target: &dyn Fn(NodeId, f32) -> f32| {
+        let targets: BTreeMap<NodeId, f32> =
+            row.iter().map(|&id| (id, target(id, x[&id]))).collect();
+        row.sort_by(|a, b| targets[a].total_cmp(&targets[b]));
+        // Left to right at the targets, but never overlapping.
+        let mut placed: Vec<f32> = Vec::with_capacity(row.len());
+        for (k, &id) in row.iter().enumerate() {
+            let mut at = targets[&id];
+            if k > 0 {
+                let prev = row[k - 1];
+                at = at.max(placed[k - 1] + (space(prev) + space(id)) / 2.0);
+            }
+            placed.push(at);
+        }
+        // Then centre the row on its targets.
+        let shift = row
+            .iter()
+            .zip(&placed)
+            .map(|(id, at)| targets[id] - at)
+            .sum::<f32>()
+            / row.len().max(1) as f32;
+        for (&id, at) in row.iter().zip(placed) {
+            x.insert(id, at + shift);
+        }
+    };
+    let mean = |ids: Vec<NodeId>, x: &BTreeMap<NodeId, f32>, or: f32| {
+        let xs: Vec<f32> = ids.iter().filter_map(|id| x.get(id).copied()).collect();
+        if xs.is_empty() {
+            or
+        } else {
+            xs.iter().sum::<f32>() / xs.len() as f32
+        }
+    };
+    let parents = |id: NodeId| {
+        links
+            .iter()
+            .filter(|l| l.to == id)
+            .map(|l| l.from)
+            .collect::<Vec<_>>()
+    };
+    let children = |id: NodeId| {
+        links
+            .iter()
+            .filter(|l| l.from == id)
+            .map(|l| l.to)
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..4 {
+        for row in rows.iter_mut().skip(1) {
+            let snapshot = x.clone();
+            place(row, &mut x, &|id, here| mean(parents(id), &snapshot, here));
+        }
+        let last = rows.len().saturating_sub(1);
+        for row in rows.iter_mut().take(last).rev() {
+            let snapshot = x.clone();
+            place(row, &mut x, &|id, here| mean(children(id), &snapshot, here));
+        }
+    }
+    for row in rows.iter_mut().skip(1) {
+        let snapshot = x.clone();
+        place(row, &mut x, &|id, here| mean(parents(id), &snapshot, here));
+    }
+    x
+}
+
 pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
     let mut depth = BTreeMap::new();
     let mut pending: BTreeMap<_, usize> = s.doc.graph.nodes().map(|(id, _)| (id, 0)).collect();
@@ -1324,27 +1590,24 @@ pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
             }
         }
     }
-    let mut rows = BTreeMap::<usize, Vec<NodeId>>::new();
+    let mut by_depth = BTreeMap::<usize, Vec<NodeId>>::new();
     for (id, _) in s.doc.graph.nodes() {
-        rows.entry(depth.get(&id).copied().unwrap_or_default())
+        by_depth
+            .entry(depth.get(&id).copied().unwrap_or_default())
             .or_default()
             .push(id);
     }
+    let mut rows: Vec<Vec<NodeId>> = by_depth.into_values().collect();
+    let links = s.doc.graph.links().to_vec();
+    let x = arrange_columns(&mut rows, &links, |id| card_width(&s.doc.graph, id));
     let mut edits = Vec::new();
     let mut bounds = Rect::NOTHING;
-    for (row, ids) in rows {
-        let mut offset = 0.0;
-        let widths: Vec<_> = ids
-            .iter()
-            .map(|&id| card_width(&s.doc.graph, id) + 32.0)
-            .collect();
-        let centre = widths.iter().sum::<f32>() * 0.5;
-        for (id, width) in ids.into_iter().zip(widths) {
-            let after = [offset + width * 0.5 - centre, 43.0 + row as f32 * 98.0];
-            offset += width;
+    for (row, ids) in rows.iter().enumerate() {
+        for &id in ids {
+            let after = [x[&id], 43.0 + row as f32 * 98.0];
             bounds = bounds.union(Rect::from_center_size(
                 Pos2::new(after[0], after[1]),
-                Vec2::new(width - 32.0, H),
+                Vec2::new(card_width(&s.doc.graph, id), H),
             ));
             let before = s.doc.node_positions.get(&id).copied();
             if before != Some(after) {
@@ -1514,33 +1777,51 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         y += grid;
     }
 
-    let mut positions = BTreeMap::new();
-    let middle = s.doc.layers.len().saturating_sub(1) as f32 / 2.0;
-    for (index, layer) in s.doc.layers.iter().enumerate() {
-        let x = (index as f32 - middle) * (W + 26.0);
-        positions.insert(layer.peg, Vec2::new(x, 43.0));
-        positions.insert(layer.node, Vec2::new(x, 120.0));
+    // Where every node sits: stored, or the default layout. Dragged nodes
+    // follow the pointer; the others make room (they push apart so no two
+    // cards overlap) and glide to where they're going.
+    let defaults = default_positions(s);
+    let mut placed: BTreeMap<NodeId, Vec2> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, _)| (id, node_position(s, id, &defaults)))
+        .collect();
+    let mut held = BTreeSet::new();
+    if let Some(Drag::Node(moving, delta)) = state.drag {
+        for (id, position) in placed.iter_mut() {
+            if *id == moving || state.selection.contains(id) {
+                *position += delta;
+                held.insert(*id);
+            }
+        }
+        relax(&mut placed, |id| card_width(&s.doc.graph, id), &held);
     }
-    positions.insert(s.doc.composite, Vec2::new(0.0, 209.0));
-    positions.insert(s.doc.display, Vec2::new(0.0, 291.0));
+    for (id, position) in placed.iter_mut() {
+        if !held.contains(id) {
+            let key = resp.id.with(("node-glide", *id));
+            *position = Vec2::new(
+                symphony_ui::motion::value(
+                    ui.ctx(),
+                    key.with(0),
+                    position.x,
+                    symphony_ui::motion::Motion::Select,
+                ),
+                symphony_ui::motion::value(
+                    ui.ctx(),
+                    key.with(1),
+                    position.y,
+                    symphony_ui::motion::Motion::Select,
+                ),
+            );
+        }
+    }
 
     let mut cards = BTreeMap::new();
     let mut inputs = BTreeMap::<Input, Pos2>::new();
     let mut outputs = BTreeMap::new();
     for (id, node) in s.doc.graph.nodes() {
-        let mut position = s
-            .doc
-            .node_positions
-            .get(&id)
-            .copied()
-            .map(|p| Vec2::new(p[0], p[1]))
-            .or_else(|| positions.get(&id).copied())
-            .unwrap_or_else(|| Vec2::new(W + 36.0, 43.0 + id.0 as f32 * 58.0));
-        if let Some(Drag::Node(moving, delta)) = state.drag {
-            if id == moving || state.selection.contains(&id) {
-                position += delta;
-            }
-        }
+        let position = placed.get(&id).copied().unwrap_or_default();
         let center = origin + position * zoom;
         let ports = if matches!(node.kind, NodeKind::Composite) {
             let mut used: Vec<_> = s
@@ -1762,6 +2043,14 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                             after: [position.x, position.y],
                         })
                         .collect();
+                    // Neighbours it pushed aside move in the same step.
+                    let overrides: BTreeMap<NodeId, Vec2> = cards
+                        .iter()
+                        .filter(|(moving, _)| **moving == id || state.selection.contains(moving))
+                        .map(|(&id, (_, position))| (id, *position))
+                        .collect();
+                    let fixed: BTreeSet<NodeId> = overrides.keys().copied().collect();
+                    edits.extend(make_room(s, &fixed, &overrides));
                     let action = if let Some(wiring) = auto_wire.take() {
                         edits.push(wiring.edit(s));
                         "Move and connect node"
@@ -2500,6 +2789,94 @@ pub fn convert_drawing(s: &mut Session, id: NodeId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn overlapping(s: &Session) -> Vec<(NodeId, NodeId)> {
+        let defaults = default_positions(s);
+        let ids: Vec<NodeId> = s.doc.graph.nodes().map(|(id, _)| id).collect();
+        let mut out = Vec::new();
+        for (k, &a) in ids.iter().enumerate() {
+            for &b in &ids[k + 1..] {
+                let (pa, pb) = (
+                    node_position(s, a, &defaults),
+                    node_position(s, b, &defaults),
+                );
+                let (wa, wb) = (card_width(&s.doc.graph, a), card_width(&s.doc.graph, b));
+                if (pa.x - pb.x).abs() < (wa + wb) / 2.0 && (pa.y - pb.y).abs() < H {
+                    out.push((a, b));
+                }
+            }
+        }
+        out
+    }
+
+    /// Cards pushed apart: none overlap, and held cards stay put.
+    #[test]
+    fn relaxing_clears_overlaps_and_keeps_held_cards() {
+        let ids = [NodeId(1), NodeId(2), NodeId(3)];
+        let mut p: BTreeMap<NodeId, Vec2> =
+            ids.iter().map(|&id| (id, Vec2::new(5.0, 5.0))).collect();
+        let held: BTreeSet<NodeId> = [NodeId(2)].into();
+        relax(&mut p, |_| W, &held);
+        assert_eq!(p[&NodeId(2)], Vec2::new(5.0, 5.0));
+        for a in ids {
+            for b in ids {
+                if a < b {
+                    let d = p[&a] - p[&b];
+                    assert!(
+                        d.x.abs() >= W + NODE_GAP - 0.5 || d.y.abs() >= H + NODE_GAP - 0.5,
+                        "{a:?} {b:?} {d:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Arrange: nothing overlaps, each peg sits straight above its drawing,
+    /// and cables between rows don't cross.
+    #[test]
+    fn arrange_is_tidy_and_uncrossed() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        s.add_layer();
+        let mut state = NodeViewState::default();
+        arrange(&mut s, &mut state);
+        assert!(overlapping(&s).is_empty(), "{:?}", overlapping(&s));
+        let defaults = default_positions(&s);
+        let at = |id| node_position(&s, id, &defaults);
+        for layer in &s.doc.layers {
+            assert!(
+                (at(layer.peg).x - at(layer.node).x).abs() < 1.0,
+                "peg straight above its drawing"
+            );
+        }
+        // No two links between the same pair of rows cross.
+        let links = s.doc.graph.links().to_vec();
+        for a in &links {
+            for b in &links {
+                let (a0, a1, b0, b1) = (at(a.from), at(a.to), at(b.from), at(b.to));
+                if (a0.y - b0.y).abs() < 1.0
+                    && (a1.y - b1.y).abs() < 1.0
+                    && a.from != b.from
+                    && a.to != b.to
+                {
+                    assert!(
+                        (a0.x - b0.x) * (a1.x - b1.x) >= 0.0,
+                        "cables cross: {a:?} {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A node added where another sits moves clear of it.
+    #[test]
+    fn added_nodes_make_room() {
+        let mut s = Session::new_scene();
+        let peg = s.doc.layers[0].peg;
+        let p = node_position(&s, peg, &default_positions(&s));
+        add_node(&mut s, NodeKind::Composite, [p.x, p.y]);
+        assert!(overlapping(&s).is_empty(), "{:?}", overlapping(&s));
+    }
 
     #[test]
     fn connecting_keeps_connections_where_it_can() {
