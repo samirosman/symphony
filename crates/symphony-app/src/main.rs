@@ -186,6 +186,9 @@ struct Saved {
     /// How often each search result was chosen, to rank favourites first.
     #[serde(default)]
     search_uses: std::collections::HashMap<String, u32>,
+    /// Timeline: peg rows hidden.
+    #[serde(default)]
+    hide_pegs: bool,
 }
 
 fn preferences_window(ctx: &egui::Context, id: egui::Id) -> egui::Window<'static> {
@@ -652,6 +655,7 @@ impl SymphonyApp {
             .as_ref()
             .map(|s| s.search_uses.clone())
             .unwrap_or_default();
+        let hide_pegs = saved.as_ref().is_some_and(|s| s.hide_pegs);
         let tool_dock = saved
             .as_ref()
             .map_or(ToolDock::Left, |saved| saved.tool_dock);
@@ -807,7 +811,11 @@ impl SymphonyApp {
             shot_search_opened: false,
             search_uses,
             node_view: Default::default(),
-            timing: Default::default(),
+            timing: {
+                let mut t = timing::TimingState::default();
+                t.hide_pegs = hide_pegs;
+                t
+            },
             export: Default::default(),
             soundtrack: Default::default(),
             sound: Default::default(),
@@ -3731,6 +3739,7 @@ impl eframe::App for SymphonyApp {
             use_openh264: self.use_openh264,
             presets: Some(self.presets.clone()),
             search_uses: self.search_uses.clone(),
+            hide_pegs: self.timing.hide_pegs,
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

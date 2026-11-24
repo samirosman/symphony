@@ -25,6 +25,9 @@ pub struct TimingState {
     /// The node a right-click menu is for (a layer's drawing node too).
     menu_node: Option<NodeId>,
     show_unanimated_nodes: bool,
+    /// Hide peg rows, so the Timeline reads as a plain layer stack.
+    /// Saved with the app's workspace settings.
+    pub hide_pegs: bool,
     /// Parameters column: drawing name being typed, per row.
     swap_text: Option<(usize, String)>,
     /// Parameters column drag: row, starting drawing index, pixels dragged.
@@ -442,12 +445,13 @@ fn hierarchy_rows(s: &Session, tracks: &[NodeId], sounds: usize) -> Vec<(Slot, u
         let (pegs, effects) = layer_chain(s, i);
         let mut depth = 0;
         for peg in pegs {
+            // A hidden peg row doesn't indent the rows under it.
             if let Some(j) = index(peg) {
                 if placed.insert(peg) {
                     out.push((Slot::Node(j), depth));
                 }
+                depth += 1;
             }
-            depth += 1;
         }
         out.push((Slot::Layer(i), depth));
         for fx in effects {
@@ -796,14 +800,23 @@ pub fn timeline(
         has_unanimated_nodes |= frames.is_empty();
         node_tracks.push((id, super::node::node_name(node), frames));
     }
-    if has_unanimated_nodes {
-        ui.toggle_value(&mut t.show_unanimated_nodes, "Show all node tracks")
-            .on_hover_text("Animated nodes and the selected node are always shown.");
-    }
+    ui.horizontal(|ui| {
+        let mut show_pegs = !t.hide_pegs;
+        ui.toggle_value(&mut show_pegs, "Show pegs")
+            .on_hover_text("Show each layer's pegs above it.");
+        t.hide_pegs = !show_pegs;
+        if has_unanimated_nodes {
+            ui.toggle_value(&mut t.show_unanimated_nodes, "Show all node tracks")
+                .on_hover_text("Animated nodes and the selected node are always shown.");
+        }
+    });
     // Pegs and effects that belong to a layer always show: they're part
     // of the layer's hierarchy. The filter is for loose nodes.
     let attached = attached_nodes(s);
     node_tracks.retain(|(id, _, frames)| {
+        if t.hide_pegs && matches!(kind_of(s, *id), Some(NodeKind::Peg(_))) {
+            return false;
+        }
         t.show_unanimated_nodes
             || !frames.is_empty()
             || Some(*id) == visible_node
@@ -1733,6 +1746,9 @@ mod hierarchy_tests {
                 (Slot::Node(0), 3)
             ]
         );
+        // With pegs hidden, the layer and its effect lose the indent.
+        let rows = hierarchy_rows(&s, &[fx], 0);
+        assert_eq!(&rows[..2], &[(Slot::Layer(0), 0), (Slot::Node(0), 1)]);
         // One undo each.
         s.undo();
         s.undo();
