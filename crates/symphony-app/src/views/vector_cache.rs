@@ -202,6 +202,16 @@ impl VectorMeshes {
     }
 
     /// Draw `st` under `m` (drawing -> screen points).
+    /// The stroke being drawn: it isn't in the scene yet, so the scene's
+    /// edit counter never moves while it grows. Re-check it every frame,
+    /// or the line only appears when the pen lifts.
+    pub fn paint_live(&mut self, painter: &egui::Painter, st: &Stroke, colour: Color32, m: Affine) {
+        if let Some(e) = self.entries.get_mut(&st.id) {
+            e.checked = 0;
+        }
+        self.paint(painter, st, colour, m);
+    }
+
     pub fn paint(&mut self, painter: &egui::Painter, st: &Stroke, colour: Color32, m: Affine) {
         let k = symphony_vector::scale_of(m);
         if !(k.is_finite() && k > 0.0) {
@@ -379,6 +389,39 @@ mod tests {
                 times[0], times[1], times[2]
             );
         }
+    }
+
+    /// The line being drawn grows on screen every frame, even though the
+    /// scene (and its edit counter) doesn't change until the pen lifts.
+    #[test]
+    fn the_line_being_drawn_grows_every_frame() {
+        let mut st = sketch().remove(0);
+        st.kind = StrokeKind::Brush;
+        let full = st.points.clone();
+        let ctx = egui::Context::default();
+        let mut cache = VectorMeshes::default();
+        cache.set_version(7);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(2000.0, 1200.0));
+        let m = Affine::translate(1000.0, 600.0);
+        let mut widths = Vec::new();
+        for n in [5, 20, 60] {
+            st.points = full[..n].to_vec();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let painter = ui.painter().with_clip_rect(screen);
+                cache.begin_frame();
+                cache.paint_live(&painter, &st, Color32::BLACK, m);
+            });
+            out.textures_delta.clear();
+            let width = out
+                .shapes
+                .iter()
+                .map(|s| s.shape.visual_bounding_rect())
+                .filter(|r| r.is_finite())
+                .fold(Rect::NOTHING, |a, r| a.union(r))
+                .width();
+            widths.push(width);
+        }
+        assert!(widths[0] < widths[1] && widths[1] < widths[2], "{widths:?}");
     }
 
     #[test]

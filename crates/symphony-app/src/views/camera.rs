@@ -870,14 +870,10 @@ pub fn ui(
                     ink,
                     m,
                 ),
-                None => paint_stroke(
-                    &painter,
-                    &mut state.strokes,
-                    &s.doc.textures,
-                    &a.stroke,
-                    ink,
-                    m,
-                ),
+                None => state
+                    .strokes
+                    .vectors
+                    .paint_live(&painter, &a.stroke, ink, m),
             }
         }
     }

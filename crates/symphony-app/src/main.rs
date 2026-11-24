@@ -2826,7 +2826,7 @@ impl SymphonyApp {
                     // turns on themselves (Symphony never ships it).
                     let Some(codec) = codec::installed() else {
                         notes.push(
-                            "Video import uses the OpenH264 codec: turn it on in Preferences > Video, then import again."
+                            "Video import needs Cisco's free OpenH264 codec. Download it once in Preferences > Video, then import again."
                                 .into(),
                         );
                         continue;
@@ -3783,8 +3783,13 @@ impl SymphonyApp {
                 0.0,
                 egui::Color32::from_black_alpha((90.0 * dim) as u8),
             );
-            // Keep the window above its scrim.
             ctx.move_to_top(scrim);
+        }
+        // Keep the window above its scrim and every other window, from the
+        // first frame it opens. egui only paints the grey title bar on the
+        // top window, so it went missing when Preferences first opened
+        // under another window.
+        if open || dim > 0.0 {
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, prefs_id));
         }
         let glass = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, prefs_id));
