@@ -43,10 +43,15 @@ impl Cable {
 
     pub fn follow(self, from: Pos2, end: Pos2, dt: f32) -> Self {
         let movement = (end - from) - (self.end - self.from);
-        let decay = (-11.0 * dt.clamp(0.0, 0.1)).exp();
-        let offset = (self.offset() - movement * 0.23) * decay;
+        let dt = dt.clamp(1.0 / 240.0, 0.1);
+        let weight = 1.0 - (-16.0 * dt).exp();
         let limit = MAX_TRAIL.min(from.distance(end) * 0.2);
-        Self::new(from, end).with_offset(offset * (limit / offset.length().max(limit).max(0.001)))
+        let bounded = |v: Vec2| v * (limit / v.length().max(limit).max(0.001));
+        // Ease the same two control points toward the direction of travel,
+        // so reversing the pointer changes the bend smoothly.
+        let target = bounded(movement * (-0.07 / dt));
+        let offset = self.offset() * (1.0 - weight) + target * weight;
+        Self::new(from, end).with_offset(bounded(offset))
     }
 
     /// The part before t, with exactly the same curve as the full cable.

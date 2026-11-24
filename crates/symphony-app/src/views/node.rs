@@ -2075,10 +2075,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 });
                 let cable = previous.follow(from, to, dt);
                 state.drag_cable = Some(cable);
-                let span = to - from;
-                let transverse = Vec2::new(-span.y, span.x).normalized();
-                let flex = cable.offset().dot(transverse) * 0.32;
-                cable.paint_moving(&painter, Stroke::new(ACTIVE_CABLE_WIDTH, ink), flex);
+                cable.paint(&painter, Stroke::new(ACTIVE_CABLE_WIDTH, ink));
                 if cable.offset().length_sq() > 0.01 {
                     ui.ctx().request_repaint();
                 }
