@@ -4518,6 +4518,7 @@ dependencies = [
  "dirs",
  "eframe",
  "flate2",
+ "image",
  "semver",
  "serde",
  "serde_json",

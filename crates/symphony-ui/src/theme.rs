@@ -82,6 +82,7 @@ pub const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(23, 23, 23, 23)
 pub const GLASS_RADIUS: u8 = 12;
 pub const GLASS_TOOL_INSET: i8 = 6;
 pub const GLASS_CONTROL_RADIUS: u8 = GLASS_RADIUS - GLASS_TOOL_INSET as u8;
+#[cfg(feature = "dock")]
 const GLASS_TAB_INSET: i8 = 5;
 
 // §6.3 radii.
