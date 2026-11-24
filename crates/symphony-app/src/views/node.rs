@@ -1758,7 +1758,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         // Selecting eases the card up a little, with a shadow under it and
         // a thicker rim (Motion presence, so it eases out again too).
         let lift = symphony_ui::motion::presence(ui.ctx(), resp.id.with(("lift", *id)), selected);
-        let card = &Rect::from_center_size(card.center(), card.size() * (1.0 + 0.06 * lift));
+        let card = &Rect::from_center_size(card.center(), card.size() * (1.0 + 0.12 * lift));
         // Rounded, and the same shape at any zoom: corners scale with the card.
         let radius = NODE_RADIUS * zoom;
         let peg = peg_colour(&s.doc.graph, *id);
@@ -1768,11 +1768,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         } else {
             node_name(node).to_owned()
         };
-        let edge = if selected {
-            theme::ACCENT_SELECT
-        } else {
-            peg.unwrap_or(theme::LINE_STRONG)
-        };
+        // Selection keeps the node's own colour; the rim just thickens.
+        let edge = peg.unwrap_or(theme::LINE_STRONG);
         let face = peg.map_or(theme::BG_RAISED, |colour| {
             theme::BG_RAISED.lerp_to_gamma(colour, 0.12)
         });
@@ -1801,7 +1798,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             *card,
             radius,
             face,
-            Stroke::new(1.0 + 1.5 * lift, edge),
+            Stroke::new(1.0 + 2.0 * lift, edge),
             StrokeKind::Inside,
         );
         let mut font = theme::body();

@@ -148,6 +148,11 @@ pub enum Edit {
         after: u32,
     },
     AddLayer(Box<LayerSnapshot>),
+    /// The camera frame's black bars, before and after.
+    SetBars {
+        before: crate::doc::Bars,
+        after: crate::doc::Bars,
+    },
     /// The scene's sound clips, before and after.
     SetSounds {
         before: Vec<crate::doc::SoundClip>,
@@ -436,6 +441,9 @@ impl Edit {
             }
             Edit::SetLength { before, after } => {
                 s.settings.length = if forward { *after } else { *before }
+            }
+            Edit::SetBars { before, after } => {
+                s.settings.bars = if forward { *after } else { *before };
             }
             Edit::SetSounds { before, after } => {
                 s.sounds = if forward {

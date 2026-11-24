@@ -499,6 +499,7 @@ mod tests {
             height: 1920,
             fps: 12.0,
             length: 96,
+            ..Default::default()
         };
         save_new(&path, settings.clone()).unwrap();
 

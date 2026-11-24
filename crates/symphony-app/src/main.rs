@@ -698,6 +698,15 @@ impl SymphonyApp {
                     }
                 }
             }
+            // SYMPHONY_SHOT_BARS=<aspect>,<radius>: black bars, for review.
+            if let Ok(v) = std::env::var("SYMPHONY_SHOT_BARS") {
+                let mut it = v.split(',').map(|x| x.trim().parse::<f32>().unwrap_or(0.0));
+                s.doc.settings.bars = symphony_core::doc::Bars {
+                    on: true,
+                    aspect: it.next().unwrap_or(0.0),
+                    radius: it.next().unwrap_or(0.0),
+                };
+            }
             // SYMPHONY_SHOT_RANGE: a playback range (frames 10 to 30).
             if std::env::var_os("SYMPHONY_SHOT_RANGE").is_some() {
                 s.play_range = Some((10, 30));

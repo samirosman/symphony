@@ -18,6 +18,10 @@ pub struct Settings {
     pub height: u32,
     pub fps: f32,
     pub length: u32,
+    /// Black bars over the camera frame: rounded edges or a cinematic
+    /// shape. Drawn in the Camera view and in exports.
+    #[serde(default, skip_serializing_if = "Bars::is_off")]
+    pub bars: Bars,
 }
 
 impl Default for Settings {
@@ -27,7 +31,68 @@ impl Default for Settings {
             height: 1080,
             fps: 24.0,
             length: 48,
+            bars: Bars::default(),
         }
+    }
+}
+
+/// Black bars framing the picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bars {
+    pub on: bool,
+    /// Width / height of the picture left between the bars; 0 = the
+    /// frame's own shape (bars only round the corners).
+    pub aspect: f32,
+    /// Corner radius of the picture, in frame pixels.
+    pub radius: f32,
+}
+
+impl Bars {
+    pub fn is_off(&self) -> bool {
+        !self.on
+    }
+
+    /// The picture left between the bars in a `w` x `h` frame centred on
+    /// the origin: (x, y, width, height, corner radius). None when there
+    /// are no bars to draw.
+    pub fn opening(&self, w: f32, h: f32) -> Option<([f32; 4], f32)> {
+        if !self.on || w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let (mut ow, mut oh) = (w, h);
+        if self.aspect.is_finite() && self.aspect > 0.0 {
+            if self.aspect > w / h {
+                oh = w / self.aspect;
+            } else {
+                ow = h * self.aspect;
+            }
+        }
+        let r = self.radius.clamp(0.0, ow.min(oh) / 2.0);
+        if (ow - w).abs() < 0.01 && (oh - h).abs() < 0.01 && r <= 0.0 {
+            return None;
+        }
+        Some(([-ow / 2.0, -oh / 2.0, ow, oh], r))
+    }
+
+    /// The opening's outline as points (corners rounded), centred on the
+    /// origin, clockwise from the top-left.
+    pub fn outline(&self, w: f32, h: f32) -> Option<Vec<[f32; 2]>> {
+        let ([x, y, ow, oh], r) = self.opening(w, h)?;
+        let steps = if r > 0.0 { 10 } else { 0 };
+        let mut pts = Vec::new();
+        let corners = [
+            ([x + ow - r, y + r], -90.0f32),
+            ([x + ow - r, y + oh - r], 0.0),
+            ([x + r, y + oh - r], 90.0),
+            ([x + r, y + r], 180.0),
+        ];
+        for (c, start) in corners {
+            for i in 0..=steps {
+                let a = (start + 90.0 * i as f32 / steps.max(1) as f32).to_radians();
+                pts.push([c[0] + r * a.cos(), c[1] + r * a.sin()]);
+            }
+        }
+        Some(pts)
     }
 }
 

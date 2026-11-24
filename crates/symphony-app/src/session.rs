@@ -2024,6 +2024,18 @@ impl Session {
         placed
     }
 
+    /// Change the camera frame's black bars (one undo step per change).
+    pub fn set_bars(&mut self, after: symphony_core::doc::Bars) {
+        let before = self.doc.settings.bars;
+        if before != after {
+            self.history.apply(
+                &mut self.doc,
+                "Black bars",
+                vec![Edit::SetBars { before, after }],
+            );
+        }
+    }
+
     /// Place imported sounds on the timeline from the current frame,
     /// lengthening the scene to fit. One undo step.
     pub fn import_sounds(&mut self, sounds: Vec<crate::import::StagedSound>) -> usize {

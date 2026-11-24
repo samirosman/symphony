@@ -21,7 +21,8 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Transform};
 /// Render `frame` at `width` x `height` pixels (the scene's aspect is
 /// kept; the stage fills the image). Background is white paper.
 pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Option<RgbaImage> {
-    let pixmap = render_display(scene, frame, width, height, true, None)?;
+    let mut pixmap = render_display(scene, frame, width, height, true, None)?;
+    paint_bars(&mut pixmap, &scene.settings);
     RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
 }
 
@@ -96,7 +97,45 @@ pub fn render_camera(
     height: u32,
     preview: Option<StrokePreview<'_>>,
 ) -> Option<Pixmap> {
-    render_display(scene, frame, width, height, false, preview)
+    let mut pix = render_display(scene, frame, width, height, false, preview)?;
+    paint_bars(&mut pix, &scene.settings);
+    Some(pix)
+}
+
+/// The camera frame's black bars, over everything: the frame minus the
+/// (rounded) picture opening, filled black.
+pub fn paint_bars(pix: &mut Pixmap, settings: &symphony_core::doc::Settings) {
+    let (sw, sh) = (settings.width.max(1) as f32, settings.height.max(1) as f32);
+    let Some(outline) = settings.bars.outline(sw, sh) else {
+        return;
+    };
+    let k = pix.width() as f32 / sw;
+    let (cx, cy) = (pix.width() as f32 / 2.0, pix.height() as f32 / 2.0);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.push_rect(
+        tiny_skia::Rect::from_xywh(0.0, 0.0, pix.width() as f32, pix.height() as f32).unwrap(),
+    );
+    for (i, p) in outline.iter().enumerate() {
+        let (x, y) = (cx + p[0] * k, cy + p[1] * k);
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(tiny_skia::Color::BLACK);
+        paint.anti_alias = true;
+        pix.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::EvenOdd,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
 }
 
 fn render_display(
@@ -509,6 +548,7 @@ mod tests {
             height: 100,
             fps: 12.0,
             length: 3,
+            ..Default::default()
         });
         let mut h = History::default();
         let snap = s.make_layer("Drawing", 0);
@@ -875,5 +915,37 @@ mod tests {
         cancel.store(true, Ordering::SeqCst);
         assert!(export(&s, &png, &cancel, &|_, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Black bars are part of the exported picture: a 2.39 shape blacks out
+    /// the top and bottom, rounded corners black out the corners, and the
+    /// middle is untouched.
+    #[test]
+    fn exports_draw_the_black_bars() {
+        let mut scene = Scene::new(Settings {
+            width: 200,
+            height: 100,
+            fps: 12.0,
+            length: 1,
+            ..Default::default()
+        });
+        scene.settings.bars = symphony_core::doc::Bars {
+            on: true,
+            aspect: 2.39,
+            radius: 10.0,
+        };
+        let img = render_frame(&scene, 1, 200, 100).unwrap();
+        let px = |x, y| img.get_pixel(x, y).0;
+        assert_eq!(px(100, 2), [0, 0, 0, 255], "top bar");
+        assert_eq!(px(100, 97), [0, 0, 0, 255], "bottom bar");
+        assert_eq!(px(1, 50 - 41 + 1), [0, 0, 0, 255], "rounded corner");
+        assert_eq!(px(100, 50), [255, 255, 255, 255], "the picture");
+        scene.settings.bars.on = false;
+        let img = render_frame(&scene, 1, 200, 100).unwrap();
+        assert_eq!(
+            img.get_pixel(100, 2).0,
+            [255, 255, 255, 255],
+            "off: no bars"
+        );
     }
 }

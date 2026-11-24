@@ -12,7 +12,7 @@ use symphony_core::math::Affine;
 use symphony_core::stroke::{ArtLayer, Point, Stroke, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 use symphony_ui::icons::{self, Icon};
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 use symphony_vector::{pressure_curve, scale_of, Smoother};
 
 use crate::keymap::{self, Action, Profile};
@@ -248,6 +248,54 @@ fn paint_stroke(
     cache.vectors.paint(painter, stroke, colour, m);
 }
 
+/// Black bars: the ring between the frame (`w` x `h`, centred) and the
+/// opening `outline` (scaled by `k`). Each opening point pairs with the
+/// matching point of the opening stretched to the frame (so straight edges
+/// meet straight edges), and each rounded corner is filled with a fan from
+/// the frame's corner. `outline` runs corner by corner (top-right,
+/// bottom-right, bottom-left, top-left), the same number of points each.
+fn bars_mesh(
+    outline: &[[f32; 2]],
+    w: f32,
+    h: f32,
+    k: f32,
+    to_screen: impl Fn(f32, f32) -> Pos2,
+) -> egui::Shape {
+    let mut mesh = egui::Mesh::default();
+    let n = outline.len() as u32;
+    let (ow, oh) = outline.iter().fold((0.0f32, 0.0f32), |(a, b), p| {
+        (a.max(p[0].abs() * k), b.max(p[1].abs() * k))
+    });
+    let (sx, sy) = (w / 2.0 / ow.max(1e-6), h / 2.0 / oh.max(1e-6));
+    for p in outline {
+        let (x, y) = (p[0] * k, p[1] * k);
+        mesh.colored_vertex(to_screen(x, y), Color32::BLACK);
+        mesh.colored_vertex(to_screen(x * sx, y * sy), Color32::BLACK);
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * j, 2 * j + 1);
+        mesh.add_triangle(a, b, d);
+        mesh.add_triangle(a, d, c);
+    }
+    // Rounded corners: fan from the frame corner over the stretched arc.
+    let per = n / 4;
+    if per > 1 {
+        for (q, (cx, cy)) in [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let v = mesh.vertices.len() as u32;
+            mesh.colored_vertex(to_screen(cx * w / 2.0, cy * h / 2.0), Color32::BLACK);
+            let start = q as u32 * per;
+            for i in start..start + per - 1 {
+                mesh.add_triangle(2 * i + 1, 2 * (i + 1) + 1, v);
+            }
+        }
+    }
+    egui::Shape::mesh(mesh)
+}
+
 /// When there's no native pen backend, egui's pointer becomes pen samples (E4.2).
 pub fn pointer_samples(ctx: &egui::Context) -> Vec<PenSample> {
     ctx.input(|i| {
@@ -384,6 +432,9 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 });
                 ui.add_space(10.0);
                 art_layer_toolbar(ui, s, profile);
+                if !drawing_only {
+                    bars_menu(ui, s);
+                }
                 if drawing_only {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         dense_label(ui, "Selected drawing only, without pegs");
@@ -391,6 +442,34 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 }
             });
         });
+}
+
+/// Black bars over the camera frame: rounded edges or a cinematic shape.
+/// They're part of the picture, so exports draw them too.
+fn bars_menu(ui: &mut egui::Ui, s: &mut Session) {
+    let mut bars = s.doc.settings.bars;
+    let label = if bars.on { "Bars: on" } else { "Bars" };
+    ui.menu_button(label, |ui| {
+        ui.set_min_width(220.0);
+        widgets::checkbox(ui, &mut bars.on, "Black bars");
+        ui.add_enabled_ui(bars.on, |ui| {
+            ui.add_space(4.0);
+            dense_label(ui, "Shape");
+            for (aspect, name) in [
+                (0.0, "Frame (rounded edges only)"),
+                (1.85, "Cinematic 1.85"),
+                (2.39, "Cinematic 2.39"),
+            ] {
+                widgets::radio_value(ui, &mut bars.aspect, aspect, name);
+            }
+            ui.add_space(4.0);
+            ui.add(egui::Slider::new(&mut bars.radius, 0.0..=200.0).text("Corner radius"));
+        });
+        dense_label(ui, "Bars are part of the picture: exports draw them too.");
+    })
+    .response
+    .on_hover_text("Black bars over the camera frame");
+    s.set_bars(bars);
 }
 
 /// Harmony's Art Layer toolbar: preview all, then the art layers back to
@@ -895,6 +974,18 @@ pub fn ui(
                     .vectors
                     .paint_live(&painter, &a.stroke, ink, m),
             }
+        }
+    }
+
+    // The scene's black bars, over the artwork, as export draws them.
+    if !drawing_only {
+        let settings = &s.doc.settings;
+        let (sw, sh) = (settings.width as f32, settings.height as f32);
+        if let Some(outline) = settings.bars.outline(sw, sh) {
+            let k = 1.0 / state.framing;
+            painter.add(bars_mesh(&outline, sw * k, sh * k, k, |x, y| {
+                to_pos(view.apply(x, y))
+            }));
         }
     }
 
