@@ -1921,9 +1921,6 @@ impl SymphonyApp {
         // toolbar): a selected peg offers Transform and the view tools.
         let context = self.s.tool_context();
         ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
-        // One highlight slides between tools as you switch.
-        let highlight = ui.painter().add(egui::Shape::Noop);
-        let mut active_rect = None;
         let mut first = true;
         for tools in GROUPS {
             let shown: Vec<Tool> = tools.iter().copied().filter(|t| t.fits(context)).collect();
@@ -1955,16 +1952,13 @@ impl SymphonyApp {
                 if let Some(milestone) = tool.planned_for() {
                     tip.push_str(&format!("\nComing in {milestone}"));
                 }
-                let response = icons::sliding_tool_button(
+                let response = icons::tool_button(
                     ui,
                     icon,
                     self.s.tool == tool,
                     tool.planned_for().is_none(),
                     &tip,
                 );
-                if self.s.tool == tool {
-                    active_rect = Some(response.rect);
-                }
                 if response.clicked() {
                     self.s.tool = tool;
                 }
@@ -1973,9 +1967,6 @@ impl SymphonyApp {
                     self.open_tool_properties();
                 }
             }
-        }
-        if let Some(rect) = active_rect {
-            icons::paint_tool_highlight(ui, egui::Id::unique("tool-highlight"), rect, highlight);
         }
     }
 
@@ -3836,15 +3827,14 @@ impl SymphonyApp {
                     // Pages, like Harmony's Preferences tabs.
                     ui.vertical(|ui| {
                         ui.set_width(150.0);
-                        let pages: Vec<(PrefsPage, &str)> =
-                            PrefsPage::ALL.iter().map(|&p| (p, p.title())).collect();
-                        symphony_ui::widgets::segmented(
-                            ui,
-                            "prefs-pages",
-                            &mut self.prefs_page,
-                            &pages,
-                            true,
-                        );
+                        for page in PrefsPage::ALL {
+                            if ui
+                                .selectable_label(self.prefs_page == page, page.title())
+                                .clicked()
+                            {
+                                self.prefs_page = page;
+                            }
+                        }
                     });
                     ui.separator();
                     egui::ScrollArea::vertical()

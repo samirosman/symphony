@@ -483,7 +483,6 @@ pub fn button(
         active,
         enabled,
         tooltip,
-        true,
     )
 }
 
@@ -503,52 +502,9 @@ pub fn tool_button(
         active,
         enabled,
         tooltip,
-        true,
     )
 }
 
-/// A tool button whose selected fill is drawn by its strip, as one
-/// highlight that slides between buttons (`paint_tool_highlight`).
-pub fn sliding_tool_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    active: bool,
-    enabled: bool,
-    tooltip: &str,
-) -> Response {
-    sized_button(
-        ui,
-        icon,
-        theme::TOOL_BUTTON,
-        theme::TOOL_ICON,
-        active,
-        enabled,
-        tooltip,
-        false,
-    )
-}
-
-/// The selected tool's highlight, sliding to `target` (the active button's
-/// rect) from wherever it was. Paint it under the buttons.
-pub fn paint_tool_highlight(ui: &egui::Ui, id: egui::Id, target: Rect, at: egui::layers::ShapeIdx) {
-    let r = crate::motion::slide(ui.ctx(), id, target);
-    let shadow = egui::epaint::Shadow {
-        offset: [0, 0],
-        blur: 8,
-        spread: 0,
-        color: theme::ACCENT_SELECT.gamma_multiply(0.22),
-    }
-    .as_shape(r, theme::GLASS_CONTROL_RADIUS);
-    ui.painter().set(
-        at,
-        egui::Shape::Vec(vec![
-            shadow.into(),
-            egui::Shape::rect_filled(r, theme::GLASS_CONTROL_RADIUS, theme::ACCENT_SELECT_FILL),
-        ]),
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
 fn sized_button(
     ui: &mut egui::Ui,
     icon: Icon,
@@ -557,7 +513,6 @@ fn sized_button(
     active: bool,
     enabled: bool,
     tooltip: &str,
-    own_fill: bool,
 ) -> Response {
     let enabled = enabled && ui.is_enabled();
     let sense = if enabled {
@@ -578,20 +533,18 @@ fn sized_button(
     };
     let hover = transition("hover", enabled && response.hovered());
     let selected = transition("selected", enabled && active);
-    // A sliding highlight under the strip stands in for this one's fill.
-    let fill_selected = if own_fill { selected } else { 0.0 };
     // Pressed: a quick darken, so a click feels like it lands.
     let pressed = enabled && response.is_pointer_button_down_on();
     let bg = egui::Color32::TRANSPARENT
         .lerp_to_gamma(theme::BG_HOVER, hover)
-        .lerp_to_gamma(theme::ACCENT_SELECT_FILL, fill_selected);
+        .lerp_to_gamma(theme::ACCENT_SELECT_FILL, selected);
     let bg = if pressed {
         bg.lerp_to_gamma(egui::Color32::BLACK, 0.25)
     } else {
         bg
     };
     let radius = if size == theme::TOOL_BUTTON {
-        if fill_selected > 0.0 {
+        if selected > 0.0 {
             painter.add(
                 egui::epaint::Shadow {
                     offset: [0, 0],

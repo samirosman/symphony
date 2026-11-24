@@ -249,13 +249,10 @@ pub fn segmented<T: PartialEq + Copy>(
     vertical: bool,
 ) -> bool {
     let id = ui.scope_id().with(("segmented", id_salt));
-    let layout = if vertical {
-        egui::Layout::top_down_justified(egui::Align::Min)
-    } else {
-        egui::Layout::left_to_right(egui::Align::Center)
-    };
     let mut changed = false;
-    ui.with_layout(layout, |ui| {
+    // Size to the choices: a horizontal layout given the rest of a panel
+    // would stretch to fill its height.
+    let body = |ui: &mut egui::Ui| {
         if !vertical {
             ui.spacing_mut().item_spacing.x = 2.0;
         }
@@ -322,6 +319,11 @@ pub fn segmented<T: PartialEq + Copy>(
                 egui::Shape::rect_filled(r, theme::RADIUS_CONTROL, fill),
             );
         }
-    });
+    };
+    if vertical {
+        ui.vertical(body);
+    } else {
+        ui.horizontal(body);
+    }
     changed
 }
