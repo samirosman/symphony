@@ -127,6 +127,13 @@ pub enum Edit {
         before: bool,
         after: bool,
     },
+    /// Lock or unlock a layer: a locked layer can't be drawn on, picked
+    /// or moved.
+    SetLocked {
+        column: Id,
+        before: bool,
+        after: bool,
+    },
     Rename {
         column: Id,
         before: String,
@@ -415,6 +422,15 @@ impl Edit {
             } => {
                 if let Some(c) = s.xsheet.column_mut(*column) {
                     c.visible = if forward { *after } else { *before };
+                }
+            }
+            Edit::SetLocked {
+                column,
+                before,
+                after,
+            } => {
+                if let Some(c) = s.xsheet.column_mut(*column) {
+                    c.locked = if forward { *after } else { *before };
                 }
             }
             Edit::Rename {

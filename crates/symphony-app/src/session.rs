@@ -656,6 +656,10 @@ impl Session {
         self.doc.column(i).is_some_and(|c| c.visible)
     }
 
+    pub fn layer_locked(&self, i: usize) -> bool {
+        self.doc.column(i).is_some_and(|c| c.locked)
+    }
+
     /// Name of the drawing exposed on `layer` at `frame`.
     pub fn drawing_name(&self, layer: usize, frame: u32) -> Option<&str> {
         let id = self.doc.exposed(layer, frame)?;
@@ -2172,6 +2176,24 @@ impl Session {
         );
     }
 
+    /// Lock or unlock layer `i`, as one undo step.
+    pub fn toggle_locked(&mut self, i: usize) {
+        let Some(col) = self.doc.column(i) else {
+            return;
+        };
+        let (column, before) = (col.id, col.locked);
+        let name = if before { "Unlock layer" } else { "Lock layer" };
+        self.history.apply(
+            &mut self.doc,
+            name,
+            vec![Edit::SetLocked {
+                column,
+                before,
+                after: !before,
+            }],
+        );
+    }
+
     pub fn toggle_visible(&mut self, i: usize) {
         let Some(col) = self.doc.column(i) else {
             return;
@@ -2626,6 +2648,20 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn locking_a_layer_is_one_undo_step() {
+        let mut s = Session::new_scene();
+        assert!(!s.layer_locked(0));
+        s.toggle_locked(0);
+        assert!(s.layer_locked(0));
+        s.undo();
+        assert!(!s.layer_locked(0));
+        s.redo();
+        assert!(s.layer_locked(0));
+        s.toggle_locked(0);
+        assert!(!s.layer_locked(0));
+    }
+
     #[test]
     fn play_at_the_range_end_starts_from_the_range_start() {
         let mut s = Session::new_scene();

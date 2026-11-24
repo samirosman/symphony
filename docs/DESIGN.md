@@ -149,6 +149,7 @@ Tokens live in `crates/symphony-ui/src/theme.rs`.
 | `accent.time` | `#F0A63A` | "Light-table amber": playhead, current frame, keyframes, animate mode |
 | `state.danger` | `#E86A62` | Eraser, destructive actions, errors. Icons and markers only, not body text. |
 | `state.ok` | `#62C484` | Confirmed good states (tablet connected). Rare. |
+| `state.locked` | `#F08A82` | A locked layer's name, as Harmony shows it in red. Text: 5.2:1 on `bg.raised`, 6.3:1 on `bg.panel`. |
 | `canvas.surround` | `#464749` | Area around the stage. A neutral mid grey. |
 | `canvas.stage` | `#D4D5D7` | The empty stage: light neutral grey, not white (Tristan). Exports still render on white. |
 

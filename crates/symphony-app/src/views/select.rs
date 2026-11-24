@@ -271,6 +271,19 @@ pub fn ui(
     });
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
     let transform_tool = s.tool == Tool::Transform;
+    // Locked layers can't be picked or changed: a click goes through to
+    // the layer behind, as in Harmony.
+    let unlocked: Vec<Item> = items
+        .iter()
+        .copied()
+        .filter(|(l, ..)| !s.layer_locked(*l))
+        .collect();
+    let items = unlocked.as_slice();
+    if !transform_tool && s.layer_locked(s.selected) {
+        st.drag = None;
+        st.hover = None;
+        return;
+    }
     if transform_tool {
         follow_current_layer(s);
     }
@@ -731,6 +744,7 @@ fn transform_indices(s: &Session) -> Vec<usize> {
     s.transform_layers
         .iter()
         .filter_map(|n| s.doc.layers.iter().position(|l| l.node == *n))
+        .filter(|&i| !s.layer_locked(i))
         .collect()
 }
 
@@ -1292,6 +1306,40 @@ mod tests {
             .map(|l| (l, s.doc.exposed(l, 1).unwrap(), Affine::IDENTITY))
             .to_vec();
         (s, items)
+    }
+
+    #[test]
+    fn a_click_on_a_locked_layer_picks_the_layer_behind() {
+        let (mut session, _) = two_layers();
+        // Put a line on layer 1 over layer 0's line.
+        let mut over = session.doc.drawings[&session.doc.exposed(0, 1).unwrap()].strokes[0].clone();
+        over.id = session.doc.ids.fresh();
+        session.commit_stroke(1, 1, over);
+        let items = [1, 0]
+            .map(|l| (l, session.doc.exposed(l, 1).unwrap(), Affine::IDENTITY))
+            .to_vec();
+        session.tool = Tool::Transform;
+        let view = Affine::translate(250.0, 200.0).compose(Affine::scale(0.2, 0.2));
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(500.0, 400.0))
+            .build_ui_state(
+                move |ui, (session, state)| {
+                    let (response, painter) =
+                        ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+                    super::ui(ui, &response, &painter, session, state, view, &items);
+                },
+                (session, SelectState::default()),
+            );
+        let at = Pos2::new(340.0, 200.0);
+        let none = egui::Modifiers::NONE;
+        click(&mut h, at, none);
+        let top = transform_indices(&h.state().0);
+        assert_eq!(top.len(), 1);
+        h.state_mut().0.toggle_locked(top[0]);
+        click(&mut h, at, none);
+        let behind = transform_indices(&h.state().0);
+        assert_eq!(behind.len(), 1);
+        assert_ne!(behind, top, "the locked layer was picked");
     }
 
     #[test]
