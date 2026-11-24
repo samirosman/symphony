@@ -255,10 +255,11 @@ continues.
 - ⬜ Backdrops in the Node view
 
 ### 4.7 Deformation
-- ⬜ **Mesh Warp**. Add a non-destructive grid for a drawing or group. Show
-  draggable points in Camera view when the node is selected, with keyframes
-  for point positions. Start with a simple grid and tuck resolution controls
-  into Node Properties.
+- 🟡 **Mesh Warp**. Non-destructive grid for a drawing or group (✅ node in
+  the peg chain; Rows, Columns, (x)/(y) Axis, Width, Height, Deformation
+  Quality in Node Properties; points dragged in the Camera view with the
+  Transform tool, keyed in Animate mode; bends in the canvas and renders).
+  Still to do: Bézier handles on grid points, bending imported pictures.
 - ⬜ Bone deformer (bias, regions of influence, chains)
 - ⬜ Game Bone deformer (game export, no bias or regions)
 - ⬜ Curve deformer (Bézier chain)

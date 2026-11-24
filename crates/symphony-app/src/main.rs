@@ -770,6 +770,26 @@ impl SymphonyApp {
                 Ok("Eraser") => s.tool = Tool::Eraser,
                 _ => {}
             }
+            // SYMPHONY_SHOT_WARP: a Mesh Warp on the selected layer with
+            // its middle pulled, selected for editing.
+            if std::env::var_os("SYMPHONY_SHOT_WARP").is_some() {
+                if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
+                    let (w, h) = (s.doc.settings.width, s.doc.settings.height);
+                    views::node::insert_near(&mut s, node, views::node::mesh_warp(w, h));
+                    if let Some(id) = s.doc.graph.input(node, 0) {
+                        if let Some(n) = s.doc.graph.node_mut(id) {
+                            if let symphony_core::graph::NodeKind::MeshWarp(m) = &mut n.kind {
+                                m.points[12] = [
+                                    symphony_core::anim::Value::Constant(90.0),
+                                    symphony_core::anim::Value::Constant(-120.0),
+                                ];
+                            }
+                        }
+                        s.select_graph_node(id, false);
+                        s.fit_tool_to_context();
+                    }
+                }
+            }
             if std::env::var_os("SYMPHONY_SHOT_PAINT").is_some() {
                 s.tool = Tool::Paint;
                 if let Some(id) = s.doc.palette.swatches.get(1).map(|sw| sw.id) {

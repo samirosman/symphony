@@ -1588,7 +1588,13 @@ impl Session {
         let peg = self
             .selected_node
             .and_then(|id| self.doc.graph.node(id))
-            .is_some_and(|n| matches!(n.kind, symphony_core::graph::NodeKind::Peg(_)));
+            .is_some_and(|n| {
+                matches!(
+                    n.kind,
+                    symphony_core::graph::NodeKind::Peg(_)
+                        | symphony_core::graph::NodeKind::MeshWarp(_)
+                )
+            });
         if peg {
             ToolContext::Peg
         } else {
@@ -1624,7 +1630,7 @@ impl Session {
         }
         if !matches!(
             self.doc.graph.node(id).map(|node| &node.kind),
-            Some(NodeKind::Peg(_))
+            Some(NodeKind::Peg(_) | NodeKind::MeshWarp(_))
         ) {
             return;
         }

@@ -11,3 +11,4 @@ pub mod select;
 pub mod textured;
 pub mod timing;
 pub mod vector_cache;
+pub mod warp_edit;

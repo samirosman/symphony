@@ -118,7 +118,7 @@ impl LinkAnim {
 fn passes_through(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Peg(_) | NodeKind::Effect(_) | NodeKind::Composite
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Effect(_) | NodeKind::Composite
     )
 }
 
@@ -188,6 +188,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::Drawing { .. } => "Drawing",
         NodeKind::Peg(_) => "Peg",
+        NodeKind::MeshWarp(_) => "Mesh Warp",
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
@@ -221,9 +222,28 @@ fn effect_nodes() -> [NodeKind; 6] {
 }
 
 pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
-    [NodeKind::Peg(Default::default()), NodeKind::Composite]
-        .into_iter()
-        .chain(effect_nodes())
+    [
+        NodeKind::Peg(Default::default()),
+        mesh_warp(1920, 1080),
+        NodeKind::Composite,
+    ]
+    .into_iter()
+    .chain(effect_nodes())
+}
+
+/// A new Mesh Warp: a 4 x 4 grid over the whole stage (`w` x `h`).
+pub fn mesh_warp(w: u32, h: u32) -> NodeKind {
+    NodeKind::MeshWarp(symphony_core::warp::MeshWarp::new(
+        4, 4, 0.0, 0.0, w as f32, h as f32,
+    ))
+}
+
+/// A Mesh Warp from search or a menu, sized to this scene's stage.
+fn fit_to_stage(s: &Session, kind: NodeKind) -> NodeKind {
+    match kind {
+        NodeKind::MeshWarp(_) => mesh_warp(s.doc.settings.width, s.doc.settings.height),
+        other => other,
+    }
 }
 
 pub(super) fn node_name(node: &Node) -> &str {
@@ -235,6 +255,14 @@ pub(super) fn node_name(node: &Node) -> &str {
 }
 
 pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKind) {
+    let kind = fit_to_stage(s, kind);
+    // A Mesh Warp found by search bends the selected layer straight away.
+    if matches!(kind, NodeKind::MeshWarp(_)) {
+        if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
+            insert_near(s, node, kind);
+            return;
+        }
+    }
     // An effect found by search applies to the selected layer straight
     // away: it goes between that layer's drawing node and where its image
     // went, so typing "subtract" is enough.
@@ -338,10 +366,10 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         .unwrap_or([0.0, 0.0]);
     // (link to replace, its source, its destination) for the new node.
     let splice: Option<(Option<Link>, Option<NodeId>, Input)> = match &kind {
-        NodeKind::Peg(_)
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_)
             if matches!(
                 kind_of(target),
-                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_))
+                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_) | NodeKind::MeshWarp(_))
             ) =>
         {
             let parent = graph.input(target, 0);
@@ -377,7 +405,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         return;
     };
     let id = s.doc.graph.next_id();
-    let position = if matches!(kind, NodeKind::Peg(_)) {
+    let position = if matches!(kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_)) {
         [at[0], at[1] - (H + 30.0)]
     } else {
         [at[0], at[1] + H + 30.0]
@@ -793,7 +821,11 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                 }
                 ui.close();
             }
-            for kind in [NodeKind::Peg(Default::default()), NodeKind::Composite] {
+            for kind in [
+                NodeKind::Peg(Default::default()),
+                mesh_warp(s.doc.settings.width, s.doc.settings.height),
+                NodeKind::Composite,
+            ] {
                 if ui.button(kind_label(&kind)).clicked() {
                     add = Some(kind);
                     ui.close();
@@ -873,6 +905,42 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                     ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
                 });
             });
+        }
+        NodeKind::MeshWarp(warp) => {
+            let (mut rows, mut columns) = (warp.rows, warp.columns);
+            ui.horizontal(|ui| {
+                ui.label("Rows");
+                ui.add(egui::DragValue::new(&mut rows).range(1..=symphony_core::warp::MAX_CELLS));
+                ui.label("Columns");
+                ui.add(
+                    egui::DragValue::new(&mut columns).range(1..=symphony_core::warp::MAX_CELLS),
+                );
+            });
+            if (rows, columns) != (warp.rows, warp.columns) {
+                warp.resize(rows, columns);
+            }
+            peg_value(ui, "(x) Axis", &mut warp.x, s.frame, s.animate);
+            peg_value(ui, "(y) Axis", &mut warp.y, s.frame, s.animate);
+            peg_value(ui, "Width", &mut warp.width, s.frame, s.animate);
+            peg_value(ui, "Height", &mut warp.height, s.frame, s.animate);
+            egui::ComboBox::from_label("Deformation Quality")
+                .selected_text(warp.quality.title())
+                .show_ui(ui, |ui| {
+                    for q in symphony_core::warp::WarpQuality::ALL {
+                        ui.selectable_value(&mut warp.quality, q, q.title());
+                    }
+                });
+            ui.label("Drag the grid's points in the Camera view to bend the artwork under it.");
+            if ui
+                .button("Reset points")
+                .on_hover_text("Flatten the grid (removes the points' keys too).")
+                .clicked()
+            {
+                warp.points.fill([
+                    symphony_core::anim::Value::Constant(0.0),
+                    symphony_core::anim::Value::Constant(0.0),
+                ]);
+            }
         }
         NodeKind::Drawing { column } => {
             if let Some(source) = s.doc.xsheet.column(*column) {
@@ -1050,7 +1118,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     // Pegs apply live, so the drawing moves as you drag a value: their
     // values carry their own keys (Auto-key writes them as you edit), so
     // the node itself is what changes. One drag is one undo step.
-    if matches!(draft.node.kind, NodeKind::Peg(_))
+    if matches!(draft.node.kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_))
         && draft.node.kind != draft.initial.kind
         && draft.node.enabled == draft.initial.enabled
     {
@@ -1074,7 +1142,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     let changed =
         (draft.node != draft.initial || camera_changed) && !draft.node.name.trim().is_empty();
     let keyed = s.doc.graph.has_key(draft.id, s.frame);
-    let has_staged_controls = !matches!(draft.node.kind, NodeKind::Peg(_));
+    let has_staged_controls = !matches!(draft.node.kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_));
     ui.horizontal_wrapped(|ui| {
         if (has_staged_controls || changed)
             && ui
@@ -1183,6 +1251,24 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                 }
             }
             after.kind = NodeKind::Peg(peg);
+        }
+        if let NodeKind::MeshWarp(warp) = if delete {
+            &before.kind
+        } else {
+            &draft.node.kind
+        } {
+            let mut warp = warp.clone();
+            for value in [&mut warp.x, &mut warp.y, &mut warp.width, &mut warp.height]
+                .into_iter()
+                .chain(warp.points.iter_mut().flatten())
+            {
+                if delete {
+                    value.remove_key(s.frame);
+                } else {
+                    value.set_key(s.frame, value.at(s.frame));
+                }
+            }
+            after.kind = NodeKind::MeshWarp(warp);
         }
     }
     if let Some(fov) = draft.fov {
@@ -1637,9 +1723,10 @@ fn card_width(graph: &symphony_core::graph::Graph, id: NodeId) -> f32 {
 /// (danger) are kept for their meanings. Types beyond the table reuse a
 /// table colour shifted lighter or darker, so they read as related.
 pub fn kind_colour(kind: &NodeKind) -> egui::Color32 {
-    const TABLE: [(&str, (u8, u8, u8)); 10] = [
+    const TABLE: [(&str, (u8, u8, u8)); 11] = [
         ("Drawing", (111, 194, 168)),
         ("Peg", (186, 150, 222)),
+        ("Mesh Warp", (214, 168, 232)),
         ("Composite", (128, 182, 214)),
         ("Camera", (214, 214, 220)),
         ("Write", (168, 172, 180)),

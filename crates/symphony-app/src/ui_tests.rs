@@ -2000,3 +2000,77 @@ fn more_picture_formats_import() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A Mesh Warp bends the drawing under it in renders: a straight line
+/// with the grid's middle point pulled down comes out curved, its middle
+/// lowered and its ends where they were; the drawing itself is unchanged.
+#[test]
+fn mesh_warp_bends_the_drawing_in_renders() {
+    use symphony_core::graph::NodeKind;
+    use symphony_core::stroke::{Point, Stroke};
+    let mut s = crate::session::Session::new_scene();
+    for l in (1..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    let layer = 0;
+    let p = |x: f32| Point {
+        x,
+        y: 0.0,
+        pressure: 1.0,
+        pen: Default::default(),
+    };
+    // Clear the layer's own drawing, then one straight line across.
+    let col = s.doc.layers[layer].column;
+    let d = s.doc.make_drawing(col);
+    let did = d.id;
+    s.doc.drawings.insert(did, d);
+    s.doc.xsheet.column_mut(col).unwrap().set(1, Some(did));
+    let st = Stroke {
+        id: s.doc.ids.fresh(),
+        kind: StrokeKind::Brush,
+        art: Default::default(),
+        swatch: s.doc.palette.swatches[0].id,
+        min_width: 12.0,
+        max_width: 12.0,
+        points: vec![p(-600.0), p(600.0)],
+        tips: Default::default(),
+        texture: None,
+        shape: Vec::new(),
+    };
+    s.doc.drawings.get_mut(&did).unwrap().strokes.push(st);
+    s.frame = 1;
+    let dark_rows = |s: &crate::session::Session, x: u32| -> Vec<u32> {
+        let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+        (0..1080)
+            .filter(|&y| {
+                let p = img.get_pixel(x, y).0;
+                (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+            })
+            .collect()
+    };
+    let flat = dark_rows(&s, 960);
+    assert!(!flat.is_empty(), "the line shows");
+    let node = s.doc.layers[layer].node;
+    crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(1920, 1080));
+    let warp = s.doc.graph.input(node, 0).unwrap();
+    assert_eq!(dark_rows(&s, 960), flat, "a flat grid changes nothing");
+    // Pull the middle point (row 2, column 2 of the 4 x 4 grid) down.
+    let mut before = s.doc.graph.node(warp).unwrap().clone();
+    if let NodeKind::MeshWarp(w) = &mut before.kind {
+        w.points[2 * 5 + 2][1] = symphony_core::anim::Value::Constant(150.0);
+    }
+    *s.doc.graph.node_mut(warp).unwrap() = before;
+    let bent = dark_rows(&s, 960);
+    let shift = bent[0] as i64 - flat[0] as i64;
+    assert!(
+        (shift - 150).abs() <= 3,
+        "the middle follows the point: {shift}"
+    );
+    // Near the end (x = 400 + 960), the line hardly moves.
+    let end = dark_rows(&s, 960 + 590);
+    assert!(end
+        .first()
+        .is_some_and(|y| (*y as i64 - flat[0] as i64).abs() < 40));
+    // The drawing itself is as drawn.
+    assert_eq!(s.doc.drawings[&did].strokes[0].points.len(), 2);
+}

@@ -85,6 +85,7 @@ pub fn render_drawing_thumbnail(
         transform: Affine::IDENTITY,
         depth: 0.0,
         matte_pass: false,
+        warp: None,
     };
     paint_drawing(&mut pix, scene, frame, view, item, None);
     Some(pix)
@@ -289,6 +290,15 @@ fn paint_drawing(
     if let Some(img) = d.image {
         paint_image(pix, scene, img, m);
     }
+    // Under Mesh Warps: draw the drawing bent (pictures aren't bent).
+    let bent;
+    let (d, m) = match item.warp.as_deref() {
+        Some(warp) => {
+            bent = symphony_vector::bend::drawing(d, warp);
+            (&bent, view.compose(project).compose(warp.outer()))
+        }
+        None => (d, m),
+    };
     // Art layers back to front; within each, paint under ink.
     let moving = preview.filter(|p| p.drawing == item.drawing);
     for art in ArtLayer::STACK {

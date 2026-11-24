@@ -55,6 +55,11 @@ pub struct CanvasState {
     strokes: super::textured::Cache,
     display: camera_render::Cache,
     pub render_effects: bool,
+    /// The selected Mesh Warp's grid, being edited.
+    warp_edit: super::warp_edit::WarpEdit,
+    /// Drawings bent by Mesh Warps, by drawing: rebuilt only when the
+    /// drawing or the warp changes (key), never every frame.
+    bent: std::collections::HashMap<Id, (u64, std::sync::Arc<symphony_core::stroke::Drawing>)>,
 }
 
 impl Default for CanvasState {
@@ -75,6 +80,8 @@ impl Default for CanvasState {
             strokes: Default::default(),
             display: Default::default(),
             render_effects: true,
+            warp_edit: Default::default(),
+            bent: Default::default(),
         }
     }
 }
@@ -305,6 +312,41 @@ fn view_transform(state: &CanvasState, rect: Rect) -> Affine {
 
 fn to_pos((x, y): (f32, f32)) -> Pos2 {
     Pos2::new(x, y)
+}
+
+/// A drawing bent by its Mesh Warps, rebuilt only when the drawing (the
+/// scene version) or the warp changed. Bent strokes get their own ids per
+/// warp, so the line caches keep the unbent and bent shapes apart.
+fn bent_drawing(
+    cache: &mut std::collections::HashMap<
+        Id,
+        (u64, std::sync::Arc<symphony_core::stroke::Drawing>),
+    >,
+    version: u64,
+    d: &symphony_core::stroke::Drawing,
+    warp: &symphony_core::warp::Warp,
+) -> std::sync::Arc<symphony_core::stroke::Drawing> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    version.hash(&mut h);
+    format!("{warp:?}").hash(&mut h);
+    let key = h.finish();
+    if let Some((k, bent)) = cache.get(&d.id) {
+        if *k == key {
+            return bent.clone();
+        }
+    }
+    let mut bent = symphony_vector::bend::drawing(d, warp);
+    let tag = (key >> 1) | (1 << 63);
+    for st in &mut bent.strokes {
+        st.id = Id(st.id.0 ^ tag);
+    }
+    for f in &mut bent.fills {
+        f.id = Id(f.id.0 ^ tag);
+    }
+    let bent = std::sync::Arc::new(bent);
+    cache.insert(d.id, (key, bent.clone()));
+    bent
 }
 
 fn paint_stroke(
@@ -888,6 +930,9 @@ pub fn ui(
             .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
             .ok()
     };
+    // Drawings bent by Mesh Warps: (drawing, its warp).
+    // (drawing, its warp, stage transform for the bent copy)
+    let mut warps: Vec<(Id, std::sync::Arc<symphony_core::warp::Warp>, Affine)> = Vec::new();
     let items: Vec<select::Item> = if drawing_only {
         s.doc
             .exposed(s.selected, s.frame)
@@ -905,10 +950,11 @@ pub fn ui(
                     return None;
                 }
                 let layer = s.doc.layers.iter().position(|l| l.node == item.node)?;
-                let transform = s
-                    .doc
-                    .project_plane(s.frame, item.depth)?
-                    .compose(item.transform);
+                let plane = s.doc.project_plane(s.frame, item.depth)?;
+                let transform = plane.compose(item.transform);
+                if let Some(w) = &item.warp {
+                    warps.push((item.drawing, w.clone(), plane.compose(w.outer())));
+                }
                 Some((layer, item.drawing, transform))
             })
             .collect()
@@ -925,17 +971,30 @@ pub fn ui(
         });
     let raw_art = raw_only || show_surround;
     if raw_art {
+        state
+            .bent
+            .retain(|d, _| warps.iter().any(|(w, _, _)| w == d));
         for (_, d, m) in &items {
-            let Some(dr) = s.doc.drawings.get(d) else {
+            let Some(original) = s.doc.drawings.get(d) else {
                 continue;
             };
             let world = view.compose(*m);
-            if let Some(img) = dr.image {
+            if let Some(img) = original.image {
                 state
                     .strokes
                     .vectors
                     .paint_image(&painter, &s.doc, img, world);
             }
+            // Under a Mesh Warp: the bent copy, drawn with the warp's
+            // outer transform (on the same plane).
+            let bent_copy;
+            let (dr, world) = match warps.iter().find(|(w, _, _)| w == d) {
+                Some((_, warp, stage)) => {
+                    bent_copy = bent_drawing(&mut state.bent, s.doc.version, original, warp);
+                    (&*bent_copy, view.compose(*stage))
+                }
+                None => (original, world),
+            };
             for art in ArtLayer::STACK {
                 if drawing_only && !s.art_preview && art != s.art {
                     continue;
@@ -1059,7 +1118,9 @@ pub fn ui(
     }
     state.select.camera_space = !drawing_only;
     let navigating_now = space || s.tool == Tool::Hand;
-    if matches!(s.tool, Tool::Select | Tool::Transform) && !navigating_now {
+    let warp_busy = !navigating_now
+        && super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view);
+    if matches!(s.tool, Tool::Select | Tool::Transform) && !navigating_now && !warp_busy {
         select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
     } else {
         state.select.hover = None;

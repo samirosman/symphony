@@ -66,6 +66,9 @@ pub enum NodeKind {
         column: Id,
     },
     Peg(PegParams),
+    /// Bends the artwork under it with a grid of points (Harmony's Mesh
+    /// Warp). A position node, like a peg.
+    MeshWarp(crate::warp::MeshWarp),
     /// Stacks its inputs. Port 0 (leftmost) is in front.
     Composite,
     Effect(Effect),
@@ -397,9 +400,13 @@ pub struct RenderItem {
     pub node: NodeId,
     pub column: Id,
     pub drawing: Id,
+    /// The pegs' transform (Mesh Warps count as no change here: tools
+    /// work on the drawing as drawn).
     pub transform: Affine,
     pub depth: f32,
     pub matte_pass: bool,
+    /// Mesh Warps above the drawing that bend it, if any.
+    pub warp: Option<std::sync::Arc<crate::warp::Warp>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -431,9 +438,11 @@ impl Graph {
 
     pub fn has_key(&self, id: NodeId, frame: u32) -> bool {
         self.keys(id).is_some_and(|keys| keys.contains_key(&frame))
-            || self
-                .node(id)
-                .is_some_and(|node| matches!(&node.kind, NodeKind::Peg(peg) if peg.has_key(frame)))
+            || self.node(id).is_some_and(|node| match &node.kind {
+                NodeKind::Peg(peg) => peg.has_key(frame),
+                NodeKind::MeshWarp(warp) => warp.has_key(frame),
+                _ => false,
+            })
     }
 
     pub(crate) fn set_keys(&mut self, id: NodeId, keys: BTreeMap<u32, NodeKey>) {
@@ -538,7 +547,10 @@ impl Graph {
             return false;
         };
         let valid = match source.kind {
-            NodeKind::Peg(_) => matches!(target.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }),
+            NodeKind::Peg(_) | NodeKind::MeshWarp(_) => matches!(
+                target.kind,
+                NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Drawing { .. }
+            ),
             NodeKind::Composite
             | NodeKind::Drawing { .. }
             | NodeKind::Effect(_)
@@ -721,6 +733,10 @@ impl Graph {
                         Some(p) => self.eval_transform(p, frame, depth + 1)?,
                         None => StagePose::default(),
                     };
+                    let warp = match self.input(id, 0) {
+                        Some(p) => self.warp_chain(p, frame, depth + 1)?,
+                        None => None,
+                    };
                     out.push(RenderCommand::Drawing(RenderItem {
                         node: id,
                         column: *column,
@@ -728,12 +744,60 @@ impl Graph {
                         transform: pose.transform,
                         depth: pose.depth,
                         matte_pass,
+                        warp,
                     }));
                 }
             }
-            NodeKind::Peg(_) => {} // a peg carries no image
+            NodeKind::Peg(_) | NodeKind::MeshWarp(_) => {} // position nodes carry no image
         }
         Ok(())
+    }
+
+    /// The Mesh Warps between a drawing and the stage, from the position
+    /// node `id` above it upward; None when none of them bends anything.
+    fn warp_chain(
+        &self,
+        id: NodeId,
+        frame: u32,
+        depth: usize,
+    ) -> Result<Option<std::sync::Arc<crate::warp::Warp>>, EvalError> {
+        // The chain from the nearest node up to the root.
+        let mut chain = Vec::new();
+        let mut at = Some(id);
+        while let Some(n) = at {
+            if chain.len() + depth > MAX_DEPTH {
+                return Err(EvalError::Cycle(n));
+            }
+            chain.push(n);
+            at = self.input(n, 0);
+        }
+        let mut steps = Vec::new();
+        let mut outer = Affine::IDENTITY;
+        for &n in chain.iter().rev() {
+            let node = self.get(n, depth)?;
+            let enabled = self
+                .sample_key(n, frame)
+                .map_or(node.enabled, |key| key.enabled);
+            if !enabled {
+                continue;
+            }
+            match &node.kind {
+                NodeKind::Peg(p) => outer = outer.compose(p.transform_at(frame)),
+                NodeKind::MeshWarp(w) => {
+                    steps.push(crate::warp::WarpStep {
+                        outer,
+                        grid: w.grid_at(frame),
+                    });
+                    outer = Affine::IDENTITY;
+                }
+                _ => {}
+            }
+        }
+        let warp = crate::warp::Warp {
+            steps,
+            inner: outer,
+        };
+        Ok((!warp.steps.is_empty() && !warp.is_flat()).then(|| std::sync::Arc::new(warp)))
     }
 
     fn eval_transform(&self, id: NodeId, frame: u32, depth: usize) -> Result<StagePose, EvalError> {
