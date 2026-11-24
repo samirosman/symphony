@@ -163,7 +163,9 @@ continues.
   Existing vector imports stay editable.
 - 🟡 Eraser (vector and bitmap): brush strokes and paint lose exactly the eraser's shape (outlines, polygon difference); pencil lines cut along the centreline with Round/Flat tips; pressure size; options for all art layers, all Timeline layers and all frames (done). Still to do: Bevel tip, eraser presets, bitmap.
 - ⬜ Line, Rectangle, Ellipse and Polyline tools
-- ⬜ Text tool
+- 🟡 Text tool (✅ type in the Camera view; font, size, bold, italic and
+  alignment; the letters become vector shapes, like Harmony's text after
+  Break Apart. Still to do: re-editing committed text, Justify.)
 - 🟡 Stroke tool (invisible lines used for painting zones): invisible strokes exist (Close Gap makes them); the drawing tool is next
 - ⬜ Contour Editor (edit vector points and Béziers)
 - ⬜ Centerline Editor

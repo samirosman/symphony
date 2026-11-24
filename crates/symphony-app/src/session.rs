@@ -32,6 +32,8 @@ pub enum Tool {
     /// Reshape vector lines: push points with a soft brush, or Shift-paint
     /// to select points and move only those.
     LineEditor,
+    /// Type text; it becomes vector letter shapes in the drawing.
+    Text,
 }
 
 /// What the tools would act on.
@@ -68,11 +70,12 @@ impl PaintMode {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 12] = [
+    pub const ALL: [Tool; 13] = [
         Tool::Select,
         Tool::Transform,
         Tool::Brush,
         Tool::Line,
+        Tool::Text,
         Tool::Pencil,
         Tool::Eraser,
         Tool::Paint,
@@ -107,6 +110,7 @@ impl Tool {
             | Tool::Paint
             | Tool::CloseGap
             | Tool::LineEditor
+            | Tool::Text
             | Tool::Dropper => None,
         }
     }
@@ -421,6 +425,8 @@ pub struct Session {
     pub clipboard: Vec<Stroke>,
     /// Colour zones copied with the strokes.
     pub clipboard_fills: Vec<symphony_core::stroke::Fill>,
+    /// The Text tool's font, size, style and alignment.
+    pub text_style: crate::vector_import::TextStyle,
     /// Last action, for the status bar ("Undo Brush stroke").
     pub notice: Option<String>,
 }
@@ -518,6 +524,7 @@ impl Session {
             easy_drag: false,
             clipboard: Vec::new(),
             clipboard_fills: Vec::new(),
+            text_style: Default::default(),
             animate: true,
             notice: None,
         }
@@ -735,6 +742,64 @@ impl Session {
         };
         edits.push(Edit::AddStroke { drawing, stroke });
         self.history.apply(&mut self.doc, name, edits);
+    }
+
+    /// Add typed text to the drawing at (`layer`, `frame`) as letter
+    /// shapes (vector strokes in the current colour, on the current art
+    /// layer), with its top-left (or aligned) point at `at` in drawing
+    /// space. One undo step. Returns how many shapes it made.
+    pub fn add_text(&mut self, layer: usize, frame: u32, at: [f32; 2], text: &str) -> usize {
+        let shapes = crate::vector_import::text_shapes(text, &self.text_style);
+        if shapes.is_empty() {
+            return 0;
+        }
+        let Some(col) = self.doc.layers.get(layer).map(|l| l.column) else {
+            return 0;
+        };
+        let mut edits = Vec::new();
+        let drawing = match self.doc.exposed(layer, frame) {
+            Some(d) => d,
+            None => {
+                let d = self.doc.make_drawing(col);
+                let id = d.id;
+                edits.push(Edit::AddDrawing { drawing: d });
+                edits.push(Edit::SetCells {
+                    column: col,
+                    from: frame,
+                    before: vec![None],
+                    after: vec![Some(id)],
+                });
+                id
+            }
+        };
+        let n = shapes.len();
+        for shape in shapes {
+            let shape = shape
+                .into_iter()
+                .map(|ring| {
+                    ring.into_iter()
+                        .map(|p| [p[0] + at[0], p[1] + at[1]])
+                        .collect()
+                })
+                .collect();
+            edits.push(Edit::AddStroke {
+                drawing,
+                stroke: Stroke {
+                    id: self.doc.ids.fresh(),
+                    kind: StrokeKind::Brush,
+                    art: self.art,
+                    swatch: self.swatch,
+                    min_width: 1.0,
+                    max_width: 1.0,
+                    points: Vec::new(),
+                    tips: Default::default(),
+                    texture: None,
+                    shape,
+                },
+            });
+        }
+        self.history.apply(&mut self.doc, "Text", edits);
+        n
     }
 
     /// Erase strokes by ID from `drawing`. Repeated calls during one eraser

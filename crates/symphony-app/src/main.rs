@@ -557,6 +557,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Transform => Icon::Transform,
         Tool::Brush => Icon::Brush,
         Tool::Line => Icon::Line,
+        Tool::Text => Icon::Text,
         Tool::Pencil => Icon::Pencil,
         Tool::Eraser => Icon::Eraser,
         Tool::Paint => Icon::Paint,
@@ -574,6 +575,7 @@ fn tool_action(t: Tool) -> Action {
         Tool::Transform => Action::ToolTransform,
         Tool::Brush => Action::ToolBrush,
         Tool::Line => Action::ToolLine,
+        Tool::Text => Action::ToolText,
         Tool::Pencil => Action::ToolPencil,
         Tool::Eraser => Action::ToolEraser,
         Tool::Paint => Action::ToolPaint,
@@ -768,7 +770,15 @@ impl SymphonyApp {
                 Ok("Brush") => s.tool = Tool::Brush,
                 Ok("Pencil") => s.tool = Tool::Pencil,
                 Ok("Eraser") => s.tool = Tool::Eraser,
+                Ok("Text") => s.tool = Tool::Text,
                 _ => {}
+            }
+            // SYMPHONY_SHOT_TEXT=<words>: type them with the Text tool.
+            if let Ok(words) = std::env::var("SYMPHONY_SHOT_TEXT") {
+                s.text_style.size = 140.0;
+                s.text_style.bold = true;
+                let (layer, frame) = (s.selected, s.frame);
+                s.add_text(layer, frame, [-520.0, -380.0], &words);
             }
             // SYMPHONY_SHOT_WARP: a Mesh Warp on the selected layer with
             // its middle pulled, selected for editing.
@@ -2016,11 +2026,12 @@ impl SymphonyApp {
     }
 
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        const TOOLS: [Tool; 11] = [
+        const TOOLS: [Tool; 12] = [
             Tool::Select,
             Tool::Transform,
             Tool::Brush,
             Tool::Line,
+            Tool::Text,
             Tool::Eraser,
             Tool::LineEditor,
             Tool::Paint,

@@ -2074,3 +2074,60 @@ fn mesh_warp_bends_the_drawing_in_renders() {
     // The drawing itself is as drawn.
     assert_eq!(s.doc.drawings[&did].strokes[0].points.len(), 2);
 }
+
+/// The Text tool: click, type, ⌘↩: the letters land in the drawing as
+/// vector shapes in the current colour, on the current art layer, near
+/// where you clicked, as one undo step. Esc cancels.
+#[test]
+fn the_text_tool_types_vector_letters() {
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    h.state_mut().s.tool = Tool::Text;
+    h.run_steps(2);
+    let before = strokes(&h, layer).len();
+    let at = h.state().canvas.to_screen(-200.0, -50.0);
+    let press = |h: &mut Harness<'static, Rig>, pressed: bool| {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    };
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    press(&mut h, true);
+    h.step();
+    press(&mut h, false);
+    h.run_steps(3);
+    h.input_mut().events.push(egui::Event::Text("Hi".into()));
+    h.run_steps(2);
+    h.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.run_steps(3);
+    let after = strokes(&h, layer);
+    if after.len() == before {
+        // No fonts on this machine (headless CI): nothing to type with.
+        assert!(crate::vector_import::text_shapes("Hi", &Default::default()).is_empty());
+        return;
+    }
+    let new: Vec<_> = after[before..].to_vec();
+    assert!(new.len() >= 2, "H and i (with its dot): {}", new.len());
+    let s = &h.state().s;
+    assert!(new
+        .iter()
+        .all(|st| st.swatch == s.swatch && st.art == s.art && !st.shape.is_empty()));
+    // Near the click (the drawing's own space here is scene space).
+    let (lo, _) = symphony_vector::bounds_of(&new).unwrap();
+    assert!(
+        (lo[0] + 200.0).abs() < 30.0 && (lo[1] + 50.0).abs() < 60.0,
+        "{lo:?}"
+    );
+    h.state_mut().s.undo();
+    assert_eq!(strokes(&h, layer).len(), before, "one undo step");
+}

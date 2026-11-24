@@ -78,15 +78,7 @@ pub fn from_svg(bytes: &[u8]) -> Result<VectorArt, String> {
     // Text needs the system's fonts (slow to load: once, and only when a
     // file has text).
     if bytes.windows(5).any(|w| w == b"<text") {
-        static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
-            std::sync::OnceLock::new();
-        options.fontdb = FONTS
-            .get_or_init(|| {
-                let mut db = usvg::fontdb::Database::new();
-                db.load_system_fonts();
-                std::sync::Arc::new(db)
-            })
-            .clone();
+        options.fontdb = fonts();
     }
     let tree =
         usvg::Tree::from_data(bytes, &options).map_err(|_| "not an SVG Symphony can read")?;
@@ -264,6 +256,119 @@ fn flatten(
 /// resolved, each an outside with its holes.
 fn clean(rings: Vec<Vec<[f32; 2]>>, even_odd: bool) -> Vec<Shape> {
     symphony_vector::shape::from_polygons(rings, even_odd)
+}
+
+// ---------------------------------------------------------------------
+// Text (the Text tool)
+
+/// How text looks (the Text tool's properties).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TextStyle {
+    /// A font family installed on this computer ("" = the system's sans).
+    pub family: String,
+    /// Height in drawing units.
+    pub size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub align: TextAlign,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle {
+            family: String::new(),
+            size: 72.0,
+            bold: false,
+            italic: false,
+            align: TextAlign::Left,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+fn fonts() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        })
+        .clone()
+}
+
+/// The font families on this computer, sorted (loads them the first time:
+/// call it off the UI thread).
+pub fn font_families() -> Vec<String> {
+    let mut names: Vec<String> = fonts()
+        .faces()
+        .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+/// `text` (lines split at newlines) as letter shapes, the first line's
+/// top at y = 0, aligned at x = 0 (left edge, centre or right edge).
+pub fn text_shapes(text: &str, style: &TextStyle) -> Vec<Shape> {
+    use resvg::usvg;
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let esc = |t: &str| {
+        t.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let size = style.size.clamp(1.0, 4000.0);
+    let anchor = match style.align {
+        TextAlign::Left => "start",
+        TextAlign::Center => "middle",
+        TextAlign::Right => "end",
+    };
+    let family = if style.family.trim().is_empty() {
+        "sans-serif".to_owned()
+    } else {
+        format!("'{}', sans-serif", esc(&style.family))
+    };
+    let mut body = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        // Each line's baseline: ascent of about 0.8 of the size, lines
+        // 1.25 apart.
+        let y = size * 0.8 + i as f32 * size * 1.25;
+        body.push_str(&format!(
+            "<text x=\"0\" y=\"{y}\" xml:space=\"preserve\">{}</text>",
+            esc(line)
+        ));
+    }
+    let svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\">\
+         <g font-family=\"{family}\" font-size=\"{size}\" font-weight=\"{}\" \
+         font-style=\"{}\" text-anchor=\"{anchor}\" fill=\"#000\">{body}</g></svg>",
+        if style.bold { "bold" } else { "normal" },
+        if style.italic { "italic" } else { "normal" },
+    );
+    let options = usvg::Options {
+        fontdb: fonts(),
+        ..Default::default()
+    };
+    let Ok(tree) = usvg::Tree::from_data(svg.as_bytes(), &options) else {
+        return Vec::new();
+    };
+    let mut art = VectorArt::default();
+    let mut skipped = 0;
+    walk(tree.root(), 1.0, size / 64.0, &mut art, &mut skipped);
+    art.pieces.into_iter().map(|p| p.shape).collect()
 }
 
 // ---------------------------------------------------------------------
@@ -700,6 +805,61 @@ mod tests {
             "a 70 x 10 line"
         );
         assert!(area(&art, Part::Zone) > 6400.0);
+    }
+
+    /// Text comes out as letter shapes: more letters cover more, a bigger
+    /// size scales them, and alignment moves them about x = 0.
+    #[test]
+    fn text_becomes_letter_shapes() {
+        let style = TextStyle {
+            size: 50.0,
+            ..Default::default()
+        };
+        let one = text_shapes("I", &style);
+        if one.is_empty() {
+            eprintln!("No fonts on this machine: skipping");
+            return;
+        }
+        let total = |s: &[Shape]| -> f32 {
+            s.iter()
+                .map(|x| symphony_vector::shape::shape_area(x).abs())
+                .sum()
+        };
+        let word = text_shapes("HELLO", &style);
+        assert!(total(&word) > total(&one) * 3.0);
+        let big = text_shapes(
+            "HELLO",
+            &TextStyle {
+                size: 100.0,
+                ..style.clone()
+            },
+        );
+        assert!((total(&big) / total(&word) - 4.0).abs() < 0.5);
+        let xs = |s: &[Shape]| {
+            s.iter()
+                .flatten()
+                .flatten()
+                .map(|p| p[0])
+                .fold(f32::MIN, f32::max)
+        };
+        let right = text_shapes(
+            "HELLO",
+            &TextStyle {
+                align: TextAlign::Right,
+                ..style.clone()
+            },
+        );
+        assert!(xs(&right) <= 0.5, "right-aligned text ends at x = 0");
+        assert!(text_shapes("  ", &style).is_empty());
+        // Two lines go down the page.
+        let two = text_shapes("A\nA", &style);
+        let ys = two
+            .iter()
+            .flatten()
+            .flatten()
+            .map(|p| p[1])
+            .fold(0.0f32, f32::max);
+        assert!(ys > 90.0, "{ys}");
     }
 
     #[test]

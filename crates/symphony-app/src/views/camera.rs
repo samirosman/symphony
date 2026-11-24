@@ -57,6 +57,8 @@ pub struct CanvasState {
     pub render_effects: bool,
     /// The selected Mesh Warp's grid, being edited.
     warp_edit: super::warp_edit::WarpEdit,
+    /// Text being typed with the Text tool.
+    text: Option<TextDraft>,
     /// Drawings bent by Mesh Warps, by drawing: rebuilt only when the
     /// drawing or the warp changes (key), never every frame.
     bent: std::collections::HashMap<Id, (u64, std::sync::Arc<symphony_core::stroke::Drawing>)>,
@@ -81,6 +83,7 @@ impl Default for CanvasState {
             display: Default::default(),
             render_effects: true,
             warp_edit: Default::default(),
+            text: None,
             bent: Default::default(),
         }
     }
@@ -312,6 +315,162 @@ fn view_transform(state: &CanvasState, rect: Rect) -> Affine {
 
 fn to_pos((x, y): (f32, f32)) -> Pos2 {
     Pos2::new(x, y)
+}
+
+/// Text being typed: where (drawing space of `layer` at `frame`), what,
+/// and its letters' triangles for the live preview (by text and style).
+struct TextDraft {
+    layer: usize,
+    frame: u32,
+    at: [f32; 2],
+    text: String,
+    focus: bool,
+    preview: Option<(
+        String,
+        crate::vector_import::TextStyle,
+        std::sync::Arc<symphony_vector::Mesh>,
+    )>,
+}
+
+/// Put the typed text in the drawing (nothing if it's empty).
+fn commit_text(s: &mut Session, draft: TextDraft) {
+    if !draft.text.trim().is_empty() {
+        s.add_text(draft.layer, draft.frame, draft.at, &draft.text);
+    }
+}
+
+/// The Text tool: a click starts text there; the letters show as they'll
+/// be while you type in a small field beside them. Cmd+Enter or a click
+/// elsewhere puts them in the drawing (one undo step); Esc cancels.
+/// Switching tools, layers or frames finishes the text too.
+#[allow(clippy::too_many_arguments)]
+fn text_tool(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    s: &mut Session,
+    state: &mut CanvasState,
+    view: Affine,
+    layer_world: Affine,
+    space: bool,
+) {
+    let elsewhere = state
+        .text
+        .as_ref()
+        .is_some_and(|d| s.tool != Tool::Text || d.layer != s.selected || d.frame != s.frame);
+    if elsewhere {
+        if let Some(d) = state.text.take() {
+            commit_text(s, d);
+        }
+    }
+    if s.tool != Tool::Text {
+        return;
+    }
+    let to_screen = view.compose(layer_world);
+    if response.clicked() && !space {
+        if let Some(d) = state.text.take() {
+            commit_text(s, d);
+        } else if let (Some(p), Some(back)) = (response.interact_pointer_pos(), to_screen.inverse())
+        {
+            let (x, y) = back.apply(p.x, p.y);
+            state.text = Some(TextDraft {
+                layer: s.selected,
+                frame: s.frame,
+                at: [x, y],
+                text: String::new(),
+                focus: true,
+                preview: None,
+            });
+        }
+    }
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    let Some(draft) = state.text.as_mut() else {
+        return;
+    };
+    // The letters, as they'll be (rebuilt only when the text or style
+    // changes).
+    let stale = draft
+        .preview
+        .as_ref()
+        .is_none_or(|(t, st, _)| *t != draft.text || *st != s.text_style);
+    if stale {
+        let mut mesh = symphony_vector::Mesh::default();
+        for shape in crate::vector_import::text_shapes(&draft.text, &s.text_style) {
+            let part = symphony_vector::fill::fill_mesh(&shape, Affine::IDENTITY);
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.extend(part.vertices);
+            mesh.indices.extend(part.indices.iter().map(|i| i + base));
+        }
+        draft.preview = Some((
+            draft.text.clone(),
+            s.text_style.clone(),
+            std::sync::Arc::new(mesh),
+        ));
+    }
+    let m = to_screen.compose(Affine::translate(draft.at[0], draft.at[1]));
+    let ink = {
+        let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
+        Color32::from_rgba_unmultiplied(r, g, b, a)
+    };
+    if let Some((_, _, mesh)) = &draft.preview {
+        let mut out = egui::Mesh::default();
+        for &[x, y] in &mesh.vertices {
+            out.colored_vertex(to_pos(m.apply(x, y)), ink);
+        }
+        out.indices = mesh.indices.clone();
+        painter.add(egui::Shape::mesh(out));
+    }
+    // Where the text starts.
+    let anchor = to_pos(m.apply(0.0, 0.0));
+    let line_h = (s.text_style.size * scale_of(m)).max(8.0);
+    painter.line_segment(
+        [anchor, anchor + Vec2::new(0.0, line_h)],
+        EStroke::new(1.5, theme::ACCENT_SELECT),
+    );
+    // The typing field, just below the first line.
+    let mut done = false;
+    let mut cancel = false;
+    egui::Area::new(egui::Id::unique("text-tool-field"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor + Vec2::new(0.0, line_h + 6.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                // Taken before the field sees them (it would type a
+                // newline for Cmd+Enter).
+                ui.input_mut(|i| {
+                    done = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
+                    cancel = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                });
+                let field = ui.add(
+                    egui::TextEdit::multiline(&mut draft.text)
+                        .desired_width(240.0)
+                        .desired_rows(2)
+                        .hint_text("Type text"),
+                );
+                if draft.focus {
+                    field.request_focus();
+                    draft.focus = false;
+                }
+                ui.label(
+                    egui::RichText::new(if cfg!(target_os = "macos") {
+                        "Cmd+Enter to finish, Esc to cancel"
+                    } else {
+                        "Ctrl+Enter to finish, Esc to cancel"
+                    })
+                    .font(theme::dense())
+                    .color(theme::TEXT_SECONDARY),
+                );
+            });
+        });
+    if cancel {
+        state.text = None;
+    } else if done {
+        if let Some(d) = state.text.take() {
+            commit_text(s, d);
+        }
+    }
 }
 
 /// A drawing bent by its Mesh Warps, rebuilt only when the drawing (the
@@ -1183,6 +1342,8 @@ pub fn ui(
         }
     }
 
+    text_tool(ui, &response, &painter, s, state, view, layer_world, space);
+
     // Pen input.
     let zoom_factor = ui.ctx().zoom_factor();
     let draws = matches!(
@@ -1840,6 +2001,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
             Tool::CloseGap => Icon::CloseGap,
             Tool::Dropper => Icon::Dropper,
             Tool::LineEditor => Icon::LineEdit,
+            Tool::Text => Icon::Text,
             _ => Icon::Brush,
         }
     };

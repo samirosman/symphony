@@ -44,6 +44,77 @@ pub const MAX_TOOL_SIZE: f32 = 2000.0;
 
 /// A size slider: the track covers the recommended range, and the number
 /// box accepts anything up to `MAX_TOOL_SIZE`.
+/// The computer's font families, loaded once in the background (it can
+/// take a moment): None until ready.
+fn font_families(ctx: &egui::Context) -> Option<&'static [String]> {
+    static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if let Some(f) = FAMILIES.get() {
+        return Some(f);
+    }
+    let ctx = ctx.clone();
+    STARTED.call_once(move || {
+        std::thread::spawn(move || {
+            let _ = FAMILIES.set(crate::vector_import::font_families());
+            ctx.request_repaint();
+        });
+    });
+    None
+}
+
+fn text_controls(ui: &mut egui::Ui, s: &mut Session) {
+    use crate::vector_import::TextAlign;
+    section(ui, "Text");
+    hint(
+        ui,
+        "Click in the drawing and type. The letters become vector shapes in the current colour, \
+         on the current art layer: select, transform, recolour and erase them like any line. \
+         Cmd+Enter (Ctrl+Enter) or a click elsewhere finishes; Esc cancels.",
+    );
+    ui.add_space(4.0);
+    let style = &mut s.text_style;
+    ui.horizontal(|ui| {
+        ui.label("Font");
+        let shown = if style.family.is_empty() {
+            "System sans".to_owned()
+        } else {
+            style.family.clone()
+        };
+        egui::ComboBox::from_id_salt("text-font")
+            .selected_text(shown)
+            .height(320.0)
+            .show_ui(ui, |ui| match font_families(ui.ctx()) {
+                Some(families) => {
+                    ui.selectable_value(&mut style.family, String::new(), "System sans");
+                    for f in families {
+                        ui.selectable_value(&mut style.family, f.clone(), f);
+                    }
+                }
+                None => {
+                    ui.label("Loading fonts…");
+                }
+            });
+    });
+    size_slider(ui, "Size", &mut style.size, 600.0);
+    style.size = style.size.max(1.0);
+    ui.horizontal(|ui| {
+        widgets::checkbox(ui, &mut style.bold, "Bold");
+        widgets::checkbox(ui, &mut style.italic, "Italic");
+    });
+    ui.label("Alignment");
+    ui.horizontal(|ui| {
+        for (a, label) in [
+            (TextAlign::Left, "Left"),
+            (TextAlign::Center, "Center"),
+            (TextAlign::Right, "Right"),
+        ] {
+            if widgets::choice(ui, style.align == a, label).clicked() {
+                style.align = a;
+            }
+        }
+    });
+}
+
 fn size_slider(ui: &mut egui::Ui, label: &str, v: &mut f32, recommended: f32) {
     hint(ui, label);
     ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
@@ -650,6 +721,7 @@ fn tool_properties_body(
                 brush_controls(ui, s, presets, false);
             }
             Tool::Pencil => brush_controls(ui, s, presets, true),
+            Tool::Text => text_controls(ui, s),
             Tool::Eraser => {
                 section(ui, "Eraser");
                 let e = &mut s.eraser;
