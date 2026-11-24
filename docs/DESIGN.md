@@ -413,6 +413,7 @@ and animation state.
 | Area | Harmony profile | Symphony profile | Why |
 |---|---|---|---|
 | Redo on macOS | Control+Shift+Z (as Harmony 27 documents) | Cmd+Shift+Z | Matches every other Mac app |
+| Playback range start and end | No key (Harmony 27 lists none) | I and O | Mark in and out as video editors do |
 
 ---
 

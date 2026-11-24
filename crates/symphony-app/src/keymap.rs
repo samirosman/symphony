@@ -509,11 +509,15 @@ fn harmony(action: Action) -> Option<Binding> {
 }
 
 /// Symphony profile: Harmony's bindings unless an improvement is logged
-/// in DESIGN.md §11.1. There are none yet.
+/// in DESIGN.md §11.1.
 fn symphony(action: Action) -> Option<Binding> {
     match action {
         // Mac-standard Redo (DESIGN §11.1).
         Action::Redo => b(Key::Z, CMD_SHIFT),
+        // Mark in and out, as in video editors (DESIGN §11.1). Harmony
+        // has no playback range keys.
+        Action::SetPlayStart => b(Key::I, NONE),
+        Action::SetPlayEnd => b(Key::O, NONE),
         _ => harmony(action),
     }
 }
@@ -831,6 +835,20 @@ mod tests {
                 "{profile:?}"
             );
         }
+    }
+
+    /// DESIGN §11.1: I and O mark the playback range in the Symphony
+    /// profile only; Harmony has no keys for it.
+    #[test]
+    fn i_and_o_mark_the_playback_range_in_the_symphony_profile() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        reset(Profile::Symphony, Action::SetPlayStart);
+        reset(Profile::Symphony, Action::SetPlayEnd);
+        let s = Profile::Symphony;
+        assert_eq!(fired(s, Key::I, NONE), vec![Action::SetPlayStart]);
+        assert_eq!(fired(s, Key::O, NONE), vec![Action::SetPlayEnd]);
+        assert!(fired(Profile::Harmony, Key::I, NONE).is_empty());
+        assert!(fired(Profile::Harmony, Key::O, NONE).is_empty());
     }
 
     #[test]
