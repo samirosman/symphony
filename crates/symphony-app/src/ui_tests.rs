@@ -721,6 +721,20 @@ fn search_puts_a_blend_mode_on_the_selected_layer() {
     assert!(s.doc.graph.node(blend).is_none());
 }
 
+/// With `SYMPHONY_PERF_GATE=1` (scripts/perf.sh), fail a benchmark that
+/// took longer than `budget_ms`. Budgets are about twice today's time on
+/// an M1 under load, so only a real slowdown trips them.
+fn perf_gate(what: &str, took: std::time::Duration, budget_ms: f32) {
+    if std::env::var_os("SYMPHONY_PERF_GATE").is_none() {
+        return;
+    }
+    let ms = took.as_secs_f32() * 1000.0;
+    assert!(
+        ms <= budget_ms,
+        "{what} took {ms:.2} ms, over its {budget_ms} ms budget (ENGINEERING E6)"
+    );
+}
+
 /// Cost of the eraser on a busy page of brush strokes and fills. Not
 /// pass/fail: `cargo test --release -p symphony-app erase_cost -- --ignored --nocapture`.
 #[test]
@@ -777,7 +791,9 @@ fn erase_cost() {
         let x = -650.0 + k as f32 * 4.0;
         s.erase(d, &[([x, -390.0], 10.0), ([x + 4.0, -390.0], 10.0)]);
     }
-    println!("erase_cost: {:?} per eraser move", start.elapsed() / 60);
+    let per_move = start.elapsed() / 60;
+    println!("erase_cost: {per_move:?} per eraser move");
+    perf_gate("eraser move on plain strokes", per_move, 2.0);
     let start = std::time::Instant::now();
     for _ in 0..5 {
         std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
@@ -1111,10 +1127,13 @@ fn imported_video_becomes_a_frame_sequence() {
     let out = crate::import::stage_images_into(&[red], &cache);
     src.import_images(out.groups);
     let movie = dir.join("clip.mp4");
+    let key = symphony_render::checkpoint::fingerprint(&src.doc, 320, 180);
+    let ck = symphony_render::checkpoint::Checkpoint::folder(&movie, &key, 320, 180).unwrap();
     symphony_render::movie::export_mp4(
         &src.doc,
         &codec,
         &movie,
+        &ck,
         1,
         30,
         320,
@@ -1124,6 +1143,7 @@ fn imported_video_becomes_a_frame_sequence() {
         &|_, _| {},
     )
     .unwrap();
+    ck.finish();
 
     let got = crate::video::import_into(&movie, &codec, 24.0, [1920, 1080], &cache);
     assert!(got.problems.is_empty(), "{:?}", got.problems);
@@ -1206,11 +1226,13 @@ fn textured_erase_cost() {
         .map(|st| st.shape.iter().map(Vec::len).sum::<usize>())
         .max()
         .unwrap_or(0);
+    let per_move = start.elapsed() / moves;
     println!(
-        "textured_erase_cost: {:?} per move, worst {worst:?}; {} strokes, {verts} shape points (most in one: {most})",
-        start.elapsed() / moves,
+        "textured_erase_cost: {per_move:?} per move, worst {worst:?}; {} strokes, {verts} shape points (most in one: {most})",
         dr.strokes.len()
     );
+    perf_gate("eraser move on textured strokes", per_move, 2.0);
+    perf_gate("worst eraser move on textured strokes", worst, 12.0);
     let start = std::time::Instant::now();
     for _ in 0..3 {
         std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
@@ -1502,4 +1524,166 @@ fn vector_brushes_draw_solid_shapes_and_erase_cleanly() {
         cut.iter().all(|p| !p.shape.is_empty()),
         "each piece is its outline"
     );
+}
+
+/// Real-project stamping cost: `SYMPHONY_PERF_OPEN=<project> cargo test
+/// --release -p symphony-app real_scene_stamp_cost -- --ignored --nocapture`.
+/// Times stamping every textured stroke at a typical screen scale, one
+/// stroke at a time on one thread (the old way) vs in parallel bands.
+#[test]
+#[ignore = "needs a real project"]
+fn real_scene_stamp_cost() {
+    let Some(path) = std::env::var_os("SYMPHONY_PERF_OPEN") else {
+        return;
+    };
+    let scene = symphony_io::open(std::path::Path::new(&path)).unwrap();
+    let m = symphony_core::math::Affine::translate(1200.0, 700.0)
+        .compose(symphony_core::math::Affine::scale(0.9, 0.9));
+    let clip = [0, 0, 2600, 1500];
+    let strokes: Vec<_> = scene
+        .drawings
+        .values()
+        .flat_map(|d| d.strokes.iter())
+        .filter(|s| s.texture.is_some_and(|t| !t.vector))
+        .collect();
+    let tex = |k: Option<u64>| k.and_then(|k| scene.textures.get(&k));
+    let start = std::time::Instant::now();
+    for st in &strokes {
+        let t = st.texture.unwrap();
+        let mut s = symphony_vector::stamp::Stamper::new(t, m, clip);
+        let curved = symphony_core::stroke::Stroke {
+            points: symphony_vector::curve::spline(&st.points, 0.75 / 0.9),
+            ..(*st).clone()
+        };
+        s.extend(&curved, tex(t.tip), tex(t.grain));
+        std::hint::black_box(s.coverage());
+    }
+    let one = start.elapsed();
+    let start = std::time::Instant::now();
+    for st in &strokes {
+        let t = st.texture.unwrap();
+        std::hint::black_box(symphony_vector::stamp::rasterize(
+            st,
+            &t,
+            tex(t.tip),
+            tex(t.grain),
+            m,
+            clip,
+        ));
+    }
+    let bands = start.elapsed();
+    let start = std::time::Instant::now();
+    let reps: u32 = std::env::var("SYMPHONY_PERF_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    for _ in 0..reps {
+        std::hint::black_box(symphony_render::render_camera(&scene, 1, 1920, 1080, None));
+    }
+    println!(
+        "{} textured strokes: one thread {:?}, parallel bands {:?}; full camera render 1080p {:?}",
+        strokes.len(),
+        one,
+        bands,
+        start.elapsed() / reps
+    );
+}
+
+/// Export speed on a real project: frames one at a time (the old way) vs
+/// a PNG sequence and a GIF through the batched export. `SYMPHONY_PERF_OPEN=
+/// <project> cargo test --release -p symphony-app real_scene_export_cost --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "needs a real project"]
+fn real_scene_export_cost() {
+    let Some(path) = std::env::var_os("SYMPHONY_PERF_OPEN") else {
+        return;
+    };
+    let scene = symphony_io::open(std::path::Path::new(&path)).unwrap();
+    let last = scene.settings.length.clamp(1, 24);
+    let (w, h) = (scene.settings.width, scene.settings.height);
+    let start = std::time::Instant::now();
+    for f in 1..=last {
+        std::hint::black_box(symphony_render::render_frame(&scene, f, w, h));
+    }
+    let one = start.elapsed();
+    let dir = std::env::temp_dir().join(format!("symphony-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut times = Vec::new();
+    for (format, name) in [
+        (symphony_render::Format::PngSequence, "f.png"),
+        (symphony_render::Format::AnimatedGif, "a.gif"),
+    ] {
+        let job = symphony_render::ExportJob {
+            format,
+            path: dir.join(name),
+            first: 1,
+            last,
+            scale: 1.0,
+            codec: None,
+            movie_fps: None,
+        };
+        let start = std::time::Instant::now();
+        symphony_render::export(
+            &scene,
+            &job,
+            &std::sync::atomic::AtomicBool::new(false),
+            &|_, _| {},
+        )
+        .unwrap();
+        times.push(start.elapsed());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let start = std::time::Instant::now();
+    let key = symphony_render::checkpoint::fingerprint(&scene, w, h);
+    let hashing = start.elapsed();
+    println!(
+        "{last} frames at {w}x{h}: rendering one at a time {one:?}; PNG export {:?}, GIF export {:?}; \
+         scene fingerprint {hashing:?} ({} chars)",
+        times[0],
+        times[1],
+        key.len()
+    );
+}
+
+/// A real crash mid-export: run this, kill it (`kill -9`) part way, and
+/// run it again; the second run reports the frames it reused.
+/// `SYMPHONY_PERF_OPEN=<project> SYMPHONY_EXPORT_TO=<dir> cargo test
+/// --release -p symphony-app export_after_a_crash -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a real project and a kill"]
+fn export_after_a_crash() {
+    let (Some(path), Some(to)) = (
+        std::env::var_os("SYMPHONY_PERF_OPEN"),
+        std::env::var_os("SYMPHONY_EXPORT_TO"),
+    ) else {
+        return;
+    };
+    let scene = symphony_io::open(std::path::Path::new(&path)).unwrap();
+    let format = match std::env::var("SYMPHONY_EXPORT_FORMAT").as_deref() {
+        Ok("gif") => symphony_render::Format::AnimatedGif,
+        _ => symphony_render::Format::PngSequence,
+    };
+    let name = if format == symphony_render::Format::AnimatedGif {
+        "shot.gif"
+    } else {
+        "shot.png"
+    };
+    let job = symphony_render::ExportJob {
+        format,
+        path: std::path::Path::new(&to).join(name),
+        first: 1,
+        last: 120,
+        scale: 1.0,
+        codec: None,
+        movie_fps: None,
+    };
+    let done = symphony_render::export(
+        &scene,
+        &job,
+        &std::sync::atomic::AtomicBool::new(false),
+        &|d, t| eprintln!("frame {d} of {t}"),
+    )
+    .unwrap();
+    println!("export finished, {} frames reused", done.reused);
 }

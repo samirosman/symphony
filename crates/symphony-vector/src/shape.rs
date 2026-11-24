@@ -134,7 +134,65 @@ pub fn outline(stroke: &Stroke) -> Vec<Shape> {
     if !stroke.shape.is_empty() {
         return vec![stroke.shape.clone()];
     }
-    triangles_outline(stroke, OUTLINE_STEP)
+    // The eraser asks for the outline of every stroke near it on every
+    // move, so it's built once per shape of the stroke.
+    OUTLINES
+        .get_or_build(outline_key(stroke), || {
+            triangles_outline(stroke, OUTLINE_STEP)
+        })
+        .as_ref()
+        .clone()
+}
+
+static OUTLINES: crate::recent::Shared<Vec<Shape>> = crate::recent::Shared::new(2048);
+
+/// What a centreline stroke's outline depends on.
+fn outline_key(stroke: &Stroke) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in &stroke.points {
+        (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
+        (
+            p.pen.tilt.to_bits(),
+            p.pen.azimuth.to_bits(),
+            p.pen.rotation.to_bits(),
+        )
+            .hash(&mut h);
+    }
+    (stroke.min_width.to_bits(), stroke.max_width.to_bits()).hash(&mut h);
+    format!("{:?}{:?}", stroke.kind, stroke.tips).hash(&mut h);
+    h.finish()
+}
+
+/// Polygons merged per group before the groups are merged together.
+pub(crate) const MERGE_GROUP: usize = 128;
+
+/// Merge many polygons into outlines. A union doesn't depend on the order
+/// it's done in, so big sets merge in groups across the cores and the
+/// groups' outlines (far fewer points) are merged last.
+pub(crate) fn merge(polygons: Vec<Vec<[f32; 2]>>) -> Vec<Vec<Vec<[f32; 2]>>> {
+    use rayon::prelude::*;
+    let empty: Vec<[f32; 2]> = Vec::new();
+    let mut polygons = polygons;
+    // Merge in groups while that still shrinks the set (pieces that don't
+    // touch, like scattered stamps, never shrink: then merge them all).
+    while polygons.len() > MERGE_GROUP * 2 {
+        let parts: Vec<Vec<[f32; 2]>> = polygons
+            .par_chunks(MERGE_GROUP)
+            .flat_map_iter(|group| {
+                group
+                    .overlay(&empty, OverlayRule::Subject, FillRule::NonZero)
+                    .into_iter()
+                    .flatten()
+            })
+            .collect();
+        let shrank = parts.len() * 2 <= polygons.len();
+        polygons = parts;
+        if !shrank {
+            break;
+        }
+    }
+    polygons.overlay(&empty, OverlayRule::Subject, FillRule::NonZero)
 }
 
 /// How finely (drawing units) a stroke is sampled for its outline. The
@@ -166,8 +224,7 @@ fn triangles_outline(stroke: &Stroke, step: f32) -> Vec<Shape> {
         })
         .filter(|t| area(t).abs() > 1e-6)
         .collect();
-    let empty: Vec<[f32; 2]> = Vec::new();
-    to_f32(tris.overlay(&empty, OverlayRule::Subject, FillRule::NonZero))
+    to_f32(merge(tris))
 }
 
 /// The eraser's path as polygons. `discs` are the stamps in path order;
@@ -345,6 +402,19 @@ mod tests {
                 "{name}: fast {fast} vs fine {slow}"
             );
         }
+    }
+
+    #[test]
+    fn pieces_that_never_touch_still_merge() {
+        // Far apart squares: grouping can't shrink them (this once
+        // recursed forever).
+        let squares: Vec<Vec<[f32; 2]>> = (0..MERGE_GROUP * 5)
+            .map(|i| {
+                let x = i as f32 * 10.0;
+                vec![[x, 0.0], [x + 2.0, 0.0], [x + 2.0, 2.0], [x, 2.0]]
+            })
+            .collect();
+        assert_eq!(merge(squares).len(), MERGE_GROUP * 5);
     }
 
     #[test]

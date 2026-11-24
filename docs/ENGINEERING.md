@@ -125,6 +125,16 @@ symphony-core       document model, commands, undo, evaluation. Pure Rust.
   imports, vectorising, lip-sync analysis) runs on worker threads. Each
   job reports progress, can be cancelled, and sends its result back as a
   message, never by sharing mutable state.
+  - **Exports lose nothing** (`symphony_render::checkpoint`). Each frame
+    is kept on disk as soon as it's rendered: a PNG sequence's frames are
+    its files, and a movie or GIF keeps PNGs in `name.mp4.partial/` and
+    writes `name.mp4.part`, renamed only when whole. Every file is written
+    under a temporary name and renamed when complete. A manifest holds a
+    fingerprint of the scene, size and Symphony version. Exporting the
+    same scene to the same place after a crash, a full disk or Cancel
+    reuses every frame that reads back whole and renders the rest; a
+    changed scene starts over. Tested with a real kill
+    (`export_after_a_crash`) and in `an_interrupted_export_loses_nothing`.
 - **E5.3 Snapshots.** Background readers get an immutable snapshot of the
   document (copy-on-write, `Arc`-shared), so the user can keep working
   while an export runs.
@@ -154,6 +164,81 @@ Measured on a mid-range laptop at 60 Hz. Breaking a budget is a bug.
 | Save | Never blocks the UI (snapshot, then write in the background) |
 
 A CI benchmark tracks these once the renderer exists.
+
+### E6.1 Rules that keep it smooth
+
+Every feature follows these. A change that breaks one needs a written
+reason in its commit.
+
+- **The UI thread only paints.** Anything that can take over about 2 ms
+  (stamping, tracing, decoding, rendering, file work) runs on a worker
+  thread. The canvas shows a cheap stand-in until the result arrives:
+  the last image, a low-resolution preview, or a faint plain line.
+  Nothing waits on a result inside a frame.
+- **Small synchronous budget.** A frame may do at most a few
+  milliseconds of heavy work itself (`SYNC_BUDGET` in textured.rs), so
+  small strokes appear at once. Everything past the budget queues.
+- **Use every core for big jobs.** Heavy pixel work splits across cores
+  with rayon:
+  - one big stroke stamps in parallel horizontal bands;
+  - a drawing's textured strokes stamp together;
+  - the result must be byte-for-byte what one thread would make. A test
+    checks it (`parallel_bands_match_one_pass_exactly`);
+  - big outline merges (vector brushes, stroke outlines) merge in groups
+    across the cores, then merge the groups (`shape::merge`; a union
+    doesn't depend on order);
+  - the eraser works out each stroke under it in parallel;
+  - export renders a batch of frames at once and prepares them (GIF
+    colours and compression, MP4 colour conversion) ahead of the writer.
+  Spread work only when there is enough of it: one small job runs on
+  the calling thread, since waking the other cores costs more.
+- **Never rebuild geometry each frame.** Tessellated meshes, stamped
+  images and traced outlines are cached by content key. A frame that
+  re-tessellates a stroke it drew last frame is a bug. Stand-ins are
+  cached too. Outlines that several parts need (canvas, eraser, export)
+  live in one shared cache (`symphony_vector::recent`), so each is built
+  once. The test `an_unchanged_frame_rebuilds_nothing` counts the work
+  a redraw does (`Cache::work`, `VectorMeshes::built`) and fails if
+  it's more than zero; add new kinds of cached work to those counters.
+- **Cancel stale work.** A job whose stroke changed since it was queued
+  is dropped, not finished.
+- **Measure on real projects.** Synthetic scenes miss real problems. The
+  first real scene showed one frame in three janking, while the
+  generated heavy scene was smooth.
+
+### E6.2 Measuring
+
+Set these environment variables on a release build:
+
+| Variable | Effect |
+|---|---|
+| `SYMPHONY_PERF=1` | Per-second timing of frame parts, GPU paint stages, and slow paints with their biggest mesh |
+| `SYMPHONY_PERF_SECONDS=n` | Quit after n seconds and print CPU and between-frame percentiles and the jank count |
+| `SYMPHONY_PERF_SPIN=1` | Redraw every frame |
+| `SYMPHONY_PERF_OPEN=<project>` | Open a project on start |
+| `SYMPHONY_PERF_SCENE=heavy` or `effects` | Start on a generated heavy scene |
+| `SYMPHONY_PERF_VIEW=<tab>` | Bring a view to the front |
+| `SYMPHONY_PERF_PLAY=1` | Start playing |
+| `SYMPHONY_PERF_NAV=zoom` or `pan` | Keep navigating |
+
+Example:
+
+```
+SYMPHONY_PERF_SECONDS=5 SYMPHONY_PERF_SPIN=1 SYMPHONY_PERF_OPEN=My.symphony ./target/release/symphony
+```
+
+"Between frames" is what smoothness feels like. Any frame over 16.7 ms
+counts as a jank. It includes waiting for the GPU and the display, so
+a busy GPU (training running on the same Mac) adds janks the app didn't
+cause: compare against the previous commit on the same machine state.
+
+**Timing checks.** `scripts/perf.sh` runs the release-build benchmarks
+with `SYMPHONY_PERF_GATE=1`, and they fail past their budgets (about
+twice today's time): eraser moves, the worst eraser move, and a long
+vector-brush outline. Run it before merging work on drawing, erasing,
+stamping or export. More benchmarks, not gated (they need a real
+project in `SYMPHONY_PERF_OPEN`): `real_scene_stamp_cost` and
+`real_scene_export_cost`.
 
 ---
 

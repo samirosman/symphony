@@ -3688,6 +3688,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
 name = "rayon-core"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4600,6 +4610,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "openh264",
+ "rayon",
  "resvg",
  "rfd",
  "serde",
@@ -4712,9 +4723,12 @@ name = "symphony-render"
 version = "0.1.0-preview.1"
 dependencies = [
  "exr",
+ "gif",
  "image",
  "mp4",
  "openh264",
+ "rayon",
+ "serde_json",
  "symphony-core",
  "symphony-vector",
  "tiny-skia",
@@ -4734,6 +4748,7 @@ version = "0.1.0-preview.1"
 dependencies = [
  "earcutr",
  "i_overlay",
+ "rayon",
  "symphony-core",
 ]
 

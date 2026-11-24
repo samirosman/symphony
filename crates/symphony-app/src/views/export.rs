@@ -16,7 +16,7 @@ use crate::session::Session;
 
 enum Msg {
     Progress(u32, u32),
-    Done(Result<PathBuf, String>),
+    Done(Result<(PathBuf, u32), String>),
 }
 
 struct Running {
@@ -35,7 +35,8 @@ pub struct ExportDialog {
     scale: f32,
     movie_fps: Option<f32>,
     running: Option<Running>,
-    result: Option<Result<PathBuf, String>>,
+    /// The output and how many frames came from an unfinished export.
+    result: Option<Result<(PathBuf, u32), String>>,
     /// "Download codec and export": export as soon as the codec arrives.
     export_when_ready: bool,
 }
@@ -141,7 +142,7 @@ impl ExportDialog {
                 let _ = tx.send(Msg::Progress(d, t));
                 ctx.request_repaint();
             };
-            let r = symphony_render::export(&scene, &job, &flag, &report).map(|_| path);
+            let r = symphony_render::export(&scene, &job, &flag, &report).map(|d| (path, d.reused));
             let _ = tx.send(Msg::Done(r));
             ctx.request_repaint();
         });
@@ -276,8 +277,15 @@ impl ExportDialog {
                     }
                 } else {
                     match &self.result {
-                        Some(Ok(p)) => {
+                        Some(Ok((p, 0))) => {
                             ui.label(format!("Exported to {}", p.display()));
+                        }
+                        Some(Ok((p, reused))) => {
+                            ui.label(format!(
+                                "Exported to {}. {reused} frames were already done by an \
+                                 earlier export that didn't finish, so they weren't rendered again.",
+                                p.display()
+                            ));
                         }
                         Some(Err(e)) => {
                             ui.label(e.as_str());
@@ -319,6 +327,14 @@ impl ExportDialog {
                             });
                         }
                     }
+                    ui.label(
+                        egui::RichText::new(
+                            "Each frame is saved as soon as it's done. If the export stops (a crash, \
+                             a full disk, Cancel), export again to the same place to continue.",
+                        )
+                        .font(theme::dense())
+                        .color(theme::TEXT_SECONDARY),
+                    );
                     let label = if needs_codec { "Download codec and export" } else { "Export" };
                     let ready = self.path.is_some() && !downloading && !self.export_when_ready;
                     if symphony_ui::widgets::primary_button(ui, label, ready)

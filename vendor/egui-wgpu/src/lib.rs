@@ -556,3 +556,88 @@ pub fn parse_vendor_id(vendor_id: u32) -> &'static str {
         _ => "Unknown",
     }
 }
+
+
+/// Symphony: per-second painting stats for SYMPHONY_PERF=1 (upload, encode,
+/// total paint time, and vertices/indices sent to the GPU each frame).
+pub fn perf_frame(
+    upload: std::time::Duration,
+    encode: std::time::Duration,
+    total: std::time::Duration,
+    vertices: usize,
+    indices: usize,
+) {
+    use std::sync::Mutex;
+    type Acc = (web_time::Instant, u32, f32, f32, f32, f32, usize, usize);
+    static ACC: Mutex<Option<Acc>> = Mutex::new(None);
+    let Ok(mut g) = ACC.lock() else { return };
+    let a = g.get_or_insert((web_time::Instant::now(), 0, 0.0, 0.0, 0.0, 0.0, 0, 0));
+    a.1 += 1;
+    a.2 += upload.as_secs_f32() * 1000.0;
+    a.3 += encode.as_secs_f32() * 1000.0;
+    a.4 += total.as_secs_f32() * 1000.0;
+    a.5 = a.5.max(total.as_secs_f32() * 1000.0);
+    a.6 = a.6.max(vertices);
+    a.7 = a.7.max(indices);
+    if a.0.elapsed().as_secs_f32() >= 1.0 {
+        let n = a.1.max(1) as f32;
+        eprintln!(
+            "paint: upload {:.2} ms, encode {:.2} ms, paint total {:.2} ms (worst {:.2}), up to {} vertices / {} indices",
+            a.2 / n,
+            a.3 / n,
+            a.4 / n,
+            a.5,
+            a.6,
+            a.7
+        );
+        *g = None;
+    }
+}
+
+/// Symphony: time spent waiting for the next drawable (GPU or display busy).
+pub fn perf_wait(wait: std::time::Duration) {
+    use std::sync::Mutex;
+    static ACC: Mutex<Option<(web_time::Instant, u32, f32, f32)>> = Mutex::new(None);
+    let Ok(mut g) = ACC.lock() else { return };
+    let a = g.get_or_insert((web_time::Instant::now(), 0, 0.0, 0.0));
+    let ms = wait.as_secs_f32() * 1000.0;
+    a.1 += 1;
+    a.2 += ms;
+    a.3 = a.3.max(ms);
+    if a.0.elapsed().as_secs_f32() >= 1.0 {
+        if std::env::var_os("SYMPHONY_PERF").is_some() {
+            eprintln!("wait for drawable: avg {:.2} ms, worst {:.2} ms", a.2 / a.1.max(1) as f32, a.3);
+        }
+        *g = None;
+    }
+}
+
+static UI_END: std::sync::Mutex<Option<web_time::Instant>> = std::sync::Mutex::new(None);
+
+/// Symphony: the app's frame code finished (to time what happens between
+/// it and painting: egui's tessellation).
+pub fn perf_ui_end() {
+    if let Ok(mut g) = UI_END.lock() {
+        *g = Some(web_time::Instant::now());
+    }
+}
+
+/// Symphony: time from the app's frame code ending to painting starting.
+pub fn perf_since_ui_end() -> Option<std::time::Duration> {
+    UI_END.lock().ok()?.map(|t| t.elapsed())
+}
+
+static PAINT_END: std::sync::Mutex<Option<web_time::Instant>> = std::sync::Mutex::new(None);
+
+/// Symphony: painting finished.
+pub fn perf_paint_end() {
+    if let Ok(mut g) = PAINT_END.lock() {
+        *g = Some(web_time::Instant::now());
+    }
+}
+
+/// Symphony: time from the last paint ending to now (the next frame's
+/// code starting): event handling, accessibility, platform output.
+pub fn perf_since_paint_end() -> Option<std::time::Duration> {
+    PAINT_END.lock().ok()?.map(|t| t.elapsed())
+}

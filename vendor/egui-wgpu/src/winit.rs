@@ -538,6 +538,30 @@ impl Painter {
 
         let capture = !capture_data.is_empty();
         let mut vsync_sec = 0.0;
+        // Symphony: SYMPHONY_PERF=1 times each stage of painting a frame.
+        let perf = std::env::var_os("SYMPHONY_PERF").is_some();
+        let t_start = web_time::Instant::now();
+        if perf {
+            if let Some(gap) = crate::perf_since_ui_end() {
+                static ACC: std::sync::Mutex<Option<(web_time::Instant, u32, f32, f32)>> =
+                    std::sync::Mutex::new(None);
+                if let Ok(mut g) = ACC.lock() {
+                    let a = g.get_or_insert((web_time::Instant::now(), 0, 0.0, 0.0));
+                    let ms = gap.as_secs_f32() * 1000.0;
+                    a.1 += 1;
+                    a.2 += ms;
+                    a.3 = a.3.max(ms);
+                    if a.0.elapsed().as_secs_f32() >= 1.0 {
+                        eprintln!(
+                            "between frame code and paint (tessellation): avg {:.2} ms, worst {:.2} ms",
+                            a.2 / a.1.max(1) as f32,
+                            a.3
+                        );
+                        *g = None;
+                    }
+                }
+            }
+        }
 
         // If the previous frame produced `CurrentSurfaceTexture::Lost`, the action match
         // below set `needs_recreate`. Recreate the surface now, before re-borrowing
@@ -623,20 +647,24 @@ impl Painter {
             )
         };
 
+        let t_uploaded = web_time::Instant::now();
         if surface_state.needs_reconfigure {
             Self::configure_surface(surface_state, render_state, &self.config.surface);
             surface_state.needs_reconfigure = false;
         }
 
+        let t_before_drawable = web_time::Instant::now();
         let output_frame = {
             profiling::scope!("get_current_texture");
             // This is what vsync-waiting happens on my Mac.
             let start = web_time::Instant::now();
             let output_frame = surface_state.surface.get_current_texture();
             vsync_sec += start.elapsed().as_secs_f32();
+            crate::perf_wait(start.elapsed());
             output_frame
         };
 
+        let t_drawable = web_time::Instant::now();
         // `None` when there is no frame to present to. A capture is rendered to its own
         // texture and copied back to the cpu, so it is served even then — that is how a hidden
         // window, which the compositor gives no surface texture, is screenshotted at all.
@@ -806,6 +834,7 @@ impl Painter {
             }
         }
 
+        let t_encoded = web_time::Instant::now();
         let encoded = {
             profiling::scope!("CommandEncoder::finish");
             encoder.finish()
@@ -822,6 +851,7 @@ impl Painter {
             vsync_sec += start.elapsed().as_secs_f32();
         };
 
+        let t_submitted = web_time::Instant::now();
         // Ensure that the queue guard does not do unnecessary work when dropped
         render_queue_guard.commands_submitted = true;
 
@@ -850,6 +880,50 @@ impl Painter {
             let start = web_time::Instant::now();
             render_state.queue.present(output_frame);
             vsync_sec += start.elapsed().as_secs_f32();
+        }
+        if perf {
+            crate::perf_paint_end();
+            let (mut vertices, mut indices) = (0usize, 0usize);
+            let mut biggest = (0usize, egui::TextureId::default());
+            let mut biggest_clip = egui::Rect::NOTHING;
+            for p in clipped_primitives {
+                if let epaint::Primitive::Mesh(m) = &p.primitive {
+                    vertices += m.vertices.len();
+                    indices += m.indices.len();
+                    if m.vertices.len() > biggest.0 {
+                        biggest = (m.vertices.len(), m.texture_id);
+                        biggest_clip = p.clip_rect;
+                    }
+                }
+            }
+            let total_ms = t_start.elapsed().as_secs_f32() * 1000.0;
+            if total_ms > 12.0 {
+                let ms = |a: web_time::Instant, b: web_time::Instant| b.duration_since(a).as_secs_f32() * 1000.0;
+                eprintln!(
+                    "  stages: upload {:.1}, drawable {:.1}, record {:.1}, submit {:.1}, present {:.1} ms",
+                    ms(t_start, t_uploaded),
+                    ms(t_before_drawable, t_drawable),
+                    ms(t_drawable, t_encoded),
+                    ms(t_encoded, t_submitted),
+                    ms(t_submitted, web_time::Instant::now()),
+                );
+                eprintln!(
+                    "slow paint {total_ms:.1} ms: {} primitives, {} backdrop blurs, {vertices} vertices, biggest mesh {} ({:?}) clipped to {:?}, {} texture updates",
+                    clipped_primitives.len(),
+                    backdrop_marks.len(),
+                    biggest.0,
+                    biggest.1,
+                    biggest_clip,
+                    textures_delta.set.len()
+                );
+            }
+            crate::perf_frame(
+                t_uploaded.duration_since(t_start),
+                t_encoded.duration_since(t_uploaded),
+                t_start.elapsed(),
+                vertices,
+                indices,
+            );
         }
 
         vsync_sec

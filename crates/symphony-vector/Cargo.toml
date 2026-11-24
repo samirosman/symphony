@@ -8,4 +8,6 @@ license.workspace = true
 [dependencies]
 earcutr = "0.5.0"
 i_overlay = "9.2.0"
+# Stamping big textured strokes in parallel bands.
+rayon = "1"
 symphony-core = { path = "../symphony-core" }

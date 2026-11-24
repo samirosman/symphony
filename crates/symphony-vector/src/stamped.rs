@@ -186,8 +186,52 @@ pub fn stamped_outline(stroke: &Stroke, tex: &StrokeTexture, tip: Option<&Textur
     if polygons.is_empty() {
         return Vec::new();
     }
-    let empty: Vec<[f32; 2]> = Vec::new();
-    crate::shape::tidy(polygons.overlay(&empty, OverlayRule::Subject, FillRule::NonZero))
+    crate::shape::tidy(crate::shape::merge(polygons))
+}
+
+/// Recently built vector-brush outlines by content, shared by the canvas,
+/// the eraser and export so a stroke's outline is built once.
+static OUTLINES: crate::recent::Shared<Vec<Shape>> = crate::recent::Shared::new(2048);
+
+/// What a vector-brush stroke's stamped outline depends on.
+pub fn outline_key(stroke: &Stroke, tex: &StrokeTexture) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in &stroke.points {
+        (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
+        (
+            p.pen.tilt.to_bits(),
+            p.pen.azimuth.to_bits(),
+            p.pen.rotation.to_bits(),
+        )
+            .hash(&mut h);
+    }
+    (
+        stroke.min_width.to_bits(),
+        stroke.max_width.to_bits(),
+        // The stroke's random seed (scatter, jitter).
+        stroke.id.0,
+    )
+        .hash(&mut h);
+    // The tip is named by its texture key in here.
+    format!("{tex:?}").hash(&mut h);
+    h.finish()
+}
+
+/// A stroke's stamped outline if it was built lately (never builds it).
+pub fn cached_outline(key: u64) -> Option<Arc<Vec<Shape>>> {
+    OUTLINES.get(key)
+}
+
+/// The stroke's stamped outline, built once and then shared.
+pub fn shared_outline(
+    stroke: &Stroke,
+    tex: &StrokeTexture,
+    tip: Option<&Texture>,
+) -> Arc<Vec<Shape>> {
+    OUTLINES.get_or_build(outline_key(stroke, tex), || {
+        stamped_outline(stroke, tex, tip)
+    })
 }
 
 /// What a vector-brush stroke covers: its merged stamps, or once the
@@ -200,7 +244,24 @@ pub fn vector_brush_shapes(
     if !stroke.shape.is_empty() {
         return vec![stroke.shape.clone()];
     }
-    stamped_outline(stroke, tex, tip)
+    shared_outline(stroke, tex, tip).as_ref().clone()
+}
+
+/// About how many stamps a vector-brush stroke places (to decide whether
+/// building its outline can be done right away).
+pub fn estimated_stamps(stroke: &Stroke, tex: &StrokeTexture) -> f32 {
+    let length: f32 = stroke
+        .points
+        .windows(2)
+        .map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y))
+        .sum();
+    let dy = tex.dynamics;
+    let spacing = if dy.roundness > 0.0 || dy.roundness_pressure || dy.roundness_tilt {
+        tex.spacing.clamp(0.01, FLAT_SHAPE_SPACING)
+    } else {
+        tex.spacing.max(MIN_SHAPE_SPACING)
+    };
+    length / (spacing * stroke.min_width.max(stroke.max_width * 0.25).max(0.5))
 }
 
 #[cfg(test)]
@@ -255,14 +316,79 @@ mod tests {
             spacing: 0.1,
             ..Default::default()
         };
+        let _ = stamped_outline(&s, &tex, None);
         let t = std::time::Instant::now();
         let shapes = stamped_outline(&s, &tex, None);
+        let grouped = t.elapsed();
+        let tip = tip_outline(None);
+        let mut wide = tex;
+        wide.spacing = MIN_SHAPE_SPACING;
+        let polygons: Vec<Vec<[f32; 2]>> = dabs(&s, &wide)
+            .iter()
+            .flat_map(|d| place(&tip, d))
+            .collect();
+        let n = polygons.len();
+        let empty: Vec<[f32; 2]> = Vec::new();
+        let t = std::time::Instant::now();
+        let _ = polygons.overlay(&empty, OverlayRule::Subject, FillRule::NonZero);
         println!(
-            "stamped_cost: {:?}, {} dabs, {} shapes",
+            "stamped_cost: {grouped:?} (one merge {:?}), {n} stamps, {} shapes",
             t.elapsed(),
-            dabs(&s, &tex).len(),
             shapes.len()
         );
+        // scripts/perf.sh: about twice today's time under load.
+        if std::env::var_os("SYMPHONY_PERF_GATE").is_some() {
+            let ms = grouped.as_secs_f32() * 1000.0;
+            assert!(ms < 12.0, "a long vector-brush outline took {ms:.1} ms");
+        }
+    }
+
+    /// Merging in parallel groups covers the same area as one merge.
+    #[test]
+    fn grouped_union_matches_one_merge() {
+        let mut s = stroke(4.0);
+        s.points = (0..300)
+            .map(|i| Point {
+                x: i as f32 * 2.0,
+                y: (i as f32 * 0.07).sin() * 40.0,
+                pressure: 1.0,
+                pen: Default::default(),
+            })
+            .collect();
+        let tex = StrokeTexture {
+            spacing: 0.05,
+            ..Default::default()
+        };
+        let tip = tip_outline(None);
+        let polygons: Vec<Vec<[f32; 2]>> =
+            dabs(&s, &tex).iter().flat_map(|d| place(&tip, d)).collect();
+        assert!(
+            polygons.len() > crate::shape::MERGE_GROUP * 2,
+            "{}",
+            polygons.len()
+        );
+        let empty: Vec<[f32; 2]> = Vec::new();
+        let one =
+            crate::shape::tidy(polygons.overlay(&empty, OverlayRule::Subject, FillRule::NonZero));
+        let grouped = crate::shape::tidy(crate::shape::merge(polygons));
+        let (a, b) = (area(&one), area(&grouped));
+        assert!((a - b).abs() < a * 1e-3, "{a} vs {b}");
+        assert_eq!(one.len(), grouped.len());
+    }
+
+    /// A built outline is shared, not built again.
+    #[test]
+    fn outlines_are_built_once() {
+        let tex = StrokeTexture {
+            spacing: 0.2,
+            ..Default::default()
+        };
+        let mut s = stroke(6.0);
+        s.id = Id(987_654);
+        let key = outline_key(&s, &tex);
+        let first = shared_outline(&s, &tex, None);
+        assert!(cached_outline(key).is_some_and(|c| Arc::ptr_eq(&c, &first)));
+        assert!(Arc::ptr_eq(&shared_outline(&s, &tex, None), &first));
     }
 
     /// A round tip stamped densely is a capsule: about width x length plus

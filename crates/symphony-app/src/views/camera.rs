@@ -201,6 +201,18 @@ fn line_points(d: &LineDraft, step: f32) -> Vec<Point> {
 }
 
 impl CanvasState {
+    /// Performance runs (SYMPHONY_PERF_NAV): keep zooming in and out, or
+    /// panning around, as an artist navigating would.
+    pub fn perf_navigate(&mut self, t: f32, how: &str) {
+        match how {
+            "zoom" => {
+                self.zoom = (self.zoom * (1.0 + 0.025 * (t * 1.2).cos())).clamp(MIN_ZOOM, MAX_ZOOM)
+            }
+            "pan" => self.pan += Vec2::new((t * 0.9).cos(), (t * 0.7).sin()) * 6.0,
+            _ => {}
+        }
+    }
+
     /// Where scene point (`x`, `y`) was on screen last frame (UI tests).
     #[cfg(test)]
     pub fn to_screen(&self, x: f32, y: f32) -> Pos2 {
