@@ -371,8 +371,12 @@ and animation state.
 
 ## 9. Motion
 
-- **D9.1 No decorative animation.** Motion only answers an action, such as
-  a panel opening or a drop target appearing, and lasts 240 ms or less.
+- **D9.1 Make the interface feel interactive.** Use small animations
+  to give actions a satisfying response. A node connector can follow
+  a drag, acknowledge a valid connection, and settle when it snaps
+  into place. Tabs, toggles, and docking targets can respond just as
+  deliberately. Keep motion close to the interaction and let it settle
+  when the action ends. Brief transitions last 240 ms or less.
 - **D9.4 One motion per kind of action** (`symphony_ui::motion`), never
   written ad hoc, so the same action always moves the same way:
   - **Appear** (140 ms, ease-out): something opening. A plain fade: it
@@ -387,8 +391,11 @@ and animation state.
     in place, like a docked view, a snapped divider or a dropped item.
 - **D9.2 Motion never delays input.** An animation in progress never
   holds back a click or a stroke.
-- **D9.3** Respect the OS "reduce motion" setting, which turns all UI
-  motion off.
+- **D9.3 Make interface motion optional.** Respect Preferences →
+  Interface → Interface effects, the interface animation setting, and
+  the OS reduce-motion setting. When motion is off, show the same
+  feedback and final state immediately using static cues. An active
+  connector or valid drop target remains identifiable without animation.
 
 ---
 
@@ -516,6 +523,8 @@ finished.
       labels, links, selection, keyboard focus, and disabled controls are
       distinguishable (D6.8–D6.9).
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
+- [ ] Small animations respond to interactions. Check the same feedback
+      with Interface effects and motion disabled (D9.1–D9.3).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
 - [ ] Waits follow §17: acknowledged at once, spinner past 150 ms, words and progress past 1 s, Cancel past 3 s.
 - [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§16).
@@ -571,7 +580,7 @@ happening and roughly how long is left.
   become a static "Working" label with pulsing removed. Progress bars
   still fill (D9.3).
 - **D17.10 Motion here is allowed.** Loading indicators are the one
-  continuous motion in the app (an exception to D9.1), because they
+  continuous motion while waiting, because they
   answer the user's action and show it's still alive.
 - **D17.11 Make startup useful in stages.** Enable Create and Open
   as soon as the Welcome screen can accept input. Use the time an artist
