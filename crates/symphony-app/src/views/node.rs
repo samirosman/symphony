@@ -284,6 +284,109 @@ fn insert_after_selected_layer(s: &mut Session, state: &mut NodeViewState, kind:
     true
 }
 
+/// Add a node next to `target` in the nearest place in the hierarchy that
+/// fits, in one undo step: a peg becomes the target's new parent (between
+/// it and its old one); an effect or composite goes after the drawing the
+/// target leads to (between it and where its image went). Anything else,
+/// or a target with no such place, is added unconnected beside it.
+pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
+    let graph = &s.doc.graph;
+    let kind_of = |id: NodeId| graph.node(id).map(|n| n.kind.clone());
+    let at = s
+        .doc
+        .node_positions
+        .get(&target)
+        .copied()
+        .unwrap_or([0.0, 0.0]);
+    // (link to replace, its source, its destination) for the new node.
+    let splice: Option<(Option<Link>, Option<NodeId>, Input)> = match &kind {
+        NodeKind::Peg(_)
+            if matches!(
+                kind_of(target),
+                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_))
+            ) =>
+        {
+            let parent = graph.input(target, 0);
+            let old = parent.map(|from| Link {
+                from,
+                to: target,
+                port: 0,
+            });
+            Some((old, parent, (target, 0)))
+        }
+        NodeKind::Effect(_) | NodeKind::Composite => {
+            // From a peg, go down to the drawing it carries.
+            let mut src = target;
+            let mut guard = 0;
+            while matches!(kind_of(src), Some(NodeKind::Peg(_))) && guard < 32 {
+                guard += 1;
+                match graph.links().iter().find(|l| l.from == src && l.port == 0) {
+                    Some(l) => src = l.to,
+                    None => break,
+                }
+            }
+            graph
+                .links()
+                .iter()
+                .find(|l| l.from == src)
+                .copied()
+                .map(|old| (Some(old), Some(src), (old.to, old.port)))
+        }
+        _ => None,
+    };
+    let Some((old, from, to)) = splice else {
+        add_node(s, kind, [at[0] + W + 30.0, at[1]]);
+        return;
+    };
+    let id = s.doc.graph.next_id();
+    let position = if matches!(kind, NodeKind::Peg(_)) {
+        [at[0], at[1] - (H + 30.0)]
+    } else {
+        [at[0], at[1] + H + 30.0]
+    };
+    let before = s.doc.graph.links().to_vec();
+    let mut after: Vec<Link> = before
+        .iter()
+        .filter(|l| Some(**l) != old && (l.to, l.port) != to)
+        .copied()
+        .collect();
+    if let Some(from) = from {
+        after.push(Link {
+            from,
+            to: id,
+            port: 0,
+        });
+    }
+    after.push(Link {
+        from: id,
+        to: to.0,
+        port: to.1,
+    });
+    let label = kind_label(&kind);
+    let was_custom = s.doc.custom_wiring;
+    s.history.apply(
+        &mut s.doc,
+        "Add node",
+        vec![
+            Edit::AddNode {
+                id,
+                node: Node {
+                    name: label.into(),
+                    kind,
+                    enabled: true,
+                },
+                position,
+            },
+            Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            },
+        ],
+    );
+    s.select_graph_node(id, true);
+}
+
 fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
     let id = s.doc.graph.next_id();
     s.history.apply(
