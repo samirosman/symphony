@@ -372,6 +372,74 @@ pub fn inspector(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) 
     }
 }
 
+/// How far (points) a lifted cable must be pulled from its input before
+/// letting go disconnects it.
+const SNAP_BACK: f32 = 56.0;
+
+/// Connect `source` to `input`, keeping connections where it can rather
+/// than silently dropping them:
+/// - an input that's already used, on a node with a free input that fits
+///   (a Composite's spare port), takes the free one instead;
+/// - moving a cable onto a used input swaps: the cable that was there
+///   moves to the input this one came from.
+///
+/// Otherwise it replaces the connection, as before.
+fn connect_smart(
+    s: &mut Session,
+    source: NodeId,
+    input: Input,
+    old_input: Option<Input>,
+    all_inputs: &[Input],
+) {
+    let graph = &s.doc.graph;
+    let taken_by = graph.input(input.0, input.1).filter(|&from| from != source);
+    let Some(previous) = taken_by else {
+        return edit_link(s, Some(source), input, old_input);
+    };
+    // A free input on the same node that fits: use it, keep the old one.
+    if old_input.is_none() {
+        if let Some(&free) = all_inputs.iter().find(|&&(node, port)| {
+            node == input.0
+                && graph.input(node, port).is_none()
+                && graph.can_connect_to(source, node, port)
+        }) {
+            return edit_link(s, Some(source), free, None);
+        }
+    }
+    // Moving a cable onto a used input: swap them.
+    if let Some(from_input) = old_input {
+        if graph.can_connect_to(source, input.0, input.1)
+            && graph.can_connect_to(previous, from_input.0, from_input.1)
+        {
+            let before = graph.links().to_vec();
+            let mut after = before.clone();
+            after.retain(|l| (l.to, l.port) != input && (l.to, l.port) != from_input);
+            after.push(Link {
+                from: source,
+                to: input.0,
+                port: input.1,
+            });
+            after.push(Link {
+                from: previous,
+                to: from_input.0,
+                port: from_input.1,
+            });
+            let was_custom = s.doc.custom_wiring;
+            s.history.apply(
+                &mut s.doc,
+                "Swap connections",
+                vec![Edit::RewireNodes {
+                    before,
+                    after,
+                    was_custom,
+                }],
+            );
+            return;
+        }
+    }
+    edit_link(s, Some(source), input, old_input);
+}
+
 fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: Option<Input>) {
     if let Some(from) = source {
         if !s.doc.graph.can_connect_to(from, input.0, input.1) {
@@ -1415,6 +1483,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .find(|(_, at)| at.distance(p) <= hit_radius)
             .map(|(&key, _)| key)
     };
+    // Every input, by node, in port order (for picking a free one).
+    let cards_inputs: Vec<Input> = inputs.keys().copied().collect();
     let output_at = |p: Pos2| {
         outputs
             .iter()
@@ -1556,11 +1626,18 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     .interact_pointer_pos()
                     .filter(|point| viewport.contains(*point))
                 {
+                    // A cable lifted off an input and let go close to where
+                    // it was (a slip, or grabbing the port while aiming for
+                    // the node) snaps back instead of disconnecting.
+                    let slipped = old_input
+                        .and_then(|input| inputs.get(&input))
+                        .is_some_and(|&at| at.distance(point) < SNAP_BACK);
                     if let Some(input) = drop_target(&s.doc.graph, source, point) {
                         if old_input != Some(input) {
-                            edit_link(s, Some(source), input, old_input);
+                            connect_smart(s, source, input, old_input, &cards_inputs);
                         }
-                    } else if node_at(point).is_none() && output_at(point).is_none() {
+                    } else if !slipped && node_at(point).is_none() && output_at(point).is_none() {
+                        // Pulled clearly away into empty space: disconnect.
                         if let Some(input) = old_input {
                             edit_link(s, None, input, None);
                         }
@@ -2131,6 +2208,37 @@ pub fn convert_drawing(s: &mut Session, id: NodeId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Connections keep what they can: a cable moved onto a used input
+    /// swaps with the one there, and a new cable onto a used input takes
+    /// the node's free input instead of dropping the old connection.
+    #[test]
+    fn connecting_keeps_connections_where_it_can() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        let comp = s.doc.composite;
+        let from = |s: &Session, port| s.doc.graph.input(comp, port);
+        // Two sources wired into the Composite's first two ports.
+        let (a, b) = (s.doc.layers[0].node, s.doc.layers[1].node);
+        let ports: Vec<Input> = (0..6).map(|p| (comp, p)).collect();
+        for &(_, p) in &ports {
+            edit_link(&mut s, None, (comp, p), None);
+        }
+        edit_link(&mut s, Some(a), (comp, 0), None);
+        edit_link(&mut s, Some(b), (comp, 1), None);
+        assert_eq!((from(&s, 0), from(&s, 1)), (Some(a), Some(b)));
+        // Move a's cable onto b's input: they swap.
+        connect_smart(&mut s, a, (comp, 1), Some((comp, 0)), &ports);
+        assert_eq!((from(&s, 0), from(&s, 1)), (Some(b), Some(a)));
+        s.undo();
+        assert_eq!((from(&s, 0), from(&s, 1)), (Some(a), Some(b)));
+        // Free b, then connect it again onto a's (used) input: it takes a
+        // free port and a stays connected.
+        edit_link(&mut s, None, (comp, 1), None);
+        connect_smart(&mut s, b, (comp, 0), None, &ports);
+        assert_eq!(from(&s, 0), Some(a), "a kept its connection");
+        assert!(ports.iter().any(|&(_, p)| p != 0 && from(&s, p) == Some(b)));
+    }
 
     #[test]
     fn drawing_conversion_is_reversible_and_ignores_other_nodes() {
