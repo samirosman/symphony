@@ -122,6 +122,24 @@ pub fn slide(ctx: &egui::Context, id: Id, target: egui::Rect) -> egui::Rect {
     )
 }
 
+/// Put a value at `to` with no movement, so a later `value` moves on from
+/// there (something the pointer is carrying: when it's let go, it must
+/// not glide in from where it was before).
+pub fn jump(ctx: &egui::Context, id: Id, to: f32) {
+    let now = ctx.input(|i| i.time);
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            id,
+            Track {
+                from: to,
+                to,
+                start: now,
+                motion: Motion::Select,
+            },
+        )
+    });
+}
+
 /// Start a value at `from` and move it to `to`, e.g. for something that
 /// appears: `start(ctx, id, 0.0)` the frame it opens.
 pub fn start(ctx: &egui::Context, id: Id, from: f32) {
@@ -181,6 +199,24 @@ pub fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 
 #[cfg(test)]
 mod tests {
+    /// Something carried by the pointer and let go where it is doesn't
+    /// glide in from where it started (a dropped node used to swoop).
+    #[test]
+    fn a_jumped_value_lands_without_moving() {
+        let ctx = egui::Context::default();
+        let id = Id::unique("carried");
+        let mut out = ctx.run_ui(Default::default(), |_| {
+            assert_eq!(value(&ctx, id, 0.0, Motion::Select), 0.0);
+        });
+        out.textures_delta.clear();
+        let mut out = ctx.run_ui(Default::default(), |_| {
+            // Carried to 100, then let go there.
+            jump(&ctx, id, 100.0);
+            assert_eq!(value(&ctx, id, 100.0, Motion::Select), 100.0);
+        });
+        out.textures_delta.clear();
+    }
+
     use super::*;
 
     #[test]

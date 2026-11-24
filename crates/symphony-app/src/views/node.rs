@@ -2205,8 +2205,13 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         relax(&mut placed, |id| card_width(&s.doc.graph, id), &held);
     }
     for (id, position) in placed.iter_mut() {
-        if !held.contains(id) {
-            let key = resp.id.with(("node-glide", *id));
+        let key = resp.id.with(("node-glide", *id));
+        if held.contains(id) {
+            // Carried by the pointer: its glide stays where it is, so on
+            // release it doesn't swoop in from where the drag began.
+            symphony_ui::motion::jump(ui.ctx(), key.with(0), position.x);
+            symphony_ui::motion::jump(ui.ctx(), key.with(1), position.y);
+        } else {
             *position = Vec2::new(
                 symphony_ui::motion::value(
                     ui.ctx(),
