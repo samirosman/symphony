@@ -5,12 +5,65 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::Id;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
     /// 0..=1 after the pressure curve.
     pub pressure: f32,
+    /// How the pen was held here (tilt and rotation), so brushes that
+    /// follow them still do after the line is edited. Zero for mice and
+    /// for lines drawn before Symphony kept it.
+    #[serde(default, skip_serializing_if = "Pen::is_level")]
+    pub pen: Pen,
+}
+
+/// The pen's attitude at a point, in degrees.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pen {
+    /// How far the pen leans from upright, 0 (upright) ..= 90 (flat).
+    #[serde(default)]
+    pub tilt: f32,
+    /// Which way it leans, counter-clockwise from +x (Krita's "ascension").
+    #[serde(default)]
+    pub azimuth: f32,
+    /// Barrel rotation (pens that report it).
+    #[serde(default)]
+    pub rotation: f32,
+}
+
+impl Pen {
+    pub fn is_level(&self) -> bool {
+        *self == Pen::default()
+    }
+
+    /// From a tablet's tilt along x and y (degrees) and barrel rotation.
+    pub fn from_tilt(tilt_x: f32, tilt_y: f32, rotation: f32) -> Self {
+        let ok = |v: f32| if v.is_finite() { v } else { 0.0 };
+        let (tx, ty) = (ok(tilt_x), ok(tilt_y));
+        Pen {
+            tilt: tx.hypot(ty).min(90.0),
+            azimuth: if tx == 0.0 && ty == 0.0 {
+                0.0
+            } else {
+                ty.atan2(tx).to_degrees()
+            },
+            rotation: ok(rotation),
+        }
+    }
+
+    /// Between two pens; angles take the short way round.
+    pub fn lerp(a: Pen, b: Pen, t: f32) -> Pen {
+        let angle = |x: f32, y: f32| {
+            let d = (y - x + 540.0).rem_euclid(360.0) - 180.0;
+            x + d * t
+        };
+        Pen {
+            tilt: a.tilt + (b.tilt - a.tilt) * t,
+            azimuth: angle(a.azimuth, b.azimuth),
+            rotation: angle(a.rotation, b.rotation),
+        }
+    }
 }
 
 /// How a stroke is shaped (DESIGN/RESEARCH: Harmony's pencil vs brush).
@@ -160,6 +213,16 @@ pub struct Dynamics {
     pub opacity_jitter: f32,
     #[serde(default)]
     pub flow_jitter: f32,
+    /// The tip turns to the way the pen leans (Krita's "ascension").
+    #[serde(default)]
+    pub angle_tilt: bool,
+    /// The tip turns with the pen's barrel rotation.
+    #[serde(default)]
+    pub angle_barrel: bool,
+    /// Leaning the pen flattens the tip towards `roundness` (Krita's
+    /// "declination" on Ratio): upright is round, flat is flattest.
+    #[serde(default)]
+    pub roundness_tilt: bool,
 }
 
 impl Dynamics {

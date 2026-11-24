@@ -391,6 +391,7 @@ fn frame_cost() {
                             x: x0 + t * 120.0,
                             y: y + (t * 9.0).sin() * 5.0,
                             pressure: (t * 3.1).sin(),
+                            pen: Default::default(),
                         }
                     })
                     .collect(),
@@ -596,6 +597,7 @@ fn line_edit_cost() {
                     x: x0 + k as f32 * 2.0,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -670,6 +672,7 @@ fn search_puts_a_blend_mode_on_the_selected_layer() {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -737,6 +740,7 @@ fn erase_cost() {
                     x: x0 + k as f32 * 2.0,
                     y: y + (k as f32 * 0.3).sin() * 4.0,
                     pressure: 0.7,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -804,6 +808,7 @@ fn busy_frame_cost() {
                     x: -900.0 + (i % 30) as f32 * 60.0 + k as f32 * 2.5,
                     y: -500.0 + (i / 30) as f32 * 45.0 + (k as f32 * 0.3).sin() * 10.0,
                     pressure: 0.4 + 0.6 * (k as f32 * 0.1).sin().abs(),
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -1100,6 +1105,7 @@ fn textured_erase_cost() {
                     x: x0 + k as f32 * 2.5,
                     y: y + (k as f32 * 0.2).sin() * 15.0,
                     pressure: 0.5 + (k as f32 * 0.1).sin() * 0.4,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -1162,6 +1168,7 @@ fn outline_cost() {
                 x: k as f32 * 2.5,
                 y: (k as f32 * 0.2).sin() * 15.0,
                 pressure: 0.5 + (k as f32 * 0.1).sin() * 0.4,
+                pen: Default::default(),
             })
             .collect(),
         tips: Default::default(),
@@ -1313,4 +1320,57 @@ fn bitmap_brushes_also_come_as_vector_versions() {
         vector.iter().all(|p| p.settings.texture.is_none()),
         "vector versions draw clean lines"
     );
+}
+
+/// The pen's tilt and rotation are kept on the line's points (so brushes
+/// that follow them still do after editing) and survive saving; lines
+/// from a mouse store nothing extra.
+#[test]
+fn strokes_keep_how_the_pen_was_held() {
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    h.state_mut().s.tool = crate::session::Tool::Brush;
+    let pts = line((-80.0, 0.0), (80.0, 0.0), 8);
+    let n = pts.len();
+    for (i, &(x, y)) in pts.iter().enumerate() {
+        let p = h.state().canvas.to_screen(x, y);
+        let phase = match i {
+            0 => Phase::Down,
+            _ if i + 1 == n => Phase::Up,
+            _ => Phase::Move,
+        };
+        let mut sm = sample(p, phase, 0.8, PenTool::Pen);
+        sm.tilt_x = 0.0;
+        sm.tilt_y = 35.0;
+        sm.rotation = 90.0;
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        h.state_mut().samples.push(sm);
+        h.step();
+    }
+    h.run_steps(2);
+    let st = strokes(&h, layer).last().cloned().expect("a stroke");
+    assert!(
+        st.points.iter().all(|p| (p.pen.tilt - 35.0).abs() < 0.5),
+        "tilt kept"
+    );
+    assert!(
+        st.points.iter().all(|p| (p.pen.azimuth - 90.0).abs() < 0.5),
+        "lean direction kept"
+    );
+    assert!(
+        st.points
+            .iter()
+            .all(|p| (p.pen.rotation - 90.0).abs() < 0.5),
+        "barrel kept"
+    );
+    let json = serde_json::to_string(&st).unwrap();
+    let back: symphony_core::stroke::Stroke = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.points, st.points, "survives saving");
+    // A mouse line saves points without pen data at all.
+    let mut flat = st.clone();
+    for p in &mut flat.points {
+        p.pen = Default::default();
+    }
+    assert!(!serde_json::to_string(&flat).unwrap().contains("\"pen\""));
 }

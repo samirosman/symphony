@@ -160,6 +160,7 @@ fn densify_near(points: &[Point], at: [f32; 2], radius: f32, step: f32) -> Vec<P
                     x: p.x + (q.x - p.x) * t,
                     y: p.y + (q.y - p.y) * t,
                     pressure: p.pressure + (q.pressure - p.pressure) * t,
+                    pen: symphony_core::stroke::Pen::lerp(p.pen, q.pen, t),
                 });
             }
         }
@@ -534,6 +535,7 @@ impl Session {
                         x: cx + r * t.cos(),
                         y: cy + r * t.sin(),
                         pressure: 0.55 + 0.45 * (t * 1.5).sin().abs(),
+                        pen: Default::default(),
                     }
                 })
                 .collect()
@@ -545,6 +547,7 @@ impl Session {
                     x,
                     y,
                     pressure: 0.3 + 0.7 * ((i as f32) * 0.9).sin().abs(),
+                    pen: Default::default(),
                 })
                 .collect()
         };
@@ -2432,6 +2435,7 @@ impl Session {
                         x: (w[0].x + w[1].x) * 0.5,
                         y: (w[0].y + w[1].y) * 0.5,
                         pressure: 1.0,
+                        pen: Default::default(),
                     };
                     weight(&mid) > 0.0
                 })
@@ -2728,11 +2732,13 @@ mod tests {
                     x: x0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 Point {
                     x: x1,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
             ],
             tips: Default::default(),
@@ -2812,6 +2818,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -2903,6 +2910,7 @@ mod tests {
                         x: t * 100.0,
                         y: 0.0,
                         pressure: pressure(t),
+                        pen: Default::default(),
                     }
                 })
                 .collect(),
@@ -2991,11 +2999,13 @@ mod tests {
                     x: 0.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 Point {
                     x: 200.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
             ],
             tips: Default::default(),
@@ -3075,6 +3085,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -3238,6 +3249,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -3253,11 +3265,13 @@ mod tests {
                 x: 14.0,
                 y: 20.0,
                 pressure: 1.0,
+                pen: Default::default(),
             },
             Point {
                 x: 14.0,
                 y: 80.0,
                 pressure: 1.0,
+                pen: Default::default(),
             },
         ];
         s.close_gap(0, 1, &rough, 40.0);

@@ -147,7 +147,11 @@ fn translate(brush: &mut Brush, preset: &descriptor::Object<'_>) {
         if control(b"szVr") == Some(2.0) {
             brush.min_fraction = preset.number(b"minimumDiameter").unwrap_or_default() / 100.0;
         }
+        // Angle controls: 3 pen tilt, 5 rotation, 7 direction.
         brush.follow = control(b"angleDynamics") == Some(7.0);
+        brush.dynamics.angle_tilt = control(b"angleDynamics") == Some(3.0);
+        brush.dynamics.angle_barrel = control(b"angleDynamics") == Some(5.0);
+        brush.dynamics.roundness_tilt = control(b"roundnessDynamics") == Some(3.0);
         brush.dynamics.size_jitter = jitter(b"szVr");
         // Angle Jitter 100% turns the tip anywhere: +-180 degrees.
         brush.dynamics.angle_jitter = jitter(b"angleDynamics") * 180.0;

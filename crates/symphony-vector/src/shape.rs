@@ -281,6 +281,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -301,6 +302,7 @@ mod tests {
                 x,
                 y,
                 pressure: 0.3 + 0.7 * ((i as f32 * 0.7).sin() * 0.5 + 0.5),
+                pen: Default::default(),
             })
             .collect();
         s

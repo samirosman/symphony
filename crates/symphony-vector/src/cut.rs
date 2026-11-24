@@ -18,6 +18,7 @@ fn lerp(a: &Point, b: &Point, t: f32) -> Point {
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
         pressure: a.pressure + (b.pressure - a.pressure) * t,
+        pen: symphony_core::stroke::Pen::lerp(a.pen, b.pen, t),
     }
 }
 
@@ -154,6 +155,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),

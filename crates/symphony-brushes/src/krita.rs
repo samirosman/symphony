@@ -198,11 +198,23 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
     if has(&rotation, "fuzzy") {
         b.dynamics.angle_jitter = 180.0 * strength("Rotation");
     }
+    // The pen's lean direction ("ascension") and barrel ("rotation").
+    if has(&rotation, "ascension") {
+        b.dynamics.angle_tilt = true;
+    }
+    if has(&rotation, "rotation") {
+        b.dynamics.angle_barrel = true;
+    }
     if has(&rotation, "fuzzystroke") {
         b.dynamics.stroke_angle_jitter = 180.0 * strength("Rotation");
     }
-    if has(&sensors("Ratio"), "pressure") {
+    let ratio = sensors("Ratio");
+    if has(&ratio, "pressure") {
         b.dynamics.roundness_pressure = true;
+    }
+    // How far the pen leans ("declination") flattens the tip.
+    if has(&ratio, "declination") || has(&ratio, "tilt") {
+        b.dynamics.roundness_tilt = true;
     }
     if has(&sensors("Size"), "fuzzy") {
         b.dynamics.size_jitter = strength("Size").clamp(0.0, 1.0);

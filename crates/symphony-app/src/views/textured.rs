@@ -616,6 +616,7 @@ pub fn sample(
                 x: 10.0 + t * (rect.width() - 20.0),
                 y: rect.height() * 0.5 + (t * std::f32::consts::TAU).sin() * wave,
                 pressure: (t * std::f32::consts::PI).sin(),
+                pen: Default::default(),
             }
         })
         .collect();
@@ -725,6 +726,7 @@ mod tests {
                                 x: x + t * 1.7,
                                 y: y + (t * 0.15).sin() * 12.0,
                                 pressure: 0.8,
+                                pen: Default::default(),
                             }
                         })
                         .collect(),
@@ -802,7 +804,8 @@ mod tests {
             symphony_core::stroke::Point {
                 x: 20.0,
                 y: 20.0,
-                pressure: 1.0
+                pressure: 1.0,
+                pen: Default::default(),
             };
             128
         ];
@@ -834,6 +837,7 @@ mod tests {
             x: 20.0,
             y: 20.0,
             pressure: 1.0,
+            pen: Default::default(),
         }];
 
         let tex = StrokeTexture::default();

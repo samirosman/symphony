@@ -569,11 +569,13 @@ mod tests {
                     x: -50.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
                 Point {
                     x: 50.0,
                     y: 0.0,
                     pressure: 1.0,
+                    pen: Default::default(),
                 },
             ],
             tips: Default::default(),

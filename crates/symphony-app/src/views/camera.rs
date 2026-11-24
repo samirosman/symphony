@@ -191,6 +191,7 @@ fn line_points(d: &LineDraft, step: f32) -> Vec<Point> {
                 x,
                 y,
                 pressure: d.pressure,
+                pen: Default::default(),
             }
         })
         .collect()
@@ -1193,6 +1194,11 @@ pub fn ui(
                         x,
                         y,
                         pressure: pressure_curve(sm.pressure, s.pressure_gamma),
+                        pen: symphony_core::stroke::Pen::from_tilt(
+                            sm.tilt_x,
+                            sm.tilt_y,
+                            sm.rotation,
+                        ),
                     };
                     let mut smoother = Smoother::new(settings.smoothing);
                     let first = smoother.push(p, 0.0).unwrap_or(p);
@@ -1259,6 +1265,11 @@ pub fn ui(
                         x,
                         y,
                         pressure: pressure_curve(sm.pressure, s.pressure_gamma),
+                        pen: symphony_core::stroke::Pen::from_tilt(
+                            sm.tilt_x,
+                            sm.tilt_y,
+                            sm.rotation,
+                        ),
                     };
                     if let Some(p) = a.smoother.push(raw, a.min_step) {
                         a.stroke.points.push(p);
@@ -1323,8 +1334,20 @@ pub fn ui(
                     // didn't close. Lifting reports ~0 pressure, so keep
                     // the last pressure.
                     let (x, y) = a.to_local.apply(sx, sy);
-                    let pressure = a.stroke.points.last().map_or(1.0, |p| p.pressure);
-                    if let Some(p) = a.smoother.push(Point { x, y, pressure }, a.min_step) {
+                    let (pressure, pen) = a
+                        .stroke
+                        .points
+                        .last()
+                        .map_or((1.0, Default::default()), |p| (p.pressure, p.pen));
+                    if let Some(p) = a.smoother.push(
+                        Point {
+                            x,
+                            y,
+                            pressure,
+                            pen,
+                        },
+                        a.min_step,
+                    ) {
                         a.stroke.points.push(p);
                     }
                     if let Some(p) = a.smoother.finish() {

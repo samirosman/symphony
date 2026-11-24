@@ -139,6 +139,12 @@ pub struct Dynamics {
     /// Up to these fractions less opacity / flow, at random.
     pub opacity_jitter: f32,
     pub flow_jitter: f32,
+    /// The tip turns to the way the pen leans.
+    pub angle_tilt: bool,
+    /// The tip turns with barrel rotation.
+    pub angle_barrel: bool,
+    /// Leaning the pen flattens the tip.
+    pub roundness_tilt: bool,
 }
 
 /// How a grain shapes each stamp (Krita's texturing modes; other apps

@@ -130,6 +130,9 @@ fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
                 roundness_pressure: b.dynamics.roundness_pressure,
                 opacity_jitter: b.dynamics.opacity_jitter,
                 flow_jitter: b.dynamics.flow_jitter,
+                angle_tilt: b.dynamics.angle_tilt,
+                angle_barrel: b.dynamics.angle_barrel,
+                roundness_tilt: b.dynamics.roundness_tilt,
             },
         }),
     }
