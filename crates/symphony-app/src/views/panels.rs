@@ -156,7 +156,11 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
                     if let Some(p) = current.as_ref().and_then(|name| {
                         presets.list_mut(tool).iter_mut().find(|p| &p.name == name)
                     }) {
+                        // Updating a bitmap brush from its vector version
+                        // keeps the brush's stamps.
+                        let texture = current_settings.texture.or(p.settings.texture);
                         p.settings = current_settings;
+                        p.settings.texture = texture;
                     }
                     ui.close();
                 }
@@ -204,8 +208,16 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
             false,
         );
     });
-    // Both smooth and textured presets produce editable vector strokes.
-    let list = presets.list(tool).to_vec();
+    // Two kinds of brush, as Tristan set out: Bitmap lists the brushes
+    // made for bitmap painting (textured stamps, like Krita's and
+    // Photoshop's). Vector lists clean vector brushes plus a vector version
+    // of every bitmap brush: the same name, size and smoothing as a solid
+    // line (an approximation; stamps don't map exactly onto curves).
+    let list = if pencil {
+        presets.list(tool).to_vec()
+    } else {
+        brush_list(presets.list(tool), current_settings.texture.is_some())
+    };
     let [r, g, b, a] = s.doc.swatch_rgba(s.swatch);
     let ink = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
     egui::ScrollArea::vertical()
@@ -416,12 +428,76 @@ fn export_presets(s: &mut Session, presets: &Presets) {
     });
 }
 
+/// The Brush presets of one kind: Bitmap is the textured (bitmap-native)
+/// ones; Vector is the clean ones plus a vector version of each bitmap one.
+pub fn brush_list(all: &[Preset], bitmap: bool) -> Vec<Preset> {
+    if bitmap {
+        all.iter()
+            .filter(|p| p.settings.texture.is_some())
+            .cloned()
+            .collect()
+    } else {
+        all.iter().map(vector_version).collect()
+    }
+}
+
+/// A brush as a clean vector line: a bitmap brush keeps its name, size
+/// range and smoothing, without its stamps.
+fn vector_version(p: &Preset) -> Preset {
+    let mut v = p.clone();
+    v.settings.texture = None;
+    v
+}
+
 fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pencil: bool) {
     let tool = if pencil {
         PresetTool::Pencil
     } else {
         PresetTool::Brush
     };
+    // First the kind of brush, since it decides the list below.
+    if !pencil {
+        let bitmap = s.brush.texture.is_some();
+        let mut want = bitmap;
+        widgets::segmented(
+            ui,
+            "brush-kind",
+            &mut want,
+            &[(false, "Vector"), (true, "Bitmap")],
+            false,
+        );
+        if want != bitmap {
+            // Keep the same brush where it exists in the other kind: a
+            // bitmap brush's vector version, or back to the bitmap one.
+            let current = presets.current(tool).map(str::to_owned);
+            let same = current
+                .as_ref()
+                .and_then(|name| presets.list(tool).iter().find(|p| &p.name == name).cloned());
+            let pick = match (want, same) {
+                (false, Some(p)) => Some(vector_version(&p)),
+                (true, Some(p)) if p.settings.texture.is_some() => Some(p),
+                _ => presets
+                    .list(tool)
+                    .iter()
+                    .find(|p| p.settings.texture.is_some() == want)
+                    .cloned(),
+            };
+            match pick {
+                Some(p) => {
+                    s.brush = p.settings;
+                    presets.set_current(tool, Some(p.name));
+                }
+                None => {
+                    s.brush.texture = want.then(|| symphony_core::stroke::StrokeTexture {
+                        spacing: 0.1,
+                        ..Default::default()
+                    });
+                    presets.set_current(tool, None);
+                }
+            }
+        }
+        ui.add_space(6.0);
+    }
     // The preview is pinned above (tool_properties); then the presets,
     // then the settings, as in Harmony.
     preset_list(ui, s, presets, tool);

@@ -1286,3 +1286,31 @@ fn the_line_tool_draws_straight_snapped_and_bent_lines() {
         "ends stay put"
     );
 }
+
+/// Brush kinds: Bitmap lists textured brushes; Vector lists clean ones plus
+/// a vector version of every bitmap brush (same name, no stamps).
+#[test]
+fn bitmap_brushes_also_come_as_vector_versions() {
+    use crate::presets::Preset;
+    use crate::views::panels::brush_list;
+    let s = crate::session::Session::new_scene();
+    let clean = Preset {
+        name: "Ink".into(),
+        settings: s.brush,
+        source: None,
+        tip: None,
+        grain: None,
+    };
+    let mut stamped = clean.clone();
+    stamped.name = "Grainy".into();
+    stamped.settings.texture = Some(symphony_core::stroke::StrokeTexture::default());
+    let all = vec![clean, stamped];
+    let names = |l: Vec<Preset>| l.into_iter().map(|p| p.name).collect::<Vec<_>>();
+    assert_eq!(names(brush_list(&all, true)), ["Grainy"]);
+    let vector = brush_list(&all, false);
+    assert_eq!(names(vector.clone()), ["Ink", "Grainy"]);
+    assert!(
+        vector.iter().all(|p| p.settings.texture.is_none()),
+        "vector versions draw clean lines"
+    );
+}

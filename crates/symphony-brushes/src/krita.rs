@@ -153,6 +153,67 @@ pub fn preset(png: &[u8], lookup: &Lookup) -> Result<Brush, Error> {
         b.min_fraction = 1.0;
     }
 
+    // Dynamics: Krita's Scatter, Rotation and Ratio options and its random
+    // ("fuzzy") sensors. Each option is on with Pressure<Name> and lists its
+    // sensors in <Name>Sensor; <Name>Value is its strength.
+    let sensors = |prefix: &str| -> Option<Vec<String>> {
+        if flag(&format!("Pressure{prefix}")) != Some(true) {
+            return None;
+        }
+        let raw = params
+            .get(format!("{prefix}Sensor").as_str())
+            .copied()
+            .unwrap_or("");
+        Some(
+            parse_with_doctype(raw)
+                .map(|doc| {
+                    doc.descendants()
+                        .filter_map(|n| n.attribute("id"))
+                        .filter(|id| *id != "sensorslist")
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    };
+    let has = |list: &Option<Vec<String>>, id: &str| {
+        list.as_ref().is_some_and(|l| l.iter().any(|s| s == id))
+    };
+    let strength = |prefix: &str| num(&format!("{prefix}Value")).unwrap_or(1.0);
+    let scatter = sensors("Scatter");
+    if scatter.is_some()
+        && (flag("Scattering/AxisX") != Some(false) || flag("Scattering/AxisY") != Some(false))
+    {
+        // Up to Value x diameter off the line (Krita multiplies a random
+        // -1..1 by the diameter and the sensor value).
+        b.dynamics.scatter = num("ScatterValue")
+            .or_else(|| num("Scattering/Amount"))
+            .unwrap_or(1.0);
+        b.dynamics.scatter_pressure = has(&scatter, "pressure");
+    }
+    let rotation = sensors("Rotation");
+    if has(&rotation, "drawingangle") {
+        b.follow = true;
+    }
+    if has(&rotation, "fuzzy") {
+        b.dynamics.angle_jitter = 180.0 * strength("Rotation");
+    }
+    if has(&rotation, "fuzzystroke") {
+        b.dynamics.stroke_angle_jitter = 180.0 * strength("Rotation");
+    }
+    if has(&sensors("Ratio"), "pressure") {
+        b.dynamics.roundness_pressure = true;
+    }
+    if has(&sensors("Size"), "fuzzy") {
+        b.dynamics.size_jitter = strength("Size").clamp(0.0, 1.0);
+    }
+    if has(&sensors("Opacity"), "fuzzy") {
+        b.dynamics.opacity_jitter = strength("Opacity").clamp(0.0, 1.0);
+    }
+    if has(&sensors("Flow"), "fuzzy") {
+        b.dynamics.flow_jitter = strength("Flow").clamp(0.0, 1.0);
+    }
+
     let def = params.get("brush_definition").copied().unwrap_or("");
     if let Ok(d) = parse_with_doctype(def) {
         let brush = d.root_element();

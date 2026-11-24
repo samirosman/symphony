@@ -120,6 +120,52 @@ pub struct StrokeTexture {
     /// instead of `spacing * size`. 0 is off.
     #[serde(default)]
     pub auto_spacing: f32,
+    /// Randomness and pressure shaping per stamp (Krita's Scatter,
+    /// Rotation and Ratio options, Photoshop's Shape Dynamics, Scattering
+    /// and Transfer). Seeded by the stroke, so a stroke looks the same on
+    /// every redraw.
+    #[serde(default, skip_serializing_if = "Dynamics::is_still")]
+    pub dynamics: Dynamics,
+}
+
+/// Per-stamp variation of a textured brush. All zero is a steady brush.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Dynamics {
+    /// Each stamp lands up to this many diameters from the line, in a
+    /// random direction (Krita Scatter, Photoshop Scattering).
+    #[serde(default)]
+    pub scatter: f32,
+    /// Scatter grows with pen pressure (Krita's pressure sensor on Scatter).
+    #[serde(default)]
+    pub scatter_pressure: bool,
+    /// Each stamp is up to this fraction smaller, at random, 0..=1.
+    #[serde(default)]
+    pub size_jitter: f32,
+    /// Each stamp turns up to this many degrees either way, at random.
+    #[serde(default)]
+    pub angle_jitter: f32,
+    /// The whole stroke turns up to this many degrees either way, at random
+    /// (Krita's "fuzzy stroke" rotation).
+    #[serde(default)]
+    pub stroke_angle_jitter: f32,
+    /// Tip roundness, height over width, 0..=1; 0 means round (1).
+    #[serde(default)]
+    pub roundness: f32,
+    /// Roundness follows pen pressure (Krita's pressure sensor on Ratio):
+    /// light pressure flattens the tip towards `roundness`.
+    #[serde(default)]
+    pub roundness_pressure: bool,
+    /// Each stamp's opacity and flow drop by up to these fractions.
+    #[serde(default)]
+    pub opacity_jitter: f32,
+    #[serde(default)]
+    pub flow_jitter: f32,
+}
+
+impl Dynamics {
+    pub fn is_still(&self) -> bool {
+        *self == Dynamics::default()
+    }
 }
 
 /// How the grain combines with each stamp. Formulas follow Krita 5.0's
@@ -214,6 +260,7 @@ impl Default for StrokeTexture {
             grain_strength: None,
             grain_offset: [0.0, 0.0],
             auto_spacing: 0.0,
+            dynamics: Dynamics::default(),
         }
     }
 }

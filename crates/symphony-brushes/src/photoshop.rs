@@ -136,11 +136,38 @@ fn translate(brush: &mut Brush, preset: &descriptor::Object<'_>) {
 
     // Photoshop control 2 is pen pressure, and 7 is stroke direction.
     let control = |key| preset.nested(key).and_then(|option| option.number(b"bVTy"));
+    // A dynamics record's random Jitter, 0..=1 (stored as a percent).
+    let jitter = |key| {
+        preset
+            .nested(key)
+            .and_then(|option| option.number(b"jitter"))
+            .map_or(0.0, |v| (v / 100.0).clamp(0.0, 1.0))
+    };
     if preset.flag(b"useTipDynamics") {
         if control(b"szVr") == Some(2.0) {
             brush.min_fraction = preset.number(b"minimumDiameter").unwrap_or_default() / 100.0;
         }
         brush.follow = control(b"angleDynamics") == Some(7.0);
+        brush.dynamics.size_jitter = jitter(b"szVr");
+        // Angle Jitter 100% turns the tip anywhere: +-180 degrees.
+        brush.dynamics.angle_jitter = jitter(b"angleDynamics") * 180.0;
+    }
+    // A computed (round) tip's Roundness flattens it; sampled tips were
+    // squashed above already.
+    if brush.tip.is_none() {
+        let roundness = tip.number(b"Rndn").unwrap_or(100.0).clamp(1.0, 100.0) / 100.0;
+        if roundness < 1.0 {
+            brush.dynamics.roundness = roundness;
+        }
+    }
+    if preset.flag(b"useScatter") {
+        // Scatter is a percent of the diameter (up to 1000%): 100% throws
+        // dabs up to one diameter off the line.
+        brush.dynamics.scatter = preset
+            .nested(b"scatterDynamics")
+            .and_then(|option| option.number(b"jitter"))
+            .map_or(0.0, |v| (v / 100.0).clamp(0.0, 10.0));
+        brush.dynamics.scatter_pressure = control(b"scatterDynamics") == Some(2.0);
     }
     if preset.flag(b"usePaintDynamics") {
         let pressure_curve = |key| {
@@ -154,6 +181,8 @@ fn translate(brush: &mut Brush, preset: &descriptor::Object<'_>) {
         };
         brush.opacity_curve = pressure_curve(b"opVr").unwrap_or_default();
         brush.flow_curve = pressure_curve(b"prVr").unwrap_or_default();
+        brush.dynamics.opacity_jitter = jitter(b"opVr");
+        brush.dynamics.flow_jitter = jitter(b"prVr");
     }
 }
 

@@ -120,6 +120,17 @@ fn settings(b: &Brush, tip: Option<u64>, grain: Option<u64>) -> BrushSettings {
                 .then(|| PressureCurve::sample(|p| b.grain_strength_at(p))),
             grain_offset: b.grain_offset,
             auto_spacing: b.auto_spacing,
+            dynamics: symphony_core::stroke::Dynamics {
+                scatter: b.dynamics.scatter,
+                scatter_pressure: b.dynamics.scatter_pressure,
+                size_jitter: b.dynamics.size_jitter,
+                angle_jitter: b.dynamics.angle_jitter,
+                stroke_angle_jitter: b.dynamics.stroke_angle_jitter,
+                roundness: b.dynamics.roundness,
+                roundness_pressure: b.dynamics.roundness_pressure,
+                opacity_jitter: b.dynamics.opacity_jitter,
+                flow_jitter: b.dynamics.flow_jitter,
+            },
         }),
     }
 }

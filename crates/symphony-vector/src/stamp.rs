@@ -163,6 +163,19 @@ pub struct Stamper {
     /// The last point: position, diameter and pen pressure.
     last: Option<([f32; 2], f32, f32)>,
     stamps: usize,
+    /// The stroke's random seed: the same stroke always gets the same
+    /// scatter and jitter, at any zoom and on every redraw.
+    seed: u64,
+}
+
+/// A repeatable random number in 0..1 for `seed`, stamp `n`, channel `k`.
+fn rand(seed: u64, n: u64, k: u64) -> f32 {
+    let mut z =
+        seed ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ k.wrapping_mul(0xD1B5_4A32_D192_ED03);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
 impl Stamper {
@@ -179,12 +192,14 @@ impl Stamper {
             carry: 0.0,
             last: None,
             stamps: 0,
+            seed: 0,
         }
     }
 
     /// Stamp the points of `stroke` not stamped yet. The stroke must only
     /// have grown since the last call (true while drawing).
     pub fn extend(&mut self, stroke: &Stroke, tip: Option<&Texture>, grain: Option<&Texture>) {
+        self.seed = stroke.id.0.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1;
         let tip = tip.filter(|t| t.is_valid());
         let grain = grain.filter(|t| t.is_valid());
         let spacing = if self.tex.spacing.is_finite() {
@@ -344,13 +359,55 @@ impl Stamper {
         grain: Option<&Texture>,
     ) {
         self.stamps += 1;
+        // Dynamics: this stamp's own size, place, turn, roundness and
+        // strength, from the stroke's repeatable randomness.
+        let dy_ = self.tex.dynamics;
+        let (n, seed) = (self.stamps as u64, self.seed);
+        let r = |k| rand(seed, n, k);
+        let fin = |v: f32, hi: f32| if v.is_finite() { v.clamp(0.0, hi) } else { 0.0 };
+        let d = d * (1.0 - fin(dy_.size_jitter, 1.0) * r(0));
+        let scatter = fin(dy_.scatter, 10.0)
+            * if dy_.scatter_pressure {
+                pressure.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+        let c = if scatter > 0.0 {
+            [
+                c[0] + (2.0 * r(1) - 1.0) * d * scatter,
+                c[1] + (2.0 * r(2) - 1.0) * d * scatter,
+            ]
+        } else {
+            c
+        };
+        let turn = (2.0 * r(3) - 1.0) * fin(dy_.angle_jitter, 180.0)
+            + (2.0 * rand(seed, u64::MAX, 7) - 1.0) * fin(dy_.stroke_angle_jitter, 180.0);
+        let ratio = {
+            let base = if dy_.roundness > 0.0 {
+                fin(dy_.roundness, 1.0).max(0.02)
+            } else {
+                1.0
+            };
+            if dy_.roundness_pressure {
+                let p = pressure.clamp(0.0, 1.0);
+                if dy_.roundness > 0.0 {
+                    base + (1.0 - base) * p
+                } else {
+                    p.max(0.02)
+                }
+            } else {
+                base
+            }
+        };
+        let fade_level = 1.0 - fin(dy_.opacity_jitter, 1.0) * r(4);
+        let fade_flow = 1.0 - fin(dy_.flow_jitter, 1.0) * r(5);
         // Each stamp raises pixels toward its own opacity (faded by
         // pressure) and never past it; flow is how far each step goes.
         // This is how Krita's and Harmony's brushes combine dabs, so soft
         // edges stay soft and low flow builds up gently.
         let clean = |v: f32, d: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { d };
-        let level = clean(self.tex.opacity_at(pressure), 1.0);
-        let flow = clean(self.tex.flow_at(pressure), 1.0);
+        let level = clean(self.tex.opacity_at(pressure), 1.0) * fade_level;
+        let flow = clean(self.tex.flow_at(pressure), 1.0) * fade_flow;
         let strength = clean(self.tex.grain_strength_at(pressure), 1.0);
         let mode = self.tex.grain_mode;
         let gscale = if self.tex.grain_scale.is_finite() && self.tex.grain_scale > 0.0 {
@@ -373,7 +430,9 @@ impl Stamper {
             return;
         }
         let r = d * 0.5;
-        let angle = self.tex.angle.to_radians() + if self.tex.follow { heading } else { 0.0 };
+        let angle =
+            (self.tex.angle + turn).to_radians() + if self.tex.follow { heading } else { 0.0 };
+        let inv_ratio = 1.0 / ratio;
         let (sin, cos) = angle.sin_cos();
         // Exact half-size of the (rotated) tip square, or the round tip.
         let reach = if tip.is_some() {
@@ -405,7 +464,7 @@ impl Stamper {
                         // Into the tip's own frame, -1..1 across, the
                         // longer side fitted to the diameter.
                         let u = (dx * cos + dy * sin) * inv_r;
-                        let v = (dy * cos - dx * sin) * inv_r;
+                        let v = (dy * cos - dx * sin) * inv_r * inv_ratio;
                         if u.abs() >= 1.0 || v.abs() >= 1.0 {
                             continue;
                         }
@@ -423,7 +482,15 @@ impl Stamper {
                         }
                     }
                     // A hard round tip with one pixel of anti-aliasing.
-                    None => ((r - (dx * dx + dy * dy).sqrt()) / soft + 0.5).clamp(0.0, 1.0),
+                    None if ratio >= 1.0 => {
+                        ((r - (dx * dx + dy * dy).sqrt()) / soft + 0.5).clamp(0.0, 1.0)
+                    }
+                    // A flattened round tip: an ellipse in the tip's frame.
+                    None => {
+                        let u = dx * cos + dy * sin;
+                        let v = (dy * cos - dx * sin) * inv_ratio;
+                        ((r - (u * u + v * v).sqrt()) / soft + 0.5).clamp(0.0, 1.0)
+                    }
                 };
                 if a > 0.0 {
                     let i = row + (px - b[0]) as usize;
@@ -691,6 +758,55 @@ mod tests {
             s.extend(&part, None, None);
         }
         assert_eq!(s.coverage().unwrap(), whole);
+    }
+
+    /// Coverage rows (y) that have any paint.
+    fn painted_rows(c: &Coverage) -> Vec<i32> {
+        (c.y..c.y + c.height as i32)
+            .filter(|&y| (c.x..c.x + c.width as i32).any(|x| at(c, x, y) > 0))
+            .collect()
+    }
+
+    /// Scatter throws stamps off the line, the same way on every redraw
+    /// and whether stamped at once or as it's drawn; roundness flattens
+    /// the tip; a different stroke scatters differently.
+    #[test]
+    fn dynamics_scatter_and_flatten_repeatably() {
+        let mut t = tex();
+        t.dynamics.scatter = 1.5;
+        let still = rasterize(&line(8.0), &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
+        let a = rasterize(&line(8.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let b = rasterize(&line(8.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert_eq!(a, b, "the same stroke scatters the same way");
+        assert!(
+            painted_rows(&a).len() > painted_rows(&still).len() + 6,
+            "stamps land off the line"
+        );
+        let mut other = line(8.0);
+        other.id = Id(2);
+        let c = rasterize(&other, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert_ne!(a, c, "another stroke scatters differently");
+        // Drawn in pieces: identical to all at once.
+        let mut s = Stamper::new(t, Affine::IDENTITY, ALL);
+        let mut part = line(8.0);
+        let whole = line(8.0).points;
+        for n in [1, 2] {
+            part.points = whole[..n].to_vec();
+            s.extend(&part, None, None);
+        }
+        let once = {
+            let mut s = Stamper::new(t, Affine::IDENTITY, ALL);
+            s.extend(&line(8.0), None, None);
+            s.coverage().unwrap()
+        };
+        assert_eq!(s.coverage().unwrap(), once);
+        // Roundness 0.25: the line is a quarter as tall.
+        let mut flat = tex();
+        flat.dynamics.roundness = 0.25;
+        let f = rasterize(&line(16.0), &flat, None, None, Affine::IDENTITY, ALL).unwrap();
+        let full = rasterize(&line(16.0), &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
+        let (hf, hr) = (painted_rows(&f).len(), painted_rows(&full).len());
+        assert!(hf * 3 < hr + 4, "flattened: {hf} rows vs {hr}");
     }
 
     #[test]
