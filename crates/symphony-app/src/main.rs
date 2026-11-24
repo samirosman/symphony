@@ -1239,8 +1239,9 @@ impl SymphonyApp {
             | Action::ResetPan
             | Action::ResetView
             | Action::MirrorView => {
-                self.camera.apply(action);
-                self.drawing.apply(action);
+                let pointer = ctx.pointer_hover_pos();
+                self.camera.apply_at(action, pointer);
+                self.drawing.apply_at(action, pointer);
             }
             Action::Search => {
                 // Tab keeps moving keyboard focus between controls when one

@@ -44,6 +44,9 @@ pub struct CanvasState {
     line_edit: Option<LineDrag>,
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
+    /// Where the canvas was on screen last frame (zoom keys aim at the
+    /// mouse when it's over it).
+    last_rect: Option<Rect>,
     pub select: SelectState,
     /// Mirrored left to right, to check a drawing with fresh eyes (view
     /// only; the artwork isn't changed).
@@ -66,6 +69,7 @@ impl Default for CanvasState {
             erasing: None,
             line_edit: None,
             last_view: Affine::IDENTITY,
+            last_rect: None,
             select: SelectState::default(),
             strokes: Default::default(),
             display: Default::default(),
@@ -171,6 +175,21 @@ impl CanvasState {
 
     pub fn rotate_by(&mut self, degrees: f32) {
         self.rotation = (self.rotation + degrees).rem_euclid(360.0);
+    }
+
+    /// Run a View action aimed at the mouse: zooming in or out keeps the
+    /// point under the mouse in place when the mouse is over this canvas
+    /// (like the scroll wheel); otherwise the view's centre stays.
+    pub fn apply_at(&mut self, action: Action, pointer: Option<Pos2>) {
+        let factor = match action {
+            Action::ZoomIn => 1.25,
+            Action::ZoomOut => 1.0 / 1.25,
+            _ => return self.apply(action),
+        };
+        match (self.last_rect, pointer) {
+            (Some(rect), Some(p)) if rect.contains(p) => zoom_at(self, rect, p, factor),
+            _ => self.apply(action),
+        }
     }
 
     /// Run a View action on this canvas (Harmony's View menu).
@@ -561,6 +580,7 @@ pub fn ui(
     }
     let view = view_transform(state, rect);
     state.last_view = view.inverse().unwrap_or(Affine::IDENTITY);
+    state.last_rect = Some(rect);
     let px = 1.0 / scale_of(view).max(1e-6);
 
     // D4.2: neutral surround. D3.10: the stage is paper with a soft shadow.
@@ -1462,4 +1482,31 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
         }
     };
     badge(icon, p + Vec2::new(16.0, 16.0), 12.0);
+}
+
+#[cfg(test)]
+mod zoom_key_tests {
+    use super::*;
+
+    /// The 1 and 2 keys zoom on the mouse: the scene point under it stays.
+    #[test]
+    fn zoom_keys_keep_the_point_under_the_mouse() {
+        let mut st = CanvasState::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        st.last_rect = Some(rect);
+        let mouse = Pos2::new(620.0, 140.0);
+        let under = |st: &CanvasState| {
+            let inv = view_transform(st, rect).inverse().unwrap();
+            inv.apply(mouse.x, mouse.y)
+        };
+        let before = under(&st);
+        st.apply_at(Action::ZoomIn, Some(mouse));
+        st.apply_at(Action::ZoomIn, Some(mouse));
+        let after = under(&st);
+        assert!((st.zoom - 1.5625).abs() < 1e-4, "{}", st.zoom);
+        assert!((before.0 - after.0).abs() < 0.01 && (before.1 - after.1).abs() < 0.01);
+        // Outside the canvas: the centre stays put instead.
+        st.apply_at(Action::ZoomOut, Some(Pos2::new(2000.0, 2000.0)));
+        assert!((st.zoom - 1.25).abs() < 1e-4);
+    }
 }

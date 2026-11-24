@@ -10,6 +10,9 @@ use symphony_core::{
 use crate::session::Session;
 use symphony_ui::{theme, widgets};
 
+/// Node corner radius at 100% zoom: well rounded, scaled with zoom.
+const NODE_RADIUS: f32 = 9.0;
+
 type Input = (NodeId, usize);
 
 enum Drag {
@@ -1756,8 +1759,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         // a thicker rim (Motion presence, so it eases out again too).
         let lift = symphony_ui::motion::presence(ui.ctx(), resp.id.with(("lift", *id)), selected);
         let card = &Rect::from_center_size(card.center(), card.size() * (1.0 + 0.06 * lift));
-        // The same shape at any zoom: corners scale with the card.
-        let radius = f32::from(theme::RADIUS_CONTROL) * zoom;
+        // Rounded, and the same shape at any zoom: corners scale with the card.
+        let radius = NODE_RADIUS * zoom;
         let peg = peg_colour(&s.doc.graph, *id);
         let matte = s.doc.graph.is_drawing_matte(*id);
         let title = if matte {
@@ -1773,6 +1776,18 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         let face = peg.map_or(theme::BG_RAISED, |colour| {
             theme::BG_RAISED.lerp_to_gamma(colour, 0.12)
         });
+        // Unselected nodes sit a little darker, so the selected one stands
+        // out; a disabled node is grey with no border.
+        let face = if !node.enabled {
+            theme::BG_INPUT
+        } else {
+            face.lerp_to_gamma(theme::BG_BASE, 0.35 * (1.0 - lift))
+        };
+        let edge = if node.enabled {
+            edge
+        } else {
+            egui::Color32::TRANSPARENT
+        };
         if lift > 0.0 {
             let shadow = egui::epaint::Shadow {
                 offset: [0, (6.0 * zoom * lift) as i8],
@@ -1798,7 +1813,11 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             Align2::CENTER_CENTER,
             &title,
             font,
-            theme::TEXT_PRIMARY,
+            if node.enabled {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_DISABLED
+            },
             card.width() - 16.0 * zoom,
         );
     }
