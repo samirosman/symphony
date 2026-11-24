@@ -829,9 +829,13 @@ mod tests {
         let opacity = scene
             .graph
             .add("Opacity", NodeKind::Effect(Effect::Opacity { amount: 0.0 }));
-        let blur = scene
-            .graph
-            .add("Box Blur", NodeKind::Effect(Effect::Blur { radius: 16.0 }));
+        let blur = scene.graph.add(
+            "Box Blur",
+            NodeKind::Effect(Effect::Blur {
+                radius: 16.0,
+                mode: symphony_core::graph::BlurMode::Box,
+            }),
+        );
         let grain = scene.graph.add(
             "Grain",
             NodeKind::Effect(Effect::Grain {

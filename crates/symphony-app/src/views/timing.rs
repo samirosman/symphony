@@ -1404,7 +1404,10 @@ mod hierarchy_tests {
         super::super::node::insert_near(
             &mut s,
             old_peg,
-            NodeKind::Effect(Effect::Blur { radius: 2.0 }),
+            NodeKind::Effect(Effect::Blur {
+                radius: 2.0,
+                mode: symphony_core::graph::BlurMode::Box,
+            }),
         );
         let fx = s
             .doc

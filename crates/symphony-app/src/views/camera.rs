@@ -54,6 +54,7 @@ pub struct CanvasState {
     /// Stamped textured strokes, reused while only panning.
     strokes: super::textured::Cache,
     display: camera_render::Cache,
+    pub render_effects: bool,
 }
 
 impl Default for CanvasState {
@@ -73,6 +74,7 @@ impl Default for CanvasState {
             select: SelectState::default(),
             strokes: Default::default(),
             display: Default::default(),
+            render_effects: true,
         }
     }
 }
@@ -339,7 +341,13 @@ fn dense_label(ui: &mut egui::Ui, text: impl Into<String>) {
 }
 
 /// Top toolbar (D3.5a): display options, here onion skin.
-fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_only: bool) {
+fn top_toolbar(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    profile: Profile,
+    drawing_only: bool,
+    render_effects: &mut bool,
+) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
         .show(ui, |ui| {
@@ -434,6 +442,10 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 art_layer_toolbar(ui, s, profile);
                 if !drawing_only {
                     bars_menu(ui, s);
+                    ui.toggle_value(render_effects, "Render effects")
+                        .on_hover_text(
+                            "Preview Camera effects. Turn off to position the unprocessed artwork.",
+                        );
                 }
                 if drawing_only {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -599,7 +611,7 @@ pub fn ui(
     drawing_only: bool,
     profile: Profile,
 ) {
-    top_toolbar(ui, s, profile, drawing_only);
+    top_toolbar(ui, s, profile, drawing_only, &mut state.render_effects);
     let canvas_size = ui.available_size() - Vec2::new(0.0, theme::TAB_ROW);
     let (response, painter) = ui.allocate_painter(canvas_size, Sense::click_and_drag());
     let rect = response.rect;
@@ -662,13 +674,14 @@ pub fn ui(
     state.last_rect = Some(rect);
     let px = 1.0 / scale_of(view).max(1e-6);
 
+    let show_surround = drawing_only || s.doc.settings.bars.is_off();
     // D4.2: neutral surround. D3.10: the stage is paper with a soft shadow.
     let colours = s.colours;
     // The view's corners are rounded like its panel; the stage stays sharp.
     painter.rect_filled(
         rect,
         f32::from(theme::GLASS_RADIUS) - 4.0,
-        if drawing_only {
+        if show_surround {
             CanvasColours::get(colours.surround)
         } else {
             Color32::BLACK
@@ -789,112 +802,146 @@ pub fn ui(
         }
     }
 
-    // The artwork, back to front.
+    // Collect the graph once for both the draft artwork and the effects check.
+    use symphony_core::graph::RenderCommand;
+    let camera_commands = if drawing_only {
+        None
+    } else {
+        s.doc
+            .graph
+            .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
+            .ok()
+    };
     let items: Vec<select::Item> = if drawing_only {
         s.doc
             .exposed(s.selected, s.frame)
             .map(|d| vec![(s.selected, d, Affine::IDENTITY)])
             .unwrap_or_default()
     } else {
-        let layers = &s.doc.layers;
-        s.doc
-            .graph
-            .evaluate(s.doc.display, &s.doc.xsheet, s.frame)
-            .map(|v| {
-                v.into_iter()
-                    .filter_map(|i| {
-                        let layer = layers.iter().position(|l| l.node == i.node)?;
-                        let transform = s.doc.project_plane(s.frame, i.depth)?.compose(i.transform);
-                        Some((layer, i.drawing, transform))
-                    })
-                    .collect()
+        camera_commands
+            .iter()
+            .flatten()
+            .filter_map(|command| {
+                let RenderCommand::Drawing(item) = command else {
+                    return None;
+                };
+                if item.matte_pass {
+                    return None;
+                }
+                let layer = s.doc.layers.iter().position(|l| l.node == item.node)?;
+                let transform = s
+                    .doc
+                    .project_plane(s.frame, item.depth)?
+                    .compose(item.transform);
+                Some((layer, item.drawing, transform))
             })
-            .unwrap_or_default()
+            .collect()
     };
-    // While the Select tool drags, the selected strokes draw through the preview.
+    // Plain artwork uses cached GPU geometry. Effects go through an
+    // independent stage-sized raster cache when the preview is enabled.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
-    // Scenes of drawings, pegs and composites (most of them) draw straight
-    // on the GPU from cached triangles, updating on the very next frame.
-    // Effects, gradients and blend modes need the full renderer.
-    let gpu = drawing_only
-        || s.doc
-            .graph
-            .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
-            .is_ok_and(|commands| {
-                commands
-                    .iter()
-                    .all(|c| matches!(c, symphony_core::graph::RenderCommand::Drawing(_)))
-            });
-    if !gpu && !state.display.paint(&painter, s, corners, preview) {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Couldn’t render the Display output.",
-            theme::body(),
-            theme::TEXT_PRIMARY,
-        );
-    }
-    for (_, d, m) in items.iter().filter(|_| gpu || s.show_strokes) {
-        if let Some(dr) = s.doc.drawings.get(d) {
-            let moving = preview.is_some() && s.selection.drawing == Some(*d);
-            // An imported image, under the drawing's paint and lines.
-            if let (true, Some(img)) = (gpu, dr.image) {
+    let raw_only = drawing_only
+        || !state.render_effects
+        || camera_commands.as_ref().is_some_and(|commands| {
+            commands
+                .iter()
+                .all(|c| matches!(c, RenderCommand::Drawing(_)))
+        });
+    let raw_art = raw_only || show_surround;
+    if raw_art {
+        for (_, d, m) in &items {
+            let Some(dr) = s.doc.drawings.get(d) else {
+                continue;
+            };
+            let world = view.compose(*m);
+            if let Some(img) = dr.image {
                 state
                     .strokes
                     .vectors
-                    .paint_image(&painter, &s.doc, img, view.compose(*m));
+                    .paint_image(&painter, &s.doc, img, world);
             }
-            // Art layers back to front; within each, paint under ink.
             for art in ArtLayer::STACK {
-                // The Drawing view shows only the current art layer unless
-                // Preview All Art Layers (P) is on, as in Harmony.
                 if drawing_only && !s.art_preview && art != s.art {
                     continue;
                 }
-                if gpu {
-                    for f in dr.fills.iter().filter(|f| f.art == art) {
-                        state.strokes.vectors.paint_fill(
-                            &painter,
-                            f,
-                            colour(s, f.swatch),
-                            view.compose(*m),
-                        );
-                    }
+                for f in dr.fills.iter().filter(|f| f.art == art) {
+                    state
+                        .strokes
+                        .vectors
+                        .paint_fill(&painter, f, colour(s, f.swatch), world);
                 }
-                for st in dr.strokes.iter().filter(|st| st.art == art) {
-                    if !gpu && st.kind != StrokeKind::Invisible {
-                        continue;
-                    }
-                    let m = match preview {
-                        Some(l) if moving && s.selection.strokes.contains(&st.id) => {
-                            view.compose(*m).compose(l)
+                for st in dr
+                    .strokes
+                    .iter()
+                    .filter(|st| st.art == art && st.kind != StrokeKind::Invisible)
+                {
+                    let transform = match preview {
+                        Some(l)
+                            if s.selection.drawing == Some(*d)
+                                && s.selection.strokes.contains(&st.id) =>
+                        {
+                            world.compose(l)
                         }
-                        _ => view.compose(*m),
+                        _ => world,
                     };
-                    if st.kind == StrokeKind::Invisible {
-                        // Show Strokes (K): invisible strokes as thin cel-blue lines.
-                        if s.show_strokes {
-                            let pts: Vec<Pos2> = st
-                                .points
-                                .iter()
-                                .map(|p| to_pos(m.apply(p.x, p.y)))
-                                .collect();
-                            painter.add(egui::Shape::line(
-                                pts,
-                                EStroke::new(1.0, theme::ACCENT_SELECT),
-                            ));
-                        }
-                        continue;
-                    }
                     paint_stroke(
                         &painter,
                         &mut state.strokes,
                         &s.doc.textures,
                         st,
                         colour(s, st.swatch),
-                        m,
+                        transform,
                     );
                 }
+            }
+        }
+    }
+    if !raw_only {
+        if show_surround {
+            // The raw pass is a positioning aid outside the stage. Cover its
+            // inside portion before painting the composited stage texture.
+            painter.add(egui::Shape::convex_polygon(
+                corners.to_vec(),
+                CanvasColours::get(colours.stage),
+                EStroke::NONE,
+            ));
+        }
+        if !state.display.paint(&painter, s, corners, preview) {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Couldn’t render the Display output.",
+                theme::body(),
+                theme::TEXT_PRIMARY,
+            );
+        }
+    }
+    if s.show_strokes {
+        for (_, d, m) in &items {
+            let Some(dr) = s.doc.drawings.get(d) else {
+                continue;
+            };
+            let world = view.compose(*m);
+            for st in dr.strokes.iter().filter(|st| {
+                st.kind == StrokeKind::Invisible
+                    && (!drawing_only || s.art_preview || st.art == s.art)
+            }) {
+                let transform = match preview {
+                    Some(l)
+                        if s.selection.drawing == Some(*d)
+                            && s.selection.strokes.contains(&st.id) =>
+                    {
+                        world.compose(l)
+                    }
+                    _ => world,
+                };
+                painter.add(egui::Shape::line(
+                    st.points
+                        .iter()
+                        .map(|p| to_pos(transform.apply(p.x, p.y)))
+                        .collect(),
+                    EStroke::new(1.0, theme::ACCENT_SELECT),
+                ));
             }
         }
     }
@@ -1248,8 +1295,13 @@ pub fn ui(
             screen_per_size: size_unit(s, px) / px,
         },
     );
-    if !drawing_only {
+    if !show_surround {
         camera_render::mask_outside_stage(&painter, rect, corners);
+    } else if !drawing_only {
+        painter.add(egui::Shape::closed_line(
+            corners.to_vec(),
+            EStroke::new(1.0, theme::LINE_CONTROL),
+        ));
     }
     bottom_toolbar(ui, state, profile);
 }

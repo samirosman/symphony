@@ -11,12 +11,18 @@ use eframe::egui::{Pos2, Vec2};
 const POINTS: usize = 28;
 /// Simulation step, seconds.
 const STEP: f32 = 1.0 / 240.0;
+/// Cap catch-up so slow artwork frames do not trigger a burst of rope work.
+const MAX_CATCH_UP: f32 = 12.0 * STEP;
 /// Velocity kept per step (air drag).
-const DAMPING: f32 = 0.985;
+const DAMPING: f32 = 0.978;
 /// Constraint passes per step: higher is a stiffer, less stretchy rope.
 const PASSES: usize = 10;
 /// How strongly the rope resists bending (0 = thread).
-const BEND: f32 = 0.35;
+const BEND: f32 = 0.4;
+/// Cable gravity at 100% graph zoom, in points per second squared.
+pub const GRAVITY: f32 = 1500.0;
+/// Small allowance for the cable to bow while following the pointer.
+pub const DRAG_SLACK: f32 = 1.06;
 
 #[derive(Clone)]
 pub struct Rope {
@@ -112,7 +118,7 @@ impl Rope {
         shape: Option<&[Pos2]>,
         pull: f32,
     ) {
-        self.spare = (self.spare + dt.clamp(0.0, 0.1)).min(0.1);
+        self.spare = (self.spare + dt.max(0.0)).min(MAX_CATCH_UP);
         let target = shape.map(|s| resample(s, POINTS));
         while self.spare >= STEP {
             self.spare -= STEP;
@@ -285,7 +291,7 @@ mod tests {
             let t = step as f32 / fps;
             let (end, length) = if t < 0.35 {
                 let p = Pos2::new(40.0 + 360.0 * t, 160.0);
-                (p, from.distance(p) * 1.08)
+                (p, from.distance(p) * DRAG_SLACK)
             } else {
                 let k = ((t - 0.35) / 0.16).min(1.0);
                 let start = Pos2::new(40.0 + 360.0 * 0.35, 160.0);
@@ -299,7 +305,7 @@ mod tests {
                     end: Some(end),
                 },
                 length,
-                1700.0,
+                GRAVITY,
                 None,
                 0.0,
             );
@@ -322,7 +328,7 @@ mod tests {
                     end: None,
                 },
                 left,
-                1700.0,
+                GRAVITY,
                 None,
                 0.0,
             );

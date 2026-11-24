@@ -107,6 +107,17 @@ impl ToolDock {
         matches!(self, Self::Top | Self::Bottom)
     }
 
+    fn preview(self, workspace: egui::Rect) -> egui::Rect {
+        let mut rect = workspace.shrink(theme::GUTTER);
+        match self {
+            Self::Left => rect.max.x = rect.min.x + theme::TOOLS_STRIP,
+            Self::Right => rect.min.x = rect.max.x - theme::TOOLS_STRIP,
+            Self::Top => rect.max.y = rect.min.y + theme::TOOLS_STRIP,
+            Self::Bottom => rect.min.y = rect.max.y - theme::TOOLS_STRIP,
+        }
+        rect.intersect(workspace)
+    }
+
     fn nearest(rect: egui::Rect, pos: egui::Pos2) -> Self {
         let centre = rect.center();
         let local = pos - centre;
@@ -1593,6 +1604,7 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ToggleOnionSkin);
             let on = self.s.show_strokes;
             self.menu_toggle(ui, Action::ShowStrokes, on);
+            ui.checkbox(&mut self.camera.render_effects, "Render Camera Effects");
             ui.separator();
             self.menu_action(ui, Action::ZoomIn);
             self.menu_action(ui, Action::ZoomOut);
@@ -1720,6 +1732,7 @@ impl SymphonyApp {
 
     fn tools_panel(&mut self, ui: &mut egui::Ui) {
         let dock = self.tool_dock;
+        let workspace = ui.available_rect_before_wrap();
         let panel = match dock {
             ToolDock::Left => egui::Panel::left("tools-left"),
             ToolDock::Right => egui::Panel::right("tools-right"),
@@ -1758,12 +1771,12 @@ impl SymphonyApp {
             .frame(egui::Frame::new().inner_margin(margins))
             .exact_size(theme::TOOLS_STRIP + theme::GUTTER)
             .resizable(false)
-            .show(ui, |ui| self.tools_strip(ui, dock.horizontal()));
+            .show(ui, |ui| self.tools_strip(ui, dock.horizontal(), workspace));
     }
 
     /// A grip moves the toolbar between window edges. The context menu
     /// offers the same docking choices for keyboard and pen users.
-    fn tools_strip(&mut self, ui: &mut egui::Ui, horizontal: bool) {
+    fn tools_strip(&mut self, ui: &mut egui::Ui, horizontal: bool, workspace: egui::Rect) {
         let frame = egui::Frame::new()
             .fill(theme::GLASS_PANEL)
             .corner_radius(theme::GLASS_RADIUS)
@@ -1801,10 +1814,36 @@ impl SymphonyApp {
                     let grip = grip.on_hover_text(
                         "Drag Tools to a window edge, or right-click to choose a side",
                     );
-                    if grip.drag_stopped() {
-                        if let Some(pos) = grip.interact_pointer_pos() {
-                            self.tool_dock = ToolDock::nearest(ui.ctx().content_rect(), pos);
+                    if let Some(pos) = grip
+                        .interact_pointer_pos()
+                        .or_else(|| ui.ctx().pointer_latest_pos())
+                        .filter(|_| grip.dragged() || grip.drag_stopped())
+                    {
+                        let side = ToolDock::nearest(workspace, pos);
+                        if grip.drag_stopped() {
+                            self.tool_dock = side;
                             ui.ctx().request_repaint();
+                        } else {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            let preview = side.preview(workspace);
+                            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                                egui::Order::Foreground,
+                                egui::Id::unique("tools-dock-preview"),
+                            ));
+                            painter.rect(
+                                preview,
+                                theme::GLASS_RADIUS,
+                                theme::ACCENT_SELECT.gamma_multiply(0.18),
+                                egui::Stroke::new(1.0, theme::ACCENT_SELECT),
+                                egui::StrokeKind::Inside,
+                            );
+                            painter.text(
+                                preview.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Tools",
+                                theme::dense(),
+                                theme::TEXT_PRIMARY,
+                            );
                         }
                     }
                     grip.context_menu(|ui| {
@@ -1911,61 +1950,54 @@ impl SymphonyApp {
     }
 
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        const GROUPS: [&[Tool]; 4] = [
-            &[Tool::Select, Tool::Transform],
-            &[Tool::Brush, Tool::Eraser, Tool::LineEditor],
-            &[Tool::Paint, Tool::CloseGap, Tool::Dropper],
-            &[Tool::Hand, Tool::Zoom],
+        const TOOLS: [Tool; 10] = [
+            Tool::Select,
+            Tool::Transform,
+            Tool::Brush,
+            Tool::Eraser,
+            Tool::LineEditor,
+            Tool::Paint,
+            Tool::CloseGap,
+            Tool::Dropper,
+            Tool::Hand,
+            Tool::Zoom,
         ];
-        // Only the tools that can act on what you're working on (a smart
-        // toolbar): a selected peg offers Transform and the view tools.
         let context = self.s.tool_context();
         ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
-        let mut first = true;
-        for tools in GROUPS {
-            let shown: Vec<Tool> = tools.iter().copied().filter(|t| t.fits(context)).collect();
-            if shown.is_empty() {
-                continue;
+        for tool in TOOLS.into_iter().filter(|tool| tool.fits(context)) {
+            let mut tip = keymap::tooltip(self.profile, tool_action(tool));
+            // Select shows that it also transforms what it selected.
+            let icon = match tool {
+                Tool::Select if !self.s.selection.strokes.is_empty() => {
+                    tip.push_str("\nDrag, scale or rotate the selection");
+                    Icon::Transform
+                }
+                // The Brush shows its kind: a pen for vector lines, a
+                // brush for bitmap (textured) ones.
+                Tool::Brush if self.s.brush.texture.is_none() => Icon::Pen,
+                Tool::Brush => Icon::Brush,
+                Tool::Transform => {
+                    tip = format!("Transform the peg\n{tip}");
+                    Icon::Transform
+                }
+                _ => tool_icon(tool),
+            };
+            if let Some(milestone) = tool.planned_for() {
+                tip.push_str(&format!("\nComing in {milestone}"));
             }
-            if !first {
-                ui.add_space(theme::TOOL_GROUP_GAP - 2.0);
+            let response = icons::tool_button(
+                ui,
+                icon,
+                self.s.tool == tool,
+                tool.planned_for().is_none(),
+                &tip,
+            );
+            if response.clicked() {
+                self.s.tool = tool;
             }
-            first = false;
-            for tool in shown {
-                let mut tip = keymap::tooltip(self.profile, tool_action(tool));
-                // Select shows that it also transforms what it selected.
-                let icon = match tool {
-                    Tool::Select if !self.s.selection.strokes.is_empty() => {
-                        tip.push_str("\nDrag, scale or rotate the selection");
-                        Icon::Transform
-                    }
-                    // The Brush shows its kind: a pen for vector lines, a
-                    // brush for bitmap (textured) ones.
-                    Tool::Brush if self.s.brush.texture.is_none() => Icon::Pen,
-                    Tool::Brush => Icon::Brush,
-                    Tool::Transform => {
-                        tip = format!("Transform the peg\n{tip}");
-                        Icon::Transform
-                    }
-                    _ => tool_icon(tool),
-                };
-                if let Some(milestone) = tool.planned_for() {
-                    tip.push_str(&format!("\nComing in {milestone}"));
-                }
-                let response = icons::tool_button(
-                    ui,
-                    icon,
-                    self.s.tool == tool,
-                    tool.planned_for().is_none(),
-                    &tip,
-                );
-                if response.clicked() {
-                    self.s.tool = tool;
-                }
-                if response.double_clicked() {
-                    self.s.tool = tool;
-                    self.open_tool_properties();
-                }
+            if response.double_clicked() {
+                self.s.tool = tool;
+                self.open_tool_properties();
             }
         }
     }
@@ -2210,13 +2242,21 @@ impl SymphonyApp {
         }
         for kind in views::node::addable_nodes() {
             let name = views::node::kind_label(&kind);
+            let aliases = if matches!(
+                kind,
+                symphony_core::graph::NodeKind::Effect(symphony_core::graph::Effect::Blur { .. })
+            ) {
+                "node create insert effect box gaussian motion directional radial spin zoom blur"
+            } else {
+                "node create insert effect"
+            };
             let mut entry = Entry::new(
                 &format!("Add {name}"),
                 Kind::Node,
                 Command::AddNode(kind),
                 &format!("node.add.{name}"),
             )
-            .words("node create insert effect");
+            .words(aliases);
             entry.context.clone_from(&node_views);
             out.push(entry);
         }
@@ -2318,6 +2358,13 @@ impl SymphonyApp {
                 "node.properties",
                 "inspect layer settings",
                 &[View::Node, View::LayerProperties][..],
+            ),
+            (
+                "Toggle Camera Effects",
+                Command::ToggleCameraEffects,
+                "camera.effects",
+                "render camera preview draft bypass effects",
+                &[View::Camera][..],
             ),
             (
                 "Render Node Preview",
@@ -2678,6 +2725,9 @@ impl SymphonyApp {
             Command::ToggleAnimate => self.s.animate = !self.s.animate,
             Command::ShowNodeProperties => {
                 views::node::show_selected_properties(&self.s, &mut self.node_view)
+            }
+            Command::ToggleCameraEffects => {
+                self.camera.render_effects = !self.camera.render_effects
             }
             Command::RenderNodePreview => views::node::show_render_preview(&mut self.node_view),
             Command::ResetNodeView => views::node::reset_view(&mut self.node_view),
@@ -4129,9 +4179,11 @@ impl SymphonyApp {
                 self.shot_search_opened = true;
             }
         }
-        let wallpaper_pixels = self.camera.wallpaper_pixels(&self.s);
-        self.wallpaper
-            .update_camera(&ctx, &self.s, wallpaper_pixels);
+        if self.camera.render_effects {
+            let wallpaper_pixels = self.camera.wallpaper_pixels(&self.s);
+            self.wallpaper
+                .update_camera(&ctx, &self.s, wallpaper_pixels);
+        }
         views::node::windows(&ctx, &mut self.s, &mut self.node_view);
         self.search_box(&ctx);
         self.dialogs(&ctx);

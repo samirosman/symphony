@@ -33,6 +33,7 @@ pub enum Command {
     ToggleAnimate,
     ShowNodeProperties,
     RenderNodePreview,
+    ToggleCameraEffects,
     ResetNodeView,
     ResetWorkspace,
     UpdateApp,

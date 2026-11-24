@@ -62,7 +62,6 @@ pub const STATUS_BAR: f32 = 24.0;
 pub const TOOLBAR_BUTTON: f32 = 24.0;
 pub const TOOL_BUTTON: f32 = 32.0;
 pub const TOOL_ICON: f32 = 20.0;
-pub const TOOL_GROUP_GAP: f32 = 12.0;
 pub const TOOLS_STRIP: f32 = 44.0;
 pub const ROW: f32 = 28.0;
 pub const XSHEET_ROW: f32 = 20.0;
@@ -392,8 +391,8 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
         top: 0,
     };
     // Dragging a view: glass-style drop targets with soft fades.
-    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.22);
-    d.overlay.selection_stroke_width = 1.0;
+    d.overlay.selection_color = ACCENT_SELECT.gamma_multiply(0.30);
+    d.overlay.selection_stroke_width = 2.0;
     d.overlay.button_color = GLASS_PANEL;
     d.overlay.button_border_stroke = Stroke::new(1.0, ACCENT_SELECT.gamma_multiply(0.6));
     d.overlay.surface_fade_opacity = 0.45;
