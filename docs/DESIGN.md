@@ -37,6 +37,12 @@ When two rules conflict, the higher principle wins.
 - **P5. Calm, dense, legible.** This is a professional tool: compact,
   quiet and readable for hours. Colour and motion only appear when they
   mean something.
+- **P5a. Only the tools the task needs.** The toolbar and tool options
+  follow what you're working on: drawing tools on a drawing, Transform on
+  a peg, and later specialised tools only on the nodes they act on. A
+  tool that can't act on the current target isn't shown. This keeps the
+  toolbar small while letting Symphony grow many advanced tools
+  (`Tool::fits`, `ToolContext`).
 - **P6. Symphony looks like Symphony.** Harmony's structure, our own
   identity: our own icons, colours and type. We never copy Toon Boom
   artwork (see [CLEAN-ROOM.md](CLEAN-ROOM.md)).

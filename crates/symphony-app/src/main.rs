@@ -1921,6 +1921,9 @@ impl SymphonyApp {
         // toolbar): a selected peg offers Transform and the view tools.
         let context = self.s.tool_context();
         ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
+        // One highlight slides between tools as you switch.
+        let highlight = ui.painter().add(egui::Shape::Noop);
+        let mut active_rect = None;
         let mut first = true;
         for tools in GROUPS {
             let shown: Vec<Tool> = tools.iter().copied().filter(|t| t.fits(context)).collect();
@@ -1952,13 +1955,16 @@ impl SymphonyApp {
                 if let Some(milestone) = tool.planned_for() {
                     tip.push_str(&format!("\nComing in {milestone}"));
                 }
-                let response = icons::tool_button(
+                let response = icons::sliding_tool_button(
                     ui,
                     icon,
                     self.s.tool == tool,
                     tool.planned_for().is_none(),
                     &tip,
                 );
+                if self.s.tool == tool {
+                    active_rect = Some(response.rect);
+                }
                 if response.clicked() {
                     self.s.tool = tool;
                 }
@@ -1967,6 +1973,9 @@ impl SymphonyApp {
                     self.open_tool_properties();
                 }
             }
+        }
+        if let Some(rect) = active_rect {
+            icons::paint_tool_highlight(ui, egui::Id::unique("tool-highlight"), rect, highlight);
         }
     }
 
@@ -3380,6 +3389,22 @@ impl egui_dock::TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut View) {
+        // Switching tabs fades the new view in (Appear), rather than it
+        // popping in: a view that wasn't drawn last frame starts from clear.
+        let ctx = ui.ctx().clone();
+        let pass = ctx.cumulative_pass_nr();
+        let seen_id = egui::Id::unique(("tab-last-drawn", *tab));
+        let fade_id = egui::Id::unique(("tab-fade", *tab));
+        let last: Option<u64> = ctx.data(|d| d.get_temp(seen_id));
+        ctx.data_mut(|d| d.insert_temp(seen_id, pass));
+        if last.is_some_and(|l| l + 1 < pass) {
+            symphony_ui::motion::start(&ctx, fade_id, 0.0);
+        }
+        let opacity =
+            symphony_ui::motion::value(&ctx, fade_id, 1.0, symphony_ui::motion::Motion::Appear);
+        if opacity < 1.0 {
+            ui.multiply_opacity(opacity);
+        }
         self.view(ui, *tab);
     }
 
@@ -3811,14 +3836,15 @@ impl SymphonyApp {
                     // Pages, like Harmony's Preferences tabs.
                     ui.vertical(|ui| {
                         ui.set_width(150.0);
-                        for page in PrefsPage::ALL {
-                            if ui
-                                .selectable_label(self.prefs_page == page, page.title())
-                                .clicked()
-                            {
-                                self.prefs_page = page;
-                            }
-                        }
+                        let pages: Vec<(PrefsPage, &str)> =
+                            PrefsPage::ALL.iter().map(|&p| (p, p.title())).collect();
+                        symphony_ui::widgets::segmented(
+                            ui,
+                            "prefs-pages",
+                            &mut self.prefs_page,
+                            &pages,
+                            true,
+                        );
                     });
                     ui.separator();
                     egui::ScrollArea::vertical()

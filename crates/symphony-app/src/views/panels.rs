@@ -196,8 +196,13 @@ fn preset_list(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, tool: 
     // List (name beside its stroke) or Grid (more presets at a glance).
     ui.horizontal(|ui| {
         hint(ui, "View");
-        ui.selectable_value(&mut presets.grid, false, "List");
-        ui.selectable_value(&mut presets.grid, true, "Grid");
+        widgets::segmented(
+            ui,
+            "preset-view",
+            &mut presets.grid,
+            &[(false, "List"), (true, "Grid")],
+            false,
+        );
     });
     // Brush presets show in their own kind only: vector or bitmap.
     let bitmap = current_settings.texture.is_some();
@@ -429,12 +434,13 @@ fn brush_controls(ui: &mut egui::Ui, s: &mut Session, presets: &mut Presets, pen
     if !pencil {
         let bitmap = s.brush.texture.is_some();
         let mut want = bitmap;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut want, false, "Vector")
-                .on_hover_text("Clean, solid vector lines");
-            ui.selectable_value(&mut want, true, "Bitmap")
-                .on_hover_text("Textured lines from brush tips, like imported Krita brushes");
-        });
+        widgets::segmented(
+            ui,
+            "brush-kind",
+            &mut want,
+            &[(false, "Vector"), (true, "Bitmap")],
+            false,
+        );
         if want != bitmap {
             // Pick up the first preset of that kind, if there is one.
             let found = presets
@@ -601,8 +607,13 @@ fn tool_properties_body(
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     hint(ui, "Tip style");
-                    ui.selectable_value(&mut s.eraser_tip, Tip::Round, "Round");
-                    ui.selectable_value(&mut s.eraser_tip, Tip::Flat, "Flat");
+                    widgets::segmented(
+                        ui,
+                        "eraser-tip",
+                        &mut s.eraser_tip,
+                        &[(Tip::Round, "Round"), (Tip::Flat, "Flat")],
+                        false,
+                    );
                 });
                 hint(ui, "The shape left at the ends of a pencil line where you cut it. Brush lines and paint lose exactly the eraser's shape.");
                 ui.add_space(6.0);
@@ -616,10 +627,13 @@ fn tool_properties_body(
             Tool::Select | Tool::Transform => {
                 let select = s.tool == Tool::Select;
                 section(ui, if select { "Select" } else { "Transform" });
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut s.marquee_mode, false, "Lasso");
-                    ui.selectable_value(&mut s.marquee_mode, true, "Marquee");
-                });
+                widgets::segmented(
+                    ui,
+                    "select-mode",
+                    &mut s.marquee_mode,
+                    &[(false, "Lasso"), (true, "Marquee")],
+                    false,
+                );
                 hint(
                     ui,
                     "Hold Option/Alt to use the other mode for one selection.",
