@@ -506,7 +506,7 @@ pub fn tool_properties(
 ) {
     // Brush and Pencil: the name and stroke preview stay pinned at the top,
     // so changing any setting below shows its effect right away.
-    if matches!(s.tool, Tool::Brush | Tool::Pencil) {
+    if matches!(s.tool, Tool::Brush | Tool::Line | Tool::Pencil) {
         let pencil = s.tool == Tool::Pencil;
         padded(ui, |ui| {
             section(ui, if pencil { "Pencil" } else { "Brush" });
@@ -553,6 +553,14 @@ fn tool_properties_body(
     padded(ui, |ui| {
         match s.tool {
             Tool::Brush => brush_controls(ui, s, presets, false),
+            Tool::Line => {
+                hint(
+                    ui,
+                    "Drag a straight line in the Brush's style. Hold Shift to snap to 22.5° steps, hold Alt to bend it into a curve.",
+                );
+                ui.add_space(4.0);
+                brush_controls(ui, s, presets, false);
+            }
             Tool::Pencil => brush_controls(ui, s, presets, true),
             Tool::Eraser => {
                 section(ui, "Eraser");

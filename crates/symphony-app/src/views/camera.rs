@@ -135,6 +135,65 @@ struct Active {
     stencil: Option<Stencil>,
     /// Stamping state while a textured brush stroke is being drawn.
     live: Option<super::textured::Live>,
+    /// The Line tool's line, drawing-local: its points are rebuilt from
+    /// this each move rather than following the pen's path.
+    line: Option<LineDraft>,
+}
+
+/// A line being dragged: start, end, the point a bend passes through
+/// (while Alt is held), and the pen pressure it was started with.
+#[derive(Clone, Copy)]
+struct LineDraft {
+    start: [f32; 2],
+    end: [f32; 2],
+    bend: Option<[f32; 2]>,
+    pressure: f32,
+}
+
+/// `end` turned about `start` to the nearest multiple of 22.5 degrees
+/// (so 45 and 90 too), keeping its distance.
+fn snap_line(start: [f32; 2], end: [f32; 2]) -> [f32; 2] {
+    let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+    let len = dx.hypot(dy);
+    if len < 1e-6 {
+        return end;
+    }
+    let step = std::f32::consts::PI / 8.0;
+    let a = (dy.atan2(dx) / step).round() * step;
+    [start[0] + a.cos() * len, start[1] + a.sin() * len]
+}
+
+/// The line's points: straight, or a curve through `bend` (a quadratic
+/// whose middle passes through the bend point). Spaced about `step`.
+fn line_points(d: &LineDraft, step: f32) -> Vec<Point> {
+    let [sx, sy] = d.start;
+    let [ex, ey] = d.end;
+    // Control point so the curve's midpoint lands on the bend point.
+    let c = d
+        .bend
+        .map(|[bx, by]| [2.0 * bx - (sx + ex) / 2.0, 2.0 * by - (sy + ey) / 2.0]);
+    let reach = (ex - sx).hypot(ey - sy) + c.map_or(0.0, |[cx, cy]| (cx - sx).hypot(cy - sy));
+    let n = ((reach / step.max(1e-3)) as usize).clamp(1, 96);
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let (x, y) = match c {
+                Some([cx, cy]) => {
+                    let u = 1.0 - t;
+                    (
+                        u * u * sx + 2.0 * u * t * cx + t * t * ex,
+                        u * u * sy + 2.0 * u * t * cy + t * t * ey,
+                    )
+                }
+                None => (sx + (ex - sx) * t, sy + (ey - sy) * t),
+            };
+            Point {
+                x,
+                y,
+                pressure: d.pressure,
+            }
+        })
+        .collect()
 }
 
 impl CanvasState {
@@ -1041,6 +1100,7 @@ pub fn ui(
     let draws = matches!(
         s.tool,
         Tool::Brush
+            | Tool::Line
             | Tool::Pencil
             | Tool::Eraser
             | Tool::Paint
@@ -1165,11 +1225,35 @@ pub fn ui(
                         },
                         stencil: settings.stencil.filter(|_| kind == StrokeKind::Pencil),
                         live: None,
+                        line: (s.tool == Tool::Line).then_some(LineDraft {
+                            start: [first.x, first.y],
+                            end: [first.x, first.y],
+                            bend: None,
+                            pressure: first.pressure,
+                        }),
                     });
                 }
             }
             Phase::Move => {
-                if let Some(a) = state.active.as_mut() {
+                if let Some(a) = state.active.as_mut().filter(|a| a.line.is_some()) {
+                    // The Line tool: the pen sets the end; Shift snaps its
+                    // angle; Alt bends the line through the pen instead.
+                    let (x, y) = a.to_local.apply(sx, sy);
+                    if let Some(d) = a.line.as_mut() {
+                        if alt {
+                            d.bend = Some([x, y]);
+                        } else {
+                            d.end = if shift {
+                                snap_line(d.start, [x, y])
+                            } else {
+                                [x, y]
+                            };
+                        }
+                        a.stroke.points = line_points(d, a.min_step * 2.0);
+                    }
+                    // Rebuilt, not extended: stamp the textured preview anew.
+                    a.live = None;
+                } else if let Some(a) = state.active.as_mut() {
                     let (x, y) = a.to_local.apply(sx, sy);
                     let raw = Point {
                         x,
@@ -1208,7 +1292,32 @@ pub fn ui(
                         _ => s.end_gesture(),
                     }
                 }
-                if let Some(mut a) = state.active.take() {
+                if state.active.as_ref().is_some_and(|a| a.line.is_some()) {
+                    let Some(mut a) = state.active.take() else {
+                        continue;
+                    };
+                    // Where the pen lifted is the line's end (or bend).
+                    let (x, y) = a.to_local.apply(sx, sy);
+                    if let Some(d) = a.line.as_mut() {
+                        if alt {
+                            d.bend = Some([x, y]);
+                        } else {
+                            d.end = if shift {
+                                snap_line(d.start, [x, y])
+                            } else {
+                                [x, y]
+                            };
+                        }
+                        a.stroke.points = line_points(d, a.min_step * 2.0);
+                    }
+                    // A line is exactly its draft: no smoothing or thinning.
+                    if a.stroke.points.len() >= 2 {
+                        if let Some(live) = a.live.take() {
+                            state.strokes.adopt(a.stroke.id, live);
+                        }
+                        s.commit_stroke(a.layer, a.frame, a.stroke);
+                    }
+                } else if let Some(mut a) = state.active.take() {
                     // Where the pen lifted is part of the line: without it,
                     // every stroke lost its last stretch and drawn shapes
                     // didn't close. Lifting reports ~0 pressure, so keep

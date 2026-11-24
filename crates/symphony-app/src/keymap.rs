@@ -91,6 +91,7 @@ pub enum Action {
     ToolSelect,
     ToolTransform,
     ToolBrush,
+    ToolLine,
     ToolPencil,
     ToolEraser,
     ToolPaint,
@@ -116,7 +117,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 76] = [
+    pub const ALL: [Action; 77] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -171,6 +172,7 @@ impl Action {
         Action::ToolSelect,
         Action::ToolTransform,
         Action::ToolBrush,
+        Action::ToolLine,
         Action::ToolPencil,
         Action::ToolEraser,
         Action::ToolPaint,
@@ -252,6 +254,7 @@ impl Action {
             Action::ToolSelect => "tool.select",
             Action::ToolTransform => "tool.transform",
             Action::ToolBrush => "tool.brush",
+            Action::ToolLine => "tool.line",
             Action::ToolPencil => "tool.pencil",
             Action::ToolEraser => "tool.eraser",
             Action::ToolPaint => "tool.paint",
@@ -333,6 +336,7 @@ impl Action {
             Action::ToolSelect => "Select",
             Action::ToolTransform => "Transform",
             Action::ToolBrush => "Brush",
+            Action::ToolLine => "Line",
             Action::ToolPencil => "Pencil",
             Action::ToolEraser => "Eraser",
             Action::ToolPaint => "Paint",
@@ -455,6 +459,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolSelect => b(Key::S, ALT),
         Action::ToolTransform => b(Key::T, SHIFT),
         Action::ToolBrush => b(Key::B, ALT),
+        // Unbound until checked against Harmony 27.1's Line tool.
+        Action::ToolLine => None,
         Action::ToolPencil => b(Key::Slash, ALT),
         Action::ToolEraser => b(Key::E, ALT),
         Action::ToolPaint => b(Key::I, ALT),

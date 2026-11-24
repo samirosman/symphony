@@ -1205,3 +1205,84 @@ fn tga_and_svg_import() {
     assert_eq!(px.get_pixel(100, 100).0, [224, 48, 32, 255]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The Line tool: a straight line whatever path the pen takes; Shift
+/// snaps its angle to 22.5° steps; Alt bends it through the pen.
+#[test]
+fn the_line_tool_draws_straight_snapped_and_bent_lines() {
+    use crate::session::Tool;
+    // A fresh layer: its peg is untouched, so drawing space is scene space.
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    let last = move |h: &Harness<'static, Rig>| strokes(h, layer).last().cloned().expect("a line");
+    h.state_mut().s.tool = Tool::Line;
+    let before = strokes(&h, layer).len();
+    // A wobbly path: the line goes straight from start to end.
+    drag(
+        &mut h,
+        &[(-100.0, 0.0), (-20.0, 40.0), (40.0, -30.0), (100.0, 0.0)],
+        1.0,
+        PenTool::Pen,
+    );
+    assert_eq!(strokes(&h, layer).len(), before + 1);
+    let st = last(&h);
+    assert!(st.points.iter().all(|p| p.y.abs() < 0.5), "straight");
+    let (a, b) = (st.points[0], *st.points.last().unwrap());
+    assert!((a.x + 100.0).abs() < 1.0 && (b.x - 100.0).abs() < 1.0);
+    // Shift: 100 across and 30 down (about 17°) snaps to 22.5°.
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    drag(
+        &mut h,
+        &[(0.0, 0.0), (100.0, 30.0), (100.0, 30.0)],
+        1.0,
+        PenTool::Pen,
+    );
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    let st = last(&h);
+    let (a, b) = (st.points[0], *st.points.last().unwrap());
+    let angle = (b.y - a.y).atan2(b.x - a.x).to_degrees();
+    assert!((angle - 22.5).abs() < 0.5, "snapped: {angle}");
+    // Alt: after setting the end, the pen bends the line through itself.
+    let to = |h: &Harness<'static, Rig>, x, y| h.state().canvas.to_screen(x, y);
+    let steps: [((f32, f32), Phase, bool); 4] = [
+        ((-100.0, 100.0), Phase::Down, false),
+        ((100.0, 100.0), Phase::Move, false),
+        ((0.0, 40.0), Phase::Move, true),
+        ((0.0, 40.0), Phase::Up, true),
+    ];
+    for ((x, y), phase, alt) in steps {
+        let p = to(&h, x, y);
+        h.input_mut()
+            .events
+            .push(egui::Event::ModifiersChanged(if alt {
+                egui::Modifiers::ALT
+            } else {
+                egui::Modifiers::NONE
+            }));
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        h.state_mut()
+            .samples
+            .push(sample(p, phase, 1.0, PenTool::Pen));
+        h.step();
+    }
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(2);
+    let st = last(&h);
+    let mid = st.points[st.points.len() / 2];
+    assert!(
+        mid.x.abs() < 3.0 && (mid.y - 40.0).abs() < 3.0,
+        "bent through the pen: {mid:?}"
+    );
+    let (a, b) = (st.points[0], *st.points.last().unwrap());
+    assert!(
+        (a.y - 100.0).abs() < 1.0 && (b.y - 100.0).abs() < 1.0,
+        "ends stay put"
+    );
+}

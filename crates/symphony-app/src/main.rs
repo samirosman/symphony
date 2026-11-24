@@ -542,6 +542,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Select => Icon::Select,
         Tool::Transform => Icon::Transform,
         Tool::Brush => Icon::Brush,
+        Tool::Line => Icon::Line,
         Tool::Pencil => Icon::Pencil,
         Tool::Eraser => Icon::Eraser,
         Tool::Paint => Icon::Paint,
@@ -558,6 +559,7 @@ fn tool_action(t: Tool) -> Action {
         Tool::Select => Action::ToolSelect,
         Tool::Transform => Action::ToolTransform,
         Tool::Brush => Action::ToolBrush,
+        Tool::Line => Action::ToolLine,
         Tool::Pencil => Action::ToolPencil,
         Tool::Eraser => Action::ToolEraser,
         Tool::Paint => Action::ToolPaint,
@@ -1956,10 +1958,11 @@ impl SymphonyApp {
     }
 
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        const TOOLS: [Tool; 10] = [
+        const TOOLS: [Tool; 11] = [
             Tool::Select,
             Tool::Transform,
             Tool::Brush,
+            Tool::Line,
             Tool::Eraser,
             Tool::LineEditor,
             Tool::Paint,

@@ -19,6 +19,9 @@ pub enum Tool {
     Select,
     Transform,
     Brush,
+    /// Straight lines in the Brush's style: Shift snaps the angle, Alt
+    /// bends it into a curve (all while still pressing).
+    Line,
     Pencil,
     Eraser,
     Paint,
@@ -65,10 +68,11 @@ impl PaintMode {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 11] = [
+    pub const ALL: [Tool; 12] = [
         Tool::Select,
         Tool::Transform,
         Tool::Brush,
+        Tool::Line,
         Tool::Pencil,
         Tool::Eraser,
         Tool::Paint,
@@ -93,6 +97,7 @@ impl Tool {
     pub fn planned_for(self) -> Option<&'static str> {
         match self {
             Tool::Brush
+            | Tool::Line
             | Tool::Pencil
             | Tool::Eraser
             | Tool::Hand

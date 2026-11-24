@@ -15,6 +15,8 @@ pub enum Icon {
     Brush,
     /// Vector lines (the Brush tool in vector mode).
     Pen,
+    /// The Line tool: a straight line between two dots.
+    Line,
     Pencil,
     Eraser,
     Paint,
@@ -50,11 +52,12 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 36] = [
+    pub const ALL: [Icon; 37] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
         Icon::Pen,
+        Icon::Line,
         Icon::Pencil,
         Icon::Eraser,
         Icon::Paint,
@@ -216,6 +219,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                     (5.4, 8.7),
                 ],
             );
+        }
+        Icon::Line => {
+            g.line(p, &[(3.5, 12.5), (12.5, 3.5)]);
+            g.dot(p, 3.5, 12.5, 1.6);
+            g.dot(p, 12.5, 3.5, 1.6);
         }
         Icon::Pen => {
             // A fountain-pen nib: vector lines.
