@@ -13,6 +13,8 @@ struct RenderKey {
     version: u64,
     frame: u32,
     stage: [u32; 2],
+    /// The render's own size, from `render_size`.
+    size: [u32; 2],
     selection: Option<(Id, Vec<Id>, Affine)>,
 }
 
@@ -72,11 +74,17 @@ impl Cache {
             None
         };
         let stage = [s.doc.settings.width.max(1), s.doc.settings.height.max(1)];
+        let (pixels_per_point, moving) = painter
+            .ctx()
+            .input(|i| (i.pixels_per_point, i.pointer.any_down()));
+        let shown = corners[0].distance(corners[1]) * pixels_per_point;
+        let size = render_size(stage, shown, moving);
         let key = RenderKey {
             session: s.key.clone(),
             version: s.doc.version,
             frame: s.frame,
             stage,
+            size,
             selection,
         };
         // Collect a finished render.
@@ -119,8 +127,7 @@ impl Cache {
         let wanted =
             self.key.as_ref() != Some(&key) && self.job.as_ref().is_none_or(|(k, _)| *k != key);
         if wanted && self.job.is_none() {
-            let scale = (1920.0 / stage[0].max(stage[1]) as f32).min(1.0);
-            let [width, height] = stage.map(|size| (size as f32 * scale).round().max(1.0) as u32);
+            let [width, height] = size;
             let scene = std::sync::Arc::new(s.doc.clone());
             let frame = s.frame;
             let job_key = key.clone();
@@ -173,6 +180,23 @@ impl Cache {
     }
 }
 
+/// How big to render the stage: at most 1920 pixels on its long side,
+/// and no bigger than it shows on screen (`shown` pixels wide), in steps
+/// of a half so a small zoom change keeps the render. While a button is
+/// down (a drag, a scrub) one step smaller, so the view keeps up: a busy
+/// scene takes 120 ms at 1920 x 1080 and 33 ms at half that.
+fn render_size(stage: [u32; 2], shown: f32, moving: bool) -> [u32; 2] {
+    let full = (1920.0 / stage[0].max(stage[1]) as f32).min(1.0);
+    let mut scale = full;
+    while scale > full / 4.0 && stage[0] as f32 * scale / 2.0 >= shown {
+        scale /= 2.0;
+    }
+    if moving {
+        scale = (scale / 2.0).max(full / 8.0);
+    }
+    stage.map(|side| (side as f32 * scale).round().max(1.0) as u32)
+}
+
 /// Cut a stage-shaped opening in an opaque black surround, including after rotation.
 pub(super) fn mask_outside_stage(
     painter: &egui::Painter,
@@ -208,6 +232,30 @@ mod tests {
     use super::*;
     use crate::keymap::Profile;
     use crate::views::camera::{self, CanvasState};
+
+    #[test]
+    fn the_render_follows_the_size_on_screen() {
+        let hd = [1920, 1080];
+        assert_eq!(
+            render_size(hd, 2400.0, false),
+            [1920, 1080],
+            "never above 1920"
+        );
+        assert_eq!(render_size(hd, 1500.0, false), [1920, 1080]);
+        assert_eq!(
+            render_size(hd, 900.0, false),
+            [960, 540],
+            "never below the screen"
+        );
+        assert_eq!(
+            render_size(hd, 100.0, false),
+            [480, 270],
+            "a quarter at least"
+        );
+        assert_eq!(render_size(hd, 900.0, true), [480, 270], "a drag halves it");
+        assert_eq!(render_size(hd, 100.0, true), [240, 135]);
+        assert_eq!(render_size([3840, 2160], 1500.0, false), [1920, 1080]);
+    }
     use egui_kittest::Harness;
     use symphony_core::graph::{Gradient, NodeKind};
 
