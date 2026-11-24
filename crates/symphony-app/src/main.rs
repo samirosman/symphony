@@ -2177,6 +2177,11 @@ impl SymphonyApp {
                 ),
                 theme::TEXT_SECONDARY,
             );
+            dense(
+                ui,
+                format!("Frame {} of {}", s.frame, s.length()),
+                theme::TEXT_PRIMARY,
+            );
             if s.doc.column(s.selected).is_some_and(|column| column.locked) {
                 dense(ui, "Layer locked".into(), theme::TEXT_PRIMARY);
             }
