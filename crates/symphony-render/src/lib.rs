@@ -9,7 +9,7 @@ pub mod movie;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use image::{Delay, Frame, RgbaImage};
+use image::RgbaImage;
 use symphony_core::doc::Scene;
 use symphony_core::graph::{Effect, RenderCommand, RenderItem};
 use symphony_core::id::Id;
@@ -520,15 +520,23 @@ pub fn export(
     let total = last - first + 1;
     match job.format {
         Format::PngSequence => {
-            for (i, f) in (first..=last).enumerate() {
+            // Each frame is its own file, so frames render and compress
+            // (the slow part of PNG) side by side across the cores.
+            use rayon::prelude::*;
+            let frames: Vec<u32> = (first..=last).collect();
+            let mut done = 0;
+            for batch in frames.chunks(batch_len(w, h)) {
                 if cancel.load(Ordering::SeqCst) {
                     return Err("Export cancelled.".into());
                 }
-                let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
-                let out = numbered(&job.path, f);
-                img.save(&out)
-                    .map_err(|e| format!("Couldn't write {} ({e}).", out.display()))?;
-                progress(i as u32 + 1, total);
+                batch.par_iter().try_for_each(|&f| {
+                    let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
+                    let out = numbered(&job.path, f);
+                    img.save(&out)
+                        .map_err(|e| format!("Couldn't write {} ({e}).", out.display()))
+                })?;
+                done += batch.len() as u32;
+                progress(done, total);
             }
             Ok(())
         }
@@ -550,30 +558,100 @@ pub fn export(
             )
         }
         Format::AnimatedGif => {
+            let (gw, gh) = (
+                u16::try_from(w).map_err(|_| "GIFs can be at most 65535 pixels wide.")?,
+                u16::try_from(h).map_err(|_| "GIFs can be at most 65535 pixels tall.")?,
+            );
             let file = std::fs::File::create(&job.path)
                 .map_err(|e| format!("Couldn't create {} ({e}).", job.path.display()))?;
-            let mut enc =
-                image::codecs::gif::GifEncoder::new_with_speed(std::io::BufWriter::new(file), 10);
-            enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+            let mut enc = gif::Encoder::new(std::io::BufWriter::new(file), gw, gh, &[])
+                .map_err(|e| format!("Couldn't start the GIF ({e})."))?;
+            enc.set_repeat(gif::Repeat::Infinite)
                 .map_err(|e| e.to_string())?;
-            let ms = (1000.0 / scene.settings.fps.max(1.0)).round() as u32;
-            for (i, f) in (first..=last).enumerate() {
+            let delay = (100.0 / scene.settings.fps.max(1.0)).round() as u16;
+            let frames: Vec<u32> = (first..=last).collect();
+            // Reducing each frame to 256 colours and compressing it are the
+            // slow parts; both happen across the cores, ahead of writing.
+            let prepare = |img: RgbaImage| {
+                let mut raw = img.into_raw();
+                let mut frame = gif::Frame::from_rgba_speed(gw, gh, &mut raw, GIF_SPEED);
+                frame.delay = delay;
+                frame.dispose = gif::DisposalMethod::Background;
+                frame.make_lzw_pre_encoded();
+                frame
+            };
+            in_order(scene, &frames, w, h, cancel, prepare, |i, _, frame| {
+                enc.write_lzw_pre_encoded_frame(&frame)
+                    .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
+                progress(i as u32 + 1, total);
+                Ok(())
+            })
+        }
+    }
+}
+
+/// Frames rendered at once while exporting: one per core, fewer for huge
+/// frames so a batch stays within about 256 MB.
+fn batch_len(w: u32, h: u32) -> usize {
+    let frame = (w as usize * h as usize * 4).max(1);
+    rayon::current_num_threads()
+        .min((256usize << 20) / frame)
+        .max(1)
+}
+
+/// GIF colour reduction speed (1 best .. 30 fastest), as before.
+const GIF_SPEED: i32 = 10;
+
+/// Render `frames`, `prepare` each, and hand them to `each` in order
+/// (index, frame, prepared). Batches render and prepare ahead across the
+/// cores on another thread while `each` runs (writing a movie or GIF has
+/// to go in order on one thread).
+pub(crate) fn in_order<T: Send>(
+    scene: &Scene,
+    frames: &[u32],
+    w: u32,
+    h: u32,
+    cancel: &AtomicBool,
+    prepare: impl Fn(RgbaImage) -> T + Sync,
+    mut each: impl FnMut(usize, u32, T) -> Result<(), String>,
+) -> Result<(), String> {
+    use rayon::prelude::*;
+    let batch = batch_len(w, h);
+    std::thread::scope(|scope| {
+        // One batch waiting while the next renders: at most three batches
+        // of images exist at once.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Option<T>>>(1);
+        let prepare = &prepare;
+        scope.spawn(move || {
+            for chunk in frames.chunks(batch) {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let images = chunk
+                    .par_iter()
+                    .map(|&f| render_frame(scene, f, w, h).map(prepare))
+                    .collect();
+                if tx.send(images).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut i = 0;
+        for images in rx {
+            for img in images {
                 if cancel.load(Ordering::SeqCst) {
                     return Err("Export cancelled.".into());
                 }
-                let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
-                enc.encode_frame(Frame::from_parts(
-                    img,
-                    0,
-                    0,
-                    Delay::from_numer_denom_ms(ms, 1),
-                ))
-                .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
-                progress(i as u32 + 1, total);
+                let img = img.ok_or("Couldn't render a frame.")?;
+                each(i, frames[i], img)?;
+                i += 1;
             }
-            Ok(())
         }
-    }
+        if i < frames.len() {
+            return Err("Export cancelled.".into());
+        }
+        Ok(())
+    })
 }
 
 /// `shot.png` + frame 7 -> `shot_0007.png`.

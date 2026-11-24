@@ -15,3 +15,5 @@ image = { version = "0.25", default-features = false, features = ["png", "gif", 
 # Loads Cisco's separately downloaded binary; never builds or ships the codec.
 openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
 mp4 = "0.14"
+# GIF frames colour-reduced and compressed in parallel (same version image uses).
+gif = "0.14"

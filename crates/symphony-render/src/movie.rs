@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use mp4::{
     AvcConfig, FourCC, MediaConfig, Mp4Config, Mp4Sample, Mp4Writer, TrackConfig, TrackType,
@@ -18,8 +18,6 @@ use openh264::encoder::{
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
 use openh264::OpenH264API;
 use symphony_core::doc::Scene;
-
-use crate::render_frame;
 
 /// H.264 NAL unit types we care about.
 const NAL_IDR: u8 = 5;
@@ -107,15 +105,19 @@ pub fn export_mp4(
     let timescale = (fps * per_frame as f32).round() as u32;
     let total = output_frame_count(last - first + 1, source_fps, fps);
 
-    for i in 0..total {
-        let offset = (f64::from(i) * f64::from(source_fps) / f64::from(fps)).floor() as u32;
-        let f = first.saturating_add(offset).min(last);
-        if cancel.load(Ordering::SeqCst) {
-            return Err("Export cancelled.".into());
-        }
-        let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
-        let yuv =
-            YUVBuffer::from_rgb_source(RgbaSliceU8::new(img.as_raw(), (w as usize, h as usize)));
+    let frames: Vec<u32> = (0..total)
+        .map(|i| {
+            let offset = (f64::from(i) * f64::from(source_fps) / f64::from(fps)).floor() as u32;
+            first.saturating_add(offset).min(last)
+        })
+        .collect();
+    // Frames render ahead across the cores while this thread encodes.
+    // Colour conversion happens there too.
+    let to_yuv = |img: image::RgbaImage| {
+        YUVBuffer::from_rgb_source(RgbaSliceU8::new(img.as_raw(), (w as usize, h as usize)))
+    };
+    crate::in_order(scene, &frames, w, h, cancel, to_yuv, |i, f, yuv| {
+        let i = i as u32;
         let stream = encoder
             .encode(&yuv)
             .map_err(|e| format!("Couldn't encode frame {f} ({e})."))?
@@ -176,7 +178,8 @@ pub fn export_mp4(
             }
         }
         progress(i + 1, total);
-    }
+        Ok(())
+    })?;
     if let Some(mut wr) = writer {
         wr.write_end()
             .map_err(|e| format!("Couldn't finish the movie file ({e})."))?;
