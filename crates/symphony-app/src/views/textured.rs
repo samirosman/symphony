@@ -78,6 +78,46 @@ impl Image {
         mesh.indices = vec![0, 1, 2, 0, 2, 3];
         painter.add(egui::Shape::mesh(mesh));
     }
+
+    /// Show the original stamped texture through the surviving outline
+    /// while an exact re-stamp is in flight.
+    fn draw_clipped(
+        &self,
+        painter: &egui::Painter,
+        stroke: &Stroke,
+        screen: Affine,
+        colour: Color32,
+    ) {
+        let shape = symphony_vector::fill::fill_mesh(&stroke.shape, Affine::IDENTITY);
+        let [x, y, w, h] = self.rect;
+        let mut mesh = egui::Mesh::with_texture(self.handle.id());
+        mesh.vertices.reserve(shape.vertices.len());
+        for [dx, dy] in shape.vertices {
+            let (sx, sy) = screen.apply(dx, dy);
+            let (tx, ty) = self.px.apply(dx, dy);
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: Pos2::new(sx, sy),
+                uv: Pos2::new((tx - x) / w, (ty - y) / h),
+                color: colour,
+            });
+        }
+        mesh.indices = shape.indices;
+        let Some(to_drawing) = self.px.inverse() else {
+            return;
+        };
+        // The cache key matches the transform except for whole-pixel pan,
+        // so the original texture rectangle stays axis-aligned on screen.
+        let rect = Rect::from_two_pos(
+            to_screen(screen.compose(to_drawing), x, y),
+            to_screen(screen.compose(to_drawing), x + w, y + h),
+        );
+        painter.with_clip_rect(rect).add(egui::Shape::mesh(mesh));
+    }
+}
+
+fn to_screen(m: Affine, x: f32, y: f32) -> Pos2 {
+    let (x, y) = m.apply(x, y);
+    Pos2::new(x, y)
 }
 
 struct Job {
@@ -273,7 +313,10 @@ impl Cache {
             snap(visible.right() * ppp - ox, true),
             snap(visible.bottom() * ppp - oy, true),
         ];
-        let key = key(stroke, tex, local, clip);
+        let (key, uncut_key) = keys(stroke, tex, local, clip);
+        if let Some(entry) = uncut_key.and_then(|key| self.entries.get_mut(&key)) {
+            entry.used = self.frame;
+        }
         let frame = self.frame;
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = frame;
@@ -310,19 +353,26 @@ impl Cache {
         }
         // Otherwise stamp in the background and show the last image moved
         // into place (or the plain vector shape) until it's ready.
-        match stale {
-            Some((img, used)) => {
-                *used = frame;
-                img.draw(painter, px, ppp, colour);
-            }
-            None => {
-                let mesh = symphony_vector::tessellate(stroke, m, 0.6);
-                let mut out = egui::Mesh::default();
-                for v in &mesh.vertices {
-                    out.colored_vertex(Pos2::new(v[0], v[1]), colour.gamma_multiply(0.35));
+        if let Some(uncut) = uncut_key
+            .and_then(|key| self.entries.get(&key))
+            .and_then(|entry| entry.image.as_ref())
+        {
+            uncut.draw_clipped(painter, stroke, m, colour);
+        } else {
+            match stale {
+                Some((img, used)) => {
+                    *used = frame;
+                    img.draw(painter, px, ppp, colour);
                 }
-                out.indices = mesh.indices;
-                painter.add(egui::Shape::mesh(out));
+                None => {
+                    let mesh = symphony_vector::tessellate(stroke, m, 0.6);
+                    let mut out = egui::Mesh::default();
+                    for v in &mesh.vertices {
+                        out.colored_vertex(Pos2::new(v[0], v[1]), colour.gamma_multiply(0.35));
+                    }
+                    out.indices = mesh.indices;
+                    painter.add(egui::Shape::mesh(out));
+                }
             }
         }
         if self.pending.insert(key) {
@@ -401,14 +451,10 @@ impl Live {
     }
 }
 
-fn key(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> u64 {
+fn keys(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> (u64, Option<u64>) {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for p in &stroke.points {
         (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(&mut h);
-    }
-    // An erased stroke's outline changes what shows.
-    for q in stroke.shape.iter().flatten() {
-        (q[0].to_bits(), q[1].to_bits()).hash(&mut h);
     }
     (stroke.min_width.to_bits(), stroke.max_width.to_bits()).hash(&mut h);
     (
@@ -423,11 +469,35 @@ fn key(stroke: &Stroke, tex: &StrokeTexture, m: Affine, clip: [i32; 4]) -> u64 {
     for v in tex.opacity_by_pressure {
         v.to_bits().hash(&mut h);
     }
+    for curve in [
+        tex.opacity_curve,
+        tex.size_curve,
+        tex.flow_curve,
+        tex.grain_strength,
+    ] {
+        curve.map(|curve| curve.0.map(f32::to_bits)).hash(&mut h);
+    }
+    (
+        tex.grain_mode as u8,
+        tex.grain_offset.map(f32::to_bits),
+        tex.auto_spacing.to_bits(),
+    )
+        .hash(&mut h);
     for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
         v.to_bits().hash(&mut h);
     }
     clip.hash(&mut h);
-    h.finish()
+    let base = h.finish();
+    if stroke.shape.is_empty() {
+        return (base, None);
+    }
+    for ring in &stroke.shape {
+        ring.len().hash(&mut h);
+        for &[x, y] in ring {
+            (x.to_bits(), y.to_bits()).hash(&mut h);
+        }
+    }
+    (h.finish(), Some(base))
 }
 
 /// A sample stroke drawn with a textured brush, for Tool Properties and
@@ -471,7 +541,9 @@ pub fn sample(
         shape: Vec::new(),
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    key(&stroke, tex, Affine::scale(ppp, ppp), [0, 0, 0, 0]).hash(&mut h);
+    keys(&stroke, tex, Affine::scale(ppp, ppp), [0, 0, 0, 0])
+        .0
+        .hash(&mut h);
     (rect.width().to_bits(), rect.height().to_bits()).hash(&mut h);
     let id = egui::Id::unique(("brush-sample", h.finish()));
     let handle = ctx
@@ -520,5 +592,66 @@ pub fn sample(
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             ink,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphony_core::stroke::StrokeKind;
+
+    #[test]
+    fn cached_erase_preview_keeps_the_texture_and_excludes_the_hole() {
+        let ctx = egui::Context::default();
+        let cut = Stroke {
+            id: Id(1),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: Id(0),
+            min_width: 20.0,
+            max_width: 20.0,
+            points: Vec::new(),
+            tips: Default::default(),
+            texture: None,
+            shape: vec![
+                vec![[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]],
+                vec![[15.0, 15.0], [15.0, 25.0], [25.0, 25.0], [25.0, 15.0]],
+            ],
+        };
+        let coverage = Coverage {
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            data: vec![180; 400],
+        };
+        let image = Image::upload(&ctx, &coverage, Affine::IDENTITY, "erase preview test");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            image.draw_clipped(ui.painter(), &cut, Affine::IDENTITY, Color32::WHITE);
+        });
+        output.textures_delta.clear();
+        let mesh = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == image.handle.id() => Some(mesh),
+                _ => None,
+            })
+            .expect("cut geometry must use the original texture");
+        assert!(mesh
+            .vertices
+            .iter()
+            .any(|v| v.pos == Pos2::new(15.0, 15.0) && v.uv == Pos2::new(0.25, 0.25)));
+        let area: f32 = mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|ids| {
+                let [a, b, c] = ids.map(|i| mesh.vertices[i as usize].pos);
+                ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
+            })
+            .sum();
+        assert_eq!(area, 300.0);
     }
 }

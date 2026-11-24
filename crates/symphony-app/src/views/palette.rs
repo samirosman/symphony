@@ -95,8 +95,9 @@ fn placeholder(here: Option<View>) -> &'static str {
     }
 }
 
-const WIDTH: f32 = 420.0;
-const ROWS: usize = 12;
+const WIDTH: f32 = 560.0;
+const ROWS: usize = 16;
+const SUGGESTED_ROWS: usize = 8;
 const ROW_H: f32 = 34.0;
 const FIELD_H: f32 = 30.0;
 
@@ -204,15 +205,18 @@ pub fn ui(
         return Outcome::Closed;
     }
 
-    // Results only once something is typed: phrase commands ("go to
-    // frame 12") first, then ranked entries.
+    // With no query, show recent and contextual commands. Typed queries
+    // keep phrase commands first and retain normal relevance ordering.
     let typed = !st.query.trim().is_empty();
-    let mut results: Vec<Entry> = Vec::new();
-    if typed {
-        results.extend(search::phrase(&st.query));
-        let hits = search::rank(entries, &st.query, st.here, uses);
-        results.extend(hits.iter().map(|h| entries[h.index].clone()));
-    }
+    let here = st.here.or(Some(View::Camera));
+    let mut results = if typed {
+        search::phrase(&st.query)
+    } else {
+        Vec::new()
+    };
+    let hits = search::rank(entries, &st.query, here, uses);
+    let limit = if typed { usize::MAX } else { SUGGESTED_ROWS };
+    results.extend(hits.iter().take(limit).map(|h| entries[h.index].clone()));
     st.selected = st.selected.min(results.len().saturating_sub(1));
 
     // Tab toggles it closed again; Esc closes it too.
@@ -237,23 +241,17 @@ pub fn ui(
         st.selected += 1;
     }
 
-    // The results area grows to fit (Expand), from nothing while empty.
     let screen = ctx.content_rect();
+    let field_width = WIDTH.min((screen.width() - 36.0).max(40.0));
     let max_list_h = (screen.height() - FIELD_H - 36.0).max(ROW_H);
-    let rows = if typed {
-        results.len().clamp(1, ROWS)
-    } else {
-        0
-    };
-    let target_h = (rows as f32 * ROW_H).min(max_list_h);
-    // Results show at their full height at once; only opacity animates.
-    let list_h = target_h;
+    let rows = results.len().clamp(1, ROWS);
+    let list_h = (rows as f32 * ROW_H).min(max_list_h);
 
     // Centred on the mouse horizontally, just below it, kept in the window;
     // it simply fades in and out (Appear and Dismiss, opacity only).
     let opacity = shown;
-    let box_w = WIDTH + 16.0;
-    let full_h = FIELD_H + 20.0 + target_h;
+    let box_w = field_width + 16.0;
+    let full_h = FIELD_H + 20.0 + list_h;
     let x =
         (st.at.x - box_w / 2.0).clamp(screen.left() + 8.0, (screen.right() - box_w - 8.0).max(8.0));
     let y = (st.at.y + 12.0).clamp(
@@ -282,7 +280,7 @@ pub fn ui(
                 .shadow(ui.visuals().popup_shadow)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    ui.set_width(WIDTH);
+                    ui.set_width(field_width);
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut st.query)
                             .hint_text(placeholder(st.here))
@@ -350,10 +348,6 @@ pub fn ui(
                         return;
                     }
                     ui.add_space(4.0);
-                    if !typed {
-                        ui.add_space(list_h);
-                        return;
-                    }
                     if results.is_empty() {
                         ui.label(
                             egui::RichText::new(
@@ -757,7 +751,7 @@ mod tests {
                 (state, entries),
             );
         harness.run_steps(3);
-        for _ in 0..13 {
+        for _ in 0..20 {
             harness.input_mut().events.push(egui::Event::Key {
                 key: egui::Key::ArrowDown,
                 physical_key: None,
@@ -775,7 +769,7 @@ mod tests {
             });
             harness.run_steps(1);
         }
-        assert_eq!(harness.state().0.selected, 13);
+        assert_eq!(harness.state().0.selected, 20);
         let before = harness.state().0.scroll_offset;
         assert!(before > 0.0);
         harness.input_mut().events.extend([

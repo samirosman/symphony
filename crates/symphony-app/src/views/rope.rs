@@ -14,15 +14,17 @@ const STEP: f32 = 1.0 / 240.0;
 /// Cap catch-up so slow artwork frames do not trigger a burst of rope work.
 const MAX_CATCH_UP: f32 = 12.0 * STEP;
 /// Velocity kept per step (air drag).
-const DAMPING: f32 = 0.978;
+const DAMPING: f32 = 0.955;
 /// Constraint passes per step: higher is a stiffer, less stretchy rope.
 const PASSES: usize = 10;
 /// How strongly the rope resists bending (0 = thread).
 const BEND: f32 = 0.4;
 /// Cable gravity at 100% graph zoom, in points per second squared.
-pub const GRAVITY: f32 = 1500.0;
+pub const GRAVITY: f32 = 900.0;
 /// Small allowance for the cable to bow while following the pointer.
-pub const DRAG_SLACK: f32 = 1.06;
+pub const DRAG_SLACK: f32 = 1.025;
+/// A small pull towards the resting curve removes ripples during a drag.
+pub const DRAG_PULL: f32 = 0.055;
 
 #[derive(Clone)]
 pub struct Rope {

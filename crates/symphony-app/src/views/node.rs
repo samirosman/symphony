@@ -116,7 +116,7 @@ impl LinkAnim {
             rope.unwrap_or_else(|| super::rope::Rope::along(&cable_path(from, end, 1.0)));
         let length = super::rope::length(rope.points());
         let side = if seed < 0.5 { -1.0 } else { 1.0 };
-        rope.kick(Vec2::new(side * (300.0 + length * 3.0), -length * 1.5) * (0.85 * zoom.max(0.3)));
+        rope.kick(Vec2::new(side * (300.0 + length * 3.0), -length * 1.5) * (0.48 * zoom.max(0.3)));
         Self {
             link,
             start: now,
@@ -2097,12 +2097,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 let throw = start.map_or(0.0, |st| st.distance(to));
                 let rest_len = super::rope::length(&rest);
                 let slack = 1.0
-                    + (0.035 + 0.08 * a.seed) * (1.0 - (t / 0.7).clamp(0.0, 1.0))
+                    + (0.015 + 0.035 * a.seed) * (1.0 - (t / 0.7).clamp(0.0, 1.0))
                     + (throw / rest_len.max(1.0)).min(0.3)
-                        * 0.2
+                        * 0.10
                         * (1.0 - (t / 0.5).clamp(0.0, 1.0));
                 let length = (rest_len * slack).max(from.distance(end));
-                let settle = ((t - 0.25) / 0.58).clamp(0.0, 1.0);
+                let settle = ((t - 0.12) / 0.53).clamp(0.0, 1.0);
                 let pins = super::rope::Pins {
                     start: from,
                     end: Some(end),
@@ -2172,8 +2172,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     },
                     length,
                     gravity,
-                    None,
-                    0.0,
+                    Some(&rest),
+                    super::rope::DRAG_PULL,
                 );
                 painter.add(egui::Shape::line(rope.smooth(), Stroke::new(2.0, ink)));
                 ui.ctx().request_repaint();
