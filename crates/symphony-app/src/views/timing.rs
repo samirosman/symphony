@@ -17,6 +17,8 @@ pub struct TimingState {
     menu_row: Option<usize>,
     /// The node a right-click menu is for (a layer's drawing node too).
     menu_node: Option<NodeId>,
+    /// The sound clip a right-click menu is for.
+    menu_sound: Option<usize>,
     show_unanimated_nodes: bool,
     /// Parameters column: drawing name being typed, per row.
     swap_text: Option<(usize, String)>,
@@ -150,6 +152,23 @@ fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
     ui.separator();
     TimelineAction::InsertInbetween.menu(ui, s);
     TimelineAction::DeleteKey.menu(ui, s);
+    ui.separator();
+    if ui
+        .button("Clear exposure")
+        .on_hover_text("Empty this cell; the drawing stays in the layer's drawings.")
+        .clicked()
+    {
+        s.clear_cell();
+        ui.close();
+    }
+    if ui
+        .button("Remove frame")
+        .on_hover_text("Take out this cell and pull the rest of the layer one frame earlier.")
+        .clicked()
+    {
+        s.remove_frame();
+        ui.close();
+    }
 }
 
 /// View header: transport, timing fields and layer buttons (D3.2).
@@ -456,6 +475,22 @@ fn add_node_menu(ui: &mut egui::Ui, s: &mut Session, target: NodeId) {
             }
         }
     });
+}
+
+fn sound_menu(ui: &mut egui::Ui, s: &mut Session, k: usize) {
+    let muted = s.doc.sounds.get(k).is_some_and(|c| c.muted);
+    if ui
+        .button(if muted { "Unmute sound" } else { "Mute sound" })
+        .clicked()
+    {
+        s.toggle_sound_mute(k);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Delete sound").clicked() {
+        s.delete_sound(k);
+        ui.close();
+    }
 }
 
 fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usize) {
@@ -1158,26 +1193,45 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
             if resp.secondary_clicked() {
                 t.menu_row = None;
                 t.menu_node = None;
+                t.menu_sound = None;
                 match resp.interact_pointer_pos().and_then(slot_at) {
                     Some(Slot::Layer(r)) => {
                         t.menu_row = Some(r);
                         t.menu_node = Some(s.doc.layers[r].node);
                     }
                     Some(Slot::Node(j)) => t.menu_node = Some(node_tracks[j].0),
+                    Some(Slot::Sound(k)) => t.menu_sound = Some(k),
                     _ => {}
                 }
                 if let Some(node) = t.menu_node {
                     s.select_graph_node(node, false);
                 }
             }
-            if t.menu_node.is_some() {
+            if t.menu_node.is_some() || t.menu_sound.is_some() {
                 resp.context_menu(|ui| {
+                    if let Some(k) = t.menu_sound {
+                        sound_menu(ui, s, k);
+                        return;
+                    }
                     if let Some(node) = t.menu_node {
                         add_node_menu(ui, s, node);
                     }
                     if let Some(row) = t.menu_row {
                         ui.separator();
                         layer_menu(ui, s, t, row);
+                    } else if let Some(node) = t.menu_node {
+                        // A peg, Mesh Warp or effect row.
+                        ui.separator();
+                        let why = super::node::undeletable(s, node);
+                        let b = ui.add_enabled(why.is_none(), egui::Button::new("Delete node"));
+                        let b = match why {
+                            Some(w) => b.on_disabled_hover_text(w),
+                            None => b,
+                        };
+                        if b.clicked() {
+                            super::node::delete_nodes(s, &[node]);
+                            ui.close();
+                        }
                     }
                 });
             }

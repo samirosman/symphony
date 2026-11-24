@@ -701,7 +701,7 @@ impl Session {
         self.history.seal();
     }
 
-    fn clamp_selection(&mut self) {
+    pub fn clamp_selection(&mut self) {
         self.frame = self.frame.clamp(1, self.length().max(1));
         if self.doc.palette.get(self.swatch).is_none() {
             if let Some(first) = self.doc.palette.swatches.first() {
@@ -1854,6 +1854,79 @@ impl Session {
                     .apply(&mut self.doc, "Decrease exposure", vec![e]);
             }
         }
+    }
+
+    /// Empty the current cell of the selected layer (the drawing stays in
+    /// the layer's drawings, ready to reuse).
+    pub fn clear_cell(&mut self) {
+        let Some(column) = self.doc.column(self.selected) else {
+            return;
+        };
+        if column.locked {
+            self.note("The drawing layer is locked");
+            return;
+        }
+        let col = column.id;
+        if self.doc.exposed(self.selected, self.frame).is_none() {
+            self.note("This cell is already empty");
+            return;
+        }
+        if let Some(e) = Edit::splice(&self.doc, col, self.frame, 1, vec![None]) {
+            self.history.apply(&mut self.doc, "Clear exposure", vec![e]);
+        }
+    }
+
+    /// Remove the current cell of the selected layer, pulling everything
+    /// after it one frame earlier.
+    pub fn remove_frame(&mut self) {
+        let Some(column) = self.doc.column(self.selected) else {
+            return;
+        };
+        if column.locked {
+            self.note("The drawing layer is locked");
+            return;
+        }
+        let (col, last) = (column.id, column.len());
+        if self.frame > last {
+            self.note("There's nothing on this frame to remove");
+            return;
+        }
+        if let Some(e) = Edit::splice(&self.doc, col, self.frame, 1, vec![]) {
+            self.history.apply(&mut self.doc, "Remove frame", vec![e]);
+        }
+    }
+
+    /// Mute or unmute sound clip `k`.
+    pub fn toggle_sound_mute(&mut self, k: usize) {
+        let before = self.doc.sounds.clone();
+        let mut after = before.clone();
+        let Some(clip) = after.get_mut(k) else {
+            return;
+        };
+        clip.muted = !clip.muted;
+        let name = if clip.muted {
+            "Mute sound"
+        } else {
+            "Unmute sound"
+        };
+        self.history
+            .apply(&mut self.doc, name, vec![Edit::SetSounds { before, after }]);
+    }
+
+    /// Take sound clip `k` off the timeline.
+    pub fn delete_sound(&mut self, k: usize) {
+        let before = self.doc.sounds.clone();
+        if k >= before.len() {
+            return;
+        }
+        let mut after = before.clone();
+        let gone = after.remove(k);
+        self.history.apply(
+            &mut self.doc,
+            "Delete sound",
+            vec![Edit::SetSounds { before, after }],
+        );
+        self.note(format!("Deleted {}. Undo brings it back.", gone.name));
     }
 
     /// The selected layer's drawings (its element), in Harmony's order:

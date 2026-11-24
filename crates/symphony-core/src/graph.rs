@@ -515,7 +515,7 @@ impl Graph {
         NodeId(self.nodes.len())
     }
 
-    pub(crate) fn replace_links(&mut self, links: Vec<Link>) {
+    pub fn replace_links(&mut self, links: Vec<Link>) {
         self.links = links;
     }
 

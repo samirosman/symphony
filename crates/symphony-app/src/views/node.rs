@@ -146,6 +146,115 @@ fn detached_links(graph: &symphony_core::graph::Graph, id: NodeId) -> Vec<Link> 
     after
 }
 
+/// Why a node can't be deleted, if it can't.
+pub fn undeletable(s: &Session, id: NodeId) -> Option<&'static str> {
+    if id == s.doc.display {
+        return Some("The Camera node shows the scene; it can't be deleted");
+    }
+    if s.doc.layers.iter().any(|l| l.peg == id) {
+        return Some(
+            "This is a layer's own peg: delete the layer to remove it, or add another peg",
+        );
+    }
+    if matches!(
+        s.doc.graph.node(id).map(|n| &n.kind),
+        Some(NodeKind::Drawing { .. })
+    ) && s.layer_count() <= 1
+    {
+        return Some("A scene needs at least one layer");
+    }
+    None
+}
+
+/// Delete nodes, as one undo step. Pegs, Mesh Warps and effects are
+/// pulled out of their chains, which close up behind them; a Drawing
+/// node takes its layer with it. Returns how many were deleted (a note
+/// says why any couldn't be).
+pub fn delete_nodes(s: &mut Session, ids: &[NodeId]) -> usize {
+    let mut why = None;
+    let mut ids: Vec<NodeId> = ids
+        .iter()
+        .copied()
+        .filter(|&id| match undeletable(s, id) {
+            Some(reason) => {
+                why = Some(reason);
+                false
+            }
+            None => s.doc.graph.node(id).is_some(),
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    // Keep at least one layer.
+    let mut layers: Vec<usize> = ids
+        .iter()
+        .filter_map(|&id| s.doc.layers.iter().position(|l| l.node == id))
+        .collect();
+    while !layers.is_empty() && layers.len() >= s.layer_count() {
+        let keep = layers.pop().unwrap_or(0);
+        ids.retain(|&id| s.doc.layers.get(keep).is_none_or(|l| l.node != id));
+        why = Some("A scene needs at least one layer");
+    }
+    let mut edits = Vec::new();
+    // The other nodes: pulled out of a scratch copy one by one, so their
+    // chains heal around each other.
+    let mut scratch = s.doc.graph.clone();
+    let others: Vec<NodeId> = ids
+        .iter()
+        .copied()
+        .filter(|id| !s.doc.layers.iter().any(|l| l.node == *id))
+        .collect();
+    for &id in &others {
+        let after = detached_links(&scratch, id);
+        scratch.replace_links(after);
+        scratch.remove(id);
+    }
+    if !others.is_empty() {
+        edits.push(Edit::RewireNodes {
+            before: s.doc.graph.links().to_vec(),
+            after: scratch.links().to_vec(),
+            was_custom: s.doc.custom_wiring,
+        });
+        for &id in &others {
+            if let Some(node) = s.doc.graph.node(id).cloned() {
+                edits.push(Edit::RemoveNode {
+                    id,
+                    node,
+                    position: s.doc.node_positions.get(&id).copied().unwrap_or([0.0, 0.0]),
+                });
+            }
+        }
+    }
+    let mut layers: Vec<usize> = ids
+        .iter()
+        .filter_map(|&id| s.doc.layers.iter().position(|l| l.node == id))
+        .collect();
+    layers.sort_unstable();
+    for &i in layers.iter().rev() {
+        if let Some(snap) = s.doc.snapshot_layer(i) {
+            edits.push(Edit::RemoveLayer(Box::new(snap)));
+        }
+    }
+    let n = others.len() + layers.len();
+    if n > 0 {
+        let name = if n == 1 {
+            "Delete node"
+        } else {
+            "Delete nodes"
+        };
+        s.history.apply(&mut s.doc, name, edits);
+        if s.selected_node.is_some_and(|id| ids.contains(&id)) {
+            s.selected_node = None;
+        }
+        s.clamp_selection();
+        s.fit_tool_to_context();
+    }
+    if let Some(why) = why {
+        s.note(why);
+    }
+    n
+}
+
 struct PropertyDraft {
     id: NodeId,
     scene: String,
@@ -2413,6 +2522,22 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.drag = None;
     }
+    // Delete or Backspace over the Node view deletes the selected nodes.
+    let delete_key = resp.hovered()
+        && state.drag.is_none()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+    if delete_key {
+        let chosen: Vec<NodeId> = state
+            .selection
+            .iter()
+            .copied()
+            .chain(s.selected_node)
+            .collect();
+        if delete_nodes(s, &chosen) > 0 {
+            state.selection.clear();
+        }
+    }
     let mut auto_wire = match state.drag {
         Some(Drag::Node(id, delta))
             if alt && state.selection.len() <= 1 && delta.length_sq() > 0.0 =>
@@ -2894,6 +3019,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     let mut disconnect = None;
     let mut convert = None;
     let mut smart_joint = None;
+    let mut delete: Option<Vec<NodeId>> = None;
+    let mut unlink = None;
     if let Some((input, node)) =
         ui.data(|data| data.get_temp::<(Option<Input>, Option<NodeId>)>(menu_id))
     {
@@ -2907,7 +3034,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         let joint = node
             .or(input.map(|(id, _)| id))
             .and_then(|id| smart_joint_label(s, id).map(|label| (id, label)));
-        if input.is_some() || drawing.is_some() || joint.is_some() {
+        let node = node.filter(|&id| s.doc.graph.node(id).is_some());
+        if input.is_some() || node.is_some() || joint.is_some() {
             resp.context_menu(|ui| {
                 if let Some(input) = input {
                     if ui.button("Disconnect input").clicked() {
@@ -2929,8 +3057,68 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                         }
                     }
                 }
+                if let Some(id) = node {
+                    let linked = s
+                        .doc
+                        .graph
+                        .links()
+                        .iter()
+                        .any(|l| l.from == id || l.to == id);
+                    if ui
+                        .add_enabled(linked, egui::Button::new("Disconnect all"))
+                        .clicked()
+                    {
+                        unlink = Some(id);
+                        ui.close();
+                    }
+                    ui.separator();
+                    // The whole selection when the node is part of it.
+                    let group: Vec<NodeId> = if state.selection.contains(&id) {
+                        state.selection.iter().copied().collect()
+                    } else {
+                        vec![id]
+                    };
+                    let label = if group.len() > 1 {
+                        format!("Delete {} nodes", group.len())
+                    } else {
+                        "Delete node".to_owned()
+                    };
+                    let why = (group.len() == 1).then(|| undeletable(s, id)).flatten();
+                    let button = ui.add_enabled(why.is_none(), egui::Button::new(label));
+                    let button = match why {
+                        Some(why) => button.on_disabled_hover_text(why),
+                        None => button,
+                    };
+                    if button.clicked() {
+                        delete = Some(group);
+                        ui.close();
+                    }
+                }
             });
         }
+    }
+    if let Some(ids) = delete {
+        if delete_nodes(s, &ids) > 0 {
+            state.selection.clear();
+        }
+    }
+    if let Some(id) = unlink {
+        let before = s.doc.graph.links().to_vec();
+        let after: Vec<Link> = before
+            .iter()
+            .copied()
+            .filter(|l| l.from != id && l.to != id)
+            .collect();
+        let was_custom = s.doc.custom_wiring;
+        s.history.apply(
+            &mut s.doc,
+            "Disconnect node",
+            vec![Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            }],
+        );
     }
     if let Some(input) = disconnect {
         edit_link(s, None, input, None);

@@ -2216,3 +2216,97 @@ fn points_warp_bends_only_the_connected_artwork() {
     assert!(ink(960 - 380, 540), "the shoulder stayed");
     assert!(ink(965, 840), "the ball (no point on it) didn't move");
 }
+
+/// Deleting from the Node view and Timeline: an added peg or Mesh Warp
+/// goes and its chain closes up (the drawing stays under the layer's
+/// peg); a Drawing node takes its layer; the Camera and a layer's own peg
+/// refuse; one undo brings a whole delete back. Cells and sounds delete
+/// too.
+#[test]
+fn nodes_cells_and_sounds_can_be_deleted_and_undone() {
+    use crate::views::node::{delete_nodes, insert_near, mesh_warp};
+    use symphony_core::graph::NodeKind;
+    let mut s = crate::session::Session::new_scene();
+    let layer = s.doc.layers[0];
+    let before_links = s.doc.graph.links().to_vec();
+    insert_near(&mut s, layer.node, mesh_warp(100, 100));
+    insert_near(&mut s, layer.node, NodeKind::Peg(Default::default()));
+    let peg = s.doc.graph.input(layer.node, 0).unwrap();
+    let warp = s.doc.graph.input(peg, 0).unwrap();
+    assert!(matches!(
+        s.doc.graph.node(warp).unwrap().kind,
+        NodeKind::MeshWarp(_)
+    ));
+    let version = s.history.undo_len();
+    assert_eq!(delete_nodes(&mut s, &[peg, warp]), 2);
+    assert!(s.doc.graph.node(peg).is_none() && s.doc.graph.node(warp).is_none());
+    assert_eq!(
+        s.doc.graph.input(layer.node, 0),
+        Some(layer.peg),
+        "the chain closed up"
+    );
+    let mut now = s.doc.graph.links().to_vec();
+    let mut was = before_links.clone();
+    now.sort_by_key(|l| (l.from, l.to, l.port));
+    was.sort_by_key(|l| (l.from, l.to, l.port));
+    assert_eq!(now, was);
+    assert_eq!(s.history.undo_len(), version + 1, "one undo step");
+    s.undo();
+    assert!(s.doc.graph.node(peg).is_some() && s.doc.graph.node(warp).is_some());
+    assert_eq!(s.doc.graph.input(layer.node, 0), Some(peg));
+    // The Camera and a layer's own peg stay.
+    let display = s.doc.display;
+    assert_eq!(delete_nodes(&mut s, &[display, layer.peg]), 0);
+    // A Drawing node takes its layer.
+    // The only layer can't go; with another one it can.
+    assert_eq!(delete_nodes(&mut s, &[layer.node]), 0);
+    s.add_layer();
+    let layers = s.layer_count();
+    assert_eq!(delete_nodes(&mut s, &[layer.node]), 1);
+    assert_eq!(s.layer_count(), layers - 1);
+    s.undo();
+    assert_eq!(s.layer_count(), layers);
+    // Cells: clear keeps the frame, remove pulls the rest back.
+    s.selected = s
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.node == layer.node)
+        .unwrap();
+    let col = s.doc.layers[s.selected].column;
+    let row = s.selected;
+    s.frame = 1;
+    let st = symphony_core::stroke::Stroke {
+        id: s.doc.ids.fresh(),
+        kind: StrokeKind::Brush,
+        art: Default::default(),
+        swatch: s.swatch,
+        min_width: 2.0,
+        max_width: 2.0,
+        points: vec![
+            symphony_core::stroke::Point {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+                pen: Default::default(),
+            };
+            2
+        ],
+        tips: Default::default(),
+        texture: None,
+        shape: Vec::new(),
+    };
+    s.commit_stroke(row, 1, st);
+    s.change_exposure(1);
+    s.change_exposure(1);
+    let len = s.doc.xsheet.column(col).unwrap().len();
+    assert!(len >= 3, "{len}");
+    s.clear_cell();
+    assert!(s.doc.exposed(row, 1).is_none());
+    assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len);
+    s.undo();
+    s.remove_frame();
+    assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len - 1);
+    s.undo();
+    assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len);
+}

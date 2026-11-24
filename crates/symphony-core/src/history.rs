@@ -15,6 +15,12 @@ pub enum Edit {
         node: Node,
         position: [f32; 2],
     },
+    /// Delete a node (its links go with a `RewireNodes` before this).
+    RemoveNode {
+        id: NodeId,
+        node: Node,
+        position: [f32; 2],
+    },
     SetDrawingMatte {
         id: NodeId,
         before: bool,
@@ -190,6 +196,15 @@ impl Edit {
 
     fn apply(&self, s: &mut Scene, forward: bool) {
         match self {
+            Edit::RemoveNode { id, node, position } => {
+                if forward {
+                    s.graph.remove(*id);
+                    s.node_positions.remove(id);
+                } else {
+                    s.graph.restore(*id, node.clone(), &[]);
+                    s.node_positions.insert(*id, *position);
+                }
+            }
             Edit::AddNode { id, node, position } => {
                 if forward {
                     s.graph.restore(*id, node.clone(), &[]);
