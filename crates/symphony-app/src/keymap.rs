@@ -38,6 +38,8 @@ pub enum Action {
     Open,
     Save,
     SaveAs,
+    /// Import anything: images, sequences, sound, video, brushes, scenes.
+    Import,
     Undo,
     Redo,
     SelectAll,
@@ -92,6 +94,7 @@ pub enum Action {
     ToolSelect,
     ToolTransform,
     ToolBrush,
+    ToolLine,
     ToolPencil,
     ToolEraser,
     ToolPaint,
@@ -117,11 +120,12 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 78] = [
+    pub const ALL: [Action; 80] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
         Action::SaveAs,
+        Action::Import,
         Action::Undo,
         Action::Redo,
         Action::SelectAll,
@@ -174,6 +178,7 @@ impl Action {
         Action::ToolSelect,
         Action::ToolTransform,
         Action::ToolBrush,
+        Action::ToolLine,
         Action::ToolPencil,
         Action::ToolEraser,
         Action::ToolPaint,
@@ -205,6 +210,7 @@ impl Action {
             Action::Open => "file.open",
             Action::Save => "file.save",
             Action::SaveAs => "file.save_as",
+            Action::Import => "file.import",
             Action::Undo => "edit.undo",
             Action::Redo => "edit.redo",
             Action::SelectAll => "edit.select_all",
@@ -257,6 +263,7 @@ impl Action {
             Action::ToolSelect => "tool.select",
             Action::ToolTransform => "tool.transform",
             Action::ToolBrush => "tool.brush",
+            Action::ToolLine => "tool.line",
             Action::ToolPencil => "tool.pencil",
             Action::ToolEraser => "tool.eraser",
             Action::ToolPaint => "tool.paint",
@@ -288,6 +295,7 @@ impl Action {
             Action::Open => "Open",
             Action::Save => "Save",
             Action::SaveAs => "Save as",
+            Action::Import => "Import…",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::SelectAll => "Select all",
@@ -340,6 +348,7 @@ impl Action {
             Action::ToolSelect => "Select",
             Action::ToolTransform => "Transform",
             Action::ToolBrush => "Brush",
+            Action::ToolLine => "Line",
             Action::ToolPencil => "Pencil",
             Action::ToolEraser => "Eraser",
             Action::ToolPaint => "Paint",
@@ -396,6 +405,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::Open => b(Key::O, CMD),
         Action::Save => b(Key::S, CMD),
         Action::SaveAs => None, // Harmony's Ctrl+Shift+S is Advanced Save
+        // Not bound until checked against Harmony 27.1's shortcut list.
+        Action::Import => None,
         Action::Undo => b(Key::Z, CMD),
         // Harmony 27 documents Redo as Ctrl+Shift+Z on macOS too.
         Action::Redo => b(
@@ -465,6 +476,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolSelect => b(Key::S, ALT),
         Action::ToolTransform => b(Key::T, SHIFT),
         Action::ToolBrush => b(Key::B, ALT),
+        // Unbound until checked against Harmony 27.1's Line tool.
+        Action::ToolLine => None,
         Action::ToolPencil => b(Key::Slash, ALT),
         Action::ToolEraser => b(Key::E, ALT),
         Action::ToolPaint => b(Key::I, ALT),
@@ -593,6 +606,11 @@ pub fn remaps() -> Vec<Remap> {
 }
 
 /// Load saved remaps (at start-up).
+/// Tests that change or depend on shortcut remaps hold this, since the
+/// remaps are one global and tests run in parallel.
+#[cfg(test)]
+pub static TEST_REMAPS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn set_remaps(list: Vec<Remap>) {
     if let Ok(mut r) = REMAPS.write() {
         *r = list;
@@ -761,6 +779,7 @@ mod tests {
     /// E11.3: no two actions share a binding within a profile.
     #[test]
     fn no_duplicate_bindings() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
             let mut seen = Vec::new();
             for a in Action::ALL {
@@ -803,6 +822,7 @@ mod tests {
 
     #[test]
     fn redo_fires_from_its_shortcut_in_both_profiles() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
             let bind = binding(profile, Action::Redo).unwrap();
             assert_eq!(

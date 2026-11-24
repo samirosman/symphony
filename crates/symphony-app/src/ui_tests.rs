@@ -395,6 +395,7 @@ fn frame_cost() {
                             x: x0 + t * 120.0,
                             y: y + (t * 9.0).sin() * 5.0,
                             pressure: (t * 3.1).sin(),
+                            pen: Default::default(),
                         }
                     })
                     .collect(),
@@ -600,6 +601,7 @@ fn line_edit_cost() {
                     x: x0 + k as f32 * 2.0,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -617,39 +619,36 @@ fn line_edit_cost() {
     println!("line_edit_cost: {:?} per push step", start.elapsed() / 60);
 }
 
-/// Symphony profile: Brush and Pencil are modes of one Pen tool, switched
-/// at the top of Tool Properties; each mode keeps its own settings.
+/// The toolbar offers what fits the work: a peg gets Transform, and
+/// coming back to drawings returns to the last drawing tool.
 #[test]
-fn pen_tool_switches_between_brush_and_pencil_modes() {
-    use egui_kittest::kittest::Queryable;
-    let mut s = Session::new_scene();
-    s.pen_modes = true;
+fn tools_follow_what_you_work_on() {
+    use crate::session::{Tool, ToolContext};
+    let mut s = crate::session::Session::new_scene();
     s.tool = Tool::Brush;
-    s.pencil.max_width = 7.0;
-    s.brush.max_width = 19.0;
-    // The size sliders' value boxes have no accessible name yet (a known
-    // gap, tracked separately), so this test skips that check.
-    let mut h = Harness::builder()
-        .with_size(Vec2::new(360.0, 700.0))
-        .with_accessibility_check(false)
-        .build_ui_state(
-            |ui, st: &mut (Session, crate::presets::Presets)| {
-                crate::views::panels::tool_properties(ui, &mut st.0, &mut st.1, None);
-            },
-            (s, crate::presets::Presets::default()),
-        );
-    h.run_steps(2);
-    // One tool, named Pen, with both modes on offer.
-    h.get_by_label("Pen");
-    h.get_by_label("Pencil").click();
-    h.run_steps(2);
-    assert_eq!(h.state().0.tool, Tool::Pencil);
-    h.get_by_label("Brush").click();
-    h.run_steps(2);
-    assert_eq!(h.state().0.tool, Tool::Brush);
-    // Switching modes never mixes their settings.
-    assert_eq!(h.state().0.pencil.max_width, 7.0);
-    assert_eq!(h.state().0.brush.max_width, 19.0);
+    s.fit_tool_to_context();
+    assert_eq!(s.tool_context(), ToolContext::Drawing);
+    assert!(
+        !Tool::Transform.fits(ToolContext::Drawing),
+        "Select transforms selections"
+    );
+    assert!(
+        !Tool::Pencil.fits(ToolContext::Drawing),
+        "the Brush makes vector lines"
+    );
+    let peg = s.doc.layers[0].peg;
+    s.select_graph_node(peg, false);
+    s.fit_tool_to_context();
+    assert_eq!(s.tool_context(), ToolContext::Peg);
+    assert_eq!(s.tool, Tool::Transform);
+    assert!(
+        !Tool::Brush.fits(ToolContext::Peg),
+        "nothing to draw on a peg"
+    );
+    let node = s.doc.layers[0].node;
+    s.select_graph_node(node, false);
+    s.fit_tool_to_context();
+    assert_eq!(s.tool, Tool::Brush, "back to the drawing tool");
 }
 
 /// Searching a blend mode adds a Blend Modes node straight onto the
@@ -677,6 +676,7 @@ fn search_puts_a_blend_mode_on_the_selected_layer() {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -744,6 +744,7 @@ fn erase_cost() {
                     x: x0 + k as f32 * 2.0,
                     y: y + (k as f32 * 0.3).sin() * 4.0,
                     pressure: 0.7,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -811,6 +812,7 @@ fn busy_frame_cost() {
                     x: -900.0 + (i % 30) as f32 * 60.0 + k as f32 * 2.5,
                     y: -500.0 + (i / 30) as f32 * 45.0 + (k as f32 * 0.3).sin() * 10.0,
                     pressure: 0.4 + 0.6 * (k as f32 * 0.1).sin().abs(),
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -875,15 +877,8 @@ fn busy_frame_cost() {
 fn the_camera_view_draws_an_imported_image() {
     let mut h = rig();
     let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]));
-    let mut bytes = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut bytes),
-        image::ImageFormat::Png,
-    )
-    .unwrap();
-    let file = symphony_io::media::image_from_bytes(bytes).unwrap();
-    h.state_mut().s.import_images("Red", vec![file]);
-    let d = h.state().s.doc.exposed(0, 1).unwrap();
+    let layer = crate::import::import_test_image(&mut h.state_mut().s, "Red", &img);
+    let d = h.state().s.doc.exposed(layer, 1).unwrap();
     let r = h.state().s.doc.drawings[&d].image.unwrap();
     // The image decodes on a worker thread.
     let ctx = h.ctx.clone();
@@ -913,34 +908,6 @@ fn the_camera_view_draws_an_imported_image() {
     assert!(b.width() > 100.0, "{b:?}");
 }
 
-/// Undo and redo flash the area they changed, so an undo never happens
-/// unseen.
-#[test]
-fn undo_and_redo_flash_what_they_changed() {
-    let mut h = rig();
-    h.state_mut().s.tool = Tool::Pencil;
-    drag(
-        &mut h,
-        &line((-100.0, 20.0), (60.0, 40.0), 12),
-        0.8,
-        PenTool::Pen,
-    );
-    assert_eq!(strokes(&h, 0).len(), 1);
-    let st = strokes(&h, 0)[0].clone();
-    let (lo, hi) = symphony_vector::bounds(&st).unwrap();
-    h.state_mut().s.undo();
-    let s = &h.state().s;
-    let (_, flo, fhi) = s.flash.expect("undo flashes");
-    assert!(
-        flo[0] <= lo[0] + 0.01 && fhi[0] >= hi[0] - 0.01,
-        "covers the undone line"
-    );
-    let first = s.flash_serial;
-    h.state_mut().s.redo();
-    assert!(h.state().s.flash_serial > first, "redo flashes too");
-    h.run_steps(2);
-}
-
 /// Mirror view flips only what you see: drawing still lands under the pen,
 /// at the right scene coordinates.
 #[test]
@@ -967,5 +934,572 @@ fn mirrored_view_draws_where_the_pen_is() {
     assert!(
         (first.x + 100.0).abs() < 2.0 && (last.x - 60.0).abs() < 2.0,
         "{first:?} {last:?}"
+    );
+}
+
+/// Each gesture is one undo step, however many frames it lasts, so a long
+/// session doesn't run through the undo history.
+#[test]
+fn each_gesture_is_one_undo_step() {
+    let mut h = rig();
+    let steps = |h: &Harness<'static, Rig>| h.state().s.history.undo_len();
+    h.state_mut().s.tool = Tool::Pencil;
+    let before = steps(&h);
+    drag(
+        &mut h,
+        &line((-150.0, 0.0), (150.0, 30.0), 40),
+        0.8,
+        PenTool::Pen,
+    );
+    assert_eq!(steps(&h), before + 1, "a stroke");
+    h.state_mut().s.tool = Tool::Eraser;
+    let before = steps(&h);
+    drag(
+        &mut h,
+        &line((-100.0, -20.0), (100.0, 40.0), 40),
+        0.8,
+        PenTool::Pen,
+    );
+    assert_eq!(steps(&h), before + 1, "an eraser drag");
+    h.state_mut().s.tool = Tool::LineEditor;
+    let before = steps(&h);
+    drag(
+        &mut h,
+        &line((-120.0, 5.0), (-60.0, 25.0), 30),
+        0.8,
+        PenTool::Pen,
+    );
+    assert!(steps(&h) <= before + 1, "a Line Editor drag");
+}
+
+/// Importing images end to end: a picture becomes its own layer held for
+/// the scene and shows in the render; numbered pictures become one layer,
+/// a frame each; one undo takes an import away.
+#[test]
+fn imported_images_become_layers_that_render() {
+    let dir = std::env::temp_dir().join(format!("symphony-import-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = |name: &str, rgb: [u8; 3]| {
+        let p = dir.join(name);
+        image::RgbImage::from_pixel(64, 36, image::Rgb(rgb))
+            .save(&p)
+            .unwrap();
+        p
+    };
+    let bg = save("bg.png", [220, 30, 30]);
+    let seq: Vec<_> = (1..=3)
+        .map(|i| save(&format!("walk_{i:03}.png"), [30, 30, 220]))
+        .collect();
+
+    let mut s = crate::session::Session::new_scene();
+    s.doc.media_dirs = vec![cache.clone()];
+    let layers = s.layer_count();
+    let steps = s.history.undo_len();
+
+    let out = crate::import::stage_images_into(&[bg], &cache);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(s.import_images(out.groups), 1);
+    assert_eq!(s.layer_count(), layers + 1);
+    assert_eq!(s.history.undo_len(), steps + 1, "one undo step");
+    let i = (0..s.layer_count())
+        .find(|&i| s.layer_name(i) == "bg")
+        .expect("named after the file");
+    assert_eq!(
+        i,
+        s.layer_count() - 1,
+        "a full-frame picture is a background: at the bottom"
+    );
+    let len = s.length();
+    let d = s.doc.exposed(i, len).expect("held to the end of the scene");
+    assert!(s.doc.drawings[&d].image.is_some());
+    // It renders: the middle of the frame is the picture's red.
+    let pix = symphony_render::render_camera(&s.doc, 1, 192, 108, None).unwrap();
+    let mid = pix.pixel(96, 54).unwrap();
+    assert!(mid.red() > 150 && mid.blue() < 100, "{mid:?}");
+
+    // A numbered sequence: one layer, one frame each, from the current frame.
+    s.frame = 5;
+    let out = crate::import::stage_images_into(&seq, &cache);
+    assert_eq!(s.import_images(out.groups), 3);
+    let w = (0..s.layer_count())
+        .find(|&i| s.layer_name(i) == "walk")
+        .expect("one layer");
+    let frames: Vec<_> = (5..=7).map(|f| s.doc.exposed(w, f).unwrap()).collect();
+    assert!(frames[0] != frames[1] && frames[1] != frames[2]);
+
+    s.undo();
+    assert!((0..s.layer_count()).all(|i| s.layer_name(i) != "walk"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A 440 Hz mono tone of `seconds` as a 16-bit WAV file at 8 kHz.
+fn write_tone(path: &std::path::Path, seconds: f32) {
+    let rate = 8_000u32;
+    let samples: Vec<i16> = (0..(seconds * rate as f32) as u32)
+        .map(|i| ((i as f32 / rate as f32 * 440.0 * std::f32::consts::TAU).sin() * 8_000.0) as i16)
+        .collect();
+    let data = samples.len() as u32 * 2;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    for v in [
+        16u32.to_le_bytes(),
+        [1, 0, 1, 0],
+        rate.to_le_bytes(),
+        (rate * 2).to_le_bytes(),
+    ] {
+        b.extend_from_slice(&v);
+    }
+    b.extend_from_slice(&[2, 0, 16, 0]);
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    for s in samples {
+        b.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, b).unwrap();
+}
+
+/// Importing sound end to end: a clip at the current frame, the scene
+/// lengthened to fit, the waveform ready, one undo removes it.
+#[test]
+fn imported_sound_lands_on_the_timeline() {
+    let dir = std::env::temp_dir().join(format!("symphony-sound-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("line.wav");
+    write_tone(&wav, 3.0);
+    let mut s = crate::session::Session::new_scene();
+    s.doc.media_dirs = vec![cache.clone()];
+    s.doc.settings.fps = 24.0;
+    let len = s.length();
+    let out = crate::import::stage_sounds_into(&[wav], &cache);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(s.import_sounds(out.sounds), 1);
+    assert_eq!(s.doc.sounds.len(), 1);
+    assert_eq!(s.doc.sounds[0].start, 1);
+    assert_eq!(s.doc.sounds[0].name, "line");
+    assert!(s.length() >= 72, "3 s at 24 fps fits: {}", s.length());
+    assert!(s.doc.media_path(s.doc.sounds[0].media).is_some());
+    s.undo();
+    assert!(s.doc.sounds.is_empty());
+    assert_eq!(s.length(), len);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Video import round trip: a 30 fps MP4 (made by Symphony's exporter)
+/// becomes one layer resampled to a 24 fps scene, with frames that look
+/// like the movie. Needs the OpenH264 codec; skipped without it.
+#[test]
+fn imported_video_becomes_a_frame_sequence() {
+    let Some(codec) = crate::codec::installed() else {
+        eprintln!("OpenH264 not installed: skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("symphony-video-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A 1 s, 30 fps movie of a red picture.
+    let red = dir.join("red.png");
+    image::RgbImage::from_pixel(64, 36, image::Rgb([220, 30, 30]))
+        .save(&red)
+        .unwrap();
+    let mut src = crate::session::Session::new_scene();
+    src.doc.media_dirs = vec![cache.clone()];
+    src.doc.settings.fps = 30.0;
+    let out = crate::import::stage_images_into(&[red], &cache);
+    src.import_images(out.groups);
+    let movie = dir.join("clip.mp4");
+    symphony_render::movie::export_mp4(
+        &src.doc,
+        &codec,
+        &movie,
+        1,
+        30,
+        320,
+        180,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
+        &|_, _| {},
+    )
+    .unwrap();
+
+    let got = crate::video::import_into(&movie, &codec, 24.0, [1920, 1080], &cache);
+    assert!(got.problems.is_empty(), "{:?}", got.problems);
+    let g = got.frames.expect("frames");
+    assert!(
+        (23..=25).contains(&g.frames.len()),
+        "1 s at 24 fps: {}",
+        g.frames.len()
+    );
+    assert_eq!(g.name, "clip");
+    let first = image::open(cache.join(&g.frames[0].file))
+        .unwrap()
+        .to_rgb8();
+    let p = first.get_pixel(first.width() / 2, first.height() / 2);
+    assert!(p[0] > 160 && p[1] < 90 && p[2] < 90, "looks red: {p:?}");
+
+    let mut s = crate::session::Session::new_scene();
+    s.doc.media_dirs = vec![cache.clone()];
+    s.doc.settings.fps = 24.0;
+    let before = s.layer_count();
+    s.import_images(vec![g]);
+    assert_eq!(s.layer_count(), before + 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Erasing heavy textured art: scribbling back and forth over the same
+/// spot must stay fast, and erased shapes mustn't keep growing.
+#[test]
+#[ignore = "benchmark: cargo test --release textured_erase_cost -- --ignored --nocapture"]
+fn textured_erase_cost() {
+    use symphony_core::stroke::{Point, Stroke, StrokeTexture};
+    let mut s = crate::session::Session::new_scene();
+    let swatch = s.swatch;
+    for i in 0..300 {
+        let y = -300.0 + (i % 30) as f32 * 20.0;
+        let x0 = -500.0 + (i / 30) as f32 * 100.0;
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch,
+            min_width: 10.0,
+            max_width: 30.0,
+            points: (0..120)
+                .map(|k| Point {
+                    x: x0 + k as f32 * 2.5,
+                    y: y + (k as f32 * 0.2).sin() * 15.0,
+                    pressure: 0.5 + (k as f32 * 0.1).sin() * 0.4,
+                    pen: Default::default(),
+                })
+                .collect(),
+            tips: Default::default(),
+            texture: Some(StrokeTexture::default()),
+            shape: Vec::new(),
+        };
+        s.commit_stroke(0, 1, st);
+    }
+    let d = s.doc.exposed(0, 1).unwrap();
+    let mut worst = std::time::Duration::ZERO;
+    let start = std::time::Instant::now();
+    let moves = 400;
+    for k in 0..moves {
+        // Back and forth across a 300-unit patch, drifting down.
+        let t = (k % 40) as f32 / 40.0;
+        let x = -300.0 + if (k / 40) % 2 == 0 { t } else { 1.0 - t } * 300.0;
+        let y = -250.0 + k as f32 * 0.8;
+        let one = std::time::Instant::now();
+        s.erase(d, &[([x, y], 25.0), ([x + 8.0, y + 1.0], 25.0)]);
+        worst = worst.max(one.elapsed());
+    }
+    let dr = &s.doc.drawings[&d];
+    let verts: usize = dr
+        .strokes
+        .iter()
+        .map(|st| st.shape.iter().map(Vec::len).sum::<usize>())
+        .sum();
+    let most: usize = dr
+        .strokes
+        .iter()
+        .map(|st| st.shape.iter().map(Vec::len).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    println!(
+        "textured_erase_cost: {:?} per move, worst {worst:?}; {} strokes, {verts} shape points (most in one: {most})",
+        start.elapsed() / moves,
+        dr.strokes.len()
+    );
+    let start = std::time::Instant::now();
+    for _ in 0..3 {
+        std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
+    }
+    println!("render_camera after erasing: {:?}", start.elapsed() / 3);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn outline_cost() {
+    use symphony_core::stroke::{Point, Stroke, StrokeTexture};
+    let mut s = crate::session::Session::new_scene();
+    let st = Stroke {
+        id: s.doc.ids.fresh(),
+        kind: StrokeKind::Brush,
+        art: Default::default(),
+        swatch: s.swatch,
+        min_width: 10.0,
+        max_width: 30.0,
+        points: (0..120)
+            .map(|k| Point {
+                x: k as f32 * 2.5,
+                y: (k as f32 * 0.2).sin() * 15.0,
+                pressure: 0.5 + (k as f32 * 0.1).sin() * 0.4,
+                pen: Default::default(),
+            })
+            .collect(),
+        tips: Default::default(),
+        texture: Some(StrokeTexture::default()),
+        shape: Vec::new(),
+    };
+    let t = std::time::Instant::now();
+    let o = symphony_vector::shape::outline(&st);
+    let pts: usize = o.iter().flatten().map(Vec::len).sum();
+    println!("outline: {:?}, {pts} points", t.elapsed());
+    let eraser =
+        symphony_vector::shape::eraser_shape(&[([100.0, 0.0], 25.0), ([108.0, 1.0], 25.0)]);
+    let t = std::time::Instant::now();
+    let _ = symphony_vector::shape::erase(&o[0], &eraser);
+    println!("one cut: {:?}", t.elapsed());
+}
+
+/// TGA (no file signature) and SVG (vector) import as pictures.
+#[test]
+fn tga_and_svg_import() {
+    let dir = std::env::temp_dir().join(format!("symphony-tga-svg-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let tga = dir.join("bg.tga");
+    image::RgbImage::from_pixel(32, 18, image::Rgb([10, 200, 30]))
+        .save(&tga)
+        .unwrap();
+    let svg = dir.join("logo.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#e03020"/></svg>"##,
+    )
+    .unwrap();
+    let out = crate::import::stage_images_into(&[tga, svg], &cache);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    let frames: Vec<_> = out.groups.iter().flat_map(|g| g.frames.iter()).collect();
+    assert_eq!(frames.len(), 2);
+    let svg_frame = frames.iter().find(|f| f.name == "logo").unwrap();
+    assert_eq!(svg_frame.size, [4096, 2048], "drawn sharp, same shape");
+    let px = image::open(cache.join(&svg_frame.file)).unwrap().to_rgba8();
+    assert_eq!(px.get_pixel(100, 100).0, [224, 48, 32, 255]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The Line tool: a straight line whatever path the pen takes; Shift
+/// snaps its angle to 22.5° steps; Alt bends it through the pen.
+#[test]
+fn the_line_tool_draws_straight_snapped_and_bent_lines() {
+    use crate::session::Tool;
+    // A fresh layer: its peg is untouched, so drawing space is scene space.
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    let last = move |h: &Harness<'static, Rig>| strokes(h, layer).last().cloned().expect("a line");
+    h.state_mut().s.tool = Tool::Line;
+    let before = strokes(&h, layer).len();
+    // A wobbly path: the line goes straight from start to end.
+    drag(
+        &mut h,
+        &[(-100.0, 0.0), (-20.0, 40.0), (40.0, -30.0), (100.0, 0.0)],
+        1.0,
+        PenTool::Pen,
+    );
+    assert_eq!(strokes(&h, layer).len(), before + 1);
+    let st = last(&h);
+    assert!(st.points.iter().all(|p| p.y.abs() < 0.5), "straight");
+    let (a, b) = (st.points[0], *st.points.last().unwrap());
+    assert!((a.x + 100.0).abs() < 1.0 && (b.x - 100.0).abs() < 1.0);
+    // Shift: 100 across and 30 down (about 17°) snaps to 22.5°.
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    drag(
+        &mut h,
+        &[(0.0, 0.0), (100.0, 30.0), (100.0, 30.0)],
+        1.0,
+        PenTool::Pen,
+    );
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    let st = last(&h);
+    let (a, b) = (st.points[0], *st.points.last().unwrap());
+    let angle = (b.y - a.y).atan2(b.x - a.x).to_degrees();
+    assert!((angle - 22.5).abs() < 0.5, "snapped: {angle}");
+    // Alt: after setting the end, the pen bends the line through itself.
+    let to = |h: &Harness<'static, Rig>, x, y| h.state().canvas.to_screen(x, y);
+    let steps: [((f32, f32), Phase, bool); 4] = [
+        ((-100.0, 100.0), Phase::Down, false),
+        ((100.0, 100.0), Phase::Move, false),
+        ((0.0, 40.0), Phase::Move, true),
+        ((0.0, 40.0), Phase::Up, true),
+    ];
+    for ((x, y), phase, alt) in steps {
+        let p = to(&h, x, y);
+        h.input_mut()
+            .events
+            .push(egui::Event::ModifiersChanged(if alt {
+                egui::Modifiers::ALT
+            } else {
+                egui::Modifiers::NONE
+            }));
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        h.state_mut()
+            .samples
+            .push(sample(p, phase, 1.0, PenTool::Pen));
+        h.step();
+    }
+    h.input_mut()
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(2);
+    let st = last(&h);
+    let mid = st.points[st.points.len() / 2];
+    assert!(
+        mid.x.abs() < 3.0 && (mid.y - 40.0).abs() < 3.0,
+        "bent through the pen: {mid:?}"
+    );
+    let (a, b) = (st.points[0], *st.points.last().unwrap());
+    assert!(
+        (a.y - 100.0).abs() < 1.0 && (b.y - 100.0).abs() < 1.0,
+        "ends stay put"
+    );
+}
+
+/// Brush kinds: Bitmap lists textured brushes; Vector lists clean ones plus
+/// a vector version of every bitmap brush (same name, no stamps).
+#[test]
+fn bitmap_brushes_also_come_as_vector_versions() {
+    use crate::presets::Preset;
+    use crate::views::panels::brush_list;
+    let s = crate::session::Session::new_scene();
+    let clean = Preset {
+        name: "Ink".into(),
+        settings: s.brush,
+        source: None,
+        tip: None,
+        grain: None,
+    };
+    let mut stamped = clean.clone();
+    stamped.name = "Grainy".into();
+    stamped.settings.texture = Some(symphony_core::stroke::StrokeTexture::default());
+    let all = vec![clean, stamped];
+    let names = |l: Vec<Preset>| l.into_iter().map(|p| p.name).collect::<Vec<_>>();
+    assert_eq!(names(brush_list(&all, true)), ["Grainy"]);
+    let vector = brush_list(&all, false);
+    assert_eq!(names(vector.clone()), ["Ink", "Grainy"]);
+    assert!(
+        vector
+            .iter()
+            .all(|p| !crate::views::panels::is_bitmap(&p.settings)),
+        "vector versions are vector brushes"
+    );
+    let grainy = vector.iter().find(|p| p.name == "Grainy").unwrap();
+    assert!(
+        grainy.settings.texture.is_some_and(|t| t.vector),
+        "it keeps its tip, stamped as shapes"
+    );
+}
+
+/// The pen's tilt and rotation are kept on the line's points (so brushes
+/// that follow them still do after editing) and survive saving; lines
+/// from a mouse store nothing extra.
+#[test]
+fn strokes_keep_how_the_pen_was_held() {
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    h.state_mut().s.tool = crate::session::Tool::Brush;
+    let pts = line((-80.0, 0.0), (80.0, 0.0), 8);
+    let n = pts.len();
+    for (i, &(x, y)) in pts.iter().enumerate() {
+        let p = h.state().canvas.to_screen(x, y);
+        let phase = match i {
+            0 => Phase::Down,
+            _ if i + 1 == n => Phase::Up,
+            _ => Phase::Move,
+        };
+        let mut sm = sample(p, phase, 0.8, PenTool::Pen);
+        sm.tilt_x = 0.0;
+        sm.tilt_y = 35.0;
+        sm.rotation = 90.0;
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        h.state_mut().samples.push(sm);
+        h.step();
+    }
+    h.run_steps(2);
+    let st = strokes(&h, layer).last().cloned().expect("a stroke");
+    assert!(
+        st.points.iter().all(|p| (p.pen.tilt - 35.0).abs() < 0.5),
+        "tilt kept"
+    );
+    assert!(
+        st.points.iter().all(|p| (p.pen.azimuth - 90.0).abs() < 0.5),
+        "lean direction kept"
+    );
+    assert!(
+        st.points
+            .iter()
+            .all(|p| (p.pen.rotation - 90.0).abs() < 0.5),
+        "barrel kept"
+    );
+    let json = serde_json::to_string(&st).unwrap();
+    let back: symphony_core::stroke::Stroke = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.points, st.points, "survives saving");
+    // A mouse line saves points without pen data at all.
+    let mut flat = st.clone();
+    for p in &mut flat.points {
+        p.pen = Default::default();
+    }
+    assert!(!serde_json::to_string(&flat).unwrap().contains("\"pen\""));
+}
+
+/// A vector brush (a bitmap brush's tip stamped as shapes): drawn in the
+/// Camera view it renders solid where the line is, and the eraser cuts
+/// its merged outline into pieces.
+#[test]
+fn vector_brushes_draw_solid_shapes_and_erase_cleanly() {
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    {
+        let s = &mut h.state_mut().s;
+        s.tool = crate::session::Tool::Brush;
+        s.brush.min_width = 16.0;
+        s.brush.max_width = 16.0;
+        s.brush.texture = Some(symphony_core::stroke::StrokeTexture {
+            spacing: 0.2,
+            vector: true,
+            ..Default::default()
+        });
+    }
+    drag(
+        &mut h,
+        &line((-200.0, 0.0), (200.0, 0.0), 20),
+        1.0,
+        PenTool::Pen,
+    );
+    let st = strokes(&h, layer).last().cloned().expect("a stroke");
+    assert!(st.texture.is_some_and(|t| t.vector));
+    let s = &h.state().s;
+    let (w, ht) = (s.doc.settings.width, s.doc.settings.height);
+    let img = symphony_render::render_camera(&s.doc, 1, w, ht, None).unwrap();
+    // Scene origin is the frame centre; the line runs along y = 0.
+    let px = |x: f32, y: f32| {
+        let (cx, cy) = ((w as f32 / 2.0 + x) as u32, (ht as f32 / 2.0 + y) as u32);
+        img.pixel(cx, cy).unwrap().alpha()
+    };
+    assert!(px(0.0, 0.0) > 200, "solid on the line");
+    assert!(px(0.0, 30.0) < 10, "nothing well off it");
+    // Erase across the middle: two pieces, each an outline.
+    let d = h.state().s.doc.exposed(layer, 1).unwrap();
+    let eraser: Vec<symphony_vector::cut::Disc> = (0..10)
+        .map(|i| ([0.0, -20.0 + i as f32 * 4.0], 10.0))
+        .collect();
+    h.state_mut().s.erase(d, &eraser);
+    let pieces = strokes(&h, layer);
+    let cut: Vec<_> = pieces
+        .iter()
+        .filter(|p| p.texture.is_some_and(|t| t.vector))
+        .collect();
+    assert_eq!(cut.len(), 2, "split in two");
+    assert!(
+        cut.iter().all(|p| !p.shape.is_empty()),
+        "each piece is its outline"
     );
 }

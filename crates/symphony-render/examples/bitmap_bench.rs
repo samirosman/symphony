@@ -6,12 +6,13 @@
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
-use symphony_core::bitmap::{layer_edits, Alignment, ImageFile, ImageFormat};
+use symphony_core::bitmap::{fit, layer_edits, usual_alpha};
+use symphony_core::doc::{Media, MediaKind};
 use symphony_core::doc::{Scene, Settings};
 use symphony_core::history::History;
+use symphony_core::stroke::PlacedImage;
 
 fn dir() -> PathBuf {
     let d = PathBuf::from("target/bitmap-bench");
@@ -117,36 +118,20 @@ fn exr_file(name: &str, w: u32, h: u32, half: bool, alpha: bool) {
     }
 }
 
-fn load(path: &Path) -> ImageFile {
-    let bytes = std::fs::read(path).unwrap();
-    let format = match path.extension().unwrap().to_str().unwrap() {
-        "png" => ImageFormat::Png,
-        "jpg" => ImageFormat::Jpeg,
-        _ => ImageFormat::Exr,
-    };
-    let (width, height) = image::ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .unwrap()
-        .into_dimensions()
-        .unwrap();
-    ImageFile {
-        format,
-        width,
-        height,
-        bytes: Arc::new(bytes),
-    }
+fn name(path: &Path) -> String {
+    path.file_name().unwrap().to_string_lossy().into_owned()
 }
 
 fn decode(path: &Path) {
-    let file = load(path);
-    let alpha = file.format.usual_alpha();
+    let bytes = std::fs::read(path).unwrap();
+    let alpha = usual_alpha(&name(path));
     let t = Instant::now();
-    let p = symphony_render::bitmap::decode(&file, alpha);
+    let p = symphony_render::bitmap::decode(&bytes, &name(path), alpha);
     let ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
         "{}\t{} MB file\t{}\t{ms:.0} ms",
-        path.file_name().unwrap().to_string_lossy(),
-        file.bytes.len() / 1_000_000,
+        name(path),
+        bytes.len() / 1_000_000,
         if p.is_some() { "ok" } else { "FAILED" },
     );
 }
@@ -154,18 +139,42 @@ fn decode(path: &Path) {
 /// `layers` copies of the image, each with its own key (so each decodes
 /// and caches on its own), rendered at 1920 x 1080 for four frames.
 fn frames(path: &Path, layers: u64) {
-    let file = load(path);
-    let alpha = file.format.usual_alpha();
+    let bytes = std::fs::read(path).unwrap();
+    let size = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    let alpha = usual_alpha(&name(path));
     let mut s = Scene::new(Settings {
         width: 1920,
         height: 1080,
         fps: 24.0,
         length: 4,
+        ..Settings::default()
     });
+    s.media_dirs = vec![path.parent().unwrap().to_path_buf()];
     let mut h = History::default();
     for k in 0..layers {
-        s.images.insert(k + 1, file.clone());
-        let edits = layer_edits(&mut s, "BG", 0, &[k + 1], 1, Alignment::Fit, alpha);
+        s.media.insert(
+            k + 1,
+            Media {
+                kind: MediaKind::Image,
+                file: name(path),
+                name: "BG".into(),
+                size: [size.0, size.1],
+                seconds: 0.0,
+                rate: 0,
+                channels: 0,
+                samples: 0,
+            },
+        );
+        let placed = PlacedImage {
+            media: k + 1,
+            rect: fit([size.0, size.1], [1920, 1080]),
+            alpha,
+        };
+        let edits = layer_edits(&mut s, "BG", 0, &[placed], 1);
         h.apply(&mut s, "Import image", edits);
     }
     for f in 1..=4 {

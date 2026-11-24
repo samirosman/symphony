@@ -1,5 +1,6 @@
 //! Sound in the app: the audio output, the decoded sound of each file the
-//! scene uses, and the background work that imports and decodes files.
+//! scene uses, and the background work that decodes files. Import itself
+//! is in [`crate::import`].
 //!
 //! Decoding and resampling a long sound takes most of a second, so both
 //! run on worker threads (E5.2) and show in the status bar (D17.5). The
@@ -7,14 +8,13 @@
 //! never decode the same file twice.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 use eframe::egui;
-use symphony_audio::{decode, prepare, Clip, Command, Peaks, Player, Samples};
+use symphony_audio::{prepare, Clip, Command, Peaks, Player, Samples};
+use symphony_core::doc::MediaKind;
 use symphony_core::id::Id;
-use symphony_core::sound::SoundFile;
 
 use crate::session::Session;
 
@@ -30,15 +30,9 @@ pub struct Ready {
     gain: f32,
 }
 
-enum Done {
-    Imported {
-        name: String,
-        result: Result<(u64, SoundFile, Ready), String>,
-    },
-    Decoded {
-        key: u64,
-        result: Result<Ready, String>,
-    },
+struct Done {
+    key: u64,
+    result: Result<Ready, String>,
 }
 
 /// What the mixer last got, to send clips again only when they change.
@@ -46,7 +40,7 @@ enum Done {
 struct Sent {
     fps: u32,
     solo: Option<Id>,
-    /// Key, on, start frame, trims, decoded.
+    /// Key, muted, start frame, trims, decoded.
     tracks: Vec<(u64, bool, u32, u64, u64, bool)>,
 }
 
@@ -58,7 +52,6 @@ pub struct SoundState {
     decoding: HashSet<u64>,
     /// Files whose decode failed, so they aren't tried every frame.
     failed: HashSet<u64>,
-    importing: usize,
     tx: Sender<Done>,
     rx: Receiver<Done>,
     sent: Option<Sent>,
@@ -86,7 +79,6 @@ impl Default for SoundState {
             ready: HashMap::new(),
             decoding: HashSet::new(),
             failed: HashSet::new(),
-            importing: 0,
             tx,
             rx,
             sent: None,
@@ -122,7 +114,7 @@ impl SoundState {
         let Some(track) = s.doc.sounds.iter().find(|t| t.id == id) else {
             return;
         };
-        let Some(file) = s.doc.sound_files.get(&track.key) else {
+        let Some(file) = s.doc.media.get(&track.media) else {
             return;
         };
         let fps = f64::from(s.doc.settings.fps.max(1.0));
@@ -241,12 +233,7 @@ impl SoundState {
 
     /// Words for the status bar while work runs (D17.5).
     pub fn activity(&self) -> Option<String> {
-        match (self.importing, self.decoding.len()) {
-            (0, 0) => None,
-            (1, _) => Some("Importing sound".into()),
-            (0, _) => Some("Reading sound".into()),
-            (n, _) => Some(format!("Importing {n} sounds")),
-        }
+        (!self.decoding.is_empty()).then(|| "Reading sound".into())
     }
 
     /// The output's rate and channels; 48 kHz stereo when there is none,
@@ -270,75 +257,27 @@ impl SoundState {
         }
     }
 
-    /// Ask for files to import (File > Import > Sound), each decoded on its
-    /// own worker thread. Each becomes a track at the bottom of the list.
-    pub fn import_dialog(&mut self, s: &mut Session, ctx: &egui::Context) {
-        let Some(paths) = rfd::FileDialog::new()
-            .set_title("Import Sound")
-            .add_filter("Sound", &["wav", "aif", "aiff", "mp3"])
-            .pick_files()
-        else {
-            return;
-        };
-        self.import(paths, s, ctx);
-    }
-
-    pub fn import(&mut self, paths: Vec<PathBuf>, s: &mut Session, ctx: &egui::Context) {
-        self.open(s);
-        let (rate, channels) = self.format();
-        let has_output = self.player.is_some();
-        for path in paths {
-            self.importing += 1;
-            let (tx, ctx) = (self.tx.clone(), ctx.clone());
-            std::thread::spawn(move || {
-                let name = track_name(&path);
-                let result = symphony_audio::import(&path).and_then(|(key, file, samples)| {
-                    let ready = make_ready(&samples, rate, channels, has_output)
-                        .map_err(|e| format!("Couldn't import {}: {e}.", path.display()))?;
-                    Ok((key, file, ready))
-                });
-                let _ = tx.send(Done::Imported { name, result });
-                ctx.request_repaint();
-            });
-        }
-    }
-
     /// Once a UI frame: take finished work, decode files of an opened
     /// scene, and give the mixer the scene's clips when they change.
     pub fn update(&mut self, s: &mut Session, ctx: &egui::Context) {
-        while let Ok(done) = self.rx.try_recv() {
-            match done {
-                Done::Imported { name, result } => {
-                    self.importing -= 1;
-                    match result {
-                        Ok((key, file, ready)) => {
-                            self.failed.remove(&key);
-                            self.ready.insert(key, ready);
-                            s.import_sound(&name, key, file);
-                        }
-                        Err(e) => s.notify(e),
-                    }
+        while let Ok(Done { key, result }) = self.rx.try_recv() {
+            self.decoding.remove(&key);
+            match result {
+                Ok(ready) => {
+                    self.ready.insert(key, ready);
                 }
-                Done::Decoded { key, result } => {
-                    self.decoding.remove(&key);
-                    match result {
-                        Ok(ready) => {
-                            self.ready.insert(key, ready);
-                        }
-                        Err(e) => {
-                            self.failed.insert(key);
-                            s.notify(format!("A sound in this scene couldn't be read: {e}."));
-                        }
-                    }
+                Err(e) => {
+                    self.failed.insert(key);
+                    s.notify(format!("A sound in this scene couldn't be read: {e}."));
                 }
             }
         }
-        if !s.doc.sound_files.is_empty() {
+        if !s.doc.sounds.is_empty() {
             self.open(s);
         }
         self.decode_missing(s, ctx);
         // Keep only what this scene uses.
-        self.ready.retain(|k, _| s.doc.sound_files.contains_key(k));
+        self.ready.retain(|k, _| s.doc.media.contains_key(k));
         if let Some(p) = &self.player {
             if self.solo.is_some() && p.caught_up() && !p.is_playing() {
                 self.solo = None;
@@ -353,19 +292,24 @@ impl SoundState {
     fn decode_missing(&mut self, s: &Session, ctx: &egui::Context) {
         let (rate, channels) = self.format();
         let has_output = self.player.is_some();
-        for (&key, file) in &s.doc.sound_files {
-            if self.ready.contains_key(&key)
+        for (&key, m) in &s.doc.media {
+            if m.kind != MediaKind::Sound
+                || self.ready.contains_key(&key)
                 || self.decoding.contains(&key)
                 || self.failed.contains(&key)
             {
                 continue;
             }
+            let Some(path) = s.doc.media_path(key) else {
+                // Not on disk (yet): a scene before its files are copied.
+                continue;
+            };
             self.decoding.insert(key);
-            let (tx, ctx, bytes) = (self.tx.clone(), ctx.clone(), Arc::clone(&file.bytes));
+            let (tx, ctx) = (self.tx.clone(), ctx.clone());
             std::thread::spawn(move || {
-                let result = decode::decode(&bytes)
+                let result = symphony_audio::decode_path(&path)
                     .and_then(|samples| make_ready(&samples, rate, channels, has_output));
-                let _ = tx.send(Done::Decoded { key, result });
+                let _ = tx.send(Done { key, result });
                 ctx.request_repaint();
             });
         }
@@ -382,12 +326,12 @@ impl SoundState {
                 .iter()
                 .map(|t| {
                     (
-                        t.key,
-                        t.enabled,
+                        t.media,
+                        t.muted,
                         t.start,
                         t.trim_start,
                         t.trim_end,
-                        self.ready.contains_key(&t.key),
+                        self.ready.contains_key(&t.media),
                     )
                 })
                 .collect(),
@@ -405,10 +349,10 @@ impl SoundState {
             .iter()
             .filter(|t| self.solo.is_none_or(|id| id == t.id))
             .filter_map(|t| {
-                let r = self.ready.get(&t.key)?;
-                let file = s.doc.sound_files.get(&t.key)?;
+                let r = self.ready.get(&t.media)?;
+                let file = s.doc.media.get(&t.media)?;
                 let start = f64::from(t.start.saturating_sub(1)) / f64::from(fps);
-                let on = t.enabled || self.solo.is_some();
+                let on = !t.muted || self.solo.is_some();
                 let clip = Clip::new(Arc::clone(&r.pcm), start, on, rate);
                 Some(clip.trimmed(t.offset(file), t.seconds(file), rate))
             })
@@ -453,14 +397,6 @@ fn normalize(peaks: &Peaks) -> f32 {
     }
 }
 
-/// The track name: the file name without its extension, as in Harmony.
-fn track_name(path: &Path) -> String {
-    path.file_stem()
-        .map(|n| n.to_string_lossy().into_owned())
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| "Sound".into())
-}
-
 /// The frames sound playback covers, first and last, and the frame to
 /// start from: the playback range (Play menu) held inside the scene, or
 /// the whole scene; the frame shown, or the range's first frame when the
@@ -501,12 +437,5 @@ mod tests {
         };
         assert_eq!(normalize(&peaks(vec![(-0.25, 0.1), (0.0, 0.2)])), 4.0);
         assert_eq!(normalize(&peaks(vec![(0.0, 0.0)])), 1.0);
-    }
-
-    #[test]
-    fn names_a_track_after_its_file() {
-        assert_eq!(track_name(Path::new("/a/Dialogue 01.wav")), "Dialogue 01");
-        assert_eq!(track_name(Path::new("/a/.wav")), ".wav");
-        assert_eq!(track_name(Path::new("/")), "Sound");
     }
 }

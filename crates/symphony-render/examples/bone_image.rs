@@ -11,15 +11,16 @@
 
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 use image::{Rgba, RgbaImage};
-use symphony_core::bitmap::{layer_edits, Alignment, Alpha, ImageFile, ImageFormat, ImageRef};
+use symphony_core::bitmap::{layer_edits, one_to_one, Alpha};
 use symphony_core::deform::{BonePose, ChainPose, Influence, MeshDetail};
+use symphony_core::doc::{Media, MediaKind};
 use symphony_core::doc::{Scene, Settings};
 use symphony_core::history::History;
 use symphony_core::math::Affine;
+use symphony_core::stroke::PlacedImage;
 use symphony_render::warp::{paint_image_bent, Mesh};
 use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 
@@ -143,34 +144,41 @@ fn arm_image(bone: f32, half: f32) -> RgbaImage {
 }
 
 /// A scene holding `img` at one image pixel per scene pixel, centred.
-fn image_scene(w: u32, h: u32, img: RgbaImage) -> (Scene, ImageRef) {
+fn image_scene(w: u32, h: u32, img: RgbaImage) -> (Scene, PlacedImage) {
     let mut s = Scene::new(Settings {
         width: w,
         height: h,
         fps: 24.0,
         length: 1,
+        ..Settings::default()
     });
     let mut bytes = Vec::new();
     img.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
         .expect("encode PNG");
-    s.images.insert(
+    let dir = std::env::temp_dir().join(format!("symphony-bone-image-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("media folder");
+    let file = format!("{w}x{h}-{}.png", img.width());
+    std::fs::write(dir.join(&file), &bytes).expect("write PNG");
+    s.media_dirs = vec![dir];
+    s.media.insert(
         1,
-        ImageFile {
-            format: ImageFormat::Png,
-            width: img.width(),
-            height: img.height(),
-            bytes: Arc::new(bytes),
+        Media {
+            kind: MediaKind::Image,
+            file,
+            name: "Arm".into(),
+            size: [img.width(), img.height()],
+            seconds: 0.0,
+            rate: 0,
+            channels: 0,
+            samples: 0,
         },
     );
-    let edits = layer_edits(
-        &mut s,
-        "Arm",
-        0,
-        &[1],
-        1,
-        Alignment::ProjectResolution,
-        Alpha::Straight,
-    );
+    let placed = PlacedImage {
+        media: 1,
+        rect: one_to_one([img.width(), img.height()]),
+        alpha: Alpha::Straight,
+    };
+    let edits = layer_edits(&mut s, "Arm", 0, &[placed], 1);
     History::default().apply(&mut s, "Import image", edits);
     let d = s.exposed(0, 1).expect("exposed drawing");
     let r = s.drawings[&d].image.expect("image drawing");

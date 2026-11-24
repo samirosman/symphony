@@ -927,7 +927,8 @@ fn layer_at(s: &Session, p: Pos2, view: Affine, items: &[Item]) -> Option<usize>
 /// A drawing's imported image, as drawing-local bounds.
 fn image_rect(s: &Session, dr: &Drawing) -> Option<([f32; 2], [f32; 2])> {
     let r = dr.image?;
-    let [x0, y0, x1, y1] = r.rect(s.doc.images.get(&r.key)?, &s.doc.settings);
+    s.doc.media.get(&r.media)?;
+    let [x0, y0, x1, y1] = symphony_render::bitmap::corners(r);
     Some(([x0.min(x1), y0.min(y1)], [x0.max(x1), y0.max(y1)]))
 }
 
@@ -1084,15 +1085,7 @@ mod tests {
     fn the_transform_tool_picks_and_moves_an_image_layer() {
         let mut session = Session::new_scene();
         let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]));
-        let mut bytes = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut bytes),
-            image::ImageFormat::Png,
-        )
-        .unwrap();
-        let file = symphony_io::media::image_from_bytes(bytes).unwrap();
-        session.import_images("Red", vec![file]);
-        let image_layer = session.selected;
+        let image_layer = crate::import::import_test_image(&mut session, "Red", &img);
         let d = session.doc.exposed(image_layer, 1).unwrap();
         // Start on the other layer: a click on the image must pick it.
         session.selected = image_layer + 1;
@@ -1180,15 +1173,7 @@ mod tests {
     fn image_harness<'a>() -> (SelectHarness<'a>, usize, Affine) {
         let mut session = Session::new_scene();
         let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]));
-        let mut bytes = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut bytes),
-            image::ImageFormat::Png,
-        )
-        .unwrap();
-        let file = symphony_io::media::image_from_bytes(bytes).unwrap();
-        session.import_images("Red", vec![file]);
-        let layer = session.selected;
+        let layer = crate::import::import_test_image(&mut session, "Red", &img);
         let d = session.doc.exposed(layer, 1).unwrap();
         session.tool = Tool::Transform;
         let view = Affine::translate(250.0, 200.0).compose(Affine::scale(0.2, 0.2));
@@ -1294,6 +1279,7 @@ mod tests {
                         x,
                         y: 0.0,
                         pressure: 1.0,
+                        ..Default::default()
                     })
                     .to_vec(),
                 tips: Default::default(),

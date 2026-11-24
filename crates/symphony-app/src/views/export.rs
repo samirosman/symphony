@@ -36,6 +36,8 @@ pub struct ExportDialog {
     movie_fps: Option<f32>,
     running: Option<Running>,
     result: Option<Result<PathBuf, String>>,
+    /// "Download codec and export": export as soon as the codec arrives.
+    export_when_ready: bool,
 }
 
 impl Default for ExportDialog {
@@ -49,6 +51,7 @@ impl Default for ExportDialog {
             scale: 1.0,
             movie_fps: None,
             running: None,
+            export_when_ready: false,
             result: None,
         }
     }
@@ -282,11 +285,24 @@ impl ExportDialog {
                         None => {}
                     }
                     let needs_codec = format == Format::Mp4Movie && codec.is_none();
+                    // The codec arrived: carry on with the export that asked for it.
+                    if self.export_when_ready && !needs_codec && !downloading {
+                        self.export_when_ready = false;
+                        if self.path.is_some() {
+                            self.start(s, ctx, codec.clone());
+                        }
+                    }
+                    if !downloading && needs_codec && self.export_when_ready {
+                        // The download stopped without the codec (an error
+                        // shows elsewhere): let them try again.
+                        self.export_when_ready = false;
+                    }
                     if needs_codec {
                         ui.label(
                             egui::RichText::new(
-                                "Movies use Cisco's OpenH264 codec. Symphony downloads it from Cisco when you ask, \
-                                 and you can turn it off or remove it in Preferences > Video.",
+                                "Movies need Cisco's free OpenH264 codec. Symphony downloads it from Cisco \
+                                 the first time you export a movie. This only happens once. You can turn it \
+                                 off or remove it in Preferences > Video.",
                             )
                             .font(theme::dense())
                             .color(theme::TEXT_SECONDARY),
@@ -295,18 +311,26 @@ impl ExportDialog {
                         if downloading {
                             ui.horizontal(|ui| {
                                 symphony_ui::feedback::spinner(ui, 14.0);
-                                ui.label("Downloading OpenH264 from Cisco");
+                                ui.label(if self.export_when_ready {
+                                    "Downloading OpenH264 from Cisco. The export starts when it's done."
+                                } else {
+                                    "Downloading OpenH264 from Cisco"
+                                });
                             });
-                        } else if ui.button("Download OpenH264 from Cisco").clicked() {
-                            request.download_codec = true;
                         }
                     }
-                    let ready = self.path.is_some() && !needs_codec;
-                    if symphony_ui::widgets::primary_button(ui, "Export", ready)
-                        .on_disabled_hover_text(if needs_codec { "Download the codec first" } else { "Choose where to save first" })
+                    let label = if needs_codec { "Download codec and export" } else { "Export" };
+                    let ready = self.path.is_some() && !downloading && !self.export_when_ready;
+                    if symphony_ui::widgets::primary_button(ui, label, ready)
+                        .on_disabled_hover_text(if downloading { "Downloading the codec" } else { "Choose where to save first" })
                         .clicked()
                     {
-                        self.start(s, ctx, codec.clone());
+                        if needs_codec {
+                            request.download_codec = true;
+                            self.export_when_ready = true;
+                        } else {
+                            self.start(s, ctx, codec.clone());
+                        }
                     }
                 }
             });

@@ -9,7 +9,7 @@
 //! both use this, so they match.
 
 use symphony_core::math::Affine;
-use symphony_core::stroke::{Stroke, StrokeTexture, Texture};
+use symphony_core::stroke::{Pen, Stroke, StrokeTexture, Texture};
 
 use crate::scale_of;
 
@@ -161,8 +161,48 @@ pub struct Stamper {
     done: usize,
     carry: f32,
     /// The last point: position, diameter and pen pressure.
-    last: Option<([f32; 2], f32, f32)>,
+    last: Option<([f32; 2], f32, f32, Pen)>,
     stamps: usize,
+    /// The stroke's random seed: the same stroke always gets the same
+    /// scatter and jitter, at any zoom and on every redraw.
+    seed: u64,
+    /// Recording instead of painting: where each stamp lands (for vector
+    /// brushes, which turn stamps into shapes).
+    record: Option<Vec<Dab>>,
+}
+
+/// One stamp as placed on the line: centre, diameter, turn (radians, tip
+/// angle and heading included) and roundness (height over width).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dab {
+    pub c: [f32; 2],
+    pub d: f32,
+    pub angle: f32,
+    pub ratio: f32,
+}
+
+/// Every stamp a textured brush lays along `stroke`, in drawing units,
+/// placed exactly as the painting engine places them (same spacing and
+/// dynamics), but not painted.
+pub fn dabs(stroke: &Stroke, tex: &StrokeTexture) -> Vec<Dab> {
+    let mut s = Stamper::new(
+        *tex,
+        Affine::IDENTITY,
+        [i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4],
+    );
+    s.record = Some(Vec::new());
+    s.extend(stroke, None, None);
+    s.record.take().unwrap_or_default()
+}
+
+/// A repeatable random number in 0..1 for `seed`, stamp `n`, channel `k`.
+fn rand(seed: u64, n: u64, k: u64) -> f32 {
+    let mut z =
+        seed ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ k.wrapping_mul(0xD1B5_4A32_D192_ED03);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
 impl Stamper {
@@ -179,12 +219,15 @@ impl Stamper {
             carry: 0.0,
             last: None,
             stamps: 0,
+            seed: 0,
+            record: None,
         }
     }
 
     /// Stamp the points of `stroke` not stamped yet. The stroke must only
     /// have grown since the last call (true while drawing).
     pub fn extend(&mut self, stroke: &Stroke, tip: Option<&Texture>, grain: Option<&Texture>) {
+        self.seed = stroke.id.0.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1;
         let tip = tip.filter(|t| t.is_valid());
         let grain = grain.filter(|t| t.is_valid());
         let spacing = if self.tex.spacing.is_finite() {
@@ -209,7 +252,7 @@ impl Stamper {
             }
         };
         let (lo, hi) = (stroke.min_width, stroke.max_width);
-        let new: Vec<([f32; 2], f32, f32)> = stroke
+        let new: Vec<([f32; 2], f32, f32, Pen)> = stroke
             .points
             .iter()
             .skip(self.done)
@@ -219,17 +262,18 @@ impl Stamper {
                     [x, y],
                     ((lo + (hi - lo) * tex.size_at(p.pressure)) * k).max(0.0),
                     p.pressure,
+                    p.pen,
                 )
             })
             .collect();
         self.done = stroke.points.len();
-        for (c, d, pr) in new {
+        for (c, d, pr, pen) in new {
             if !(c[0].is_finite() && c[1].is_finite() && d.is_finite()) {
                 continue;
             }
-            let Some((a, wa, pa)) = self.last else {
-                self.stamp(c, d, 0.0, pr, tip, grain);
-                self.last = Some((c, d, pr));
+            let Some((a, wa, pa, pena)) = self.last else {
+                self.stamp(c, d, 0.0, pr, pen, tip, grain);
+                self.last = Some((c, d, pr, pen));
                 continue;
             };
             let (dx, dy) = (c[0] - a[0], c[1] - a[1]);
@@ -243,11 +287,20 @@ impl Stamper {
                 let f = t / len;
                 let w = wa + (d - wa) * f;
                 let p = pa + (pr - pa) * f;
-                self.stamp([a[0] + dx * f, a[1] + dy * f], w, heading, p, tip, grain);
+                let pen_here = Pen::lerp(pena, pen, f);
+                self.stamp(
+                    [a[0] + dx * f, a[1] + dy * f],
+                    w,
+                    heading,
+                    p,
+                    pen_here,
+                    tip,
+                    grain,
+                );
                 t += gap(w).max(0.5);
             }
             self.carry = t - len;
-            self.last = Some((c, d, pr));
+            self.last = Some((c, d, pr, pen));
         }
     }
 
@@ -340,17 +393,82 @@ impl Stamper {
         d: f32,
         heading: f32,
         pressure: f32,
+        pen: Pen,
         tip: Option<&Texture>,
         grain: Option<&Texture>,
     ) {
         self.stamps += 1;
+        // Dynamics: this stamp's own size, place, turn, roundness and
+        // strength, from the stroke's repeatable randomness.
+        let dy_ = self.tex.dynamics;
+        let (n, seed) = (self.stamps as u64, self.seed);
+        let r = |k| rand(seed, n, k);
+        let fin = |v: f32, hi: f32| if v.is_finite() { v.clamp(0.0, hi) } else { 0.0 };
+        let d = d * (1.0 - fin(dy_.size_jitter, 1.0) * r(0));
+        let scatter = fin(dy_.scatter, 10.0)
+            * if dy_.scatter_pressure {
+                pressure.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+        let c = if scatter > 0.0 {
+            [
+                c[0] + (2.0 * r(1) - 1.0) * d * scatter,
+                c[1] + (2.0 * r(2) - 1.0) * d * scatter,
+            ]
+        } else {
+            c
+        };
+        let ok = |v: f32| if v.is_finite() { v } else { 0.0 };
+        let turn = (2.0 * r(3) - 1.0) * fin(dy_.angle_jitter, 180.0)
+            + (2.0 * rand(seed, u64::MAX, 7) - 1.0) * fin(dy_.stroke_angle_jitter, 180.0)
+            + if dy_.angle_tilt { ok(pen.azimuth) } else { 0.0 }
+            + if dy_.angle_barrel {
+                ok(pen.rotation)
+            } else {
+                0.0
+            };
+        let ratio = {
+            let base = if dy_.roundness > 0.0 {
+                fin(dy_.roundness, 1.0).max(0.02)
+            } else {
+                1.0
+            };
+            let ratio = if dy_.roundness_pressure {
+                let p = pressure.clamp(0.0, 1.0);
+                if dy_.roundness > 0.0 {
+                    base + (1.0 - base) * p
+                } else {
+                    p.max(0.02)
+                }
+            } else {
+                base
+            };
+            if dy_.roundness_tilt {
+                // Upright keeps the ratio; lying flat flattens it to a tenth.
+                let lean = (ok(pen.tilt) / 90.0).clamp(0.0, 1.0);
+                ratio * (1.0 - 0.9 * lean)
+            } else {
+                ratio
+            }
+        };
+        if let Some(record) = self.record.as_mut() {
+            if d.is_finite() && d > 0.0 && record.len() < MAX_STAMPS {
+                let angle = (self.tex.angle + turn).to_radians()
+                    + if self.tex.follow { heading } else { 0.0 };
+                record.push(Dab { c, d, angle, ratio });
+            }
+            return;
+        }
+        let fade_level = 1.0 - fin(dy_.opacity_jitter, 1.0) * r(4);
+        let fade_flow = 1.0 - fin(dy_.flow_jitter, 1.0) * r(5);
         // Each stamp raises pixels toward its own opacity (faded by
         // pressure) and never past it; flow is how far each step goes.
         // This is how Krita's and Harmony's brushes combine dabs, so soft
         // edges stay soft and low flow builds up gently.
         let clean = |v: f32, d: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { d };
-        let level = clean(self.tex.opacity_at(pressure), 1.0);
-        let flow = clean(self.tex.flow_at(pressure), 1.0);
+        let level = clean(self.tex.opacity_at(pressure), 1.0) * fade_level;
+        let flow = clean(self.tex.flow_at(pressure), 1.0) * fade_flow;
         let strength = clean(self.tex.grain_strength_at(pressure), 1.0);
         let mode = self.tex.grain_mode;
         let gscale = if self.tex.grain_scale.is_finite() && self.tex.grain_scale > 0.0 {
@@ -373,7 +491,9 @@ impl Stamper {
             return;
         }
         let r = d * 0.5;
-        let angle = self.tex.angle.to_radians() + if self.tex.follow { heading } else { 0.0 };
+        let angle =
+            (self.tex.angle + turn).to_radians() + if self.tex.follow { heading } else { 0.0 };
+        let inv_ratio = 1.0 / ratio;
         let (sin, cos) = angle.sin_cos();
         // Exact half-size of the (rotated) tip square, or the round tip.
         let reach = if tip.is_some() {
@@ -405,7 +525,7 @@ impl Stamper {
                         // Into the tip's own frame, -1..1 across, the
                         // longer side fitted to the diameter.
                         let u = (dx * cos + dy * sin) * inv_r;
-                        let v = (dy * cos - dx * sin) * inv_r;
+                        let v = (dy * cos - dx * sin) * inv_r * inv_ratio;
                         if u.abs() >= 1.0 || v.abs() >= 1.0 {
                             continue;
                         }
@@ -423,7 +543,15 @@ impl Stamper {
                         }
                     }
                     // A hard round tip with one pixel of anti-aliasing.
-                    None => ((r - (dx * dx + dy * dy).sqrt()) / soft + 0.5).clamp(0.0, 1.0),
+                    None if ratio >= 1.0 => {
+                        ((r - (dx * dx + dy * dy).sqrt()) / soft + 0.5).clamp(0.0, 1.0)
+                    }
+                    // A flattened round tip: an ellipse in the tip's frame.
+                    None => {
+                        let u = dx * cos + dy * sin;
+                        let v = (dy * cos - dx * sin) * inv_ratio;
+                        ((r - (u * u + v * v).sqrt()) / soft + 0.5).clamp(0.0, 1.0)
+                    }
                 };
                 if a > 0.0 {
                     let i = row + (px - b[0]) as usize;
@@ -523,6 +651,7 @@ mod tests {
                     x,
                     y,
                     pressure: 1.0,
+                    pen: Default::default(),
                 })
                 .collect(),
             tips: Default::default(),
@@ -679,6 +808,7 @@ mod tests {
                 x: i as f32 * 25.0,
                 y: (i as f32 * 0.4).sin() * 30.0,
                 pressure: 1.0,
+                pen: Default::default(),
             })
             .collect();
         let mut at_once = Stamper::new(tex(), Affine::IDENTITY, ALL);
@@ -691,6 +821,95 @@ mod tests {
             s.extend(&part, None, None);
         }
         assert_eq!(s.coverage().unwrap(), whole);
+    }
+
+    /// Coverage rows (y) that have any paint.
+    fn painted_rows(c: &Coverage) -> Vec<i32> {
+        (c.y..c.y + c.height as i32)
+            .filter(|&y| (c.x..c.x + c.width as i32).any(|x| at(c, x, y) > 0))
+            .collect()
+    }
+
+    /// Scatter throws stamps off the line, the same way on every redraw
+    /// and whether stamped at once or as it's drawn; roundness flattens
+    /// the tip; a different stroke scatters differently.
+    #[test]
+    fn dynamics_scatter_and_flatten_repeatably() {
+        let mut t = tex();
+        t.dynamics.scatter = 1.5;
+        let still = rasterize(&line(8.0), &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
+        let a = rasterize(&line(8.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let b = rasterize(&line(8.0), &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert_eq!(a, b, "the same stroke scatters the same way");
+        assert!(
+            painted_rows(&a).len() > painted_rows(&still).len() + 6,
+            "stamps land off the line"
+        );
+        let mut other = line(8.0);
+        other.id = Id(2);
+        let c = rasterize(&other, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert_ne!(a, c, "another stroke scatters differently");
+        // Drawn in pieces: identical to all at once.
+        let mut s = Stamper::new(t, Affine::IDENTITY, ALL);
+        let mut part = line(8.0);
+        let whole = line(8.0).points;
+        for n in [1, 2] {
+            part.points = whole[..n].to_vec();
+            s.extend(&part, None, None);
+        }
+        let once = {
+            let mut s = Stamper::new(t, Affine::IDENTITY, ALL);
+            s.extend(&line(8.0), None, None);
+            s.coverage().unwrap()
+        };
+        assert_eq!(s.coverage().unwrap(), once);
+        // Roundness 0.25: the line is a quarter as tall.
+        let mut flat = tex();
+        flat.dynamics.roundness = 0.25;
+        let f = rasterize(&line(16.0), &flat, None, None, Affine::IDENTITY, ALL).unwrap();
+        let full = rasterize(&line(16.0), &tex(), None, None, Affine::IDENTITY, ALL).unwrap();
+        let (hf, hr) = (painted_rows(&f).len(), painted_rows(&full).len());
+        assert!(hf * 3 < hr + 4, "flattened: {hf} rows vs {hr}");
+    }
+
+    /// Pen tilt and rotation reach each stamp: a flat tip leaning one way
+    /// or the other paints a differently angled line, and leaning the pen
+    /// flattens a tilt-sensitive tip.
+    #[test]
+    fn pen_tilt_turns_and_flattens_the_tip() {
+        use symphony_core::stroke::Pen;
+        let lean = |s: &mut Stroke, pen: Pen| {
+            for p in &mut s.points {
+                p.pen = pen;
+            }
+        };
+        // A flat tip that turns with the lean direction.
+        let mut t = tex();
+        t.dynamics.roundness = 0.2;
+        t.dynamics.angle_tilt = true;
+        let mut a = line(16.0);
+        lean(&mut a, Pen::from_tilt(40.0, 0.0, 0.0));
+        let mut b = line(16.0);
+        lean(&mut b, Pen::from_tilt(0.0, 40.0, 0.0));
+        let ca = rasterize(&a, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let cb = rasterize(&b, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert!(
+            painted_rows(&cb).len() > painted_rows(&ca).len() + 4,
+            "leaning across the line stands the flat tip up"
+        );
+        // Tilt flattening: leaning the pen makes the line thinner.
+        let mut t = tex();
+        t.dynamics.roundness_tilt = true;
+        let mut up = line(16.0);
+        lean(&mut up, Pen::from_tilt(0.0, 0.0, 0.0));
+        let mut down = line(16.0);
+        lean(&mut down, Pen::from_tilt(0.0, 80.0, 0.0));
+        let cu = rasterize(&up, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        let cd = rasterize(&down, &t, None, None, Affine::IDENTITY, ALL).unwrap();
+        assert!(
+            painted_rows(&cd).len() * 2 < painted_rows(&cu).len(),
+            "a leaning pen flattens it"
+        );
     }
 
     #[test]

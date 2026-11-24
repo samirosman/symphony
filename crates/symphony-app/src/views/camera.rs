@@ -12,7 +12,7 @@ use symphony_core::math::Affine;
 use symphony_core::stroke::{ArtLayer, Drawing, Point, Stroke, StrokeKind};
 use symphony_pen::{PenSample, Phase, Tool as PenTool};
 use symphony_ui::icons::{self, Icon};
-use symphony_ui::theme;
+use symphony_ui::{theme, widgets};
 use symphony_vector::{pressure_curve, scale_of, Smoother};
 
 use crate::images::ImageState;
@@ -47,21 +47,22 @@ pub struct CanvasState {
     line_edit: Option<LineDrag>,
     /// Screen -> scene for the last frame, used by input.
     last_view: Affine,
+    /// Where the canvas was on screen last frame (zoom keys aim at the
+    /// mouse when it's over it).
+    last_rect: Option<Rect>,
     pub select: SelectState,
     /// Mirrored left to right, to check a drawing with fresh eyes (view
     /// only; the artwork isn't changed).
     pub mirrored: bool,
-    /// The undo/redo flash being shown: its serial and when it started.
-    flash_seen: (u64, f64),
     /// Stamped textured strokes, reused while only panning.
     strokes: super::textured::Cache,
     display: camera_render::Cache,
+    pub render_effects: bool,
 }
 
 impl Default for CanvasState {
     fn default() -> Self {
         CanvasState {
-            flash_seen: (0, 0.0),
             mirrored: false,
             pan: Vec2::ZERO,
             zoom: 1.0,
@@ -72,9 +73,11 @@ impl Default for CanvasState {
             erasing: None,
             line_edit: None,
             last_view: Affine::IDENTITY,
+            last_rect: None,
             select: SelectState::default(),
             strokes: Default::default(),
             display: Default::default(),
+            render_effects: true,
         }
     }
 }
@@ -135,6 +138,66 @@ struct Active {
     stencil: Option<Stencil>,
     /// Stamping state while a textured brush stroke is being drawn.
     live: Option<super::textured::Live>,
+    /// The Line tool's line, drawing-local: its points are rebuilt from
+    /// this each move rather than following the pen's path.
+    line: Option<LineDraft>,
+}
+
+/// A line being dragged: start, end, the point a bend passes through
+/// (while Alt is held), and the pen pressure it was started with.
+#[derive(Clone, Copy)]
+struct LineDraft {
+    start: [f32; 2],
+    end: [f32; 2],
+    bend: Option<[f32; 2]>,
+    pressure: f32,
+}
+
+/// `end` turned about `start` to the nearest multiple of 22.5 degrees
+/// (so 45 and 90 too), keeping its distance.
+fn snap_line(start: [f32; 2], end: [f32; 2]) -> [f32; 2] {
+    let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+    let len = dx.hypot(dy);
+    if len < 1e-6 {
+        return end;
+    }
+    let step = std::f32::consts::PI / 8.0;
+    let a = (dy.atan2(dx) / step).round() * step;
+    [start[0] + a.cos() * len, start[1] + a.sin() * len]
+}
+
+/// The line's points: straight, or a curve through `bend` (a quadratic
+/// whose middle passes through the bend point). Spaced about `step`.
+fn line_points(d: &LineDraft, step: f32) -> Vec<Point> {
+    let [sx, sy] = d.start;
+    let [ex, ey] = d.end;
+    // Control point so the curve's midpoint lands on the bend point.
+    let c = d
+        .bend
+        .map(|[bx, by]| [2.0 * bx - (sx + ex) / 2.0, 2.0 * by - (sy + ey) / 2.0]);
+    let reach = (ex - sx).hypot(ey - sy) + c.map_or(0.0, |[cx, cy]| (cx - sx).hypot(cy - sy));
+    let n = ((reach / step.max(1e-3)) as usize).clamp(1, 96);
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let (x, y) = match c {
+                Some([cx, cy]) => {
+                    let u = 1.0 - t;
+                    (
+                        u * u * sx + 2.0 * u * t * cx + t * t * ex,
+                        u * u * sy + 2.0 * u * t * cy + t * t * ey,
+                    )
+                }
+                None => (sx + (ex - sx) * t, sy + (ey - sy) * t),
+            };
+            Point {
+                x,
+                y,
+                pressure: d.pressure,
+                pen: Default::default(),
+            }
+        })
+        .collect()
 }
 
 impl CanvasState {
@@ -177,6 +240,21 @@ impl CanvasState {
 
     pub fn rotate_by(&mut self, degrees: f32) {
         self.rotation = (self.rotation + degrees).rem_euclid(360.0);
+    }
+
+    /// Run a View action aimed at the mouse: zooming in or out keeps the
+    /// point under the mouse in place when the mouse is over this canvas
+    /// (like the scroll wheel); otherwise the view's centre stays.
+    pub fn apply_at(&mut self, action: Action, pointer: Option<Pos2>) {
+        let factor = match action {
+            Action::ZoomIn => 1.25,
+            Action::ZoomOut => 1.0 / 1.25,
+            _ => return self.apply(action),
+        };
+        match (self.last_rect, pointer) {
+            (Some(rect), Some(p)) if rect.contains(p) => zoom_at(self, rect, p, factor),
+            _ => self.apply(action),
+        }
     }
 
     /// Run a View action on this canvas (Harmony's View menu).
@@ -228,11 +306,63 @@ fn paint_stroke(
     colour: Color32,
     m: Affine,
 ) {
+    if let Some(tex) = stroke.texture.filter(|t| t.vector) {
+        cache.paint_stamped(painter, textures, stroke, &tex, colour, m);
+        return;
+    }
     if let Some(tex) = &stroke.texture {
         cache.paint(painter.ctx(), painter, textures, stroke, tex, colour, m);
         return;
     }
     cache.vectors.paint(painter, stroke, colour, m);
+}
+
+/// Black bars: the ring between the frame (`w` x `h`, centred) and the
+/// opening `outline` (scaled by `k`). Each opening point pairs with the
+/// matching point of the opening stretched to the frame (so straight edges
+/// meet straight edges), and each rounded corner is filled with a fan from
+/// the frame's corner. `outline` runs corner by corner (top-right,
+/// bottom-right, bottom-left, top-left), the same number of points each.
+fn bars_mesh(
+    outline: &[[f32; 2]],
+    w: f32,
+    h: f32,
+    k: f32,
+    to_screen: impl Fn(f32, f32) -> Pos2,
+) -> egui::Shape {
+    let mut mesh = egui::Mesh::default();
+    let n = outline.len() as u32;
+    let (ow, oh) = outline.iter().fold((0.0f32, 0.0f32), |(a, b), p| {
+        (a.max(p[0].abs() * k), b.max(p[1].abs() * k))
+    });
+    let (sx, sy) = (w / 2.0 / ow.max(1e-6), h / 2.0 / oh.max(1e-6));
+    for p in outline {
+        let (x, y) = (p[0] * k, p[1] * k);
+        mesh.colored_vertex(to_screen(x, y), Color32::BLACK);
+        mesh.colored_vertex(to_screen(x * sx, y * sy), Color32::BLACK);
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * j, 2 * j + 1);
+        mesh.add_triangle(a, b, d);
+        mesh.add_triangle(a, d, c);
+    }
+    // Rounded corners: fan from the frame corner over the stretched arc.
+    let per = n / 4;
+    if per > 1 {
+        for (q, (cx, cy)) in [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let v = mesh.vertices.len() as u32;
+            mesh.colored_vertex(to_screen(cx * w / 2.0, cy * h / 2.0), Color32::BLACK);
+            let start = q as u32 * per;
+            for i in start..start + per - 1 {
+                mesh.add_triangle(2 * i + 1, 2 * (i + 1) + 1, v);
+            }
+        }
+    }
+    egui::Shape::mesh(mesh)
 }
 
 /// When there's no native pen backend, egui's pointer becomes pen samples (E4.2).
@@ -278,7 +408,13 @@ fn dense_label(ui: &mut egui::Ui, text: impl Into<String>) {
 }
 
 /// Top toolbar (D3.5a): display options, here onion skin.
-fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_only: bool) {
+fn top_toolbar(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    profile: Profile,
+    drawing_only: bool,
+    render_effects: &mut bool,
+) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(theme::CARD_PAD, 4))
         .show(ui, |ui| {
@@ -371,6 +507,13 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 });
                 ui.add_space(10.0);
                 art_layer_toolbar(ui, s, profile);
+                if !drawing_only {
+                    bars_menu(ui, s);
+                    ui.toggle_value(render_effects, "Render effects")
+                        .on_hover_text(
+                            "Preview Camera effects. Turn off to position the unprocessed artwork.",
+                        );
+                }
                 if drawing_only {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         dense_label(ui, "Selected drawing only, without pegs");
@@ -378,6 +521,34 @@ fn top_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile, drawing_onl
                 }
             });
         });
+}
+
+/// Black bars over the camera frame: rounded edges or a cinematic shape.
+/// They're part of the picture, so exports draw them too.
+fn bars_menu(ui: &mut egui::Ui, s: &mut Session) {
+    let mut bars = s.doc.settings.bars;
+    let label = if bars.on { "Bars: on" } else { "Bars" };
+    ui.menu_button(label, |ui| {
+        ui.set_min_width(220.0);
+        widgets::checkbox(ui, &mut bars.on, "Black bars");
+        ui.add_enabled_ui(bars.on, |ui| {
+            ui.add_space(4.0);
+            dense_label(ui, "Shape");
+            for (aspect, name) in [
+                (0.0, "Frame (rounded edges only)"),
+                (1.85, "Cinematic 1.85"),
+                (2.39, "Cinematic 2.39"),
+            ] {
+                widgets::radio_value(ui, &mut bars.aspect, aspect, name);
+            }
+            ui.add_space(4.0);
+            ui.add(egui::Slider::new(&mut bars.radius, 0.0..=200.0).text("Corner radius"));
+        });
+        dense_label(ui, "Bars are part of the picture: exports draw them too.");
+    })
+    .response
+    .on_hover_text("Black bars over the camera frame");
+    s.set_bars(bars);
 }
 
 /// Harmony's Art Layer toolbar: preview all, then the art layers back to
@@ -508,7 +679,7 @@ pub fn ui(
     drawing_only: bool,
     profile: Profile,
 ) {
-    top_toolbar(ui, s, profile, drawing_only);
+    top_toolbar(ui, s, profile, drawing_only, &mut state.render_effects);
     let canvas_size = ui.available_size() - Vec2::new(0.0, theme::TAB_ROW);
     let (response, painter) = ui.allocate_painter(canvas_size, Sense::click_and_drag());
     let rect = response.rect;
@@ -580,15 +751,17 @@ pub fn ui(
     }
     let view = view_transform(state, rect);
     state.last_view = view.inverse().unwrap_or(Affine::IDENTITY);
+    state.last_rect = Some(rect);
     let px = 1.0 / scale_of(view).max(1e-6);
 
+    let show_surround = drawing_only || s.doc.settings.bars.is_off();
     // D4.2: neutral surround. D3.10: the stage is paper with a soft shadow.
     let colours = s.colours;
     // The view's corners are rounded like its panel; the stage stays sharp.
     painter.rect_filled(
         rect,
         f32::from(theme::GLASS_RADIUS) - 4.0,
-        if drawing_only {
+        if show_surround {
             CanvasColours::get(colours.surround)
         } else {
             Color32::BLACK
@@ -709,151 +882,142 @@ pub fn ui(
         }
     }
 
-    // The artwork, back to front.
+    // Collect the graph once for both the draft artwork and the effects check.
+    use symphony_core::graph::RenderCommand;
+    let camera_commands = if drawing_only {
+        None
+    } else {
+        s.doc
+            .graph
+            .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
+            .ok()
+    };
     let items: Vec<select::Item> = if drawing_only {
         s.doc
             .exposed(s.selected, s.frame)
             .map(|d| vec![(s.selected, d, Affine::IDENTITY)])
             .unwrap_or_default()
     } else {
-        let layers = &s.doc.layers;
-        s.doc
-            .graph
-            .evaluate(s.doc.display, &s.doc.xsheet, s.frame)
-            .map(|v| {
-                v.into_iter()
-                    .filter_map(|i| {
-                        let layer = layers.iter().position(|l| l.node == i.node)?;
-                        let transform = s.doc.project_plane(s.frame, i.depth)?.compose(i.transform);
-                        Some((layer, i.drawing, transform))
-                    })
-                    .collect()
+        camera_commands
+            .iter()
+            .flatten()
+            .filter_map(|command| {
+                let RenderCommand::Drawing(item) = command else {
+                    return None;
+                };
+                if item.matte_pass {
+                    return None;
+                }
+                let layer = s.doc.layers.iter().position(|l| l.node == item.node)?;
+                let transform = s
+                    .doc
+                    .project_plane(s.frame, item.depth)?
+                    .compose(item.transform);
+                Some((layer, item.drawing, transform))
             })
-            .unwrap_or_default()
+            .collect()
     };
-    // An empty frame in the Drawing view says what to do next.
-    if drawing_only && items.is_empty() {
-        let name = s.layer_name(s.selected).to_owned();
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            format!("No drawing on {name} at this frame. Draw to start one."),
-            theme::body(),
-            theme::TEXT_SECONDARY,
-        );
-    }
-    // Undo and redo show where they landed: a soft outline around what
-    // changed, fading out.
-    if s.flash_serial != state.flash_seen.0 {
-        state.flash_seen = (s.flash_serial, ui.input(|i| i.time));
-    }
-    if let Some((drawing, lo, hi)) = s.flash {
-        let age = ui.input(|i| i.time) - state.flash_seen.1;
-        const LENGTH: f64 = 0.7;
-        if age < LENGTH {
-            if let Some((_, _, m)) = items.iter().find(|(_, d, _)| *d == drawing) {
-                let m = view.compose(*m);
-                let corners = [
-                    m.apply(lo[0], lo[1]),
-                    m.apply(hi[0], lo[1]),
-                    m.apply(hi[0], hi[1]),
-                    m.apply(lo[0], hi[1]),
-                ];
-                let r = Rect::from_points(&corners.map(|(x, y)| Pos2::new(x, y))).expand(8.0);
-                let t = (age / LENGTH) as f32;
-                let fade = 1.0 - symphony_ui::motion::Motion::Dismiss.ease(t);
-                painter.rect(
-                    r,
-                    theme::RADIUS_CONTROL,
-                    theme::ACCENT_SELECT.gamma_multiply(0.08 * fade),
-                    EStroke::new(1.5, theme::ACCENT_SELECT.gamma_multiply(0.8 * fade)),
-                    egui::StrokeKind::Outside,
-                );
-            }
-            ui.ctx().request_repaint();
-        }
-    }
-    // While the Select tool drags, the selected strokes draw through the preview.
+    // Plain artwork uses cached GPU geometry. Effects go through an
+    // independent stage-sized raster cache when the preview is enabled.
     let preview = state.select.preview.filter(|_| s.tool == Tool::Select);
-    // Scenes of drawings, pegs and composites (most of them) draw straight
-    // on the GPU from cached triangles, updating on the very next frame.
-    // Effects, gradients and blend modes need the full renderer.
-    let gpu = drawing_only
-        || s.doc
-            .graph
-            .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
-            .is_ok_and(|commands| {
-                commands
-                    .iter()
-                    .all(|c| matches!(c, symphony_core::graph::RenderCommand::Drawing(_)))
-            });
-    if !gpu && !state.display.paint(&painter, s, corners, preview) {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Couldn’t render the Display output.",
-            theme::body(),
-            theme::TEXT_PRIMARY,
-        );
-    }
-    for (_, d, m) in items.iter().filter(|_| gpu || s.show_strokes) {
-        if let Some(dr) = s.doc.drawings.get(d) {
-            let moving = preview.is_some() && s.selection.drawing == Some(*d);
+    let raw_only = drawing_only
+        || !state.render_effects
+        || camera_commands.as_ref().is_some_and(|commands| {
+            commands
+                .iter()
+                .all(|c| matches!(c, RenderCommand::Drawing(_)))
+        });
+    let raw_art = raw_only || show_surround;
+    if raw_art {
+        for (_, d, m) in &items {
+            let Some(dr) = s.doc.drawings.get(d) else {
+                continue;
+            };
+            let world = view.compose(*m);
             // An imported image sits under all of the drawing's art layers.
-            if gpu {
-                paint_image(&painter, s, images, dr, view.compose(*m));
-            }
-            // Art layers back to front; within each, paint under ink.
+            paint_image(&painter, images, dr, world);
             for art in ArtLayer::STACK {
-                // The Drawing view shows only the current art layer unless
-                // Preview All Art Layers (P) is on, as in Harmony.
                 if drawing_only && !s.art_preview && art != s.art {
                     continue;
                 }
-                if gpu {
-                    for f in dr.fills.iter().filter(|f| f.art == art) {
-                        state.strokes.vectors.paint_fill(
-                            &painter,
-                            f,
-                            colour(s, f.swatch),
-                            view.compose(*m),
-                        );
-                    }
+                for f in dr.fills.iter().filter(|f| f.art == art) {
+                    state
+                        .strokes
+                        .vectors
+                        .paint_fill(&painter, f, colour(s, f.swatch), world);
                 }
-                for st in dr.strokes.iter().filter(|st| st.art == art) {
-                    if !gpu && st.kind != StrokeKind::Invisible {
-                        continue;
-                    }
-                    let m = match preview {
-                        Some(l) if moving && s.selection.strokes.contains(&st.id) => {
-                            view.compose(*m).compose(l)
+                for st in dr
+                    .strokes
+                    .iter()
+                    .filter(|st| st.art == art && st.kind != StrokeKind::Invisible)
+                {
+                    let transform = match preview {
+                        Some(l)
+                            if s.selection.drawing == Some(*d)
+                                && s.selection.strokes.contains(&st.id) =>
+                        {
+                            world.compose(l)
                         }
-                        _ => view.compose(*m),
+                        _ => world,
                     };
-                    if st.kind == StrokeKind::Invisible {
-                        // Show Strokes (K): invisible strokes as thin cel-blue lines.
-                        if s.show_strokes {
-                            let pts: Vec<Pos2> = st
-                                .points
-                                .iter()
-                                .map(|p| to_pos(m.apply(p.x, p.y)))
-                                .collect();
-                            painter.add(egui::Shape::line(
-                                pts,
-                                EStroke::new(1.0, theme::ACCENT_SELECT),
-                            ));
-                        }
-                        continue;
-                    }
                     paint_stroke(
                         &painter,
                         &mut state.strokes,
                         &s.doc.textures,
                         st,
                         colour(s, st.swatch),
-                        m,
+                        transform,
                     );
                 }
+            }
+        }
+    }
+    if !raw_only {
+        if show_surround {
+            // The raw pass is a positioning aid outside the stage. Cover its
+            // inside portion before painting the composited stage texture.
+            painter.add(egui::Shape::convex_polygon(
+                corners.to_vec(),
+                CanvasColours::get(colours.stage),
+                EStroke::NONE,
+            ));
+        }
+        if !state.display.paint(&painter, s, corners, preview) {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Couldn’t render the Display output.",
+                theme::body(),
+                theme::TEXT_PRIMARY,
+            );
+        }
+    }
+    if s.show_strokes {
+        for (_, d, m) in &items {
+            let Some(dr) = s.doc.drawings.get(d) else {
+                continue;
+            };
+            let world = view.compose(*m);
+            for st in dr.strokes.iter().filter(|st| {
+                st.kind == StrokeKind::Invisible
+                    && (!drawing_only || s.art_preview || st.art == s.art)
+            }) {
+                let transform = match preview {
+                    Some(l)
+                        if s.selection.drawing == Some(*d)
+                            && s.selection.strokes.contains(&st.id) =>
+                    {
+                        world.compose(l)
+                    }
+                    _ => world,
+                };
+                painter.add(egui::Shape::line(
+                    st.points
+                        .iter()
+                        .map(|p| to_pos(transform.apply(p.x, p.y)))
+                        .collect(),
+                    EStroke::new(1.0, theme::ACCENT_SELECT),
+                ));
             }
         }
     }
@@ -938,11 +1102,24 @@ pub fn ui(
         }
     }
 
+    // The scene's black bars, over the artwork, as export draws them.
+    if !drawing_only {
+        let settings = &s.doc.settings;
+        let (sw, sh) = (settings.width as f32, settings.height as f32);
+        if let Some(outline) = settings.bars.outline(sw, sh) {
+            let k = 1.0 / state.framing;
+            painter.add(bars_mesh(&outline, sw * k, sh * k, k, |x, y| {
+                to_pos(view.apply(x, y))
+            }));
+        }
+    }
+
     // Pen input.
     let zoom_factor = ui.ctx().zoom_factor();
     let draws = matches!(
         s.tool,
         Tool::Brush
+            | Tool::Line
             | Tool::Pencil
             | Tool::Eraser
             | Tool::Paint
@@ -1035,6 +1212,11 @@ pub fn ui(
                         x,
                         y,
                         pressure: pressure_curve(sm.pressure, s.pressure_gamma),
+                        pen: symphony_core::stroke::Pen::from_tilt(
+                            sm.tilt_x,
+                            sm.tilt_y,
+                            sm.rotation,
+                        ),
                     };
                     let mut smoother = Smoother::new(settings.smoothing);
                     let first = smoother.push(p, 0.0).unwrap_or(p);
@@ -1067,16 +1249,45 @@ pub fn ui(
                         },
                         stencil: settings.stencil.filter(|_| kind == StrokeKind::Pencil),
                         live: None,
+                        line: (s.tool == Tool::Line).then_some(LineDraft {
+                            start: [first.x, first.y],
+                            end: [first.x, first.y],
+                            bend: None,
+                            pressure: first.pressure,
+                        }),
                     });
                 }
             }
             Phase::Move => {
-                if let Some(a) = state.active.as_mut() {
+                if let Some(a) = state.active.as_mut().filter(|a| a.line.is_some()) {
+                    // The Line tool: the pen sets the end; Shift snaps its
+                    // angle; Alt bends the line through the pen instead.
+                    let (x, y) = a.to_local.apply(sx, sy);
+                    if let Some(d) = a.line.as_mut() {
+                        if alt {
+                            d.bend = Some([x, y]);
+                        } else {
+                            d.end = if shift {
+                                snap_line(d.start, [x, y])
+                            } else {
+                                [x, y]
+                            };
+                        }
+                        a.stroke.points = line_points(d, a.min_step * 2.0);
+                    }
+                    // Rebuilt, not extended: stamp the textured preview anew.
+                    a.live = None;
+                } else if let Some(a) = state.active.as_mut() {
                     let (x, y) = a.to_local.apply(sx, sy);
                     let raw = Point {
                         x,
                         y,
                         pressure: pressure_curve(sm.pressure, s.pressure_gamma),
+                        pen: symphony_core::stroke::Pen::from_tilt(
+                            sm.tilt_x,
+                            sm.tilt_y,
+                            sm.rotation,
+                        ),
                     };
                     if let Some(p) = a.smoother.push(raw, a.min_step) {
                         a.stroke.points.push(p);
@@ -1110,14 +1321,51 @@ pub fn ui(
                         _ => s.end_gesture(),
                     }
                 }
-                if let Some(mut a) = state.active.take() {
+                if state.active.as_ref().is_some_and(|a| a.line.is_some()) {
+                    let Some(mut a) = state.active.take() else {
+                        continue;
+                    };
+                    // Where the pen lifted is the line's end (or bend).
+                    let (x, y) = a.to_local.apply(sx, sy);
+                    if let Some(d) = a.line.as_mut() {
+                        if alt {
+                            d.bend = Some([x, y]);
+                        } else {
+                            d.end = if shift {
+                                snap_line(d.start, [x, y])
+                            } else {
+                                [x, y]
+                            };
+                        }
+                        a.stroke.points = line_points(d, a.min_step * 2.0);
+                    }
+                    // A line is exactly its draft: no smoothing or thinning.
+                    if a.stroke.points.len() >= 2 {
+                        if let Some(live) = a.live.take() {
+                            state.strokes.adopt(a.stroke.id, live);
+                        }
+                        s.commit_stroke(a.layer, a.frame, a.stroke);
+                    }
+                } else if let Some(mut a) = state.active.take() {
                     // Where the pen lifted is part of the line: without it,
                     // every stroke lost its last stretch and drawn shapes
                     // didn't close. Lifting reports ~0 pressure, so keep
                     // the last pressure.
                     let (x, y) = a.to_local.apply(sx, sy);
-                    let pressure = a.stroke.points.last().map_or(1.0, |p| p.pressure);
-                    if let Some(p) = a.smoother.push(Point { x, y, pressure }, a.min_step) {
+                    let (pressure, pen) = a
+                        .stroke
+                        .points
+                        .last()
+                        .map_or((1.0, Default::default()), |p| (p.pressure, p.pen));
+                    if let Some(p) = a.smoother.push(
+                        Point {
+                            x,
+                            y,
+                            pressure,
+                            pen,
+                        },
+                        a.min_step,
+                    ) {
                         a.stroke.points.push(p);
                     }
                     if let Some(p) = a.smoother.finish() {
@@ -1197,20 +1445,25 @@ pub fn ui(
             screen_per_size: size_unit(s, px) / px,
         },
     );
-    if !drawing_only {
+    if !show_surround {
         camera_render::mask_outside_stage(&painter, rect, corners);
+    } else if !drawing_only {
+        painter.add(egui::Shape::closed_line(
+            corners.to_vec(),
+            EStroke::new(1.0, theme::LINE_CONTROL),
+        ));
     }
     bottom_toolbar(ui, state, profile);
 }
 
 /// Draw a drawing's imported image, once its texture is ready, as one
 /// textured quad through `m` (scene to screen).
-fn paint_image(painter: &egui::Painter, s: &Session, images: &ImageState, dr: &Drawing, m: Affine) {
+fn paint_image(painter: &egui::Painter, images: &ImageState, dr: &Drawing, m: Affine) {
     let Some(r) = dr.image else { return };
-    let (Some(file), Some(tex)) = (s.doc.images.get(&r.key), images.texture(r)) else {
+    let Some(tex) = images.texture(r) else {
         return;
     };
-    let [x0, y0, x1, y1] = r.rect(file, &s.doc.settings);
+    let [x0, y0, x1, y1] = symphony_render::bitmap::corners(r);
     let mut mesh = egui::Mesh::with_texture(tex.id());
     for ((x, y), uv) in [
         ((x0, y0), (0.0, 0.0)),
@@ -1548,4 +1801,31 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
         }
     };
     badge(icon, p + Vec2::new(16.0, 16.0), 12.0);
+}
+
+#[cfg(test)]
+mod zoom_key_tests {
+    use super::*;
+
+    /// The 1 and 2 keys zoom on the mouse: the scene point under it stays.
+    #[test]
+    fn zoom_keys_keep_the_point_under_the_mouse() {
+        let mut st = CanvasState::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        st.last_rect = Some(rect);
+        let mouse = Pos2::new(620.0, 140.0);
+        let under = |st: &CanvasState| {
+            let inv = view_transform(st, rect).inverse().unwrap();
+            inv.apply(mouse.x, mouse.y)
+        };
+        let before = under(&st);
+        st.apply_at(Action::ZoomIn, Some(mouse));
+        st.apply_at(Action::ZoomIn, Some(mouse));
+        let after = under(&st);
+        assert!((st.zoom - 1.5625).abs() < 1e-4, "{}", st.zoom);
+        assert!((before.0 - after.0).abs() < 0.01 && (before.1 - after.1).abs() < 0.01);
+        // Outside the canvas: the centre stays put instead.
+        st.apply_at(Action::ZoomOut, Some(Pos2::new(2000.0, 2000.0)));
+        assert!((st.zoom - 1.25).abs() < 1e-4);
+    }
 }

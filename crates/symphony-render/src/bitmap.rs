@@ -1,16 +1,17 @@
-//! Drawing imported images ([`symphony_core::bitmap`]): decode once, keep
-//! the premultiplied pixels in a small cache, draw them through the
-//! drawing's transform. The Camera view can share [`decode`] for its GPU
-//! textures.
+//! Drawing imported images ([`symphony_core::bitmap`]): read the file from
+//! the scene's media folders, decode once, keep the premultiplied pixels
+//! in a cache, draw them through the drawing's transform. The Camera view
+//! shares [`decode_media`] for its GPU textures.
 
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use symphony_core::bitmap::{self, Alpha, ImageFile, ImageFormat, ImageRef};
+use symphony_core::bitmap::{self, Alpha};
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
+use symphony_core::stroke::PlacedImage;
 use tiny_skia::{
     FilterQuality, IntSize, Paint, Pattern, Pixmap, Point, Rect, SpreadMode, Transform,
 };
@@ -37,18 +38,33 @@ pub(crate) fn next_frame() {
     FRAME.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Decode `file` to premultiplied RGBA, undoing the file's own alpha
-/// encoding. `None` if the bytes don't decode; never panics (E7.6).
-pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
-    if !file.size_ok() {
+/// Decode the scene's media file `key` to premultiplied RGBA. `None` if
+/// it is missing, too large or doesn't decode; never panics (E7.6).
+pub fn decode_media(scene: &Scene, key: u64, alpha: Alpha) -> Option<Pixmap> {
+    let m = scene.media.get(&key)?;
+    let path = scene.media_path(key)?;
+    if std::fs::metadata(&path).ok()?.len() > bitmap::MAX_FILE_BYTES {
         return None;
     }
-    let format = match file.format {
-        ImageFormat::Png => image::ImageFormat::Png,
-        ImageFormat::Jpeg => image::ImageFormat::Jpeg,
-        ImageFormat::Exr => return decode_exr(&file.bytes, alpha),
+    decode(&std::fs::read(&path).ok()?, &m.file, alpha)
+}
+
+/// Decode the bytes of image file `name` to premultiplied RGBA, undoing
+/// the file's own alpha encoding. The extension picks the format, and
+/// the content when the extension is unknown. `None` if the bytes don't
+/// decode or the image is over the size limits; never panics (E7.6).
+pub fn decode(bytes: &[u8], name: &str, alpha: Alpha) -> Option<Pixmap> {
+    if bitmap::is_exr(name) {
+        return decode_exr(bytes, alpha);
+    }
+    let reader = image::ImageReader::new(Cursor::new(bytes));
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str());
+    let mut reader = match ext.and_then(image::ImageFormat::from_extension) {
+        Some(f) => image::ImageReader::with_format(Cursor::new(bytes), f),
+        None => reader.with_guessed_format().ok()?,
     };
-    let mut reader = image::ImageReader::with_format(Cursor::new(&file.bytes[..]), format);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(bitmap::MAX_SIDE);
     limits.max_image_height = Some(bitmap::MAX_SIDE);
@@ -57,6 +73,9 @@ pub fn decode(file: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
     let decoded = reader.decode().ok()?;
     let rgba = decoded.into_rgba8();
     let (w, h) = rgba.dimensions();
+    if !bitmap::size_ok(w, h) {
+        return None;
+    }
     let mut px = rgba.into_raw();
     for p in px.as_chunks_mut::<4>().0 {
         let a = p[3];
@@ -201,17 +220,16 @@ fn srgb8(linear: f32) -> u8 {
     code
 }
 
-pub(crate) fn cached(scene: &Scene, r: ImageRef) -> Option<Arc<Pixmap>> {
-    let file = scene.images.get(&r.key)?;
+pub(crate) fn cached(scene: &Scene, r: PlacedImage) -> Option<Arc<Pixmap>> {
     let frame = FRAME.load(Ordering::Relaxed);
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some(e) = cache.get_mut(&(r.key, r.alpha)) {
+    if let Some(e) = cache.get_mut(&(r.media, r.alpha)) {
         e.used = frame;
         return Some(e.pixmap.clone());
     }
-    let p = Arc::new(decode(file, r.alpha)?);
-    store(cache, (r.key, r.alpha), p.clone(), frame, CACHE_BYTES);
+    let p = Arc::new(decode_media(scene, r.media, r.alpha)?);
+    store(cache, (r.media, r.alpha), p.clone(), frame, CACHE_BYTES);
     Some(p)
 }
 
@@ -245,14 +263,11 @@ fn store(cache: &mut Cache, key: (u64, Alpha), p: Arc<Pixmap>, frame: u64, budge
 }
 
 /// Draw the drawing's image into `pix` with `m` (drawing space to pixels).
-pub fn paint_image(pix: &mut Pixmap, scene: &Scene, r: ImageRef, m: Affine) {
-    let Some(file) = scene.images.get(&r.key) else {
-        return;
-    };
+pub fn paint_image(pix: &mut Pixmap, scene: &Scene, r: PlacedImage, m: Affine) {
     let Some(img) = cached(scene, r) else {
         return;
     };
-    let [x0, y0, x1, y1] = r.rect(file, &scene.settings);
+    let [x0, y0, x1, y1] = corners(r);
     let m = cap_zoom(m, [x1 - x0, y1 - y0], pix);
     let place = m.compose(Affine::translate(x0, y0)).compose(Affine::scale(
         (x1 - x0) / img.width() as f32,
@@ -260,6 +275,12 @@ pub fn paint_image(pix: &mut Pixmap, scene: &Scene, r: ImageRef, m: Affine) {
     ));
     let t = Transform::from_row(place.a, place.b, place.c, place.d, place.tx, place.ty);
     draw(pix, &img, t);
+}
+
+/// The image's rect as `[left, top, right, bottom]` in drawing units.
+pub fn corners(r: PlacedImage) -> [f32; 4] {
+    let [x, y, w, h] = r.rect;
+    [x, y, x + w, y + h]
 }
 
 /// The largest size, in output pixels, an image may be drawn at. Pegs
@@ -333,13 +354,27 @@ pub(crate) fn draw(pix: &mut Pixmap, img: &Pixmap, t: Transform) {
 mod tests {
     use super::*;
 
+    /// An image file's name and bytes, as a media folder holds them.
+    struct ImageFile {
+        name: &'static str,
+        #[allow(dead_code)]
+        width: u32,
+        #[allow(dead_code)]
+        height: u32,
+        bytes: Arc<Vec<u8>>,
+    }
+
+    fn decode_file(f: &ImageFile, alpha: Alpha) -> Option<Pixmap> {
+        decode(&f.bytes, f.name, alpha)
+    }
+
     fn file(px: [u8; 4]) -> ImageFile {
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba(px));
         let mut bytes = Vec::new();
         img.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
         ImageFile {
-            format: ImageFormat::Png,
+            name: "a.png",
             width: 1,
             height: 1,
             bytes: Arc::new(bytes),
@@ -347,7 +382,7 @@ mod tests {
     }
 
     fn one(px: [u8; 4], alpha: Alpha) -> [u8; 4] {
-        let p = decode(&file(px), alpha).unwrap();
+        let p = decode_file(&file(px), alpha).unwrap();
         p.data().try_into().unwrap()
     }
 
@@ -377,7 +412,7 @@ mod tests {
             .to_buffered(Cursor::new(&mut bytes))
             .unwrap();
         ImageFile {
-            format: ImageFormat::Exr,
+            name: "a.exr",
             width: 1,
             height: 1,
             bytes: Arc::new(bytes),
@@ -385,7 +420,7 @@ mod tests {
     }
 
     fn one_exr(px: [f32; 4], alpha: Alpha) -> [u8; 4] {
-        let p = decode(&exr(px), alpha).unwrap();
+        let p = decode_file(&exr(px), alpha).unwrap();
         p.data().try_into().unwrap()
     }
 
@@ -475,7 +510,7 @@ mod tests {
             let mut bytes = Vec::new();
             image.write().to_buffered(Cursor::new(&mut bytes)).unwrap();
             ImageFile {
-                format: ImageFormat::Exr,
+                name: "a.exr",
                 width: size.width() as u32,
                 height: size.height() as u32,
                 bytes: Arc::new(bytes),
@@ -488,7 +523,7 @@ mod tests {
         use exr::prelude::*;
         let ch = SpecificChannels::rgb(|_: Vec2<usize>| (0.2158_f32, 0.0_f32, 1.0_f32));
         let f = exr_file!(Image::from_channels((1, 1), ch));
-        let p = decode(&f, Alpha::PremultipliedBlack).unwrap();
+        let p = decode_file(&f, Alpha::PremultipliedBlack).unwrap();
         assert_eq!(
             p.data(),
             one_exr([0.2158, 0.0, 1.0, 1.0], Alpha::PremultipliedBlack)
@@ -509,7 +544,7 @@ mod tests {
         layer.attributes.layer_position = Vec2(1, 0);
         let mut image = Image::from_layer(layer);
         image.attributes.display_window = IntegerBounds::new((0, 0), (3, 1));
-        let p = decode(&exr_file!(image), Alpha::PremultipliedBlack).unwrap();
+        let p = decode_file(&exr_file!(image), Alpha::PremultipliedBlack).unwrap();
         assert_eq!((p.width(), p.height()), (3, 1));
         assert_eq!(p.data(), [0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0]);
     }
@@ -522,7 +557,7 @@ mod tests {
         let ch = SpecificChannels::rgba(|_: Vec2<usize>| (0.0_f32, 0.0_f32, 0.0_f32, 1.0_f32));
         let mut f = exr_file!(Image::from_channels((2, 1), ch));
         f.width = 1;
-        let p = decode(&f, Alpha::PremultipliedBlack).unwrap();
+        let p = decode_file(&f, Alpha::PremultipliedBlack).unwrap();
         assert_eq!((p.width(), p.height()), (2, 1));
     }
 
@@ -532,7 +567,7 @@ mod tests {
         let mut cut = f.bytes.to_vec();
         cut.truncate(cut.len() / 2);
         f.bytes = Arc::new(cut);
-        assert!(decode(&f, Alpha::Straight).is_none());
+        assert!(decode_file(&f, Alpha::Straight).is_none());
     }
 
     #[test]
@@ -691,6 +726,6 @@ mod tests {
     fn garbage_bytes_decode_to_nothing() {
         let mut f = file([0, 0, 0, 255]);
         f.bytes = Arc::new(b"\x89PNG\r\n\x1a\nbroken".to_vec());
-        assert!(decode(&f, Alpha::Straight).is_none());
+        assert!(decode_file(&f, Alpha::Straight).is_none());
     }
 }

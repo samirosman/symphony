@@ -9,7 +9,7 @@ license.workspace = true
 symphony-core = { path = "../symphony-core" }
 symphony-vector = { path = "../symphony-vector" }
 tiny-skia = "0.11"
-image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "exr"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "webp", "bmp", "tiff", "tga", "exr"] }
 # Loads Cisco's separately downloaded binary; never builds or ships the codec.
 openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
 mp4 = "0.14"

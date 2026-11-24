@@ -7,8 +7,8 @@
 //! (D8.4). The window doesn't block the rest of the app (D8.3).
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use symphony_core::doc::{Media, SoundClip};
 use symphony_core::id::Id;
-use symphony_core::sound::{SoundFile, SoundTrack};
 use symphony_ui::{theme, widgets};
 
 use crate::session::Session;
@@ -56,11 +56,11 @@ pub struct SoundEditor {
     /// Trim drags snap to whole scene frames, as in the Timeline.
     snap: bool,
     /// The edge being dragged, and the track as it was when the drag began.
-    drag: Option<(Edge, SoundTrack)>,
+    drag: Option<(Edge, SoundClip)>,
 }
 
 impl SoundEditor {
-    pub fn new(track: &SoundTrack) -> SoundEditor {
+    pub fn new(track: &SoundClip) -> SoundEditor {
         SoundEditor {
             id: track.id,
             name: track.name.clone(),
@@ -89,7 +89,7 @@ pub fn show(
         *editor = None;
         return;
     };
-    let Some(file) = s.doc.sound_files.get(&track.key).cloned() else {
+    let Some(file) = s.doc.media.get(&track.media).cloned() else {
         *editor = None;
         return;
     };
@@ -121,8 +121,8 @@ fn body(
     ed: &mut SoundEditor,
     s: &mut Session,
     sounds: &mut SoundState,
-    track: &SoundTrack,
-    file: &SoundFile,
+    track: &SoundClip,
+    file: &Media,
 ) -> bool {
     let fps = s.doc.settings.fps.max(1.0);
     ui.horizontal(|ui| {
@@ -138,7 +138,7 @@ fn body(
             // Renamed elsewhere, or by undo.
             ed.name = track.name.clone();
         }
-        let mut on = track.enabled;
+        let mut on = !track.muted;
         if widgets::checkbox(ui, &mut on, "Play in scene").changed() {
             s.toggle_sound(track.id);
         }
@@ -183,7 +183,7 @@ fn body(
             if ui
                 .add(
                     egui::DragValue::new(&mut secs)
-                        .range(0.0..=file.seconds())
+                        .range(0.0..=file.sound_seconds())
                         .speed(0.001)
                         .fixed_decimals(3)
                         .suffix(" s"),
@@ -198,7 +198,7 @@ fn body(
             if ui
                 .add(
                     egui::DragValue::new(&mut secs)
-                        .range(0.0..=file.seconds())
+                        .range(0.0..=file.sound_seconds())
                         .speed(0.001)
                         .fixed_decimals(3)
                         .suffix(" s"),
@@ -215,7 +215,7 @@ fn body(
         egui::RichText::new(format!(
             "Plays {frames} frames ({:.3} s) of {:.3} s",
             track.seconds(file),
-            file.seconds()
+            file.sound_seconds()
         ))
         .font(theme::dense())
         .color(theme::TEXT_SECONDARY),
@@ -248,7 +248,7 @@ fn body(
 }
 
 /// One change from a number field, as its own undo step.
-fn field_edit(s: &mut Session, after: SoundTrack, name: &str) {
+fn field_edit(s: &mut Session, after: SoundClip, name: &str) {
     s.drag_sound(after, name);
     s.end_gesture();
 }
@@ -268,12 +268,12 @@ fn waveform_view(
     ed: &mut SoundEditor,
     s: &mut Session,
     sounds: &SoundState,
-    track: &SoundTrack,
-    file: &SoundFile,
+    track: &SoundClip,
+    file: &Media,
     fps: f32,
 ) {
     let view_w = ui.available_width().max(1.0);
-    let seconds = file.seconds().max(1e-6);
+    let seconds = file.sound_seconds().max(1e-6);
     let visible = ed
         .visible
         .unwrap_or(seconds)
@@ -298,7 +298,7 @@ fn waveform_view(
     let (x0, x1) = (x_of(offset), x_of(offset + played));
     let lit = Rect::from_min_max(Pos2::new(x0, wave.top()), Pos2::new(x1, wave.bottom()));
     painter.rect_filled(lit, 0.0, theme::BG_HOVER);
-    draw_wave(&painter, sounds, track.key, wave, left, spp, x0, x1);
+    draw_wave(&painter, sounds, track.media, wave, left, spp, x0, x1);
     ruler(&painter, track, file, fps, o, view_w, left, spp);
     for x in [x0, x1] {
         painter.line_segment(
@@ -453,13 +453,13 @@ fn overview(
 /// `before` with `edge` moved to file time `t`, in whole scene frames when
 /// `snap`, else to the sample. The start frame stays where it is.
 fn trim_to(
-    before: &SoundTrack,
-    file: &SoundFile,
+    before: &SoundClip,
+    file: &Media,
     fps: f32,
     edge: Edge,
     t: f64,
     snap: bool,
-) -> SoundTrack {
+) -> SoundClip {
     let rate = f64::from(file.rate.max(1));
     let per = rate / f64::from(fps.max(1.0));
     let samples = (t * rate).round().max(0.0) as u64;
@@ -548,8 +548,8 @@ fn draw_wave(
 #[allow(clippy::too_many_arguments)]
 fn ruler(
     painter: &egui::Painter,
-    track: &SoundTrack,
-    file: &SoundFile,
+    track: &SoundClip,
+    file: &Media,
     fps: f32,
     o: Pos2,
     width: f32,

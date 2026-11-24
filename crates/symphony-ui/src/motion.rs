@@ -106,6 +106,22 @@ pub fn value(ctx: &egui::Context, id: Id, target: f32, motion: Motion) -> f32 {
     }
 }
 
+/// A rectangle that slides to `target` when it moves (Select motion): a
+/// selection highlight glides from the old choice to the new one instead
+/// of jumping. Returns where to draw it this frame.
+pub fn slide(ctx: &egui::Context, id: Id, target: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(
+            value(ctx, id.with("x0"), target.min.x, Motion::Select),
+            value(ctx, id.with("y0"), target.min.y, Motion::Select),
+        ),
+        egui::pos2(
+            value(ctx, id.with("x1"), target.max.x, Motion::Select),
+            value(ctx, id.with("y1"), target.max.y, Motion::Select),
+        ),
+    )
+}
+
 /// Start a value at `from` and move it to `to`, e.g. for something that
 /// appears: `start(ctx, id, 0.0)` the frame it opens.
 pub fn start(ctx: &egui::Context, id: Id, from: f32) {

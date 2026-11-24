@@ -22,8 +22,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # cpal (symphony-audio) links ALSA on Linux.
-      - if: runner.os == 'Linux'
+      - name: Linux audio headers (sound playback)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace

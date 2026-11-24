@@ -5,15 +5,11 @@ Launcher**. It installs Symphony, keeps it up to date, and can switch back
 to the previous version if an update has a problem.
 
 ## 1. Download the launcher
-Go to the [latest release](https://github.com/tdemers218/symphony/releases)
-and download the launcher for your computer:
-
-| Computer | File |
-|---|---|
-| Mac with Apple chip (M1 or newer) | `symphony-launcher-aarch64-apple-darwin.zip` |
-| Mac with Intel chip | `symphony-launcher-x86_64-apple-darwin.zip` |
-| Windows | `symphony-launcher-x86_64-pc-windows-msvc.zip` |
-| Linux | `symphony-launcher-x86_64-unknown-linux-gnu.tar.gz` |
+Go to [the Symphony site](https://tdemers218.github.io/symphony/) and click
+**Download**. It picks the right file for your computer. (Every file is
+also on the [releases page](https://github.com/tdemers218/symphony/releases):
+`symphony-launcher-macos.zip` for any Mac, and the Windows or Linux
+launcher.)
 
 ## 2. Open it for the first time
 Symphony isn't code-signed yet, so your computer shows a warning the first
@@ -31,14 +27,9 @@ time. This happens once.
 - **Linux**: extract the file and run `./symphony-launcher`.
 
 ## 3. Install and launch
-1. Set **Updates** to **Preview (for testers)**.
-2. Click **Install Symphony**. The launcher downloads it and checks the
+1. Click **Install Symphony**. The launcher downloads it and checks the
    download before installing.
-3. Click **Launch Symphony**.
-
-If the launcher says "Symphony isn't installed yet" and "You have the
-newest version" with no Install button, it's still on **Stable**, which
-has no release yet. Switch **Updates** to **Preview (for testers)**.
+2. Click **Launch Symphony**.
 
 Next time, open the launcher and click **Launch**. When an update is out,
 the launcher shows what changed and an **Update** button.
@@ -202,8 +193,10 @@ Each GIMP image pipe cell imports as an individual preset.
 
 Re-import a source file to apply improvements to its presets. Photoshop
 presets previously imported under numbered names may appear alongside
-their newly named versions. Imported brushes use Symphony’s vector
-renderer. Some source behaviours, such as Photoshop dual brushes and
+their newly named versions. Imported presets appear alongside the other
+vector brush presets and retain editable points even when they use a
+bitmap tip or grain. Pixel painting is planned as a separate brush
+category. Some source behaviours, such as Photoshop dual brushes and
 scatter, Krita smudging, and MyPaint’s time-based dabs, are still outside
 the importer’s mapping.
 

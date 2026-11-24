@@ -92,6 +92,7 @@ fn catmull(p0: &Point, p1: &Point, p2: &Point, p3: &Point, u: f32) -> Point {
         // Pressure is interpolated linearly: a curve through pressure
         // could dip below zero between points.
         pressure: (p1.pressure + (p2.pressure - p1.pressure) * u).clamp(0.0, 1.0),
+        pen: symphony_core::stroke::Pen::lerp(p1.pen, p2.pen, u),
     }
 }
 
@@ -158,6 +159,7 @@ mod tests {
             x,
             y,
             pressure: 1.0,
+            pen: Default::default(),
         }
     }
 

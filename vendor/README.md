@@ -25,6 +25,9 @@ changes marked `// Symphony:`.
 - `src/widgets/dock_area/show/leaf.rs`: Close in a tab's right-click
   menu, and middle-click close, depend only on the tab being closeable,
   not on tabs showing a × (Symphony hides it).
+- `src/widgets/dock_area/show/leaf.rs` (`tab_title`): the active tab's
+  fill slides from the previously active tab to the new one, one
+  highlight per tab bar, measured from the bar's left edge.
 - `src/dock_state/tree/mod.rs` and `show/mod.rs`: `Tree::transpose_grid`
   re-stores a 2x2 grid of views the other way round (columns of rows <->
   rows of columns) with the same fractions. `DockArea` calls it when the

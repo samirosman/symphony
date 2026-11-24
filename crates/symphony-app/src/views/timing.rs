@@ -8,18 +8,22 @@ use eframe::egui::{self, Align2, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_ui::icons::{self, Icon};
 use symphony_ui::{theme, widgets};
 
+use symphony_core::doc::SoundClip;
 use symphony_core::id::Id;
-use symphony_core::sound::{self, SoundTrack};
+use symphony_core::sound;
 
 use crate::keymap::{self, Action, Profile};
 use crate::session::{InsertExposure, Session};
 use crate::sound::SoundState;
 use crate::views::sound_editor::SoundEditor;
+use symphony_core::graph::{NodeId, NodeKind};
 
 #[derive(Default)]
 pub struct TimingState {
     renaming: Option<(usize, String)>,
     menu_row: Option<usize>,
+    /// The node a right-click menu is for (a layer's drawing node too).
+    menu_node: Option<NodeId>,
     show_unanimated_nodes: bool,
     /// Parameters column: drawing name being typed, per row.
     swap_text: Option<(usize, String)>,
@@ -57,7 +61,7 @@ struct SoundDrag {
     /// Pointer x where the drag started.
     x: f32,
     /// The track as it was then; each step is worked out from it.
-    original: SoundTrack,
+    original: SoundClip,
 }
 
 /// Pixels on each side of a sound block's edge that grab the edge.
@@ -348,6 +352,140 @@ fn frame_tag(painter: &egui::Painter, centre: Pos2, frame: u32) {
     );
 }
 
+/// The Timeline ruler's beats for a frame rate: [small step, half second,
+/// second], in frames. 24 fps: 6, 12, 24; 30 fps: 5, 15, 30; 25 fps: 5,
+/// 25 (no whole half), 25; 12 fps: 3, 6, 12.
+fn ruler_steps(fps: f32) -> [u32; 3] {
+    let second = (fps.round() as u32).max(1);
+    let half = if second.is_multiple_of(2) {
+        second / 2
+    } else {
+        second
+    };
+    let small = [4, 6, 5, 3, 2]
+        .into_iter()
+        .find(|d| second.is_multiple_of(*d) && second / d >= 3)
+        .map_or(half, |d| second / d);
+    [small.max(1), half.max(1), second]
+}
+
+/// Indent per level of the node hierarchy, in the Timeline's name column.
+const INDENT: f32 = 12.0;
+
+/// One Timeline row: a layer, a node track (index into the shown node
+/// tracks) or a sound clip.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Slot {
+    Layer(usize),
+    Node(usize),
+    Sound(usize),
+}
+
+fn kind_of(s: &Session, id: NodeId) -> Option<&NodeKind> {
+    s.doc.graph.node(id).map(|n| &n.kind)
+}
+
+/// The pegs above a layer's drawing (outermost first) and the effects
+/// after it, in order.
+fn layer_chain(s: &Session, layer: usize) -> (Vec<NodeId>, Vec<NodeId>) {
+    let graph = &s.doc.graph;
+    let node = s.doc.layers[layer].node;
+    let mut pegs = Vec::new();
+    let mut cur = node;
+    while let Some(up) = graph.input(cur, 0) {
+        if matches!(kind_of(s, up), Some(NodeKind::Peg(_))) && !pegs.contains(&up) {
+            pegs.push(up);
+            cur = up;
+        } else {
+            break;
+        }
+    }
+    pegs.reverse();
+    let mut effects = Vec::new();
+    let mut cur = node;
+    while let Some(next) = graph
+        .links()
+        .iter()
+        .find(|l| {
+            l.from == cur && l.port == 0 && matches!(kind_of(s, l.to), Some(NodeKind::Effect(_)))
+        })
+        .map(|l| l.to)
+    {
+        if effects.contains(&next) || effects.len() > 32 {
+            break;
+        }
+        effects.push(next);
+        cur = next;
+    }
+    (pegs, effects)
+}
+
+/// Nodes that are part of some layer's hierarchy.
+fn attached_nodes(s: &Session) -> std::collections::HashSet<NodeId> {
+    (0..s.layer_count())
+        .flat_map(|i| {
+            let (pegs, effects) = layer_chain(s, i);
+            pegs.into_iter().chain(effects)
+        })
+        .collect()
+}
+
+/// Timeline rows in hierarchy order: for each layer, its pegs above it
+/// (outermost first, indented like parents), the layer, then its effects;
+/// then sound; then the remaining nodes. A peg shared by several layers
+/// shows once, above the first.
+fn hierarchy_rows(s: &Session, tracks: &[NodeId], sounds: usize) -> Vec<(Slot, usize)> {
+    let index = |id: NodeId| tracks.iter().position(|&x| x == id);
+    let mut placed = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for i in 0..s.layer_count() {
+        let (pegs, effects) = layer_chain(s, i);
+        let mut depth = 0;
+        for peg in pegs {
+            if let Some(j) = index(peg) {
+                if placed.insert(peg) {
+                    out.push((Slot::Node(j), depth));
+                }
+            }
+            depth += 1;
+        }
+        out.push((Slot::Layer(i), depth));
+        for fx in effects {
+            if let Some(j) = index(fx) {
+                if placed.insert(fx) {
+                    out.push((Slot::Node(j), depth + 1));
+                }
+            }
+        }
+    }
+    out.extend((0..sounds).map(|k| (Slot::Sound(k), 0)));
+    for (j, id) in tracks.iter().enumerate() {
+        if !placed.contains(id) {
+            out.push((Slot::Node(j), 0));
+        }
+    }
+    out
+}
+
+/// "Add node" from a Timeline row: the new node goes in the nearest place
+/// in the hierarchy that fits (a peg above, an effect after), so the
+/// Timeline can work like a layer stack or like nodes.
+fn add_node_menu(ui: &mut egui::Ui, s: &mut Session, target: NodeId) {
+    ui.menu_button("Add node", |ui| {
+        if ui.button("Drawing layer").clicked() {
+            s.add_layer();
+            ui.close();
+        }
+        ui.separator();
+        for kind in super::node::addable_nodes() {
+            if ui.button(super::node::kind_label(&kind)).clicked() {
+                super::node::insert_near(s, target, kind);
+                ui.close();
+            }
+        }
+    });
+}
+
 fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usize) {
     if ui.button("Rename layer").clicked() {
         t.renaming = Some((row, s.layer_name(row).to_owned()));
@@ -385,7 +523,7 @@ fn sound_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, id: Id) {
     let Some(track) = s.doc.sounds.iter().find(|t| t.id == id) else {
         return;
     };
-    let (name, on) = (track.name.clone(), track.enabled);
+    let (name, on) = (track.name.clone(), !track.muted);
     if ui.button("Open sound editor").clicked() {
         t.sound_editor = Some(SoundEditor::new(track));
         ui.close();
@@ -618,7 +756,7 @@ pub fn timeline(
     let rh = theme::ROW;
     // Sound tracks come after the drawing layers, as in Harmony.
     let layers = s.layer_count();
-    let rows = layers + s.doc.sounds.len();
+    let rows = layers;
     let len = s.length();
     let reveal = s.reveal_node_track.take();
     let visible_node = super::node::selected_node(s);
@@ -662,15 +800,43 @@ pub fn timeline(
         ui.toggle_value(&mut t.show_unanimated_nodes, "Show all node tracks")
             .on_hover_text("Animated nodes and the selected node are always shown.");
     }
+    // Pegs and effects that belong to a layer always show: they're part
+    // of the layer's hierarchy. The filter is for loose nodes.
+    let attached = attached_nodes(s);
     node_tracks.retain(|(id, _, frames)| {
-        t.show_unanimated_nodes || !frames.is_empty() || Some(*id) == visible_node
+        t.show_unanimated_nodes
+            || !frames.is_empty()
+            || Some(*id) == visible_node
+            || attached.contains(id)
     });
     // Own labels because timeline interactions can mutate the document.
     let node_tracks: Vec<_> = node_tracks
         .into_iter()
         .map(|(id, name, frames)| (id, name.to_owned(), frames))
         .collect();
-    let track_count = rows + node_tracks.len();
+    let sound_rows = s.doc.sounds.len();
+    let track_count = rows + node_tracks.len() + sound_rows;
+    // Where each row goes, following the node hierarchy.
+    let track_ids: Vec<NodeId> = node_tracks.iter().map(|(id, _, _)| *id).collect();
+    let layout = hierarchy_rows(s, &track_ids, sound_rows);
+    let mut layer_slot = vec![0usize; rows];
+    let mut layer_depth = vec![0usize; rows];
+    let mut node_slot = vec![0usize; node_tracks.len()];
+    let mut node_depth = vec![0usize; node_tracks.len()];
+    let mut sound_slot = vec![0usize; sound_rows];
+    for (slot, &(row, depth)) in layout.iter().enumerate() {
+        match row {
+            Slot::Layer(i) => {
+                layer_slot[i] = slot;
+                layer_depth[i] = depth;
+            }
+            Slot::Node(j) => {
+                node_slot[j] = slot;
+                node_depth[j] = depth;
+            }
+            Slot::Sound(k) => sound_slot[k] = slot,
+        }
+    }
     let width = HEAD + len as f32 * cw + 16.0;
 
     let out = egui::ScrollArea::both()
@@ -685,34 +851,61 @@ pub fn timeline(
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
 
-            for f in (5..=len).step_by(5) {
-                let x = frame_x(f) + cw;
-                painter.line_segment(
-                    [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
-                    Stroke::new(1.0, theme::LINE_SUBTLE),
-                );
-            }
+            // Beats follow the frame rate: the second, its half and a
+            // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
+            // numbers sit on the frame's centre, like the playhead.
+            let [small, half, second] = ruler_steps(s.doc.settings.fps);
+            // Number every small step if there's room, else every half.
+            let label_step = if small as f32 * cw >= 22.0 {
+                small
+            } else {
+                half
+            };
             for f in 1..=len {
                 let x = frame_x(f) + cw / 2.0;
-                let major = f % 5 == 0 || f == 1;
-                let top = if major { 16.0 } else { 21.0 };
+                let level = if f % second == 0 {
+                    3
+                } else if f % half == 0 {
+                    2
+                } else if f % small == 0 {
+                    1
+                } else {
+                    0
+                };
+                if level > 0 {
+                    let alpha = [0.0, 0.35, 0.6, 1.0][level];
+                    painter.line_segment(
+                        [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
+                        Stroke::new(1.0, theme::LINE_STRONG.gamma_multiply(alpha)),
+                    );
+                }
+                let top = match level {
+                    0 => 22.0,
+                    1 => 18.0,
+                    _ => 15.0,
+                };
                 painter.line_segment(
                     [Pos2::new(x, o.y + top), Pos2::new(x, o.y + RULER - 2.0)],
                     Stroke::new(1.0, theme::LINE_STRONG),
                 );
-                if major {
+                if f == 1 || f % label_step == 0 {
                     painter.text(
                         Pos2::new(x, o.y + 4.0),
                         Align2::CENTER_TOP,
                         f.to_string(),
                         theme::numbers(),
-                        theme::TEXT_SECONDARY,
+                        if level == 3 {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
                     );
                 }
             }
 
-            for i in 0..layers {
-                let y = o.y + RULER + i as f32 * rh;
+            for i in 0..rows {
+                let y = o.y + RULER + layer_slot[i] as f32 * rh;
+                let indent = layer_depth[i] as f32 * INDENT;
                 let node = s.doc.layers[i].node;
                 let sel = visible_node == Some(node);
                 let visible = s.layer_visible(i);
@@ -736,8 +929,10 @@ pub fn timeline(
                     );
                 }
                 let eye = if visible { Icon::Eye } else { Icon::EyeOff };
-                let eye_rect =
-                    Rect::from_center_size(Pos2::new(o.x + 22.0, y + rh / 2.0), Vec2::splat(16.0));
+                let eye_rect = Rect::from_center_size(
+                    Pos2::new(o.x + 22.0 + indent, y + rh / 2.0),
+                    Vec2::splat(16.0),
+                );
                 icons::paint(
                     &painter,
                     eye_rect,
@@ -782,12 +977,12 @@ pub fn timeline(
                     widgets::fitted_text(
                         ui,
                         &painter,
-                        Pos2::new(o.x + 40.0, y + rh / 2.0),
+                        Pos2::new(o.x + 40.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         s.layer_name(i),
                         theme::body(),
                         name_col,
-                        HEAD - 68.0 - PARAM_W,
+                        HEAD - 68.0 - PARAM_W - indent,
                     );
                 }
                 parameters_field(
@@ -871,7 +1066,8 @@ pub fn timeline(
             }
 
             for (index, (node, name, frames)) in node_tracks.iter().enumerate() {
-                let y = o.y + RULER + (rows + index) as f32 * rh;
+                let y = o.y + RULER + node_slot[index] as f32 * rh;
+                let indent = node_depth[index] as f32 * INDENT;
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
                     Vec2::new(width - 8.0, rh - 2.0),
@@ -883,12 +1079,12 @@ pub fn timeline(
                 widgets::fitted_text(
                     ui,
                     &painter,
-                    Pos2::new(o.x + 18.0, y + rh / 2.0),
+                    Pos2::new(o.x + 18.0 + indent, y + rh / 2.0),
                     Align2::LEFT_CENTER,
                     name,
                     theme::body(),
                     theme::TEXT_SECONDARY,
-                    HEAD - 30.0,
+                    HEAD - 30.0 - indent,
                 );
                 for f in frames.iter().copied().filter(|f| (1..=len).contains(f)) {
                     key_diamond(
@@ -903,8 +1099,8 @@ pub fn timeline(
             // Each sound block, for moving and trimming.
             let mut blocks: Vec<(Id, Rect)> = Vec::new();
             for (j, track) in s.doc.sounds.iter().enumerate() {
-                let y = o.y + RULER + (layers + j) as f32 * rh;
-                let on = track.enabled;
+                let y = o.y + RULER + sound_slot[j] as f32 * rh;
+                let on = !track.muted;
                 let eye_rect =
                     Rect::from_center_size(Pos2::new(o.x + 22.0, y + rh / 2.0), Vec2::splat(16.0));
                 // Mute uses the layer's show/hide icon until the icon set
@@ -935,7 +1131,7 @@ pub fn timeline(
                         HEAD - 56.0,
                     );
                 }
-                let Some(file) = s.doc.sound_files.get(&track.key) else {
+                let Some(file) = s.doc.media.get(&track.media) else {
                     continue;
                 };
                 let first = track.start.max(1);
@@ -950,7 +1146,7 @@ pub fn timeline(
                 );
                 painter.rect_filled(block, theme::RADIUS_CONTROL as f32, theme::BG_HOVER);
                 blocks.push((track.id, block));
-                if let Some((peaks, gain)) = sounds.peaks(track.key) {
+                if let Some((peaks, gain)) = sounds.peaks(track.media) {
                     let colour = if on {
                         theme::TEXT_SECONDARY
                     } else {
@@ -1026,7 +1222,7 @@ pub fn timeline(
             if let Some(d) = &t.sound_drag {
                 if let (Some(p), Some(file)) = (
                     resp.interact_pointer_pos(),
-                    s.doc.sound_files.get(&d.original.key),
+                    s.doc.media.get(&d.original.media),
                 ) {
                     let frames = ((p.x - d.x) / cw).round() as i64;
                     let o = &d.original;
@@ -1069,7 +1265,7 @@ pub fn timeline(
             for (id, at) in &t.arrived {
                 if let Some(row) = order.iter().position(|c| c == id) {
                     let k = 1.0 - ((now - at) / 0.8) as f32;
-                    let y = o.y + RULER + row as f32 * rh;
+                    let y = o.y + RULER + layer_slot[row] as f32 * rh;
                     painter.rect_filled(
                         Rect::from_min_size(
                             Pos2::new(o.x + 4.0, y + 1.0),
@@ -1094,15 +1290,19 @@ pub fn timeline(
                     theme::ACCENT_TIME.gamma_multiply(0.16),
                 );
             }
-            // The playhead glides to a clicked frame (Select motion); while
-            // playing it stays exactly on the frame.
+            // A click jumps straight to the frame (only that frame is ever
+            // shown or rendered); just the line glides there (Select
+            // motion). Dragging and playing keep it exactly on the frame:
+            // scrubbing must feel snappy, not trail the mouse.
             let target = s.frame.min(len) as f32;
-            let shown = if s.playing {
+            let playhead = egui::Id::unique("timeline-playhead");
+            let shown = if s.playing || resp.dragged() || resp.drag_stopped() {
+                symphony_ui::motion::start(ui.ctx(), playhead, target);
                 target
             } else {
                 symphony_ui::motion::value(
                     ui.ctx(),
-                    egui::Id::unique("timeline-playhead"),
+                    playhead,
                     target,
                     symphony_ui::motion::Motion::Select,
                 )
@@ -1117,9 +1317,17 @@ pub fn timeline(
             );
             frame_tag(&painter, Pos2::new(cx, o.y + RULER - 12.0), s.frame);
 
-            let row_at = |p: Pos2| -> Option<usize> {
+            let slot_at = |p: Pos2| -> Option<Slot> {
                 let r = ((p.y - o.y - RULER) / rh).floor();
-                (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
+                (r >= 0.0)
+                    .then(|| layout.get(r as usize).map(|&(row, _)| row))
+                    .flatten()
+            };
+            let row_at = |p: Pos2| -> Option<usize> {
+                match slot_at(p) {
+                    Some(Slot::Layer(i)) => Some(i),
+                    _ => None,
+                }
             };
             // Drag a layer by its name to move it in the stack; a line
             // shows where it will land.
@@ -1136,10 +1344,18 @@ pub fn timeline(
                 }
             }
             if let (Some(from), Some(p)) = (t.layer_drag, resp.interact_pointer_pos()) {
-                let gap = (((p.y - o.y - RULER) / rh) + 0.5)
-                    .floor()
-                    .clamp(0.0, rows as f32) as usize;
-                let y = o.y + RULER + gap as f32 * rh;
+                // The gap in the layer stack: layers whose row centre is
+                // above the pointer come before it.
+                let at = (p.y - o.y - RULER) / rh;
+                let gap = (0..rows)
+                    .filter(|&i| (layer_slot[i] as f32 + 0.5) < at)
+                    .count();
+                let line_slot = if gap < rows {
+                    layer_slot[gap]
+                } else {
+                    layer_slot.iter().max().map_or(0, |m| m + 1)
+                };
+                let y = o.y + RULER + line_slot as f32 * rh;
                 painter.line_segment(
                     [Pos2::new(o.x + 8.0, y), Pos2::new(o.x + width - 8.0, y)],
                     Stroke::new(2.0, theme::ACCENT_SELECT),
@@ -1161,7 +1377,7 @@ pub fn timeline(
                 if rel.x >= HEAD {
                     s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);
                 }
-                if let Some(j) = row_at(p).and_then(|r| r.checked_sub(layers)) {
+                if let Some(Slot::Sound(j)) = slot_at(p) {
                     let id = s.doc.sounds[j].id;
                     if rel.x < 32.0 && resp.clicked() {
                         s.toggle_sound(id);
@@ -1184,28 +1400,42 @@ pub fn timeline(
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
                 } else if resp.clicked() || resp.drag_started() {
-                    let index = ((p.y - o.y - RULER) / rh).floor() as isize - rows as isize;
-                    if let Some((node, _, _)) =
-                        usize::try_from(index).ok().and_then(|i| node_tracks.get(i))
-                    {
-                        s.select_graph_node(*node, false);
+                    if let Some(Slot::Node(j)) = slot_at(p) {
+                        s.select_graph_node(node_tracks[j].0, false);
                     }
                 }
             }
+            // Right-click a layer or node: its menu, with Add node, so the
+            // Timeline works as a layer stack or as nodes.
             if resp.secondary_clicked() {
-                let row = resp.interact_pointer_pos().and_then(row_at);
-                t.sound_menu = row
-                    .and_then(|r| r.checked_sub(layers))
-                    .map(|j| s.doc.sounds[j].id);
-                t.menu_row = row.filter(|&r| r < layers);
-                if let Some(r) = t.menu_row {
-                    s.select_graph_node(s.doc.layers[r].node, false);
+                t.menu_row = None;
+                t.menu_node = None;
+                t.sound_menu = None;
+                match resp.interact_pointer_pos().and_then(slot_at) {
+                    Some(Slot::Layer(r)) => {
+                        t.menu_row = Some(r);
+                        t.menu_node = Some(s.doc.layers[r].node);
+                    }
+                    Some(Slot::Node(j)) => t.menu_node = Some(node_tracks[j].0),
+                    Some(Slot::Sound(j)) => t.sound_menu = Some(s.doc.sounds[j].id),
+                    None => {}
+                }
+                if let Some(node) = t.menu_node {
+                    s.select_graph_node(node, false);
                 }
             }
             if let Some(id) = t.sound_menu {
                 resp.context_menu(|ui| sound_menu(ui, s, t, id));
-            } else if let Some(row) = t.menu_row {
-                resp.context_menu(|ui| layer_menu(ui, s, t, row));
+            } else if t.menu_node.is_some() {
+                resp.context_menu(|ui| {
+                    if let Some(node) = t.menu_node {
+                        add_node_menu(ui, s, node);
+                    }
+                    if let Some(row) = t.menu_row {
+                        ui.separator();
+                        layer_menu(ui, s, t, row);
+                    }
+                });
             }
 
             let renaming = t
@@ -1213,7 +1443,7 @@ pub fn timeline(
                 .as_ref()
                 .and_then(|(id, _)| s.doc.sounds.iter().position(|t| t.id == *id));
             if let Some(j) = renaming {
-                let y = o.y + RULER + (layers + j) as f32 * rh;
+                let y = o.y + RULER + sound_slot[j] as f32 * rh;
                 sound_rename_field(
                     ui,
                     s,
@@ -1225,7 +1455,7 @@ pub fn timeline(
                 );
             }
             if let Some((row, _)) = t.renaming {
-                let y = o.y + RULER + row as f32 * rh;
+                let y = o.y + RULER + layer_slot.get(row).copied().unwrap_or(row) as f32 * rh;
                 rename_field(
                     ui,
                     s,
@@ -1424,4 +1654,88 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    #[test]
+    fn ruler_beats_follow_the_frame_rate() {
+        assert_eq!(ruler_steps(24.0), [6, 12, 24]);
+        assert_eq!(ruler_steps(30.0), [5, 15, 30]);
+        assert_eq!(ruler_steps(12.0), [3, 6, 12]);
+        assert_eq!(ruler_steps(25.0), [5, 25, 25]);
+        assert_eq!(ruler_steps(60.0), [15, 30, 60]);
+    }
+    use symphony_core::graph::Effect;
+
+    /// Nodes added from the Timeline go to the nearest fitting place, and
+    /// the Timeline lists each layer's pegs right above it.
+    #[test]
+    fn added_nodes_join_the_hierarchy_and_the_timeline_follows_it() {
+        let mut s = Session::new_scene();
+        let layer = s.doc.layers[0];
+        let old_peg = s
+            .doc
+            .graph
+            .input(layer.node, 0)
+            .expect("layers start with a peg");
+        // A peg on the drawing: a new parent between it and its old peg.
+        super::super::node::insert_near(&mut s, layer.node, NodeKind::Peg(Default::default()));
+        let new_peg = s.doc.graph.input(layer.node, 0).unwrap();
+        assert_ne!(new_peg, old_peg);
+        assert_eq!(s.doc.graph.input(new_peg, 0), Some(old_peg));
+        // An effect from the (old) peg: after that layer's drawing.
+        let out_before = s
+            .doc
+            .graph
+            .links()
+            .iter()
+            .find(|l| l.from == layer.node)
+            .copied()
+            .unwrap();
+        super::super::node::insert_near(
+            &mut s,
+            old_peg,
+            NodeKind::Effect(Effect::Blur {
+                radius: 2.0,
+                mode: symphony_core::graph::BlurMode::Box,
+            }),
+        );
+        let fx = s
+            .doc
+            .graph
+            .links()
+            .iter()
+            .find(|l| l.from == layer.node)
+            .unwrap()
+            .to;
+        assert!(matches!(kind_of(&s, fx), Some(NodeKind::Effect(_))));
+        assert!(s
+            .doc
+            .graph
+            .links()
+            .iter()
+            .any(|l| l.from == fx && l.to == out_before.to));
+        // The rows: old peg, new peg, then the layer, then its effect.
+        let (pegs, effects) = layer_chain(&s, 0);
+        assert_eq!(pegs, vec![old_peg, new_peg]);
+        assert_eq!(effects, vec![fx]);
+        let tracks = vec![fx, new_peg, old_peg];
+        let rows = hierarchy_rows(&s, &tracks, 0);
+        assert_eq!(
+            &rows[..4],
+            &[
+                (Slot::Node(2), 0),
+                (Slot::Node(1), 1),
+                (Slot::Layer(0), 2),
+                (Slot::Node(0), 3)
+            ]
+        );
+        // One undo each.
+        s.undo();
+        s.undo();
+        assert_eq!(s.doc.graph.input(layer.node, 0), Some(old_peg));
+    }
 }

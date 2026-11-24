@@ -278,7 +278,18 @@ mod tests {
                     && mesh.indices.len() == 24 && mesh.vertices.iter().all(|v| v.color == Color32::BLACK)
             ))
         };
+        assert!(!draws_stage_mask(harness.output()));
+        harness.state_mut().0.doc.settings.bars.on = true;
+        harness.run_steps(1);
         assert!(draws_stage_mask(harness.output()));
+
+        harness.state_mut().0.frame = 3;
+        harness.state_mut().1.render_effects = false;
+        harness.run_steps(2);
+        assert!(!draws_camera_texture(harness.output()));
+        assert!(harness.state().1.display.job.is_none());
+        assert_eq!(harness.state().1.display.key.as_ref().unwrap().frame, 2);
+
         harness.state_mut().3 = true;
         harness.run_steps(1);
         assert!(!draws_camera_texture(harness.output()));

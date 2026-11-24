@@ -12,6 +12,6 @@ pub mod peaks;
 pub mod play;
 pub mod soundtrack;
 
-pub use decode::{decode, import, import_bytes, Samples};
+pub use decode::{decode, decode_path, import, import_bytes, Samples};
 pub use peaks::Peaks;
 pub use play::{prepare, Clip, Command, Player};

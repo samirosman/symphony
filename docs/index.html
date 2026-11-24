@@ -82,6 +82,8 @@
       text-decoration: none;
     }
     .download:hover { background: #3659a5; }
+    .download.big { padding: 12px 22px; font-size: 1.05rem; border-radius: 8px; }
+    .get-more { margin: 12px auto 0; font-size: .85rem; max-width: none; }
     figure { margin: 0; }
     .preview {
       padding: var(--inset);
@@ -125,7 +127,8 @@
     <header class="intro">
       <h1>Symphony</h1>
       <p>Free, open-source 2D animation software.</p>
-      <a class="download" href="https://github.com/tdemers218/symphony/releases">Get the preview build</a>
+      <a class="download" id="download" href="https://github.com/tdemers218/symphony/releases">Get the preview build</a>
+      <p class="get-more" id="get-more" hidden></p>
     </header>
     <figure>
       <div class="preview">
@@ -147,5 +150,75 @@
     <span>GPL-3.0-or-later</span>
     <a href="https://github.com/tdemers218/symphony/blob/main/docs/TESTERS.md">Testing guide</a>
   </footer>
+  <script>
+  // One button for this computer: the newest release's launcher for it,
+  // read from GitHub when the page opens (previews included), so the page
+  // never needs updating after a release. Without JavaScript, or if
+  // GitHub can't be reached, the button opens the releases page.
+  (function () {
+    var REPO = "tdemers218/symphony";
+    var button = document.getElementById("download");
+    var more = document.getElementById("get-more");
+    var ua = navigator.userAgent || "";
+    var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+    var touchMac = /Mac/.test(platform + ua) && navigator.maxTouchPoints > 1; // iPad
+    var os = touchMac || /iPhone|iPad|Android/.test(ua) ? "phone"
+      : /Mac/.test(platform + ua) ? "mac"
+      : /Win/.test(platform + ua) ? "windows"
+      : /Linux|X11/.test(platform + ua) ? "linux" : "other";
+    // Launcher file per system, newest naming first.
+    var files = {
+      mac: ["symphony-launcher-macos.zip", "symphony-launcher-aarch64-apple-darwin.zip"],
+      windows: ["symphony-launcher-x86_64-pc-windows-msvc.zip"],
+      linux: ["symphony-launcher-x86_64-unknown-linux-gnu.tar.gz"]
+    };
+    var names = { mac: "Mac", windows: "Windows", linux: "Linux" };
+    function text(el, s) { el.textContent = s; }
+    if (os === "phone") {
+      text(button, "See releases");
+      more.hidden = false;
+      text(more, "Symphony runs on Mac, Windows and Linux. Open this page on your computer to download it.");
+      return;
+    }
+    fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=20")
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+      .then(function (releases) {
+        var usable = releases.filter(function (r) { return !r.draft; });
+        if (!usable.length) return;
+        var rel = usable[0];
+        function find(kind) {
+          var list = files[kind] || [];
+          for (var i = 0; i < list.length; i++) {
+            for (var j = 0; j < rel.assets.length; j++) {
+              if (rel.assets[j].name === list[i]) return rel.assets[j];
+            }
+          }
+          return null;
+        }
+        var version = rel.tag_name.replace(/^v/, "").replace(/-preview\./, " preview ");
+        var mine = find(os);
+        if (mine) {
+          button.href = mine.browser_download_url;
+          button.classList.add("big");
+          text(button, "Download for " + names[os]);
+        }
+        // The other systems, small, for anyone downloading for someone else.
+        more.hidden = false;
+        more.replaceChildren();
+        more.append("Version " + version + ". ");
+        var others = Object.keys(files).filter(function (k) { return k !== os && find(k); });
+        if (others.length) {
+          more.append(mine ? "Also for " : "For ");
+          others.forEach(function (k, i) {
+            var a = document.createElement("a");
+            a.href = find(k).browser_download_url;
+            text(a, names[k]);
+            more.append(a, i < others.length - 2 ? ", " : i === others.length - 2 ? " and " : ".");
+          });
+        }
+      })
+      .catch(function () {});
+  })();
+  </script>
 </body>
 </html>
