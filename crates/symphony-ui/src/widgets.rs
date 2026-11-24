@@ -393,3 +393,27 @@ pub fn segmented<T: PartialEq + Copy>(
     }
     changed
 }
+
+/// The middle button always pans (Harmony's "Middle Button Pans View").
+/// When a middle press began on `resp`, returns how far the pointer moved
+/// this frame (zero on the press and release frames) and a hover-only
+/// stand-in for `resp`, so code that reads clicks, drags or the press
+/// position sees nothing. Otherwise returns `resp` unchanged and `None`.
+pub fn middle_pan(ui: &egui::Ui, resp: Response) -> (Response, Option<Vec2>) {
+    let middle = egui::PointerButton::Middle;
+    let (down, released, primary, delta) = ui.input(|i| {
+        (
+            i.pointer.button_down(middle),
+            i.pointer.button_released(middle),
+            i.pointer.primary_down(),
+            i.pointer.delta(),
+        )
+    });
+    let held = down && resp.is_pointer_button_down_on();
+    let ended = released && (resp.drag_stopped() || resp.clicked_by(middle));
+    if primary || !(held || ended) {
+        return (resp, None);
+    }
+    let inert = ui.interact(resp.rect, resp.id.with("middle pan"), Sense::hover());
+    (inert, Some(if held { delta } else { Vec2::ZERO }))
+}

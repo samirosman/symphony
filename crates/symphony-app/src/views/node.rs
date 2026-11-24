@@ -1725,6 +1725,11 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
     state.selection.retain(|&id| s.doc.graph.node(id).is_some());
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+    // The middle button pans and never picks, moves or wires a node.
+    let (resp, pan) = widgets::middle_pan(ui, resp);
+    if let Some(delta) = pan {
+        state.pan += delta;
+    }
     let viewport = resp.rect;
     let anchor =
         viewport.left_top() + Vec2::X * *state.anchor_x.get_or_insert(viewport.width() / 2.0);

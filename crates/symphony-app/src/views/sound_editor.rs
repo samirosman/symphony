@@ -283,6 +283,11 @@ fn waveform_view(
     let played = track.seconds(file);
     let size = Vec2::new(view_w, RULER_H + WAVE_H);
     let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+    // The middle button drags the sound sideways and never trims it.
+    let (resp, pan) = widgets::middle_pan(ui, resp);
+    if let Some(delta) = pan {
+        ed.left -= f64::from(delta.x) * spp;
+    }
     if resp.hovered() {
         let d = ui.input(|i| i.smooth_scroll_delta);
         ed.left -= f64::from(d.x + d.y) * spp;
@@ -371,6 +376,7 @@ fn overview(
 ) {
     let w = ui.available_width().max(1.0);
     let (resp, painter) = ui.allocate_painter(Vec2::new(w, OVERVIEW_H), Sense::click_and_drag());
+    let (resp, _) = widgets::middle_pan(ui, resp);
     let r = resp.rect;
     let x_of = |t: f64| r.left() + (t / seconds) as f32 * w;
     let t_of = |x: f32| (f64::from((x - r.left()) / w) * seconds).clamp(0.0, seconds);
