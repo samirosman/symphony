@@ -351,8 +351,8 @@ impl Cache {
             self.entries.insert(key, Entry { image, used: frame });
             return;
         }
-        // Otherwise stamp in the background and show the last image moved
-        // into place (or the plain vector shape) until it's ready.
+        // Expensive strokes stamp in the background. Keep a cached texture
+        // visible when available, including a clipped preview for erasing.
         if let Some(uncut) = uncut_key
             .and_then(|key| self.entries.get(&key))
             .and_then(|entry| entry.image.as_ref())
@@ -364,7 +364,7 @@ impl Cache {
                     *used = frame;
                     img.draw(painter, px, ppp, colour);
                 }
-                None => {
+                None if stroke.shape.is_empty() => {
                     let mesh = symphony_vector::tessellate(stroke, m, 0.6);
                     let mut out = egui::Mesh::default();
                     for v in &mesh.vertices {
@@ -373,6 +373,9 @@ impl Cache {
                     out.indices = mesh.indices;
                     painter.add(egui::Shape::mesh(out));
                 }
+                // Wait for the first textured result rather than flashing
+                // a solid silhouette on a cut stroke.
+                None => {}
             }
         }
         if self.pending.insert(key) {
@@ -600,10 +603,8 @@ mod tests {
     use super::*;
     use symphony_core::stroke::StrokeKind;
 
-    #[test]
-    fn cached_erase_preview_keeps_the_texture_and_excludes_the_hole() {
-        let ctx = egui::Context::default();
-        let cut = Stroke {
+    fn cut_stroke() -> Stroke {
+        Stroke {
             id: Id(1),
             kind: StrokeKind::Brush,
             art: Default::default(),
@@ -617,7 +618,46 @@ mod tests {
                 vec![[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]],
                 vec![[15.0, 15.0], [15.0, 25.0], [25.0, 25.0], [25.0, 15.0]],
             ],
-        };
+        }
+    }
+
+    #[test]
+    fn uncached_cut_waits_for_its_texture() {
+        let ctx = egui::Context::default();
+        let mut stroke = cut_stroke();
+        stroke.max_width = 100.0;
+        stroke.points = vec![
+            symphony_core::stroke::Point {
+                x: 20.0,
+                y: 20.0,
+                pressure: 1.0
+            };
+            128
+        ];
+        let mut cache = Cache::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cache.paint(
+                &ctx,
+                ui.painter(),
+                &BTreeMap::new(),
+                &stroke,
+                &StrokeTexture::default(),
+                Color32::WHITE,
+                Affine::IDENTITY,
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(cache.pending.len(), 1);
+        assert!(!output
+            .shapes
+            .iter()
+            .any(|shape| matches!(shape.shape, egui::Shape::Mesh(_))));
+    }
+
+    #[test]
+    fn cached_erase_preview_keeps_the_texture_and_excludes_the_hole() {
+        let ctx = egui::Context::default();
+        let cut = cut_stroke();
         let coverage = Coverage {
             x: 10,
             y: 10,

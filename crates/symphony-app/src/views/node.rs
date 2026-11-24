@@ -7,7 +7,11 @@ use symphony_core::{
     history::Edit,
 };
 
+use super::rope::Cable;
 use crate::session::Session;
+
+const CABLE_WIDTH: f32 = 2.0;
+const ACTIVE_CABLE_WIDTH: f32 = 2.4;
 use symphony_ui::{theme, widgets};
 
 /// Node corner radius at 100% zoom: well rounded, scaled with zoom.
@@ -46,12 +50,11 @@ pub struct NodeViewState {
     /// Where (and when) a dragged cable was last let go, so the cable's
     /// animation starts from there.
     released: Option<(Pos2, f64)>,
-    /// The cable being dragged, as a live rope, and the one just let go
-    /// (picked up by the animation that follows).
-    drag_rope: Option<super::rope::Rope>,
-    released_rope: Option<super::rope::Rope>,
-    /// When ropes were last advanced.
-    rope_time: Option<f64>,
+    /// The live drag curve and its shape at release.
+    drag_cable: Option<Cable>,
+    released_cable: Option<Cable>,
+    /// When the drag curve last updated.
+    cable_time: Option<f64>,
     /// The hover thumbnail: what it shows (drawing, scene version, frame)
     /// and its texture, plus the last card it was shown beside (for its
     /// fade-out).
@@ -67,11 +70,7 @@ struct LinkAnim {
     link: Option<Link>,
     start: f64,
     motion: CableMotion,
-    /// 0..1 from the link and the moment: no two animations alike.
-    seed: f32,
-    /// The cable as a rope: it carries on from wherever it was (dragged,
-    /// plugged in elsewhere) with its momentum.
-    rope: super::rope::Rope,
+    curve: Cable,
 }
 
 /// What a cable is doing, like a real one.
@@ -83,19 +82,14 @@ enum CableMotion {
     /// Moved or swapped to another input: the end travels from the old
     /// input to the new one.
     Move { from_end: Pos2 },
-    /// Disconnected: the rope winds itself into its output, starting
-    /// `length` long.
-    Retract {
-        source: NodeId,
-        from: Pos2,
-        length: f32,
-    },
+    /// Disconnected or dropped loose: the cable winds into its output.
+    Retract { source: NodeId, from: Pos2 },
 }
 
 impl CableMotion {
     fn seconds(self) -> f64 {
         match self {
-            CableMotion::Connect { .. } | CableMotion::Move { .. } => 0.95,
+            CableMotion::Connect { .. } | CableMotion::Move { .. } => 0.28,
             CableMotion::Retract { .. } => 0.45,
         }
     }
@@ -106,27 +100,15 @@ impl LinkAnim {
         link: Option<Link>,
         source: NodeId,
         ends: (Pos2, Pos2),
-        rope: Option<super::rope::Rope>,
+        curve: Option<Cable>,
         now: f64,
-        zoom: f32,
-        seed: f32,
     ) -> Self {
         let (from, end) = ends;
-        let mut rope =
-            rope.unwrap_or_else(|| super::rope::Rope::along(&cable_path(from, end, 1.0)));
-        let length = super::rope::length(rope.points());
-        let side = if seed < 0.5 { -1.0 } else { 1.0 };
-        rope.kick(Vec2::new(side * (300.0 + length * 3.0), -length * 1.5) * (0.48 * zoom.max(0.3)));
         Self {
             link,
             start: now,
-            motion: CableMotion::Retract {
-                source,
-                from,
-                length,
-            },
-            seed,
-            rope,
+            motion: CableMotion::Retract { source, from },
+            curve: curve.unwrap_or_else(|| Cable::new(from, end)),
         }
     }
 }
@@ -162,23 +144,6 @@ fn detached_links(graph: &symphony_core::graph::Graph, id: NodeId) -> Vec<Link> 
         }
     }
     after
-}
-
-/// Points along a cable from its output to `upto` (0..=1) of the way.
-fn cable_path(from: Pos2, to: Pos2, upto: f32) -> Vec<Pos2> {
-    let [a, b, c, d] = cable_points(from, to);
-    let n = 32;
-    (0..=n)
-        .map(|i| {
-            let t = upto.clamp(0.0, 1.0) * i as f32 / n as f32;
-            let u = 1.0 - t;
-            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
-            Pos2::new(
-                a.x * w[0] + b.x * w[1] + c.x * w[2] + d.x * w[3],
-                a.y * w[0] + b.y * w[1] + c.y * w[2] + d.y * w[3],
-            )
-        })
-        .collect()
 }
 
 struct PropertyDraft {
@@ -656,18 +621,8 @@ fn edit_link(s: &mut Session, source: Option<NodeId>, input: Input, old_input: O
     }
 }
 
-fn cable_points(from: Pos2, to: Pos2) -> [Pos2; 4] {
-    let bend = ((to.y - from.y).abs() * 0.5).clamp(16.0, 120.0);
-    [from, from + Vec2::Y * bend, to - Vec2::Y * bend, to]
-}
-
 fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
-    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        cable_points(from, to),
-        false,
-        egui::Color32::TRANSPARENT,
-        stroke,
-    ));
+    Cable::new(from, to).paint(painter, stroke);
 }
 
 #[derive(Clone, Copy)]
@@ -721,13 +676,11 @@ impl AutoWire {
 }
 
 fn near_cable(point: Pos2, from: Pos2, to: Pos2) -> f32 {
-    let [a, b, c, d] = cable_points(from, to).map(Pos2::to_vec2);
-    let mut previous = a;
+    let cable = Cable::new(from, to);
+    let mut previous = from.to_vec2();
     let mut best = f32::INFINITY;
     for step in 1..=20 {
-        let t = step as f32 / 20.0;
-        let u = 1.0 - t;
-        let next = a * u.powi(3) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * t.powi(3);
+        let next = cable.prefix(step as f32 / 20.0).end.to_vec2();
         let edge = next - previous;
         let along =
             ((point.to_vec2() - previous).dot(edge) / edge.length_sq().max(0.0001)).clamp(0.0, 1.0);
@@ -1835,24 +1788,21 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                     .filter(|p| viewport.contains(*p))
                     .and_then(|p| drop_target(&s.doc.graph, source, p));
                 if old_input.is_none() && target.is_none() {
-                    let end =
-                        release.or_else(|| state.drag_rope.as_ref()?.points().last().copied());
+                    let end = release.or_else(|| state.drag_cable.map(|cable| cable.end));
                     if animated {
                         if let (Some(&from), Some(end)) = (outputs.get(&source), end) {
                             state.link_anims.push(LinkAnim::retract(
                                 None,
                                 source,
                                 (from, end),
-                                state.drag_rope.take(),
+                                state.drag_cable.take(),
                                 now,
-                                zoom,
-                                if end.x < from.x { 0.25 } else { 0.75 },
                             ));
                         }
                     }
                 } else if let Some(point) = release.filter(|point| viewport.contains(*point)) {
                     state.released = Some((point, now));
-                    state.released_rope = state.drag_rope.take();
+                    state.released_cable = state.drag_cable.take();
                     // A cable lifted off an input and let go close to where
                     // it was (a slip, or grabbing the port while aiming for
                     // the node) snaps back instead of disconnecting.
@@ -1882,10 +1832,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                             link: Some(link),
                             start: now,
                             motion: CableMotion::Move { from_end: point },
-                            seed: 0.5,
-                            rope: state.released_rope.take().unwrap_or_else(|| {
-                                let from = outputs.get(&source).copied().unwrap_or(point);
-                                super::rope::Rope::along(&cable_path(from, point, 1.0))
+                            curve: state.released_cable.take().unwrap_or_else(|| {
+                                Cable::new(outputs.get(&source).copied().unwrap_or(point), point)
                             }),
                         });
                     }
@@ -1937,12 +1885,8 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
 
-    // Connections move like real cables: each change runs a short rope
-    // simulation (gravity, momentum, a fixed length) that starts from
-    // wherever the cable was and eases into its resting curve.
-    let dt = state.rope_time.map_or(0.0, |last| (now - last) as f32);
-    state.rope_time = Some(now);
-    let gravity = super::rope::GRAVITY * zoom;
+    let dt = state.cable_time.map_or(0.0, |last| (now - last) as f32);
+    state.cable_time = Some(now);
     let mut ends: Vec<(Link, Pos2, Pos2)> = Vec::new();
     for link in s.doc.graph.links() {
         if let (Some(&from), Some(&to)) =
@@ -1955,7 +1899,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     let recent = state.released.is_some_and(|(_, at)| now - at < 0.25);
     let released = state.released.filter(|_| recent).map(|(p, _)| p);
     if !recent {
-        state.released_rope = None;
+        state.released_cable = None;
     }
     if state.drawn_scene != s.key {
         // A different scene: nothing to animate from.
@@ -1979,13 +1923,6 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .copied()
             .filter(|(l, ..)| !ends.iter().any(|(e, ..)| e == l))
             .collect();
-        let seed = |l: &Link| {
-            let h = (l.from.0 as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add((l.to.0 as u64) << 8 | l.port as u64)
-                .wrapping_add((now * 1000.0) as u64);
-            ((h.wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 40) % 1000) as f32 / 1000.0
-        };
         for (link, from, _) in appeared {
             // The same output lost a link this frame: it moved (or swapped).
             let (motion, start_end) = match gone.iter().position(|(g, ..)| g.from == link.from) {
@@ -1996,19 +1933,16 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 }
                 None => (CableMotion::Connect { from_end: released }, released),
             };
-            let rope = match (state.released_rope.take(), start_end) {
-                (Some(r), _) => r,
-                (None, Some(e)) => super::rope::Rope::along(&cable_path(from, e, 1.0)),
-                // Made elsewhere: it comes out of the output.
-                (None, None) => super::rope::Rope::along(&[from, from]),
-            };
+            let curve = state
+                .released_cable
+                .take()
+                .unwrap_or_else(|| Cable::new(from, start_end.unwrap_or(from)));
             state.link_anims.retain(|a| a.link != Some(link));
             state.link_anims.push(LinkAnim {
                 link: Some(link),
                 start: now,
                 motion,
-                seed: seed(&link),
-                rope,
+                curve,
             });
         }
         for (link, from, to) in gone {
@@ -2017,17 +1951,15 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 Some(link),
                 link.from,
                 (from, released.unwrap_or(to)),
-                state.released_rope.take(),
+                state.released_cable.take(),
                 now,
-                zoom,
-                seed(&link),
             ));
         }
     }
     if !animated {
         state.link_anims.clear();
-        state.drag_rope = None;
-        state.released_rope = None;
+        state.drag_cable = None;
+        state.released_cable = None;
     }
     state.drawn_links = ends;
     state
@@ -2038,30 +1970,17 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
     // Step and draw every moving cable.
     let mut moving: Vec<Link> = Vec::new();
-    for a in &mut state.link_anims {
-        let t = (now - a.start) as f32;
+    for a in &state.link_anims {
+        let progress = ((now - a.start) / a.motion.seconds()).clamp(0.0, 1.0) as f32;
         match a.motion {
-            CableMotion::Retract {
-                source,
-                from,
-                length,
-            } => {
+            CableMotion::Retract { source, from } => {
                 let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::LINE_CONTROL);
-                // Winds in: the rope shortens, fast, its end swinging free.
-                let p = (t / a.motion.seconds() as f32).clamp(0.0, 1.0);
-                let left = length * (1.0 - p * p * (3.0 - 2.0 * p));
-                let pins = super::rope::Pins {
-                    start: from,
-                    end: None,
-                };
-                a.rope
-                    .advance(dt, pins, left, gravity * (0.7 + 0.6 * a.seed), None, 0.0);
-                if left > 2.0 {
-                    painter.add(egui::Shape::line(
-                        a.rope.smooth(),
-                        Stroke::new(1.65, ink.gamma_multiply(0.5 + 0.5 * (1.0 - p))),
-                    ));
-                }
+                let from = outputs.get(&source).copied().unwrap_or(from);
+                let remaining = 1.0 - progress * progress * (3.0 - 2.0 * progress);
+                a.curve.retract(from, remaining).paint(
+                    &painter,
+                    Stroke::new(CABLE_WIDTH, ink.gamma_multiply(0.5 + 0.5 * remaining)),
+                );
             }
             CableMotion::Connect { .. } | CableMotion::Move { .. } => {
                 let Some(link) = a.link else { continue };
@@ -2072,50 +1991,19 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 };
                 let ink = peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL);
                 moving.push(link);
-                let rest = cable_path(from, to, 1.0);
                 let start = match a.motion {
                     CableMotion::Move { from_end } => Some(from_end),
                     CableMotion::Connect { from_end } => from_end,
                     CableMotion::Retract { .. } => None,
                 };
-                // The end travels to the port: quickly from where it was
-                // let go, or along the cable when it shoots out.
-                let end = match start {
-                    Some(st) => {
-                        let k = (t / 0.16).clamp(0.0, 1.0);
-                        st + (to - st) * (1.0 - (1.0 - k).powi(3))
-                    }
-                    None => {
-                        let k = (t / 0.28).clamp(0.0, 1.0);
-                        *cable_path(from, to, 1.0 - (1.0 - k).powi(3))
-                            .last()
-                            .unwrap_or(&to)
-                    }
+                let remaining = (1.0 - progress).powi(3);
+                let cable = if let Some(start) = start {
+                    Cable::new(from, to.lerp(start, remaining))
+                        .with_offset(a.curve.offset() * remaining)
+                } else {
+                    Cable::new(from, to).prefix(1.0 - remaining)
                 };
-                // A little slack (more for a longer throw) so it swings,
-                // then it eases into the resting curve.
-                let throw = start.map_or(0.0, |st| st.distance(to));
-                let rest_len = super::rope::length(&rest);
-                let slack = 1.0
-                    + (0.015 + 0.035 * a.seed) * (1.0 - (t / 0.7).clamp(0.0, 1.0))
-                    + (throw / rest_len.max(1.0)).min(0.3)
-                        * 0.10
-                        * (1.0 - (t / 0.5).clamp(0.0, 1.0));
-                let length = (rest_len * slack).max(from.distance(end));
-                let settle = ((t - 0.12) / 0.53).clamp(0.0, 1.0);
-                let pins = super::rope::Pins {
-                    start: from,
-                    end: Some(end),
-                };
-                a.rope.advance(
-                    dt,
-                    pins,
-                    length,
-                    gravity * (1.0 - settle),
-                    Some(&rest),
-                    0.12 * settle * settle,
-                );
-                painter.add(egui::Shape::line(a.rope.smooth(), Stroke::new(1.65, ink)));
+                cable.paint(&painter, Stroke::new(CABLE_WIDTH, ink));
             }
         }
     }
@@ -2138,7 +2026,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             } else {
                 peg_colour(&s.doc.graph, link.from).unwrap_or(theme::LINE_CONTROL)
             };
-            curve(&painter, from, to, Stroke::new(1.65, ink));
+            curve(&painter, from, to, Stroke::new(CABLE_WIDTH, ink));
         }
     }
     if let Some(Drag::Cable { source, .. }) = state.drag {
@@ -2151,9 +2039,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 .unwrap_or(pointer);
             let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::ACCENT_SELECT);
             if animated {
-                // A live rope: it hangs, trails a fast drag and swings.
-                let rest = cable_path(from, to, 1.0);
-                let rope = state.drag_rope.get_or_insert_with(|| {
+                let previous = state.drag_cable.unwrap_or_else(|| {
                     let picked = match state.drag {
                         Some(Drag::Cable {
                             old_input: Some(input),
@@ -2161,28 +2047,20 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                         }) => inputs.get(&input).copied(),
                         _ => None,
                     };
-                    super::rope::Rope::along(&cable_path(from, picked.unwrap_or(from), 1.0))
+                    Cable::new(from, picked.unwrap_or(from))
                 });
-                let length = super::rope::length(&rest) * super::rope::DRAG_SLACK;
-                rope.advance(
-                    dt,
-                    super::rope::Pins {
-                        start: from,
-                        end: Some(to),
-                    },
-                    length,
-                    gravity,
-                    Some(&rest),
-                    super::rope::DRAG_PULL,
-                );
-                painter.add(egui::Shape::line(rope.smooth(), Stroke::new(2.0, ink)));
-                ui.ctx().request_repaint();
+                let cable = previous.follow(from, to, dt);
+                state.drag_cable = Some(cable);
+                cable.paint(&painter, Stroke::new(ACTIVE_CABLE_WIDTH, ink));
+                if cable.offset().length_sq() > 0.01 {
+                    ui.ctx().request_repaint();
+                }
             } else {
-                curve(&painter, from, to, Stroke::new(2.0, ink));
+                curve(&painter, from, to, Stroke::new(ACTIVE_CABLE_WIDTH, ink));
             }
         }
     } else {
-        state.drag_rope = None;
+        state.drag_cable = None;
     }
     // While pulling a node out, show the chain closing up behind it.
     if let Some(id) = detach {
