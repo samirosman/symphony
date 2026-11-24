@@ -90,7 +90,7 @@ impl CableMotion {
     fn seconds(self) -> f64 {
         match self {
             CableMotion::Connect { .. } | CableMotion::Move { .. } => 0.28,
-            CableMotion::Retract { .. } => 0.45,
+            CableMotion::Retract { .. } => 0.32,
         }
     }
 }
@@ -1976,10 +1976,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             CableMotion::Retract { source, from } => {
                 let ink = peg_colour(&s.doc.graph, source).unwrap_or(theme::LINE_CONTROL);
                 let from = outputs.get(&source).copied().unwrap_or(from);
-                let remaining = 1.0 - progress * progress * (3.0 - 2.0 * progress);
-                a.curve.retract(from, remaining).paint(
+                a.curve.retract(from, progress).paint(
                     &painter,
-                    Stroke::new(CABLE_WIDTH, ink.gamma_multiply(0.5 + 0.5 * remaining)),
+                    Stroke::new(CABLE_WIDTH, ink.gamma_multiply(1.0 - 0.5 * progress)),
                 );
             }
             CableMotion::Connect { .. } | CableMotion::Move { .. } => {
