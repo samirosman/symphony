@@ -717,6 +717,20 @@ fn search_puts_a_blend_mode_on_the_selected_layer() {
     assert!(s.doc.graph.node(blend).is_none());
 }
 
+/// With `SYMPHONY_PERF_GATE=1` (scripts/perf.sh), fail a benchmark that
+/// took longer than `budget_ms`. Budgets are about twice today's time on
+/// an M1 under load, so only a real slowdown trips them.
+fn perf_gate(what: &str, took: std::time::Duration, budget_ms: f32) {
+    if std::env::var_os("SYMPHONY_PERF_GATE").is_none() {
+        return;
+    }
+    let ms = took.as_secs_f32() * 1000.0;
+    assert!(
+        ms <= budget_ms,
+        "{what} took {ms:.2} ms, over its {budget_ms} ms budget (ENGINEERING E6)"
+    );
+}
+
 /// Cost of the eraser on a busy page of brush strokes and fills. Not
 /// pass/fail: `cargo test --release -p symphony-app erase_cost -- --ignored --nocapture`.
 #[test]
@@ -773,7 +787,9 @@ fn erase_cost() {
         let x = -650.0 + k as f32 * 4.0;
         s.erase(d, &[([x, -390.0], 10.0), ([x + 4.0, -390.0], 10.0)]);
     }
-    println!("erase_cost: {:?} per eraser move", start.elapsed() / 60);
+    let per_move = start.elapsed() / 60;
+    println!("erase_cost: {per_move:?} per eraser move");
+    perf_gate("eraser move on plain strokes", per_move, 2.0);
     let start = std::time::Instant::now();
     for _ in 0..5 {
         std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
@@ -1139,11 +1155,13 @@ fn textured_erase_cost() {
         .map(|st| st.shape.iter().map(Vec::len).sum::<usize>())
         .max()
         .unwrap_or(0);
+    let per_move = start.elapsed() / moves;
     println!(
-        "textured_erase_cost: {:?} per move, worst {worst:?}; {} strokes, {verts} shape points (most in one: {most})",
-        start.elapsed() / moves,
+        "textured_erase_cost: {per_move:?} per move, worst {worst:?}; {} strokes, {verts} shape points (most in one: {most})",
         dr.strokes.len()
     );
+    perf_gate("eraser move on textured strokes", per_move, 2.0);
+    perf_gate("worst eraser move on textured strokes", worst, 12.0);
     let start = std::time::Instant::now();
     for _ in 0..3 {
         std::hint::black_box(symphony_render::render_camera(&s.doc, 1, 1920, 1080, None));
@@ -1497,5 +1515,56 @@ fn real_scene_stamp_cost() {
         one,
         bands,
         start.elapsed() / reps
+    );
+}
+
+/// Export speed on a real project: frames one at a time (the old way) vs
+/// a PNG sequence and a GIF through the batched export. `SYMPHONY_PERF_OPEN=
+/// <project> cargo test --release -p symphony-app real_scene_export_cost --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "needs a real project"]
+fn real_scene_export_cost() {
+    let Some(path) = std::env::var_os("SYMPHONY_PERF_OPEN") else {
+        return;
+    };
+    let scene = symphony_io::open(std::path::Path::new(&path)).unwrap();
+    let last = scene.settings.length.clamp(1, 24);
+    let (w, h) = (scene.settings.width, scene.settings.height);
+    let start = std::time::Instant::now();
+    for f in 1..=last {
+        std::hint::black_box(symphony_render::render_frame(&scene, f, w, h));
+    }
+    let one = start.elapsed();
+    let dir = std::env::temp_dir().join(format!("symphony-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut times = Vec::new();
+    for (format, name) in [
+        (symphony_render::Format::PngSequence, "f.png"),
+        (symphony_render::Format::AnimatedGif, "a.gif"),
+    ] {
+        let job = symphony_render::ExportJob {
+            format,
+            path: dir.join(name),
+            first: 1,
+            last,
+            scale: 1.0,
+            codec: None,
+            movie_fps: None,
+        };
+        let start = std::time::Instant::now();
+        symphony_render::export(
+            &scene,
+            &job,
+            &std::sync::atomic::AtomicBool::new(false),
+            &|_, _| {},
+        )
+        .unwrap();
+        times.push(start.elapsed());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "{last} frames at {w}x{h}: rendering one at a time {one:?}; PNG export {:?}, GIF export {:?}",
+        times[0], times[1]
     );
 }

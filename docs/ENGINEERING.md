@@ -173,11 +173,23 @@ reason in its commit.
   - one big stroke stamps in parallel horizontal bands;
   - a drawing's textured strokes stamp together;
   - the result must be byte-for-byte what one thread would make. A test
-    checks it (`parallel_bands_match_one_pass_exactly`).
+    checks it (`parallel_bands_match_one_pass_exactly`);
+  - big outline merges (vector brushes, stroke outlines) merge in groups
+    across the cores, then merge the groups (`shape::merge`; a union
+    doesn't depend on order);
+  - the eraser works out each stroke under it in parallel;
+  - export renders a batch of frames at once and prepares them (GIF
+    colours and compression, MP4 colour conversion) ahead of the writer.
+  Spread work only when there is enough of it: one small job runs on
+  the calling thread, since waking the other cores costs more.
 - **Never rebuild geometry each frame.** Tessellated meshes, stamped
   images and traced outlines are cached by content key. A frame that
   re-tessellates a stroke it drew last frame is a bug. Stand-ins are
-  cached too.
+  cached too. Outlines that several parts need (canvas, eraser, export)
+  live in one shared cache (`symphony_vector::recent`), so each is built
+  once. The test `an_unchanged_frame_rebuilds_nothing` counts the work
+  a redraw does (`Cache::work`, `VectorMeshes::built`) and fails if
+  it's more than zero; add new kinds of cached work to those counters.
 - **Cancel stale work.** A job whose stroke changed since it was queued
   is dropped, not finished.
 - **Measure on real projects.** Synthetic scenes miss real problems. The
@@ -206,7 +218,17 @@ SYMPHONY_PERF_SECONDS=5 SYMPHONY_PERF_SPIN=1 SYMPHONY_PERF_OPEN=My.symphony ./ta
 ```
 
 "Between frames" is what smoothness feels like. Any frame over 16.7 ms
-counts as a jank.
+counts as a jank. It includes waiting for the GPU and the display, so
+a busy GPU (training running on the same Mac) adds janks the app didn't
+cause: compare against the previous commit on the same machine state.
+
+**Timing checks.** `scripts/perf.sh` runs the release-build benchmarks
+with `SYMPHONY_PERF_GATE=1`, and they fail past their budgets (about
+twice today's time): eraser moves, the worst eraser move, and a long
+vector-brush outline. Run it before merging work on drawing, erasing,
+stamping or export. More benchmarks, not gated (they need a real
+project in `SYMPHONY_PERF_OPEN`): `real_scene_stamp_cost` and
+`real_scene_export_cost`.
 
 ---
 
