@@ -280,9 +280,58 @@ fn fonts() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
             ] {
                 db.load_font_data(bytes.to_vec());
             }
+            name_generic_families(&mut db);
             std::sync::Arc::new(db)
         })
         .clone()
+}
+
+/// Point "sans-serif", "serif" and "monospace" at fonts that exist. The
+/// database's own choices are Arial, Times New Roman and Courier New;
+/// on a computer without them (most Linux systems) text in a generic
+/// family, which is the Text tool's default, gave no letters at all.
+/// The last name of each list is a font that ships with Symphony.
+fn name_generic_families(db: &mut resvg::usvg::fontdb::Database) {
+    let first = |db: &resvg::usvg::fontdb::Database, names: &[&str]| {
+        names
+            .iter()
+            .find(|name| {
+                db.faces()
+                    .any(|face| face.families.iter().any(|(family, _)| family == *name))
+            })
+            .map(|name| (*name).to_owned())
+    };
+    let sans = [
+        "Arial",
+        "Helvetica",
+        "Noto Sans",
+        "DejaVu Sans",
+        "Liberation Sans",
+        "Space Grotesk",
+    ];
+    let serif = [
+        "Times New Roman",
+        "Noto Serif",
+        "DejaVu Serif",
+        "Liberation Serif",
+        "Fraunces",
+    ];
+    let mono = [
+        "Courier New",
+        "Noto Sans Mono",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Space Mono",
+    ];
+    if let Some(name) = first(db, &sans) {
+        db.set_sans_serif_family(name);
+    }
+    if let Some(name) = first(db, &serif) {
+        db.set_serif_family(name);
+    }
+    if let Some(name) = first(db, &mono) {
+        db.set_monospace_family(name);
+    }
 }
 
 /// The font families on this computer, sorted (loads them the first time:
@@ -796,11 +845,9 @@ mod tests {
             size: 50.0,
             ..Default::default()
         };
+        // Fonts ship with Symphony, so there are always letters.
         let one = text_shapes("I", &style);
-        if one.is_empty() {
-            eprintln!("No fonts on this machine: skipping");
-            return;
-        }
+        assert!(!one.is_empty());
         let total = |s: &[Shape]| -> f32 {
             s.iter()
                 .map(|x| symphony_vector::shape::shape_area(x).abs())
