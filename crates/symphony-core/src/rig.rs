@@ -57,7 +57,7 @@ pub enum AnchorKind {
     /// The joint stays on its target.
     #[default]
     Locked,
-    /// The joint may move, but its bone keeps aiming at the target.
+    /// The target guides inverse kinematics without pinning the joint.
     Aim,
 }
 
@@ -294,6 +294,150 @@ pub fn solve_chain(joints: &[[f32; 2]], links: &[Link], target: [f32; 2]) -> Vec
         }
     }
     p
+}
+
+/// Result of an anchored edit, including the permitted translation and
+/// the accepted target when the edited tip already has an anchor.
+#[derive(Default)]
+pub struct RigSolution {
+    pub changes: Vec<(crate::graph::NodeId, f32, f32)>,
+    pub feasible: bool,
+    pub translation: [f32; 2],
+    pub target: Option<[f32; 2]>,
+}
+
+pub(crate) struct RigEdge {
+    pub start: usize,
+    pub end: usize,
+    pub length: f32,
+    pub range: [f32; 2],
+}
+
+/// Project the whole tree together. Roots, locked anchors, and the
+/// requested drag are hard constraints. Aim targets pull the rig as far
+/// as it can go while those constraints still hold.
+pub(crate) fn solve_tree(
+    rest: &[[f32; 2]],
+    edges: &[RigEdge],
+    hard: &[(usize, [f32; 2])],
+    soft: &[(usize, [f32; 2])],
+) -> Option<Vec<[f32; 2]>> {
+    let mut pinned = vec![false; rest.len()];
+    let mut active = vec![false; rest.len()];
+    let mut initial = rest.to_vec();
+    for &(i, p) in hard {
+        pinned[i] = true;
+        active[i] = true;
+        initial[i] = p;
+    }
+    for &(i, _) in soft {
+        active[i] = true;
+    }
+    for edge in edges.iter().rev() {
+        active[edge.start] |= active[edge.end];
+    }
+    let distance = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let lengths_fit = |p: &[[f32; 2]], stretch: bool| {
+        edges.iter().filter(|e| active[e.end]).all(|edge| {
+            let len = distance(p[edge.start], p[edge.end]);
+            let [lo, hi] = if stretch {
+                edge.range
+            } else {
+                [edge.length; 2]
+            };
+            len >= lo - 0.008 && len <= hi + 0.008
+        })
+    };
+    let relax = |stretch: bool, pull: bool| {
+        let mut points = initial.clone();
+        if !pull && lengths_fit(&points, stretch) {
+            return Some(points);
+        }
+        // Break a perfectly straight chain's symmetry when a rigid chain
+        // is shortened. Preserve the current bend whenever one exists.
+        for edge in edges {
+            if active[edge.end] && !pinned[edge.end] {
+                let [ax, ay] = rest[edge.start];
+                let [bx, by] = rest[edge.end];
+                points[edge.end][0] -= (by - ay) * 0.001;
+                points[edge.end][1] += (bx - ax) * 0.001;
+            }
+        }
+        for step in 0..192 {
+            if pull && step < 100 {
+                for &(i, goal) in soft {
+                    if !pinned[i] {
+                        for (value, desired) in points[i].iter_mut().zip(goal) {
+                            *value += (desired - *value) * 0.35;
+                        }
+                    }
+                }
+            }
+            let mut project = |edge: &RigEdge| {
+                let RigEdge { start, end, .. } = *edge;
+                if !active[end] || (pinned[start] && pinned[end]) {
+                    return;
+                }
+                let a = points[start];
+                let b = points[end];
+                let len = distance(a, b);
+                let [lo, hi] = if stretch {
+                    edge.range
+                } else {
+                    [edge.length; 2]
+                };
+                let wanted = len.clamp(lo, hi);
+                let (dx, dy) = if len > 0.00001 {
+                    ((b[0] - a[0]) / len, (b[1] - a[1]) / len)
+                } else {
+                    (1.0, 0.0)
+                };
+                let weight = if pinned[start] || pinned[end] {
+                    1.0
+                } else {
+                    0.5
+                };
+                let correction = (len - wanted) * weight;
+                if !pinned[start] {
+                    points[start] = [a[0] + dx * correction, a[1] + dy * correction];
+                }
+                if !pinned[end] {
+                    points[end] = [b[0] - dx * correction, b[1] - dy * correction];
+                }
+            };
+            edges.iter().rev().for_each(&mut project);
+            edges.iter().for_each(&mut project);
+            if (!pull
+                || step >= 100
+                || soft
+                    .iter()
+                    .all(|&(i, target)| distance(points[i], target) < 0.008))
+                && lengths_fit(&points, stretch)
+            {
+                return Some(points);
+            }
+        }
+        None
+    };
+    let mut solved = relax(false, !soft.is_empty())
+        .or_else(|| relax(true, !soft.is_empty()))
+        .or_else(|| relax(true, false))?;
+    // Free branches inherit their parent's change in angle and keep their
+    // own local pose, even when the constraint solve moves the parent.
+    let mut turns = vec![0.0; rest.len()];
+    for edge in edges {
+        let d = |p: &[[f32; 2]]| {
+            (p[edge.end][1] - p[edge.start][1]).atan2(p[edge.end][0] - p[edge.start][0])
+        };
+        let old = d(rest);
+        if !active[edge.end] {
+            let angle = old + turns[edge.start];
+            let [x, y] = solved[edge.start];
+            solved[edge.end] = [x + edge.length * angle.cos(), y + edge.length * angle.sin()];
+        }
+        turns[edge.end] = d(&solved) - old;
+    }
+    Some(solved)
 }
 
 /// Two rigid transformations blended around the selected bone's rest joint.

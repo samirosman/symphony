@@ -1229,29 +1229,46 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     });
     ui.checkbox(&mut draft.node.enabled, "Enabled");
     ui.separator();
+    let skeleton_anchored = matches!(draft.node.kind, NodeKind::Skeleton(_))
+        && s.doc.graph.rig_has_anchors(draft.id, s.frame);
     match &mut draft.node.kind {
         NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => {
-            peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
-            peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
-            peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
-            ui.label("Transform values update live.");
-            ui.collapsing("Scale, pivot and depth", |ui| {
-                peg_value(ui, "Depth Z", &mut peg.z, s.frame, s.animate);
-                for (label, value) in [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)]
-                {
-                    let mut draft = value
-                        .clone()
-                        .unwrap_or(symphony_core::anim::Value::Constant(1.0));
-                    if peg_value(ui, label, &mut draft, s.frame, s.animate) {
-                        *value = Some(draft);
+            let x = peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
+            let y = peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
+            if skeleton_anchored {
+                if x || y {
+                    super::rig_edit::translate_skeleton(
+                        s,
+                        draft.id,
+                        [peg.x.at(s.frame), peg.y.at(s.frame)],
+                    );
+                    if let Some(current) = PropertyDraft::new(s, draft.id) {
+                        *draft = current;
                     }
+                    return;
                 }
-                ui.horizontal(|ui| {
-                    ui.label("Pivot");
-                    ui.add(egui::DragValue::new(&mut peg.pivot.0).prefix("X "));
-                    ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
+            } else {
+                peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
+                ui.label("Transform values update live.");
+                ui.collapsing("Scale, pivot and depth", |ui| {
+                    peg_value(ui, "Depth Z", &mut peg.z, s.frame, s.animate);
+                    for (label, value) in
+                        [("Scale X", &mut peg.scale_x), ("Scale Y", &mut peg.scale_y)]
+                    {
+                        let mut draft = value
+                            .clone()
+                            .unwrap_or(symphony_core::anim::Value::Constant(1.0));
+                        if peg_value(ui, label, &mut draft, s.frame, s.animate) {
+                            *value = Some(draft);
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Pivot");
+                        ui.add(egui::DragValue::new(&mut peg.pivot.0).prefix("X "));
+                        ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
+                    });
                 });
-            });
+            }
         }
         NodeKind::Bone(bone) => {
             if !bone_has_drawing(&s.doc.graph, draft.id)
@@ -1263,26 +1280,77 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 add_bone_drawing(s, draft.id);
                 return;
             }
+            use symphony_core::rig::AnchorKind;
             let parent = s.doc.graph.parent_bone(draft.id);
-            let controller = s.doc.graph.smart_controller(draft.id, s.frame);
-            if let Some(joint) = bone.smart.as_mut().filter(|_| parent.is_some()) {
-                peg_value(ui, "Target X", &mut joint.target[0], s.frame, s.animate);
-                peg_value(ui, "Target Y", &mut joint.target[1], s.frame, s.animate);
-                ui.checkbox(&mut joint.flip, "Flip bend");
-            } else if let Some(owner) = controller.filter(|&id| id != draft.id) {
-                if ui.button("Select smart joint target").clicked() {
-                    s.select_graph_node(owner, true);
-                }
-            } else {
-                peg_value(ui, "Rotation", &mut bone.rotation, s.frame, s.animate);
+            let root = s.doc.graph.rig_root(draft.id);
+            let anchored = s.doc.graph.rig_has_anchors(root, s.frame);
+            ui.label("Anchor");
+            let mut kind = bone.anchor.as_ref().map(|anchor| anchor.kind);
+            widgets::segmented(
+                ui,
+                "anchor-mode",
+                &mut kind,
+                &[
+                    (None, "Off"),
+                    (Some(AnchorKind::Locked), "Locked"),
+                    (Some(AnchorKind::Aim), "Aim"),
+                ],
+                false,
+            );
+            if let Some(kind) = kind {
+                ui.label(match kind {
+                    AnchorKind::Locked => "This tip stays planted while you pose the rig.",
+                    AnchorKind::Aim => "The rig reaches toward this target.",
+                });
             }
-            if let Some(label) = smart_joint_label(s, draft.id) {
-                if ui.button(label).clicked() {
-                    toggle_smart_joint(s, draft.id);
+            if kind != bone.anchor.as_ref().map(|anchor| anchor.kind) {
+                super::rig_edit::set_anchor_mode(s, draft.id, kind);
+                if let Some(current) = PropertyDraft::new(s, draft.id) {
+                    *draft = current;
+                }
+                return;
+            }
+            if let Some(anchor) = &bone.anchor {
+                let mut target = anchor.target.each_ref().map(|value| value.at(s.frame));
+                let changed = ui
+                    .horizontal(|ui| {
+                        let x = ui
+                            .add(egui::DragValue::new(&mut target[0]).prefix("Target X "))
+                            .changed();
+                        let y = ui
+                            .add(egui::DragValue::new(&mut target[1]).prefix("Y "))
+                            .changed();
+                        x || y
+                    })
+                    .inner;
+                if changed {
+                    super::rig_edit::pose_to(s, draft.id, target, false);
                     if let Some(current) = PropertyDraft::new(s, draft.id) {
                         *draft = current;
                     }
                     return;
+                }
+            } else if !anchored {
+                let controller = s.doc.graph.smart_controller(draft.id, s.frame);
+                if let Some(joint) = bone.smart.as_mut().filter(|_| parent.is_some()) {
+                    peg_value(ui, "Target X", &mut joint.target[0], s.frame, s.animate);
+                    peg_value(ui, "Target Y", &mut joint.target[1], s.frame, s.animate);
+                    ui.checkbox(&mut joint.flip, "Flip bend");
+                } else if let Some(owner) = controller.filter(|&id| id != draft.id) {
+                    if ui.button("Select smart joint target").clicked() {
+                        s.select_graph_node(owner, true);
+                    }
+                } else {
+                    peg_value(ui, "Rotation", &mut bone.rotation, s.frame, s.animate);
+                }
+                if let Some(label) = smart_joint_label(s, draft.id) {
+                    if ui.button(label).clicked() {
+                        toggle_smart_joint(s, draft.id);
+                        if let Some(current) = PropertyDraft::new(s, draft.id) {
+                            *draft = current;
+                        }
+                        return;
+                    }
                 }
             }
             ui.collapsing("Rest pose and deformation", |ui| {
@@ -1337,7 +1405,9 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         .on_hover_text("Longer and thinner, or shorter and fatter.");
                     });
                 if bone.stretch_mode != Stretch::Rigid {
-                    peg_value(ui, "Stretch", &mut bone.stretch, s.frame, s.animate);
+                    if !anchored {
+                        peg_value(ui, "Stretch", &mut bone.stretch, s.frame, s.animate);
+                    }
                     let mut limited = bone.stretch_limits.is_some();
                     widgets::checkbox(ui, &mut limited, "Limit")
                         .on_hover_text("Resistance grows as it nears its shortest or longest.");
@@ -1361,44 +1431,6 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         });
                     }
                 }
-            });
-            ui.collapsing("Anchor", |ui| {
-                use symphony_core::rig::{Anchor, AnchorKind};
-                let mut kind = bone.anchor.as_ref().map(|a| a.kind);
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut kind, None, "None");
-                    ui.selectable_value(&mut kind, Some(AnchorKind::Locked), "Locked");
-                    ui.selectable_value(&mut kind, Some(AnchorKind::Aim), "Aim");
-                });
-                if kind != bone.anchor.as_ref().map(|a| a.kind) {
-                    match kind {
-                        None => bone.anchor = None,
-                        Some(k) => {
-                            // A new anchor starts where the tip is.
-                            let tip = s
-                                .doc
-                                .graph
-                                .bone_pose(draft.id, s.frame)
-                                .map(|p| p.tip())
-                                .unwrap_or((0.0, 0.0));
-                            let target =
-                                bone.anchor.as_ref().map(|a| a.target.clone()).unwrap_or([
-                                    symphony_core::anim::Value::Constant(tip.0),
-                                    symphony_core::anim::Value::Constant(tip.1),
-                                ]);
-                            bone.anchor = Some(Box::new(Anchor { kind: k, target }));
-                        }
-                    }
-                }
-                ui.label(
-                    egui::RichText::new(
-                        "Locked pins this bone's tip; Aim keeps the bone pointing at its target. \
-                         With anchors, dragging a joint in the Camera view solves the rig around \
-                         them (A toggles the selected bone's anchor).",
-                    )
-                    .font(theme::dense())
-                    .color(theme::TEXT_SECONDARY),
-                );
             });
         }
         NodeKind::MeshWarp(warp) => {
@@ -1714,16 +1746,44 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         if let Some(before) = s.doc.graph.node(draft.id).cloned() {
             let mut after = before.clone();
             after.kind = draft.node.kind.clone();
+            let key = format!("node-props-{}", draft.id.0);
+            let root = s.doc.graph.rig_root(draft.id);
+            let mut anchored_solution = None;
+            if matches!(after.kind, NodeKind::Bone(_)) && s.doc.graph.rig_has_anchors(root, s.frame)
+            {
+                let mut preview = s.doc.graph.clone();
+                if let Some(node) = preview.node_mut(draft.id) {
+                    *node = after.clone();
+                }
+                anchored_solution = preview.solve_rig_translation(root, [0.0; 2], s.frame);
+                if anchored_solution
+                    .as_ref()
+                    .is_some_and(|solution| !solution.feasible)
+                {
+                    s.note("This change would move a locked anchor.");
+                    if let Some(current) = PropertyDraft::new(s, draft.id) {
+                        *draft = current;
+                    }
+                    return;
+                }
+            }
             s.history.apply_merged(
                 &mut s.doc,
                 "Change transform",
-                &format!("node-props-{}", draft.id.0),
+                &key,
                 Edit::SetNodeProperties {
                     id: draft.id,
                     before,
                     after,
                 },
             );
+            if let Some(solution) = anchored_solution {
+                super::rig_edit::apply_rig_solution(s, root, &key, solution, None);
+                if let Some(current) = PropertyDraft::new(s, draft.id) {
+                    *draft = current;
+                }
+                return;
+            }
             draft.initial.kind = draft.node.kind.clone();
         }
     }
