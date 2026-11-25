@@ -3777,7 +3777,10 @@ impl Viewer<'_> {
             View::Multiplane => views::multiplane::ui(ui, self.s, self.node_view),
             View::ToolProperties => panels::tool_properties(ui, self.s, self.presets, self.device),
             View::Colour => panels::colour(ui, self.s),
-            View::LayerProperties => node::inspector(ui, self.s, self.node_view),
+            View::LayerProperties => {
+                function::key_properties(ui, self.s, self.function);
+                node::inspector(ui, self.s, self.node_view);
+            }
             View::Function => function::ui(ui, self.s, self.function),
             View::NodeLibrary => node::library(ui, self.s, self.node_view),
             View::Library => panels::planned(ui, "Library (templates and symbols)", "M6"),

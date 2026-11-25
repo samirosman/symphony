@@ -359,7 +359,7 @@ fn key_diamond(painter: &egui::Painter, c: Pos2, r: f32) {
 }
 
 /// The amber frame tag on a ruler (D3.9).
-fn frame_tag(painter: &egui::Painter, centre: Pos2, frame: u32) {
+pub(crate) fn frame_tag(painter: &egui::Painter, centre: Pos2, frame: u32) {
     let text = frame.to_string();
     let w = 10.0 + 7.0 * text.len() as f32;
     let r = Rect::from_center_size(centre, Vec2::new(w, 16.0));
