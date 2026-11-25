@@ -415,10 +415,13 @@ and animation state.
 | Area | Harmony profile | Symphony profile | Why |
 |---|---|---|---|
 | Redo on macOS | Control+Shift+Z (as Harmony 27 documents) | Cmd+Shift+Z | Matches every other Mac app |
-| Tool keys | Harmony bindings | S Select, B Brush, E Eraser, L Line, T Text, P Paint, C Close Gap, D Dropper, N Line Editor, X Transform, H Hand, Z Zoom | Use mnemonic keys in Drawing and Camera |
+| Tool keys | Harmony bindings | S Select, B Brush, E Eraser, L Line, T Text, P Paint, C Cutter, G Close Gap, D Dropper, N Line Editor, X Transform, H Hand, Z Zoom | Use mnemonic keys in Drawing and Camera |
 | Zoom | Harmony bindings | 1 zooms in and 2 zooms out in Drawing, Camera, and Node | Use the same gesture across viewports |
 | Plus and minus | Change exposure | Resize the brush in Drawing and Camera, change exposure in Timeline and Xsheet | Apply the adjustment to the view under the pointer |
 | Search | Tab | Tab | Open Search from the workspace |
+| Drawing and Camera | Harmony bindings | R Repaint, U Unpaint, Y Paint Unpainted, O Onion Skin, M Mirror, I Show selected points, V Preview art layers. Camera also uses Shift+R to toggle rendered effects. | Keep common drawing and preview actions near their names |
+| Timeline and Xsheet | Harmony bindings | A Auto-key, C Clone, D Duplicate, I Insert in-between, K Set key, Shift+K Delete key, L Add layer, N New drawing frame, V Layer visibility | Reuse letters in the timing context |
+| Node | Menus and Search | A Arrange, P Properties, R Reset view, V Render preview | Keep graph editing shortcuts inside the graph |
 
 
 ---

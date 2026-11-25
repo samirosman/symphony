@@ -1388,6 +1388,30 @@ impl SymphonyApp {
                     self.palette = Some(views::palette::PaletteState::new(at, here));
                 }
             }
+            Action::IncreaseBrushSize => self.set_tool_size(|size| size * 1.1),
+            Action::DecreaseBrushSize => self.set_tool_size(|size| size / 1.1),
+            Action::SelectCutter if Tool::Select.fits(self.s.tool_context()) => {
+                self.s.tool = Tool::Select;
+                self.s.cutter_mode = true;
+            }
+            Action::ToggleSelectedPoints if self.s.has_selected_points() => {
+                self.s.show_selected_points = !self.s.show_selected_points;
+                self.s.tool = Tool::Select;
+            }
+            Action::ArrangeNodes => views::node::arrange(&mut self.s, &mut self.node_view),
+            Action::ShowNodeProperties => {
+                views::node::show_selected_properties(&self.s, &mut self.node_view)
+            }
+            Action::RenderNodePreview => views::node::show_render_preview(&mut self.node_view),
+            Action::ResetNodeView => views::node::reset_view(&mut self.node_view),
+            Action::ToggleCameraEffects => self.camera.render_effects = !self.camera.render_effects,
+            Action::ToggleAutoKey => self.s.animate = !self.s.animate,
+            Action::ToggleLayerVisible => self.s.toggle_visible(self.s.selected),
+            Action::Timeline(action) => {
+                if action.enabled(&self.s) {
+                    action.run(&mut self.s);
+                }
+            }
             Action::MaximiseView => {
                 self.maximised = match self.maximised {
                     Some(_) => None,
@@ -1456,22 +1480,6 @@ impl SymphonyApp {
                     }
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
-                    Action::IncreaseBrushSize | Action::DecreaseBrushSize => {
-                        let factor = if other == Action::IncreaseBrushSize {
-                            1.1_f32
-                        } else {
-                            1.0 / 1.1
-                        };
-                        let settings = match s.tool {
-                            Tool::Eraser => &mut s.eraser,
-                            Tool::Pencil => &mut s.pencil,
-                            _ => &mut s.brush,
-                        };
-                        let minimum = if s.tool == Tool::Eraser { 1.0 } else { 0.5 };
-                        settings.max_width = (settings.max_width * factor).clamp(minimum, 4096.0);
-                        settings.min_width = (settings.min_width * factor).min(settings.max_width);
-                    }
-
                     Action::CreateEmptyDrawing => s.new_drawing(),
                     Action::AddLayer => s.add_layer(),
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
@@ -1530,56 +1538,36 @@ impl SymphonyApp {
             return;
         }
         let hovered = self.hovered_view;
-        let canvas = matches!(hovered, Some(View::Drawing | View::Camera));
-        let timing = matches!(hovered, Some(View::Timeline | View::Xsheet));
         let symphony = self.profile == Profile::Symphony;
-        if symphony || !ctx.egui_wants_keyboard_input() {
-            let here = self.hovered_view.or_else(|| {
+        let here = if symphony {
+            hovered
+        } else {
+            hovered.or_else(|| {
                 self.layout_mut()
                     .find_active_focused()
                     .map(|(_, view)| *view)
-            });
-            if !symphony && here == Some(View::Node) {
-                let zoom = ctx.input_mut(|input| {
-                    if input.consume_key(egui::Modifiers::NONE, egui::Key::Num1) {
-                        Some(true)
-                    } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Num2) {
-                        Some(false)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(zoom_in) = zoom {
-                    views::node::zoom_by_keyboard(&mut self.node_view, zoom_in);
-                    ctx.request_repaint();
-                }
-            }
-            if timing || (!symphony && matches!(here, Some(View::Timeline | View::Xsheet))) {
-                let clipboard = ctx.input_mut(|input| {
-                    use views::timing::TimelineAction;
-                    if input.consume_key(egui::Modifiers::COMMAND, egui::Key::C) {
-                        Some(TimelineAction::CopyDrawing)
-                    } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::V) {
-                        Some(TimelineAction::PasteDrawing)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(action) = clipboard {
-                    action.run(&mut self.s);
-                    ctx.request_repaint();
-                }
-            }
-            if (hovered == Some(View::Timeline) || (!symphony && here == Some(View::Timeline)))
-                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
-            {
-                views::timing::TimelineAction::SetKey.run(&mut self.s);
-                ctx.request_repaint();
-            }
-        }
+            })
+        };
+        let canvas = matches!(here, Some(View::Drawing | View::Camera));
+        let timing = matches!(here, Some(View::Timeline | View::Xsheet));
         let control_focused = ctx.egui_wants_keyboard_input();
         if control_focused && !symphony {
             return;
+        }
+        if !symphony && here == Some(View::Node) {
+            let zoom = ctx.input_mut(|input| {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Num1) {
+                    Some(true)
+                } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Num2) {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+            if let Some(zoom_in) = zoom {
+                views::node::zoom_by_keyboard(&mut self.node_view, zoom_in);
+                ctx.request_repaint();
+            }
         }
         // Rig keys while posing a bone (Transform tool): A cycles the
         // anchor, F flips a smart joint's bend, arrows nudge (Shift: 10).
@@ -1643,21 +1631,32 @@ impl SymphonyApp {
         for action in Action::ALL {
             let allowed = match keymap::scope(self.profile, action) {
                 keymap::Scope::Global => true,
+                keymap::Scope::OutsideTiming => !timing,
+                keymap::Scope::OutsideTimeline => here != Some(View::Timeline),
+                keymap::Scope::Timeline => here == Some(View::Timeline),
+                keymap::Scope::Node => here == Some(View::Node),
+                keymap::Scope::Camera => here == Some(View::Camera),
                 keymap::Scope::Timing => timing,
                 keymap::Scope::Canvas => canvas,
                 keymap::Scope::Viewport => canvas || hovered == Some(View::Node),
             };
             if !allowed
+                || (action == Action::ArrangeNodes && self.node_view.setup.open.is_some())
                 || (control_focused && matches!(action, Action::Delete | Action::PlayPause))
                 || !keymap::pressed(ctx, self.profile, action)
             {
                 continue;
             }
-            if let Some(tool) = Tool::ALL
-                .into_iter()
-                .find(|&tool| tool_action(tool) == action)
-            {
-                if symphony && !tool.fits(self.s.tool_context()) {
+            if symphony {
+                let tool = match action {
+                    Action::ToolRepaint | Action::ToolUnpaint | Action::ToolPaintUnpainted => {
+                        Some(Tool::Paint)
+                    }
+                    _ => Tool::ALL
+                        .into_iter()
+                        .find(|&tool| tool_action(tool) == action),
+                };
+                if tool.is_some_and(|tool| !tool.fits(self.s.tool_context())) {
                     continue;
                 }
             }
@@ -1816,10 +1815,11 @@ impl SymphonyApp {
                 }
             });
             ui.separator();
-            views::timing::TimelineAction::SetKey.menu(ui, &mut self.s);
-            views::timing::TimelineAction::Duplicate.menu(ui, &mut self.s);
-            views::timing::TimelineAction::InsertNew.menu(ui, &mut self.s);
-            views::timing::TimelineAction::Extend.menu(ui, &mut self.s);
+            views::timing::TimelineAction::SetKey.menu(ui, &mut self.s, self.profile);
+            views::timing::TimelineAction::Duplicate.menu(ui, &mut self.s, self.profile);
+            views::timing::TimelineAction::InsertNew.menu(ui, &mut self.s, self.profile);
+            views::timing::TimelineAction::Extend.menu(ui, &mut self.s, self.profile);
+            self.menu_toggle(ui, Action::ToggleAutoKey, self.s.animate);
             self.menu_action(ui, Action::DecreaseExposure);
             ui.separator();
             self.menu_action(ui, Action::SubstitutePrevious);
@@ -1846,7 +1846,7 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ToggleOnionSkin);
             let on = self.s.show_strokes;
             self.menu_toggle(ui, Action::ShowStrokes, on);
-            ui.checkbox(&mut self.camera.render_effects, "Render Camera Effects");
+            self.menu_toggle(ui, Action::ToggleCameraEffects, self.camera.render_effects);
             ui.separator();
             self.menu_action(ui, Action::ZoomIn);
             self.menu_action(ui, Action::ZoomOut);
@@ -1859,10 +1859,7 @@ impl SymphonyApp {
             self.menu_action(ui, Action::ResetView);
             self.menu_action(ui, Action::MirrorView);
             ui.separator();
-            if ui.button("Arrange Nodes").clicked() {
-                views::node::arrange(&mut self.s, &mut self.node_view);
-                ui.close();
-            }
+            self.menu_action(ui, Action::ArrangeNodes);
         });
         ui.menu_button("Windows", |ui| {
             for v in View::ALL {
@@ -2496,7 +2493,7 @@ impl SymphonyApp {
                 Entry::new(
                     label,
                     Kind::Action,
-                    Command::ToggleSelectedPoints,
+                    Command::Action(Action::ToggleSelectedPoints),
                     "drawing.show-points",
                 )
                 .words("display vector control points vertices")
@@ -2507,7 +2504,7 @@ impl SymphonyApp {
             Entry::new(
                 "Cutter",
                 Kind::Tool,
-                Command::SelectCutter,
+                Command::Action(Action::SelectCutter),
                 "drawing.cutter",
             )
             .words("cut split selection lasso")
@@ -2530,7 +2527,7 @@ impl SymphonyApp {
             Entry::new(
                 "Arrange Nodes",
                 Kind::Node,
-                Command::ArrangeNodes,
+                Command::Action(Action::ArrangeNodes),
                 "node.arrange",
             )
             .words("auto arrange layout tidy graph")
@@ -2613,7 +2610,20 @@ impl SymphonyApp {
         drawing.context = node_views;
         out.push(drawing);
         for a in Action::ALL {
-            if a == Action::Search {
+            if matches!(
+                a,
+                Action::Search
+                    | Action::Timeline(_)
+                    | Action::SelectCutter
+                    | Action::ToggleSelectedPoints
+                    | Action::ArrangeNodes
+                    | Action::ShowNodeProperties
+                    | Action::RenderNodePreview
+                    | Action::ResetNodeView
+                    | Action::ToggleCameraEffects
+                    | Action::ToggleAutoKey
+                    | Action::ToggleLayerVisible
+            ) {
                 continue;
             }
             let id = a.id();
@@ -2628,26 +2638,29 @@ impl SymphonyApp {
                 "view" | "drawing" | "onion" => (Kind::Action, canvas.to_vec()),
                 _ => (Kind::Action, Vec::new()),
             };
-            let mut e = Entry::new(a.name(), kind, Command::Action(a), id)
-                .words(&id.replace(['.', '_'], " "))
-                .ctx(&ctx);
-            e.shortcut = keymap::label(self.profile, a);
-            out.push(e);
+            out.push(
+                Entry::new(a.name(), kind, Command::Action(a), id)
+                    .words(&id.replace(['.', '_'], " "))
+                    .ctx(&ctx),
+            );
         }
         let timing_views = [View::Timeline, View::Xsheet];
         for action in views::timing::TimelineAction::ALL {
-            let mut entry = Entry::new(
-                action.label(),
-                Kind::Action,
-                Command::Timeline(action),
-                &format!("timeline.{action:?}"),
-            )
-            .words(action.keywords())
-            .ctx(&timing_views);
-            if action == views::timing::TimelineAction::SetKey {
-                entry.shortcut = "K in Timeline".into();
-            }
-            out.push(entry);
+            let binding = if action == views::timing::TimelineAction::Extend {
+                Action::IncreaseExposure
+            } else {
+                Action::Timeline(action)
+            };
+            out.push(
+                Entry::new(
+                    action.label(),
+                    Kind::Action,
+                    Command::Action(binding),
+                    action.id(),
+                )
+                .words(action.keywords())
+                .ctx(&timing_views),
+            );
         }
         for (id, name) in self.s.element_drawings(self.s.selected) {
             out.push(
@@ -2676,28 +2689,28 @@ impl SymphonyApp {
         for (title, command, key, words, views) in [
             (
                 "Open Node Properties",
-                Command::ShowNodeProperties,
+                Command::Action(Action::ShowNodeProperties),
                 "node.properties",
                 "inspect layer settings",
                 &[View::Node, View::LayerProperties][..],
             ),
             (
                 "Toggle Camera Effects",
-                Command::ToggleCameraEffects,
+                Command::Action(Action::ToggleCameraEffects),
                 "camera.effects",
                 "render camera preview draft bypass effects",
                 &[View::Camera][..],
             ),
             (
                 "Render Node Preview",
-                Command::RenderNodePreview,
+                Command::Action(Action::RenderNodePreview),
                 "node.preview",
                 "display camera effects",
                 &[View::Node, View::Camera][..],
             ),
             (
                 "Reset Node View",
-                Command::ResetNodeView,
+                Command::Action(Action::ResetNodeView),
                 "node.reset",
                 "reset pan zoom",
                 &[View::Node][..],
@@ -2711,7 +2724,7 @@ impl SymphonyApp {
             ),
             (
                 "Toggle Auto-key",
-                Command::ToggleAnimate,
+                Command::Action(Action::ToggleAutoKey),
                 "timing.animate",
                 "auto key animation animate mode",
                 &[View::LayerProperties, View::Timeline][..],
@@ -2875,7 +2888,7 @@ impl SymphonyApp {
             Entry::new(
                 "Hide or show the selected layer",
                 Kind::Action,
-                Command::ToggleLayerVisible,
+                Command::Action(Action::ToggleLayerVisible),
                 "layer.visible",
             )
             .words("visibility eye")
@@ -2944,6 +2957,11 @@ impl SymphonyApp {
                     .words(p.source.as_deref().unwrap_or(""))
                     .ctx(&[View::ToolProperties]),
                 );
+            }
+        }
+        for entry in &mut out {
+            if let Command::Action(action) = entry.command {
+                entry.shortcut = keymap::label(self.profile, action);
             }
         }
         out
@@ -3030,14 +3048,6 @@ impl SymphonyApp {
                 }
             }
             Command::ReduceStrokePoints => self.s.reduce_points(),
-            Command::ToggleSelectedPoints => {
-                self.s.show_selected_points = !self.s.show_selected_points;
-                self.s.tool = Tool::Select;
-            }
-            Command::SelectCutter => {
-                self.s.tool = Tool::Select;
-                self.s.cutter_mode = true;
-            }
             #[cfg(target_os = "macos")]
             Command::PickScreenColour => screen_colour::pick(ctx, self.s.key.clone()),
             Command::GoToFrame(f) => self.s.frame = f.clamp(1, self.s.length()),
@@ -3047,7 +3057,6 @@ impl SymphonyApp {
             }
             Command::SetToolSize(n) => self.set_tool_size(|_| n),
             Command::ToolSizeBy(k) => self.set_tool_size(|w| w * k),
-            Command::Timeline(action) => action.run(&mut self.s),
             Command::InsertInbetweens(count) => self
                 .s
                 .insert_inbetweens(count.min(100_000u32.saturating_sub(self.s.length()))),
@@ -3056,25 +3065,12 @@ impl SymphonyApp {
                 .insert_exposure(crate::session::InsertExposure::Reuse(id)),
             Command::SetFrameRate(fps) => self.s.set_frame_rate(fps),
             Command::AddSwatch => self.s.add_swatch(),
-            Command::ToggleAnimate => self.s.animate = !self.s.animate,
-            Command::ShowNodeProperties => {
-                views::node::show_selected_properties(&self.s, &mut self.node_view)
-            }
-            Command::ToggleCameraEffects => {
-                self.camera.render_effects = !self.camera.render_effects
-            }
-            Command::RenderNodePreview => views::node::show_render_preview(&mut self.node_view),
-            Command::ResetNodeView => views::node::reset_view(&mut self.node_view),
             Command::ResetWorkspace => {
                 *self.layout_mut() = self.workspace.preset();
                 self.maximised = None;
             }
             Command::UpdateApp => self.guard(ctx, Pending::Update),
             Command::SetLength(n) => self.s.set_length(n),
-            Command::ToggleLayerVisible => {
-                let i = self.s.selected;
-                self.s.toggle_visible(i);
-            }
             Command::SelectLayer(i) => self.s.selected = i,
             Command::SelectSwatch(id) => self.s.swatch = id,
             Command::UsePreset { pencil, name } => {
@@ -3100,7 +3096,6 @@ impl SymphonyApp {
                 }
             }
             Command::SetArt(a) => self.s.set_art(a),
-            Command::ArrangeNodes => views::node::arrange(&mut self.s, &mut self.node_view),
             Command::ConvertDrawing(id) => views::node::convert_drawing(&mut self.s, id),
             Command::ToggleSmartJoint(id) => views::node::toggle_smart_joint(&mut self.s, id),
             Command::AddDrawingNode => {
@@ -3117,13 +3112,18 @@ impl SymphonyApp {
 
     /// Change the current drawing tool's maximum size (minimum follows).
     fn set_tool_size(&mut self, f: impl Fn(f32) -> f32) {
+        let min = if self.s.tool == Tool::Eraser {
+            1.0
+        } else {
+            0.5
+        };
         let b = match self.s.tool {
             Tool::Pencil => &mut self.s.pencil,
             Tool::Eraser => &mut self.s.eraser,
             _ => &mut self.s.brush,
         };
         let old = b.max_width.max(0.01);
-        let new = f(old).clamp(0.5, panels::MAX_TOOL_SIZE);
+        let new = f(old).clamp(min, panels::MAX_TOOL_SIZE);
         b.min_width = (b.min_width * new / old).min(new);
         b.max_width = new;
         self.s.notice = Some(format!("Tool size {new:.1}"));

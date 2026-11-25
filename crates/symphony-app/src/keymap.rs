@@ -9,6 +9,8 @@
 use eframe::egui::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
+use crate::views::timing::TimelineAction;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Profile {
     Harmony,
@@ -117,10 +119,20 @@ pub enum Action {
     ToolLineEditor,
     ToolHand,
     ToolZoom,
+    SelectCutter,
+    ToggleSelectedPoints,
+    ArrangeNodes,
+    ShowNodeProperties,
+    RenderNodePreview,
+    ResetNodeView,
+    ToggleCameraEffects,
+    ToggleAutoKey,
+    ToggleLayerVisible,
+    Timeline(TimelineAction),
 }
 
 impl Action {
-    pub const ALL: [Action; 80] = [
+    pub const ALL: [Action; 98] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -201,6 +213,24 @@ impl Action {
         Action::ToolLineEditor,
         Action::ToolHand,
         Action::ToolZoom,
+        Action::SelectCutter,
+        Action::ToggleSelectedPoints,
+        Action::ArrangeNodes,
+        Action::ShowNodeProperties,
+        Action::RenderNodePreview,
+        Action::ResetNodeView,
+        Action::ToggleCameraEffects,
+        Action::ToggleAutoKey,
+        Action::ToggleLayerVisible,
+        Action::Timeline(TimelineAction::SetKey),
+        Action::Timeline(TimelineAction::DeleteKey),
+        Action::Timeline(TimelineAction::InsertNew),
+        Action::Timeline(TimelineAction::Duplicate),
+        Action::Timeline(TimelineAction::CopyDrawing),
+        Action::Timeline(TimelineAction::PasteDrawing),
+        Action::Timeline(TimelineAction::CloneDrawing),
+        Action::Timeline(TimelineAction::InsertInbetween),
+        Action::Timeline(TimelineAction::DeleteLayer),
     ];
 
     /// Stable ID, used for settings and scripting.
@@ -286,6 +316,16 @@ impl Action {
             Action::ToolLineEditor => "tool.line_editor",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
+            Action::SelectCutter => "drawing.cutter",
+            Action::ToggleSelectedPoints => "drawing.show-points",
+            Action::ArrangeNodes => "node.arrange",
+            Action::ShowNodeProperties => "node.properties",
+            Action::RenderNodePreview => "node.preview",
+            Action::ResetNodeView => "node.reset",
+            Action::ToggleCameraEffects => "camera.effects",
+            Action::ToggleAutoKey => "timing.animate",
+            Action::ToggleLayerVisible => "layer.visible",
+            Action::Timeline(action) => action.id(),
         }
     }
 
@@ -371,6 +411,16 @@ impl Action {
             Action::ToolLineEditor => "Line Editor",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
+            Action::SelectCutter => "Cutter",
+            Action::ToggleSelectedPoints => "Show selected points",
+            Action::ArrangeNodes => "Arrange nodes",
+            Action::ShowNodeProperties => "Open Node Properties",
+            Action::RenderNodePreview => "Render node preview",
+            Action::ResetNodeView => "Reset Node view",
+            Action::ToggleCameraEffects => "Toggle camera effects",
+            Action::ToggleAutoKey => "Toggle auto-key",
+            Action::ToggleLayerVisible => "Hide or show the selected layer",
+            Action::Timeline(action) => action.label(),
         }
     }
 }
@@ -503,6 +553,19 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolLineEditor => None,
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),
+        Action::Timeline(TimelineAction::SetKey) => b(Key::K, NONE),
+        Action::Timeline(TimelineAction::CopyDrawing) => b(Key::C, CMD),
+        Action::Timeline(TimelineAction::PasteDrawing) => b(Key::V, CMD),
+        Action::Timeline(_)
+        | Action::SelectCutter
+        | Action::ToggleSelectedPoints
+        | Action::ArrangeNodes
+        | Action::ShowNodeProperties
+        | Action::RenderNodePreview
+        | Action::ResetNodeView
+        | Action::ToggleCameraEffects
+        | Action::ToggleAutoKey
+        | Action::ToggleLayerVisible => None,
     }
 }
 
@@ -522,13 +585,33 @@ fn symphony(action: Action) -> Option<Binding> {
         Action::ToolPencil => None,
         Action::ToolEraser => b(Key::E, NONE),
         Action::ToolPaint => b(Key::P, NONE),
-        Action::ToolCloseGap => b(Key::C, NONE),
+        Action::ToolCloseGap => b(Key::G, NONE),
         Action::ToolDropper => b(Key::D, NONE),
         Action::ToolLineEditor => b(Key::N, NONE),
         Action::ToolHand => b(Key::H, NONE),
         Action::ToolZoom => b(Key::Z, NONE),
+        Action::SelectCutter => b(Key::C, NONE),
+        Action::ToggleSelectedPoints => b(Key::I, NONE),
+        Action::ArrangeNodes => b(Key::A, NONE),
+        Action::ShowNodeProperties => b(Key::P, NONE),
+        Action::RenderNodePreview => b(Key::V, NONE),
+        Action::ResetNodeView => b(Key::R, NONE),
+        Action::ToggleCameraEffects => b(Key::R, SHIFT),
+        Action::ToggleAutoKey => b(Key::A, NONE),
+        Action::ToggleLayerVisible => b(Key::V, NONE),
+        Action::ToolRepaint => b(Key::R, NONE),
+        Action::ToolUnpaint => b(Key::U, NONE),
+        Action::ToolPaintUnpainted => b(Key::Y, NONE),
+        Action::ToggleOnionSkin => b(Key::O, NONE),
+        Action::MirrorView => b(Key::M, NONE),
+        Action::AddLayer => b(Key::L, NONE),
+        Action::Timeline(TimelineAction::DeleteKey) => b(Key::K, SHIFT),
+        Action::Timeline(TimelineAction::InsertNew) => b(Key::N, NONE),
+        Action::Timeline(TimelineAction::Duplicate) => b(Key::D, NONE),
+        Action::Timeline(TimelineAction::CloneDrawing) => b(Key::C, NONE),
+        Action::Timeline(TimelineAction::InsertInbetween) => b(Key::I, NONE),
         Action::SwitchLineColourArt => b(Key::L, SHIFT),
-        Action::PreviewArtLayers => b(Key::P, ALT),
+        Action::PreviewArtLayers => b(Key::V, NONE),
         _ => harmony(action),
     }
 }
@@ -536,15 +619,28 @@ fn symphony(action: Action) -> Option<Binding> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Global,
+    OutsideTiming,
+    OutsideTimeline,
     Canvas,
+    Camera,
+    Node,
     Timing,
+    Timeline,
     Viewport,
 }
 
 pub fn scope(profile: Profile, action: Action) -> Scope {
     use Action::*;
     match action {
-        IncreaseBrushSize | DecreaseBrushSize => Scope::Canvas,
+        IncreaseBrushSize | DecreaseBrushSize | SelectCutter | ToggleSelectedPoints => {
+            Scope::Canvas
+        }
+        ArrangeNodes | ShowNodeProperties | RenderNodePreview | ResetNodeView => Scope::Node,
+        ToggleCameraEffects => Scope::Camera,
+        Timeline(TimelineAction::SetKey) if profile == Profile::Harmony => Scope::Timeline,
+        Timeline(_) | ToggleAutoKey | ToggleLayerVisible => Scope::Timing,
+        Copy | Paste if profile == Profile::Harmony => Scope::OutsideTiming,
+        ShowStrokes if profile == Profile::Harmony => Scope::OutsideTimeline,
         _ if profile == Profile::Harmony => Scope::Global,
         ToolSelect
         | ToolTransform
@@ -569,6 +665,8 @@ pub fn scope(profile: Profile, action: Action) -> Scope {
         | PreviewArtLayers
         | CreateColourArt
         | FlipHorizontal
+        | ToggleOnionSkin
+        | MirrorView
         | FlipVertical
         | SelectAll
         | DeselectAll
@@ -576,7 +674,7 @@ pub fn scope(profile: Profile, action: Action) -> Scope {
         | Cut
         | Copy
         | Paste => Scope::Canvas,
-        IncreaseExposure | DecreaseExposure | SubstituteNext | SubstitutePrevious
+        AddLayer | IncreaseExposure | DecreaseExposure | SubstituteNext | SubstitutePrevious
         | GoToNextDrawing | GoToPreviousDrawing => Scope::Timing,
         ZoomIn | ZoomOut => Scope::Viewport,
         _ => Scope::Global,
@@ -584,11 +682,20 @@ pub fn scope(profile: Profile, action: Action) -> Scope {
 }
 
 fn scopes_overlap(profile: Profile, a: Action, b: Action) -> bool {
-    !matches!(
-        (scope(profile, a), scope(profile, b)),
-        (Scope::Timing, Scope::Canvas | Scope::Viewport)
-            | (Scope::Canvas | Scope::Viewport, Scope::Timing)
-    )
+    fn mask(scope: Scope) -> u8 {
+        match scope {
+            Scope::Global => 0b11111,
+            Scope::OutsideTiming => 0b00111,
+            Scope::OutsideTimeline => 0b10111,
+            Scope::Canvas => 0b0011,
+            Scope::Camera => 0b0010,
+            Scope::Node => 0b0100,
+            Scope::Timing => 0b11000,
+            Scope::Timeline => 0b01000,
+            Scope::Viewport => 0b0111,
+        }
+    }
+    mask(scope(profile, a)) & mask(scope(profile, b)) != 0
 }
 
 pub fn binding(profile: Profile, action: Action) -> Option<Binding> {
@@ -885,6 +992,54 @@ mod tests {
             assert_eq!(fired(profile, key, NONE), [exposure, brush]);
             assert_eq!(scope(profile, exposure), Scope::Timing);
             assert_eq!(scope(profile, brush), Scope::Canvas);
+        }
+    }
+
+    #[test]
+    fn letter_shortcuts_can_be_reused_across_panels() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = Profile::Symphony;
+        for (key, actions) in [
+            (
+                Key::A,
+                &[
+                    (Action::ArrangeNodes, Scope::Node),
+                    (Action::ToggleAutoKey, Scope::Timing),
+                ][..],
+            ),
+            (
+                Key::C,
+                &[
+                    (Action::SelectCutter, Scope::Canvas),
+                    (
+                        Action::Timeline(TimelineAction::CloneDrawing),
+                        Scope::Timing,
+                    ),
+                ],
+            ),
+            (
+                Key::D,
+                &[
+                    (Action::ToolDropper, Scope::Canvas),
+                    (Action::Timeline(TimelineAction::Duplicate), Scope::Timing),
+                ],
+            ),
+            (
+                Key::V,
+                &[
+                    (Action::PreviewArtLayers, Scope::Canvas),
+                    (Action::RenderNodePreview, Scope::Node),
+                    (Action::ToggleLayerVisible, Scope::Timing),
+                ],
+            ),
+        ] {
+            let fired = fired(profile, key, NONE);
+            assert_eq!(fired.len(), actions.len());
+            for &(action, context) in actions {
+                assert!(fired.contains(&action));
+                assert_eq!(scope(profile, action), context);
+                assert!(clashes(profile, action, key, NONE).is_empty());
+            }
         }
     }
 

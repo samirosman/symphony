@@ -38,7 +38,7 @@ const PARAM_W: f32 = 48.0;
 /// Pixels of drag per drawing when scrubbing the Parameters field.
 const PARAM_STEP: f32 = 12.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TimelineAction {
     SetKey,
     DeleteKey,
@@ -65,6 +65,21 @@ impl TimelineAction {
         Self::InsertInbetween,
         Self::DeleteLayer,
     ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::SetKey => "timeline.SetKey",
+            Self::DeleteKey => "timeline.DeleteKey",
+            Self::InsertNew => "timeline.InsertNew",
+            Self::Duplicate => "timeline.Duplicate",
+            Self::CopyDrawing => "timeline.CopyDrawing",
+            Self::PasteDrawing => "timeline.PasteDrawing",
+            Self::CloneDrawing => "timeline.CloneDrawing",
+            Self::Extend => "timeline.Extend",
+            Self::InsertInbetween => "timeline.InsertInbetween",
+            Self::DeleteLayer => "timeline.DeleteLayer",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -96,7 +111,7 @@ impl TimelineAction {
         }
     }
 
-    fn enabled(self, s: &Session) -> bool {
+    pub(crate) fn enabled(self, s: &Session) -> bool {
         match self {
             Self::SetKey => !s.doc.layers.is_empty() || s.selected_node.is_some(),
             Self::DeleteKey => super::node::selected_has_key(s),
@@ -126,13 +141,13 @@ impl TimelineAction {
         }
     }
 
-    pub fn menu(self, ui: &mut egui::Ui, s: &mut Session) {
-        let button = egui::Button::new(self.label());
-        let button = if self == Self::SetKey {
-            button.shortcut_text("K in Timeline")
+    pub fn menu(self, ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
+        let action = if self == Self::Extend {
+            Action::IncreaseExposure
         } else {
-            button
+            Action::Timeline(self)
         };
+        let button = egui::Button::new(self.label()).shortcut_text(keymap::label(profile, action));
         if ui.add_enabled(self.enabled(s), button).clicked() {
             self.run(s);
             ui.close();
@@ -140,18 +155,18 @@ impl TimelineAction {
     }
 }
 
-fn drawing_clipboard_menu(ui: &mut egui::Ui, s: &mut Session) {
+fn drawing_clipboard_menu(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
     for action in [
         TimelineAction::CopyDrawing,
         TimelineAction::PasteDrawing,
         TimelineAction::Duplicate,
         TimelineAction::CloneDrawing,
     ] {
-        action.menu(ui, s);
+        action.menu(ui, s, profile);
     }
 }
 
-fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
+fn frame_menu(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
     for action in [
         TimelineAction::InsertNew,
         TimelineAction::Duplicate,
@@ -160,7 +175,7 @@ fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
         TimelineAction::PasteDrawing,
         TimelineAction::Extend,
     ] {
-        action.menu(ui, s);
+        action.menu(ui, s, profile);
     }
     ui.menu_button("Reuse Existing Drawing", |ui| {
         let drawings = s.element_drawings(s.selected);
@@ -182,8 +197,8 @@ fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
             });
     });
     ui.separator();
-    TimelineAction::InsertInbetween.menu(ui, s);
-    TimelineAction::DeleteKey.menu(ui, s);
+    TimelineAction::InsertInbetween.menu(ui, s, profile);
+    TimelineAction::DeleteKey.menu(ui, s, profile);
     ui.separator();
     if ui
         .button("Clear exposure")
@@ -232,24 +247,17 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
                         .prefix("Frame "),
                 );
                 let keyed = super::node::selected_has_key(s);
-                let (icon, action, tooltip) = if keyed {
-                    (
-                        Icon::RemoveKeyframe,
-                        TimelineAction::DeleteKey,
-                        "Remove keyframe",
-                    )
+                let (icon, action) = if keyed {
+                    (Icon::RemoveKeyframe, TimelineAction::DeleteKey)
                 } else {
-                    (
-                        Icon::AddKeyframe,
-                        TimelineAction::SetKey,
-                        "Set keyframe (K in Timeline)",
-                    )
+                    (Icon::AddKeyframe, TimelineAction::SetKey)
                 };
-                if icons::button(ui, icon, keyed, action.enabled(s), tooltip).clicked() {
+                let tooltip = keymap::tooltip(profile, Action::Timeline(action));
+                if icons::button(ui, icon, keyed, action.enabled(s), &tooltip).clicked() {
                     action.run(s);
                 }
                 ui.menu_button("Frames", |ui| {
-                    frame_menu(ui, s);
+                    frame_menu(ui, s, profile);
                     ui.separator();
                     ui.menu_button("Timing options", |ui| timing_options(ui, s));
                 });
@@ -1266,7 +1274,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     }
                     if let Some(row) = t.menu_row {
                         ui.separator();
-                        drawing_clipboard_menu(ui, s);
+                        drawing_clipboard_menu(ui, s, profile);
                         ui.separator();
                         layer_menu(ui, s, t, row);
                     } else if let Some(node) = t.menu_node {
@@ -1475,7 +1483,7 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
             }
             if let Some(c) = t.menu_row {
                 resp.context_menu(|ui| {
-                    drawing_clipboard_menu(ui, s);
+                    drawing_clipboard_menu(ui, s, profile);
                     ui.separator();
                     layer_menu(ui, s, t, c);
                 });

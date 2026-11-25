@@ -730,7 +730,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         use egui_kittest::kittest::Queryable;
         let profile = Profile::Symphony;
-        keymap::reset(profile, Action::MirrorView);
+        keymap::unbind(profile, Action::MirrorView);
         let entries = vec![Entry::new(
             "Mirror view",
             search::Kind::Action,
@@ -763,7 +763,10 @@ mod tests {
         assert!(b.mods.alt);
         assert!(keymap::is_remapped(profile, Action::MirrorView));
         keymap::reset(profile, Action::MirrorView);
-        assert!(keymap::binding(profile, Action::MirrorView).is_none());
+        assert_eq!(
+            keymap::binding(profile, Action::MirrorView).unwrap().key,
+            egui::Key::M
+        );
     }
 
     #[test]
