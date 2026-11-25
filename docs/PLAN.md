@@ -171,8 +171,14 @@ continues.
 - ⬜ Centerline Editor
 - ⬜ Pencil Editor (reshape thickness)
 - ⬜ Smooth Editor
-- ⬜ Cutter (lasso cut)
+- ✅ Cutter (lasso cut)
 - ✅ Select tool (lasso, marquee, transform selection)
+- ✅ **Cutter mode** for Select. Use the Select tool’s existing boundary
+  gestures to split artwork at the selection edge. Select the enclosed
+  pieces for moving, transforming, or deleting, with the outside pieces
+  left in place. Preserve editable vectors and textured brush appearance.
+  Expose the mode in Tool Properties and Search, and make the split
+  undoable in one step.
 - ⬜ Perspective tool
 - ⬜ Envelope tool (warp a selection)
 - ⬜ Morphing tool and morph sequences (Premium)
@@ -181,6 +187,10 @@ continues.
 - ⬜ Auto close gap
 - ⬜ Snap to contour, snap to grid, snap to alignment guides
 - ✅ Art layers: Overlay, Line Art, Colour Art, Underlay (toolbar, L, :, P, preference)
+- ⬜ **Sketch art layer** on each Drawing node. Edit sketches in their own
+  mode. Show them at reduced opacity while working in Line Art or Colour
+  Art. Exclude them from exports by default and provide an explicit
+  **Include Sketch** export option.
 - ⬜ Art Layer Manager (25.2) *(verify)*
 - ✅ Create Colour Art from Line Art (*)
 - ✅ Onion skin (previous and next drawings, colours, opacity, range)
@@ -238,6 +248,38 @@ continues.
 - ⬜ Show/hide manipulators and control points
 
 ### 4.6 Rigging and node view
+- ⬜ **Skeleton setup view**. Open the Skeleton node in the Node View panel
+  and use Back to return to the graph. Show diamond-shaped bones in their
+  rest pose. Drag a base or tip to reshape the rig, keep shared endpoints
+  together, and hold an endpoint to grow a new bone from it. Rename Layer
+  Properties to Node Properties and show a single thumbnail of each bone’s
+  directly attached drawings at the current frame. New artwork can connect
+  straight to its bone. Preserve existing pegs that carry transforms or keys.
+  Show the posed rig in Camera when a bone or its attached drawing is selected.
+- ⬜ **Smart rigs**. Toggle any joint or free endpoint into an editable
+  anchor. Locked anchors pin joints to their targets. Aim anchors let joints
+  move while their bones aim at the targets. With anchors active, dragging
+  a free point solves the rig around them. With no anchors, dragging a free
+  point moves the rig. Add contextual shortcuts for toggling anchors and
+  flipping bends, arrow-key nudging, and Shift-drag along straight lines
+  snapped to 22.5° increments. Defer dedicated controller objects.
+- ⬜ **Bone flexibility and stretch limits**. Give bones separate bend and
+  stretch controls. Simple Stretch changes length at constant width.
+  Squash & Stretch adjusts width in the opposite direction to suggest
+  volume. A stretchable bone can be unlimited or have a minimum and maximum
+  length. Resistance increases as it approaches either configured limit.
+  Keep locked anchors planted and constrain a drag to the rig’s reachable
+  range, including the stretch permitted on that chain.
+- ⬜ **Sticky Timeline ruler**. Keep frame numbers visible at the top while
+  the track rows scroll vertically.
+- ⬜ **Find Stroke Node**. Tap a stroke in Camera view to select its
+  source Drawing node across visible layers. Reveal the node in Node View
+  and select its Timeline row at the current frame. Explore a modifier
+  in the Select tool and make the same action available through Search.
+  Add optional pick-through filters for generated gradients, branches with
+  an Opacity node below 100% at the current frame, and effect overlays that
+  can obscure a stroke. Skip the overlays for picking while keeping their
+  rendered appearance and allowing the artist to target them explicitly.
 - 🟡 Pegs and peg hierarchy (core model ✅, no UI)
 - 🟡 Drawing nodes and Composite stacking order (core model ✅)
 - ⬜ Node view editing: add, connect, disconnect, reorder ports, groups,
@@ -351,7 +393,7 @@ Every effect is a node in the graph.
 - ⬜ **Use no AI** switch and per-scene "No AI used" provenance (DESIGN §16, ENGINEERING E17)
 These are improvements and new features. They come after the Harmony list
 above is in place.
-- Ideas go here as they come up.
+- ⬜ **Showcase demos**. Replace the current GIFs with clearer footage of real artist workflows. Make playback loop on the page and keep the still previews for reduced motion.
 
 ---
 

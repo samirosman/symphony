@@ -1357,6 +1357,9 @@ pub fn ui(
             }
         }
     }
+    if drawing_only {
+        super::rig_edit::draw_rest_guide(&painter, s, view);
+    }
     state.select.camera_space = !drawing_only;
     let navigating_now = space || s.tool == Tool::Hand;
     let warp_busy = !navigating_now
@@ -1375,6 +1378,32 @@ pub fn ui(
         select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
     } else {
         state.select.hover = None;
+    }
+    if !navigating_now && matches!(s.tool, Tool::Select | Tool::LineEditor) {
+        let can_reduce = s.can_reduce_points();
+        let has_points = s.tool == Tool::Select && s.has_selected_points();
+        if can_reduce || has_points {
+            response.context_menu(|ui| {
+                if has_points {
+                    ui.checkbox(&mut s.show_selected_points, "Show selected points");
+                }
+                if can_reduce {
+                    ui.menu_button("Reduce stroke points", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.point_reduction)
+                                .range(0.1..=30.0)
+                                .speed(0.1)
+                                .prefix("Tolerance ")
+                                .suffix(" px"),
+                        );
+                        if ui.button("Reduce points").clicked() {
+                            s.reduce_points();
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        }
     }
     if let Some(a) = state
         .active

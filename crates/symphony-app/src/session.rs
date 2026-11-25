@@ -336,6 +336,7 @@ pub struct Selection {
 pub enum InsertExposure {
     New,
     Duplicate,
+    Clone,
     Reuse(Id),
 }
 
@@ -372,6 +373,8 @@ pub struct Session {
     pub line_edit_radius: f32,
     pub line_edit_strength: f32,
     pub point_reduction: f32,
+    pub show_selected_points: bool,
+    pub cutter_mode: bool,
     pub line_points: Vec<(Id, usize)>,
     /// Lines pushed during the current drag, slimmed again on release.
     line_touched: Vec<Id>,
@@ -425,6 +428,7 @@ pub struct Session {
     pub easy_drag: bool,
     /// Copied strokes (Cut/Copy/Paste).
     pub clipboard: Vec<Stroke>,
+    drawing_clipboard: Option<symphony_core::stroke::Drawing>,
     /// Colour zones copied with the strokes.
     pub clipboard_fills: Vec<symphony_core::stroke::Fill>,
     /// The Text tool's font, size, style and alignment.
@@ -497,6 +501,8 @@ impl Session {
             line_edit_radius: 40.0,
             line_edit_strength: 1.0,
             point_reduction: 1.0,
+            show_selected_points: false,
+            cutter_mode: false,
             line_points: Vec::new(),
             line_touched: Vec::new(),
             swatch,
@@ -527,6 +533,7 @@ impl Session {
             marquee_mode: false,
             easy_drag: false,
             clipboard: Vec::new(),
+            drawing_clipboard: None,
             clipboard_fills: Vec::new(),
             text_style: Default::default(),
             animate: true,
@@ -1099,6 +1106,13 @@ impl Session {
                 edits.push(Edit::AddDrawing { drawing });
                 (id, "Insert new drawing")
             }
+            InsertExposure::Clone => {
+                let Some(id) = column.get(self.frame) else {
+                    self.note("There’s no drawing in this frame to clone");
+                    return;
+                };
+                (id, "Clone drawing")
+            }
             InsertExposure::Duplicate => {
                 let Some(source) = column
                     .get(self.frame)
@@ -1108,40 +1122,7 @@ impl Session {
                     self.note("There’s no drawing in this frame to duplicate");
                     return;
                 };
-                let mut drawing = self.doc.make_drawing(column_id);
-                drawing.strokes = source.strokes;
-                drawing.fills = source.fills;
-                drawing.image = source.image;
-                drawing.text = source.text;
-                let mut ids = std::collections::BTreeMap::new();
-                for stroke in &mut drawing.strokes {
-                    let fresh = self.doc.ids.fresh();
-                    ids.insert(stroke.id, fresh);
-                    stroke.id = fresh;
-                }
-                for fill in &mut drawing.fills {
-                    fill.id = self.doc.ids.fresh();
-                    if let Some(link) = &mut fill.linked {
-                        let mapped: Option<Vec<_>> =
-                            link.strokes.iter().map(|id| ids.get(id).copied()).collect();
-                        if let Some(mapped) = mapped {
-                            link.strokes = mapped;
-                        } else {
-                            fill.linked = None;
-                        }
-                    }
-                }
-                drawing.text.retain_mut(|object| {
-                    let mapped: Option<Vec<_>> = object
-                        .glyphs
-                        .iter()
-                        .map(|id| ids.get(id).copied())
-                        .collect();
-                    let Some(mapped) = mapped else { return false };
-                    object.glyphs = mapped;
-                    object.id = self.doc.ids.fresh();
-                    true
-                });
+                let drawing = self.copy_drawing_to_column(source, column_id);
                 let id = drawing.id;
                 edits.push(Edit::AddDrawing { drawing });
                 (id, "Duplicate drawing")
@@ -1161,6 +1142,97 @@ impl Session {
         }
         self.history.apply(&mut self.doc, title, edits);
         self.frame = frame;
+        self.validate_selection();
+    }
+
+    fn copy_drawing_to_column(
+        &mut self,
+        source: symphony_core::stroke::Drawing,
+        column_id: Id,
+    ) -> symphony_core::stroke::Drawing {
+        let mut drawing = self.doc.make_drawing(column_id);
+        drawing.strokes = source.strokes;
+        drawing.fills = source.fills;
+        drawing.image = source.image;
+        drawing.text = source.text;
+        let mut ids = std::collections::BTreeMap::new();
+        for stroke in &mut drawing.strokes {
+            let fresh = self.doc.ids.fresh();
+            ids.insert(stroke.id, fresh);
+            stroke.id = fresh;
+        }
+        for fill in &mut drawing.fills {
+            fill.id = self.doc.ids.fresh();
+            if let Some(link) = &mut fill.linked {
+                let mapped: Option<Vec<_>> =
+                    link.strokes.iter().map(|id| ids.get(id).copied()).collect();
+                if let Some(mapped) = mapped {
+                    link.strokes = mapped;
+                } else {
+                    fill.linked = None;
+                }
+            }
+        }
+        drawing.text.retain_mut(|object| {
+            let mapped: Option<Vec<_>> = object
+                .glyphs
+                .iter()
+                .map(|id| ids.get(id).copied())
+                .collect();
+            let Some(mapped) = mapped else { return false };
+            object.glyphs = mapped;
+            object.id = self.doc.ids.fresh();
+            true
+        });
+        drawing
+    }
+
+    pub fn copy_exposed_drawing(&mut self) {
+        let Some(drawing) = self
+            .doc
+            .exposed(self.selected, self.frame)
+            .and_then(|id| self.doc.drawings.get(&id))
+        else {
+            return;
+        };
+        self.drawing_clipboard = Some(drawing.clone());
+        self.note("Copied drawing");
+    }
+
+    pub fn can_paste_drawing(&self) -> bool {
+        self.drawing_clipboard.is_some()
+            && self
+                .doc
+                .column(self.selected)
+                .is_some_and(|column| !column.locked)
+    }
+
+    pub fn paste_drawing(&mut self) {
+        if !self.can_paste_drawing() {
+            return;
+        }
+        let Some(source) = self.drawing_clipboard.clone() else {
+            return;
+        };
+        let Some(column) = self.doc.column(self.selected) else {
+            return;
+        };
+        let (column, before) = (column.id, column.get(self.frame));
+        let drawing = self.copy_drawing_to_column(source, column);
+        let id = drawing.id;
+        self.history.apply(
+            &mut self.doc,
+            "Paste drawing",
+            vec![
+                Edit::AddDrawing { drawing },
+                Edit::SetCells {
+                    column,
+                    from: self.frame,
+                    before: vec![before],
+                    after: vec![Some(id)],
+                },
+            ],
+        );
         self.validate_selection();
     }
 
@@ -2662,13 +2734,36 @@ impl Session {
     }
 
     pub fn add_layer_at(&mut self, position: Option<[f32; 2]>) {
+        self.add_drawing_layer(position, None);
+    }
+
+    pub fn add_layer_for_bone(&mut self, bone: NodeId, peg_at: [f32; 2], drawing_at: [f32; 2]) {
+        self.add_drawing_layer(Some(drawing_at), Some((bone, peg_at)));
+    }
+
+    fn add_drawing_layer(&mut self, position: Option<[f32; 2]>, bone: Option<(NodeId, [f32; 2])>) {
         let n = (1..)
             .find(|n| (0..self.layer_count()).all(|i| self.layer_name(i) != format!("Drawing {n}")))
             .unwrap_or(1);
         let index = self.selected.min(self.layer_count());
-        let layer = self.doc.make_layer(&format!("Drawing {n}"), index);
+        let mut layer = self.doc.make_layer(&format!("Drawing {n}"), index);
         let node = layer.layer.node;
+        let peg = layer.layer.peg;
+        if let Some((from, _)) = bone {
+            layer.links.push(symphony_core::graph::Link {
+                from,
+                to: peg,
+                port: 0,
+            });
+        }
         let mut edits = vec![Edit::AddLayer(Box::new(layer))];
+        if let Some((_, after)) = bone {
+            edits.push(Edit::MoveNode {
+                id: peg,
+                before: None,
+                after,
+            });
+        }
         if let Some(after) = position {
             edits.push(Edit::MoveNode {
                 id: node,
@@ -3126,6 +3221,149 @@ impl Session {
         Some((self.selection.drawing?, self.selection.strokes.clone()))
     }
 
+    pub fn has_selected_points(&self) -> bool {
+        self.selected_strokes()
+            .iter()
+            .any(|stroke| !stroke.points.is_empty() || !stroke.shape.is_empty())
+            || !self.selected_fills().is_empty()
+    }
+
+    pub fn cut_area(&mut self, drawing: Id, polygon: Vec<[f32; 2]>, add: bool, remove: bool) {
+        use symphony_vector::shape;
+        let Some(doc) = self.doc.drawings.get(&drawing) else {
+            return;
+        };
+        let clip = shape::from_polygons(vec![polygon], true);
+        if clip.is_empty() {
+            return;
+        }
+        let clip: Vec<_> = clip.into_iter().flatten().collect();
+        let Some(bounds) =
+            clip.iter()
+                .flatten()
+                .copied()
+                .fold(None, |acc: Option<([f32; 2], [f32; 2])>, p| {
+                    Some(acc.map_or((p, p), |(lo, hi)| {
+                        (
+                            [lo[0].min(p[0]), lo[1].min(p[1])],
+                            [hi[0].max(p[0]), hi[1].max(p[1])],
+                        )
+                    }))
+                })
+        else {
+            return;
+        };
+        let mut picked = Vec::new();
+        let mut edits = Vec::new();
+        let mut selection = if add || remove {
+            self.selection.strokes.clone()
+        } else {
+            Vec::new()
+        };
+        for (index, stroke) in doc.strokes.iter().enumerate().rev().filter(|(_, stroke)| {
+            stroke.art == self.art
+                && symphony_vector::bounds(stroke).is_some_and(|(lo, hi)| {
+                    (0..2).all(|axis| lo[axis] <= bounds.1[axis] && hi[axis] >= bounds.0[axis])
+                })
+        }) {
+            let outlines = match stroke.texture.filter(|texture| texture.vector) {
+                Some(texture) => symphony_vector::stamped::vector_brush_shapes(
+                    stroke,
+                    &texture,
+                    texture.tip.and_then(|id| self.doc.textures.get(&id)),
+                ),
+                None => shape::outline(stroke),
+            };
+            let Some((inside, outside)) = shape::split(&outlines, &clip) else {
+                continue;
+            };
+            if outside.is_empty() {
+                picked.push(stroke.id);
+                continue;
+            }
+            let was_selected = selection.contains(&stroke.id);
+            selection.retain(|id| *id != stroke.id);
+            let after = outside
+                .into_iter()
+                .map(|shape| (false, shape))
+                .chain(inside.into_iter().map(|shape| (true, shape)))
+                .map(|(inside, shape)| {
+                    let id = self.doc.ids.fresh();
+                    if inside {
+                        picked.push(id);
+                    }
+                    if was_selected && (!remove || !inside) {
+                        selection.push(id);
+                    }
+                    Stroke {
+                        id,
+                        shape,
+                        ..stroke.clone()
+                    }
+                })
+                .collect();
+            edits.push(Edit::ReplaceStroke {
+                drawing,
+                index,
+                before: stroke.clone(),
+                after,
+            });
+        }
+        for (index, fill) in doc
+            .fills
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, fill)| fill.art == self.art)
+        {
+            let Some((inside, outside)) = shape::split(std::slice::from_ref(&fill.contours), &clip)
+            else {
+                continue;
+            };
+            if outside.is_empty() {
+                picked.push(fill.id);
+                continue;
+            }
+            let was_selected = selection.contains(&fill.id);
+            selection.retain(|id| *id != fill.id);
+            let after = outside
+                .into_iter()
+                .map(|shape| (false, shape))
+                .chain(inside.into_iter().map(|shape| (true, shape)))
+                .map(|(inside, contours)| {
+                    let id = self.doc.ids.fresh();
+                    if inside {
+                        picked.push(id);
+                    }
+                    if was_selected && (!remove || !inside) {
+                        selection.push(id);
+                    }
+                    symphony_core::stroke::Fill {
+                        id,
+                        contours,
+                        linked: None,
+                        ..fill.clone()
+                    }
+                })
+                .collect();
+            edits.push(Edit::ReplaceFill {
+                drawing,
+                index,
+                before: fill.clone(),
+                after,
+            });
+        }
+        self.history.apply(&mut self.doc, "Cut artwork", edits);
+        if remove {
+            selection.retain(|id| !picked.contains(id));
+        } else {
+            selection.extend(picked);
+            selection.sort_unstable();
+            selection.dedup();
+        }
+        self.selection.strokes = selection;
+    }
+
     pub fn can_reduce_points(&self) -> bool {
         self.reduction_target().is_some_and(|(drawing, ids)| {
             self.doc.drawings.get(&drawing).is_some_and(|doc| {
@@ -3298,6 +3536,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cutter_splits_line_and_fill_selects_inside_and_undoes_together() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        s.paint_at(0, 1, 50.0, 50.0, 1.0);
+        s.validate_selection();
+        let id = s.doc.exposed(0, 1).unwrap();
+        let before = s.doc.drawings[&id].clone();
+        s.cut_area(
+            id,
+            vec![[50.0, 0.0], [100.0, 0.0], [100.0, 100.0], [50.0, 100.0]],
+            false,
+            false,
+        );
+        assert_eq!(s.doc.drawings[&id].strokes.len(), 2);
+        assert_eq!(s.doc.drawings[&id].fills.len(), 2);
+        assert_eq!(s.selected_strokes().len(), 1);
+        assert!(s.selected_fills()[0].contains(65.0, 50.0));
+        assert!(!s.selected_fills()[0].contains(35.0, 50.0));
+        s.undo();
+        assert_eq!(s.doc.drawings[&id], before);
+    }
+
+    #[test]
     fn text_can_be_rewritten_after_move_and_restored_by_undo() {
         let mut s = Session::new_scene();
         s.text_style.family = "Space Grotesk".into();
@@ -3385,6 +3646,31 @@ mod tests {
         s.undo();
         assert_eq!(names(&s), before);
         assert_eq!(s.doc.graph.input(s.doc.composite, 2), Some(bottom.node));
+    }
+
+    #[test]
+    fn cloned_exposure_shares_artwork_and_paste_copies_to_another_layer() {
+        let mut s = Session::new_scene();
+        square_drawing(&mut s);
+        let original = s.doc.exposed(0, 1).unwrap();
+        s.copy_exposed_drawing();
+        s.insert_exposure(InsertExposure::Clone);
+        assert_eq!(s.doc.exposed(0, 2), Some(original));
+        let stroke = line(&mut s, 0.0, 10.0);
+        s.commit_stroke(0, 2, stroke);
+        assert_eq!(s.doc.drawings[&original].strokes.len(), 2);
+        s.add_layer();
+        s.paste_drawing();
+        let pasted = s.doc.exposed(s.selected, 2).unwrap();
+        assert_ne!(pasted, original);
+        assert_eq!(s.doc.drawings[&pasted].strokes.len(), 1);
+        assert_ne!(
+            s.doc.drawings[&pasted].strokes[0].id,
+            s.doc.drawings[&original].strokes[0].id
+        );
+        s.undo();
+        assert_eq!(s.doc.exposed(s.selected, 2), None);
+        assert_eq!(s.doc.exposed(1, 2), Some(original));
     }
 
     #[test]

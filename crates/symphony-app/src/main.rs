@@ -1510,6 +1510,38 @@ impl SymphonyApp {
                     .find_active_focused()
                     .map(|(_, view)| *view)
             });
+            if here == Some(View::Node) && !ctx.egui_wants_keyboard_input() {
+                let zoom = ctx.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::Num1) {
+                        Some(true)
+                    } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Num2) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(zoom_in) = zoom {
+                    views::node::zoom_by_keyboard(&mut self.node_view, zoom_in);
+                    ctx.request_repaint();
+                }
+            }
+            if matches!(here, Some(View::Timeline | View::Xsheet))
+                && !ctx.egui_wants_keyboard_input()
+            {
+                let clipboard = ctx.input_mut(|input| {
+                    use views::timing::TimelineAction;
+                    if input.consume_key(egui::Modifiers::COMMAND, egui::Key::C) {
+                        Some(TimelineAction::CopyDrawing)
+                    } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::V) {
+                        Some(TimelineAction::PasteDrawing)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(action) = clipboard {
+                    action.run(&mut self.s);
+                }
+            }
             if here == Some(View::Timeline)
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
             {
@@ -2344,6 +2376,33 @@ impl SymphonyApp {
                 View::ToolProperties,
             ]),
         );
+        if self.s.has_selected_points() {
+            let label = if self.s.show_selected_points {
+                "Hide selected points"
+            } else {
+                "Show selected points"
+            };
+            out.push(
+                Entry::new(
+                    label,
+                    Kind::Action,
+                    Command::ToggleSelectedPoints,
+                    "drawing.show-points",
+                )
+                .words("display vector control points vertices")
+                .ctx(&[View::Drawing, View::Camera]),
+            );
+        }
+        out.push(
+            Entry::new(
+                "Cutter",
+                Kind::Tool,
+                Command::SelectCutter,
+                "drawing.cutter",
+            )
+            .words("cut split selection lasso")
+            .ctx(&[View::Drawing, View::Camera, View::ToolProperties]),
+        );
         if self.s.can_reduce_points() {
             out.push(
                 Entry::new(
@@ -2860,6 +2919,14 @@ impl SymphonyApp {
                 }
             }
             Command::ReduceStrokePoints => self.s.reduce_points(),
+            Command::ToggleSelectedPoints => {
+                self.s.show_selected_points = !self.s.show_selected_points;
+                self.s.tool = Tool::Select;
+            }
+            Command::SelectCutter => {
+                self.s.tool = Tool::Select;
+                self.s.cutter_mode = true;
+            }
             #[cfg(target_os = "macos")]
             Command::PickScreenColour => screen_colour::pick(ctx, self.s.key.clone()),
             Command::GoToFrame(f) => self.s.frame = f.clamp(1, self.s.length()),

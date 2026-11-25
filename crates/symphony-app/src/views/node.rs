@@ -21,6 +21,10 @@ type Input = (NodeId, usize);
 
 enum Drag {
     Pan,
+    Marquee {
+        start: Pos2,
+        extend: bool,
+    },
     Node(NodeId, Vec2),
     Cable {
         source: NodeId,
@@ -34,6 +38,7 @@ pub struct NodeViewState {
     selection: BTreeSet<NodeId>,
     selection_scene: String,
     zoom: Option<f32>,
+    keyboard_zoom: Option<f32>,
     anchor_x: Option<f32>,
     fit_next: Option<Rect>,
     drag: Option<Drag>,
@@ -1047,7 +1052,7 @@ fn nearby_wiring(
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
     let mut add = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.menu_button("Add node", |ui| {
             if ui.button("Drawing").clicked() {
                 s.add_layer();
@@ -1076,6 +1081,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                 }
             }
         });
+        if ui
+            .button("Arrange")
+            .on_hover_text("Arrange rigs, drawings, and effects by signal flow")
+            .clicked()
+        {
+            arrange(s, state);
+        }
         if ui.button("Reset view").clicked() {
             reset_view(state);
         }
@@ -1112,6 +1124,44 @@ fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
         .show(ctx, |ui| property_form(ui, s, draft));
 }
 
+fn bone_has_drawing(graph: &symphony_core::graph::Graph, bone: NodeId) -> bool {
+    let mut pending = vec![bone];
+    let mut seen = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for link in graph
+            .links()
+            .iter()
+            .filter(|link| link.from == id && link.port == 0)
+        {
+            match graph.node(link.to).map(|node| &node.kind) {
+                Some(NodeKind::Drawing { .. }) => return true,
+                Some(NodeKind::Peg(_) | NodeKind::MeshWarp(_)) => pending.push(link.to),
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+fn add_bone_drawing(s: &mut Session, bone: NodeId) {
+    if s.doc.graph.bone(bone).is_none() || bone_has_drawing(&s.doc.graph, bone) {
+        return;
+    }
+    let at = node_position(s, bone, &default_positions(s));
+    let peg = free_spot(s, [at.x, at.y + H + 28.0], W);
+    let drawing = free_spot_with(
+        s,
+        [peg[0], peg[1] + H + 28.0],
+        W,
+        Some((s.doc.graph.next_id(), peg)),
+    );
+    s.add_layer_for_bone(bone, peg, drawing);
+    s.select_graph_node(s.doc.layers[s.selected].node, true);
+}
+
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
     let mut build_mesh_now = false;
     ui.horizontal(|ui| {
@@ -1145,6 +1195,15 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             });
         }
         NodeKind::Bone(bone) => {
+            if !bone_has_drawing(&s.doc.graph, draft.id)
+                && ui
+                    .button("Add drawing")
+                    .on_hover_text("Create a drawing layer driven by this bone")
+                    .clicked()
+            {
+                add_bone_drawing(s, draft.id);
+                return;
+            }
             let parent = s.doc.graph.parent_bone(draft.id);
             let controller = s.doc.graph.smart_controller(draft.id, s.frame);
             if let Some(joint) = bone.smart.as_mut().filter(|_| parent.is_some()) {
@@ -1994,6 +2053,7 @@ fn arrange_columns(
     rows: &mut [Vec<NodeId>],
     links: &[Link],
     width: impl Fn(NodeId) -> f32,
+    rig: impl Fn(NodeId) -> Option<NodeId>,
 ) -> BTreeMap<NodeId, f32> {
     let space = |id: NodeId| width(id) + NODE_GAP * 2.0;
     let mut x = BTreeMap::<NodeId, f32>::new();
@@ -2011,14 +2071,21 @@ fn arrange_columns(
                  target: &dyn Fn(NodeId, f32) -> f32| {
         let targets: BTreeMap<NodeId, f32> =
             row.iter().map(|&id| (id, target(id, x[&id]))).collect();
-        row.sort_by(|a, b| targets[a].total_cmp(&targets[b]));
+        // Keep each skeleton's bones adjacent even when its drawing
+        // connections would otherwise pull them through another rig.
+        row.sort_by(|a, b| {
+            rig(*a)
+                .cmp(&rig(*b))
+                .then_with(|| targets[a].total_cmp(&targets[b]))
+        });
         // Left to right at the targets, but never overlapping.
         let mut placed: Vec<f32> = Vec::with_capacity(row.len());
         for (k, &id) in row.iter().enumerate() {
             let mut at = targets[&id];
             if k > 0 {
                 let prev = row[k - 1];
-                at = at.max(placed[k - 1] + (space(prev) + space(id)) / 2.0);
+                let gap = if rig(prev) != rig(id) { 36.0 } else { 0.0 };
+                at = at.max(placed[k - 1] + (space(prev) + space(id)) / 2.0 + gap);
             }
             placed.push(at);
         }
@@ -2073,8 +2140,26 @@ fn arrange_columns(
     x
 }
 
+/// The first row a node can occupy. Connections can push it later, so
+/// effects on a composite and nested composites retain top-down flow.
+fn arrange_band(kind: &NodeKind) -> usize {
+    match kind {
+        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_) => 0,
+        NodeKind::Drawing { .. } | NodeKind::Gradient(_) => 1,
+        NodeKind::Effect(_) => 2,
+        NodeKind::Composite => 3,
+        NodeKind::Display | NodeKind::Write => 4,
+    }
+}
+
 pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
-    let mut depth = BTreeMap::new();
+    let bands: BTreeMap<_, _> = s
+        .doc
+        .graph
+        .nodes()
+        .map(|(id, node)| (id, arrange_band(&node.kind)))
+        .collect();
+    let mut depth: BTreeMap<_, _> = bands.iter().map(|(&id, &band)| (id, (band, 0))).collect();
     let mut pending: BTreeMap<_, usize> = s.doc.graph.nodes().map(|(id, _)| (id, 0)).collect();
     let mut downstream = BTreeMap::<NodeId, Vec<NodeId>>::new();
     for link in s.doc.graph.links() {
@@ -2091,10 +2176,12 @@ pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
         .map(|(&id, _)| id)
         .collect();
     while let Some(id) = ready.pop() {
-        let level = *depth.entry(id).or_insert(0);
+        let (band, level) = depth[&id];
         for &next in downstream.get(&id).into_iter().flatten() {
-            let target = depth.entry(next).or_insert(0);
-            *target = (*target).max(level + 1);
+            let target = depth.get_mut(&next).expect("known downstream node");
+            if band >= bands[&next] {
+                *target = (*target).max((band, level + 1));
+            }
             if let Some(count) = pending.get_mut(&next) {
                 *count -= 1;
                 if *count == 0 {
@@ -2103,21 +2190,38 @@ pub fn arrange(s: &mut Session, state: &mut NodeViewState) {
             }
         }
     }
-    let mut by_depth = BTreeMap::<usize, Vec<NodeId>>::new();
+    let mut by_depth = BTreeMap::<(usize, usize), Vec<NodeId>>::new();
     for (id, _) in s.doc.graph.nodes() {
         by_depth
             .entry(depth.get(&id).copied().unwrap_or_default())
             .or_default()
             .push(id);
     }
-    let mut rows: Vec<Vec<NodeId>> = by_depth.into_values().collect();
-    let links = s.doc.graph.links().to_vec();
-    let x = arrange_columns(&mut rows, &links, |id| card_width(&s.doc.graph, id));
+    let (row_bands, mut rows): (Vec<_>, Vec<_>) = by_depth.into_iter().unzip();
+    let graph = &s.doc.graph;
+    let links = graph.links();
+    let rigs: BTreeMap<_, _> = graph
+        .nodes()
+        .filter(|(_, node)| matches!(node.kind, NodeKind::Skeleton(_) | NodeKind::Bone(_)))
+        .map(|(id, _)| (id, graph.rig_root(id)))
+        .collect();
+    let x = arrange_columns(
+        &mut rows,
+        links,
+        |id| card_width(graph, id),
+        |id| rigs.get(&id).copied(),
+    );
     let mut edits = Vec::new();
     let mut bounds = Rect::NOTHING;
-    for (row, ids) in rows.iter().enumerate() {
+    let mut y = 43.0;
+    let mut previous_band = None;
+    for ((band, _), ids) in row_bands.into_iter().zip(&rows) {
+        if let Some(previous) = previous_band {
+            y += if previous == band { 76.0 } else { 108.0 };
+        }
+        previous_band = Some(band);
         for &id in ids {
-            let after = [x[&id], 43.0 + row as f32 * 98.0];
+            let after = [x[&id], y];
             bounds = bounds.union(Rect::from_center_size(
                 Pos2::new(after[0], after[1]),
                 Vec2::new(card_width(&s.doc.graph, id), H),
@@ -2232,9 +2336,16 @@ fn select_in_graph(s: &mut Session, state: &mut NodeViewState, id: NodeId, exten
     s.select_graph_node(id, true);
 }
 
+pub fn zoom_by_keyboard(state: &mut NodeViewState, zoom_in: bool) {
+    state.keyboard_zoom = Some(if zoom_in { 1.2 } else { 1.0 / 1.2 });
+}
+
 fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Option<NodeKind>) {
     let primary = selected_node(s);
-    if state.selection_scene != s.key || !primary.is_some_and(|id| state.selection.contains(&id)) {
+    if state.selection_scene != s.key
+        || s.selected_node
+            .is_some_and(|id| !state.selection.contains(&id))
+    {
         state.selection_scene.clone_from(&s.key);
         state.selection.clear();
         state.selection.extend(primary);
@@ -2253,15 +2364,19 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         state.zoom = Some(zoom);
         state.pan = viewport.center() - anchor - bounds.center().to_vec2() * zoom;
     }
+    let keyboard_zoom = state.keyboard_zoom.take();
     if state.drag.is_none() {
-        if let Some(pointer) = resp.hover_pos() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            let new_zoom = (zoom * (scroll * 0.004).exp()).clamp(0.25, 2.5);
-            if new_zoom != zoom {
-                let local = (pointer - anchor - state.pan) / zoom;
-                state.pan = pointer - anchor - local * new_zoom;
-                state.zoom = Some(new_zoom);
-                zoom = new_zoom;
+        let pointer = resp.hover_pos();
+        let scroll = pointer.map_or(0.0, |_| ui.input(|i| i.smooth_scroll_delta.y));
+        let factor = keyboard_zoom.unwrap_or(1.0) * (scroll * 0.004).exp();
+        let new_zoom = (zoom * factor).clamp(0.25, 2.5);
+        if new_zoom != zoom {
+            let point = pointer.unwrap_or(viewport.center());
+            let local = (point - anchor - state.pan) / zoom;
+            state.pan = point - anchor - local * new_zoom;
+            state.zoom = Some(new_zoom);
+            zoom = new_zoom;
+            if scroll != 0.0 {
                 ui.input_mut(|input| input.smooth_scroll_delta = Vec2::ZERO);
             }
         }
@@ -2500,9 +2615,17 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 None => near(None, 40.0 * zoom.clamp(0.6, 1.0)),
             }
         };
-    if resp.drag_started() {
+    let space = ui.input(|i| i.key_down(egui::Key::Space));
+    if space && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    if resp.drag_started_by(egui::PointerButton::Primary) {
         if let Some(point) = ui.input(|i| i.pointer.press_origin()) {
-            state.drag = if let Some(input) = input_at(point) {
+            state.drag = if space {
+                Some(Drag::Pan)
+            } else if let Some(input) =
+                input_at(point).filter(|input| s.doc.graph.input(input.0, input.1).is_some())
+            {
                 s.doc
                     .graph
                     .input(input.0, input.1)
@@ -2520,13 +2643,19 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 select_in_graph(s, state, node, extend);
                 Some(Drag::Node(node, Vec2::ZERO))
             } else {
-                Some(Drag::Pan)
+                Some(Drag::Marquee {
+                    start: point,
+                    extend: ui.input(|i| i.modifiers.shift),
+                })
             };
         }
     }
     if resp.dragged() {
         match state.drag.as_mut() {
-            Some(Drag::Pan) => state.pan += resp.drag_delta(),
+            Some(Drag::Pan) => {
+                state.pan += resp.drag_delta();
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
             Some(Drag::Node(_, delta)) => *delta += resp.drag_delta() / zoom,
             _ => {}
         }
@@ -2579,8 +2708,45 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     };
     let now = ui.input(|i| i.time);
     let animated = symphony_ui::motion::enabled(ui.ctx());
+    let marquee = |start| {
+        resp.interact_pointer_pos()
+            .map(|end| Rect::from_two_pos(start, end))
+    };
+    if let Some(Drag::Marquee { start, .. }) = state.drag {
+        if let Some(rect) = marquee(start) {
+            painter.rect(
+                rect,
+                2.0,
+                theme::ACCENT_SELECT.gamma_multiply(0.16),
+                Stroke::new(1.0, theme::ACCENT_SELECT),
+                StrokeKind::Inside,
+            );
+        }
+    }
     if resp.drag_stopped() {
         match state.drag.take() {
+            Some(Drag::Marquee { start, extend }) => {
+                if let Some(rect) = marquee(start) {
+                    let hits = cards
+                        .iter()
+                        .filter(|(_, (card, _))| rect.intersects(*card))
+                        .map(|(&id, _)| id);
+                    if !extend {
+                        state.selection.clear();
+                    }
+                    state.selection.extend(hits);
+                    if !s
+                        .selected_node
+                        .is_some_and(|id| state.selection.contains(&id))
+                    {
+                        if let Some(&id) = state.selection.iter().next() {
+                            s.select_graph_node(id, true);
+                        } else {
+                            s.selected_node = None;
+                        }
+                    }
+                }
+            }
             Some(Drag::Node(id, delta)) if delta.length_sq() > 0.0 => {
                 if cards.contains_key(&id) {
                     // Keep every selected node's relative position during a group move.
@@ -2713,7 +2879,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     } else {
         None
     };
-    if resp.clicked() || resp.double_clicked() {
+    if !space && (resp.clicked() || resp.double_clicked()) {
         if let Some(link) = cut.filter(|_| resp.clicked()) {
             edit_link(s, None, (link.to, link.port), None);
         } else if let Some(id) = resp.interact_pointer_pos().and_then(node_at) {
@@ -3609,6 +3775,66 @@ mod tests {
     /// Arrange: nothing overlaps, each peg sits straight above its drawing,
     /// and cables between rows don't cross.
     #[test]
+    fn bone_add_drawing_wires_a_layer_and_undoes_in_one_step() {
+        let mut s = Session::new_scene();
+        add_node(&mut s, NodeKind::Bone(Default::default()), [0.0, 0.0]);
+        let bone = s.selected_node.unwrap();
+        add_bone_drawing(&mut s, bone);
+        let layer = s.doc.layers[s.selected];
+        assert_eq!(s.doc.graph.input(layer.peg, 0), Some(bone));
+        assert_eq!(s.doc.graph.input(layer.node, 0), Some(layer.peg));
+        assert!(bone_has_drawing(&s.doc.graph, bone));
+        add_bone_drawing(&mut s, bone);
+        assert_eq!(s.layer_count(), 2);
+        s.undo();
+        assert_eq!(s.layer_count(), 1);
+        assert!(!bone_has_drawing(&s.doc.graph, bone));
+        s.redo();
+        assert!(bone_has_drawing(&s.doc.graph, bone));
+    }
+
+    #[test]
+    fn arrange_aligns_artwork_and_first_effects_across_unequal_rigs() {
+        let mut s = Session::demo();
+        let a = s.doc.layers[0].node;
+        let b = s.doc.layers[1].node;
+        let composite = s.doc.composite;
+        let g = &mut s.doc.graph;
+        let skeleton = g.add("Rig", NodeKind::Skeleton(Default::default()));
+        let upper = g.add("Upper", NodeKind::Bone(Default::default()));
+        let lower = g.add("Lower", NodeKind::Bone(Default::default()));
+        g.connect(skeleton, upper, 0);
+        g.connect(upper, lower, 0);
+        g.connect(lower, a, 0);
+        let effect = || NodeKind::Effect(Effect::Opacity { amount: 0.5 });
+        let first = g.add("First effect", effect());
+        let parallel = g.add("Parallel effect", effect());
+        let second = g.add("Second effect", effect());
+        g.connect(a, first, 0);
+        g.connect(first, second, 0);
+        g.connect(b, parallel, 0);
+        g.connect(second, composite, 0);
+        g.connect(parallel, composite, 1);
+        let links = g.links().to_vec();
+
+        let mut state = NodeViewState::default();
+        arrange(&mut s, &mut state);
+        let y = |id| s.doc.node_positions[&id][1];
+        assert!(y(skeleton) < y(upper) && y(upper) < y(lower) && y(lower) < y(a));
+        assert_eq!(y(a), y(b));
+        assert_eq!(y(first), y(parallel));
+        assert!(y(a) < y(first) && y(first) < y(second) && y(second) < y(composite));
+        assert!(links.iter().all(|link| y(link.from) < y(link.to)));
+        assert_eq!(s.doc.graph.links(), links);
+        assert!(overlapping(&s).is_empty());
+        let arranged = s.doc.node_positions.clone();
+        arrange(&mut s, &mut state);
+        assert_eq!(s.doc.node_positions, arranged);
+        s.undo();
+        assert!(s.doc.node_positions.is_empty());
+    }
+
+    #[test]
     fn arrange_is_tidy_and_uncrossed() {
         let mut s = Session::new_scene();
         s.add_layer();
@@ -3957,6 +4183,40 @@ mod tests {
             }
             harness.run_steps(1);
         }
+    }
+
+    #[test]
+    fn empty_drag_selects_cards_and_space_drag_pans_over_them() {
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (s, state, origin)| {
+                    *origin = ui.available_rect_before_wrap().center_top();
+                    canvas(ui, s, state, None);
+                },
+                (Session::new_scene(), NodeViewState::default(), Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let (s, _, origin) = harness.state();
+        let layer = s.doc.layers[0];
+        let at = *origin + node_position(s, layer.node, &default_positions(s));
+        let start = at - Vec2::new(120.0, 30.0);
+        let end = at + Vec2::new(100.0, 20.0);
+        pointer_gesture(&mut harness, [start, end, end], egui::Modifiers::NONE);
+        assert_eq!(harness.state().1.selection, BTreeSet::from([layer.node]));
+        assert_eq!(harness.state().1.pan, Vec2::ZERO);
+
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let end = at + Vec2::new(45.0, 30.0);
+        pointer_gesture(&mut harness, [at, end, end], egui::Modifiers::NONE);
+        assert_eq!(harness.state().1.pan, end - at);
+        assert_eq!(harness.state().1.selection, BTreeSet::from([layer.node]));
     }
 
     #[test]

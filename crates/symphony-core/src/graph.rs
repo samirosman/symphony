@@ -853,6 +853,31 @@ impl Graph {
         Ok((!warp.steps.is_empty() && !warp.is_flat()).then(|| std::sync::Arc::new(warp)))
     }
 
+    /// The nearest attached bone's rest endpoints in the drawing's local
+    /// coordinates. Intervening pegs still offset the drawing relative to it.
+    pub fn drawing_bone_guide(&self, drawing: NodeId, frame: u32) -> Option<[(f32, f32); 2]> {
+        let mut id = drawing;
+        let mut inner = Affine::IDENTITY;
+        for _ in 0..MAX_DEPTH {
+            id = self.input(id, 0)?;
+            match &self.node(id)?.kind {
+                NodeKind::Bone(_) => {
+                    let pose = self.bone_pose(id, frame)?;
+                    let guide = inner.inverse()?.compose(pose.rest);
+                    return Some([guide.apply(0.0, 0.0), guide.apply(pose.length, 0.0)]);
+                }
+                NodeKind::Peg(peg) => {
+                    if self.enabled_at(id, frame) {
+                        inner = peg.transform_at(frame).compose(inner);
+                    }
+                }
+                NodeKind::MeshWarp(_) => {}
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub fn bone(&self, id: NodeId) -> Option<&Bone> {
         match &self.node(id)?.kind {
             NodeKind::Bone(bone) => Some(bone),
@@ -1104,6 +1129,32 @@ mod tests {
             g.evaluate(display, &xs, 1),
             Err(EvalError::Cycle(_))
         ));
+    }
+
+    #[test]
+    fn drawing_bone_guide_uses_rest_pose_and_accounts_for_drawing_peg() {
+        let (mut graph, _, _, peg) = scene();
+        let drawing = graph
+            .links()
+            .iter()
+            .find(|link| link.from == peg)
+            .unwrap()
+            .to;
+        assert_eq!(graph.drawing_bone_guide(drawing, 2), None);
+        let bone = graph.add(
+            "Bone",
+            NodeKind::Bone(Bone {
+                origin: [30.0, 40.0],
+                length: 80.0,
+                rotation: Value::Constant(90.0),
+                ..Bone::default()
+            }),
+        );
+        graph.connect(bone, peg, 0);
+        assert_eq!(
+            graph.drawing_bone_guide(drawing, 2),
+            Some([(20.0, 40.0), (100.0, 40.0)])
+        );
     }
 
     #[test]

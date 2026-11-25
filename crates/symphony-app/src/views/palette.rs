@@ -100,7 +100,7 @@ fn placeholder(here: Option<View>) -> &'static str {
 
 const WIDTH: f32 = 560.0;
 const ROWS: usize = 16;
-const RECOMMEND_AFTER: f64 = 0.5;
+const RECOMMEND_AFTER: f64 = 0.2;
 const ROW_H: f32 = 34.0;
 const FIELD_H: f32 = 30.0;
 
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_search_expands_after_half_a_second() {
+    fn blank_search_expands_after_two_tenths_of_a_second() {
         use egui_kittest::kittest::Queryable;
         let state = PaletteState::new(Pos2::new(390.0, 54.0), Some(View::Timeline));
         let entries = vec![
@@ -792,7 +792,6 @@ mod tests {
             ),
         ];
         let mut harness = Harness::builder()
-            .with_step_dt(0.1)
             .with_size(Vec2::new(800.0, 620.0))
             .with_context_setup(|ctx| {
                 theme::apply(ctx);
@@ -810,10 +809,13 @@ mod tests {
                 },
                 (state, entries),
             );
-        harness.run_steps(2);
+        let opened_at = harness.state().0.opened_at.unwrap();
+        harness.input_mut().time = Some(opened_at + 0.19);
+        harness.step();
         assert!(harness.query_by_label("Context result").is_none());
         assert!(harness.query_by_label("Frequent result").is_none());
-        harness.run_steps(6);
+        harness.input_mut().time = Some(opened_at + 0.21);
+        harness.step();
         harness.get_by_label("Context result");
         harness.get_by_label("Frequent result");
         assert!(harness.query_by_label("Other result").is_none());

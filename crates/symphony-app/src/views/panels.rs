@@ -126,23 +126,6 @@ fn text_controls(ui: &mut egui::Ui, s: &mut Session) {
     });
 }
 
-fn reduce_point_controls(ui: &mut egui::Ui, s: &mut Session) {
-    if s.can_reduce_points() {
-        ui.collapsing("Reduce stroke points", |ui| {
-            ui.add(
-                egui::DragValue::new(&mut s.point_reduction)
-                    .range(0.1..=30.0)
-                    .speed(0.1)
-                    .prefix("Tolerance ")
-                    .suffix(" px"),
-            );
-            if ui.button("Reduce points").clicked() {
-                s.reduce_points();
-            }
-        });
-    }
-}
-
 fn size_slider(ui: &mut egui::Ui, label: &str, v: &mut f32, recommended: f32) {
     hint(ui, label);
     ui.spacing_mut().slider_width = (ui.available_width() - 72.0).max(80.0);
@@ -779,9 +762,14 @@ fn tool_properties_body(
                 hint(ui, "Erase the same place in every drawing of the layer, not only the one at this frame.");
             }
             Tool::Select | Tool::Transform => {
-                reduce_point_controls(ui, s);
                 let select = s.tool == Tool::Select;
                 section(ui, if select { "Select" } else { "Transform" });
+                if select {
+                    widgets::checkbox(ui, &mut s.cutter_mode, "Cutter")
+                        .on_hover_text("Draw a selection boundary to split the artwork and select the pieces inside.");
+                    widgets::checkbox(ui, &mut s.show_selected_points, "Show selected points");
+                }
+
                 widgets::segmented(
                     ui,
                     "select-mode",
@@ -888,7 +876,6 @@ fn tool_properties_body(
             }
             Tool::LineEditor => {
                 section(ui, "Line Editor");
-                reduce_point_controls(ui, s);
                 size_slider(ui, "Radius", &mut s.line_edit_radius, 200.0);
                 s.line_edit_radius = s.line_edit_radius.max(1.0);
                 slider(ui, "Strength", &mut s.line_edit_strength, 0.05..=1.0);

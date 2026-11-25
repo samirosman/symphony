@@ -44,17 +44,23 @@ pub enum TimelineAction {
     DeleteKey,
     InsertNew,
     Duplicate,
+    CopyDrawing,
+    PasteDrawing,
+    CloneDrawing,
     Extend,
     InsertInbetween,
     DeleteLayer,
 }
 
 impl TimelineAction {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::SetKey,
         Self::DeleteKey,
         Self::InsertNew,
         Self::Duplicate,
+        Self::CopyDrawing,
+        Self::PasteDrawing,
+        Self::CloneDrawing,
         Self::Extend,
         Self::InsertInbetween,
         Self::DeleteLayer,
@@ -65,7 +71,10 @@ impl TimelineAction {
             Self::SetKey => "Set Keyframe",
             Self::DeleteKey => "Delete Keyframe",
             Self::InsertNew => "Insert New Drawing Frame",
-            Self::Duplicate => "Duplicate Drawing Frame",
+            Self::Duplicate => "Duplicate Drawing",
+            Self::CopyDrawing => "Copy Drawing",
+            Self::PasteDrawing => "Paste Drawing",
+            Self::CloneDrawing => "Clone Drawing",
             Self::Extend => "Extend Exposure",
             Self::InsertInbetween => "Insert In-between Frame",
             Self::DeleteLayer => "Delete Layer",
@@ -77,7 +86,10 @@ impl TimelineAction {
             Self::SetKey => "add create key pose animation timeline",
             Self::DeleteKey => "remove key pose animation timeline",
             Self::InsertNew => "add new frame drawing blank empty cel cell",
-            Self::Duplicate => "copy clone duplicate frame exposure independent cel",
+            Self::Duplicate => "duplicate frame exposure independent cel",
+            Self::CopyDrawing => "copy artwork from frame to clipboard",
+            Self::PasteDrawing => "paste independent drawing into current cell",
+            Self::CloneDrawing => "clone linked shared drawing exposure frame",
             Self::Extend => "hold extend increase exposure length one frame",
             Self::InsertInbetween => "insert new frame all layers hold timing scene",
             Self::DeleteLayer => "remove layer timeline",
@@ -89,7 +101,9 @@ impl TimelineAction {
             Self::SetKey => !s.doc.layers.is_empty() || s.selected_node.is_some(),
             Self::DeleteKey => super::node::selected_has_key(s),
             Self::InsertNew => s.can_insert_exposure(),
-            Self::Duplicate | Self::Extend => {
+            Self::CopyDrawing => s.doc.exposed(s.selected, s.frame).is_some(),
+            Self::PasteDrawing => s.can_paste_drawing(),
+            Self::Duplicate | Self::CloneDrawing | Self::Extend => {
                 s.can_insert_exposure() && s.doc.exposed(s.selected, s.frame).is_some()
             }
             Self::InsertInbetween => s.length() < 100_000,
@@ -103,6 +117,9 @@ impl TimelineAction {
             Self::DeleteKey => super::node::set_selected_key(s, true),
             Self::InsertNew => s.insert_exposure(InsertExposure::New),
             Self::Duplicate => s.insert_exposure(InsertExposure::Duplicate),
+            Self::CopyDrawing => s.copy_exposed_drawing(),
+            Self::PasteDrawing => s.paste_drawing(),
+            Self::CloneDrawing => s.insert_exposure(InsertExposure::Clone),
             Self::Extend => s.change_exposure(1),
             Self::InsertInbetween => s.insert_inbetweens(1),
             Self::DeleteLayer => s.delete_layer(s.selected),
@@ -123,10 +140,24 @@ impl TimelineAction {
     }
 }
 
+fn drawing_clipboard_menu(ui: &mut egui::Ui, s: &mut Session) {
+    for action in [
+        TimelineAction::CopyDrawing,
+        TimelineAction::PasteDrawing,
+        TimelineAction::Duplicate,
+        TimelineAction::CloneDrawing,
+    ] {
+        action.menu(ui, s);
+    }
+}
+
 fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
     for action in [
         TimelineAction::InsertNew,
         TimelineAction::Duplicate,
+        TimelineAction::CloneDrawing,
+        TimelineAction::CopyDrawing,
+        TimelineAction::PasteDrawing,
         TimelineAction::Extend,
     ] {
         action.menu(ui, s);
@@ -1211,6 +1242,9 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 match resp.interact_pointer_pos().and_then(slot_at) {
                     Some(Slot::Layer(r)) => {
                         t.menu_row = Some(r);
+                        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.x >= o.x + HEAD) {
+                            s.frame = (((p.x - o.x - HEAD) / cw) as u32 + 1).clamp(1, len);
+                        }
                         t.menu_node = Some(s.doc.layers[r].node);
                     }
                     Some(Slot::Node(j)) => t.menu_node = Some(node_tracks[j].0),
@@ -1231,6 +1265,8 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                         add_node_menu(ui, s, node);
                     }
                     if let Some(row) = t.menu_row {
+                        ui.separator();
+                        drawing_clipboard_menu(ui, s);
                         ui.separator();
                         layer_menu(ui, s, t, row);
                     } else if let Some(node) = t.menu_node {
@@ -1431,11 +1467,18 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
             if resp.secondary_clicked() {
                 t.menu_row = resp.interact_pointer_pos().and_then(col_at);
                 if let Some(c) = t.menu_row {
+                    if let Some(p) = resp.interact_pointer_pos().filter(|p| p.y >= o.y + HEAD) {
+                        s.frame = (((p.y - o.y - HEAD) / rh) as u32 + 1).clamp(1, len);
+                    }
                     s.select_graph_node(s.doc.layers[c].node, false);
                 }
             }
             if let Some(c) = t.menu_row {
-                resp.context_menu(|ui| layer_menu(ui, s, t, c));
+                resp.context_menu(|ui| {
+                    drawing_clipboard_menu(ui, s);
+                    ui.separator();
+                    layer_menu(ui, s, t, c);
+                });
             }
             if let Some((c, _)) = t.renaming {
                 let x = o.x + NUM + c as f32 * CW;

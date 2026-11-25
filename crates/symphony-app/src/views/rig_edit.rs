@@ -24,6 +24,35 @@ enum Drag {
     },
 }
 
+/// Reference only in Drawing View, where artwork is edited in its rest
+/// coordinates. The filled bone and its endpoints stay legible over ink.
+pub fn draw_rest_guide(painter: &egui::Painter, s: &Session, view: Affine) {
+    let Some(layer) = s.doc.layers.get(s.selected) else {
+        return;
+    };
+    let Some(endpoints) = s.doc.graph.drawing_bone_guide(layer.node, s.frame) else {
+        return;
+    };
+    let [start, tip] = endpoints.map(|(x, y)| pos(view.apply(x, y)));
+    let ink = theme::ACCENT_SELECT.gamma_multiply(0.8);
+    let outline = theme::BG_BASE.gamma_multiply(0.75);
+    let delta = tip - start;
+    if delta.length() > 12.0 {
+        let along = delta.normalized();
+        let across = egui::vec2(-along.y, along.x) * 4.0;
+        let shoulder = start + along * 7.0;
+        painter.add(egui::Shape::convex_polygon(
+            vec![start, shoulder + across, tip, shoulder - across],
+            ink.gamma_multiply(0.28),
+            Stroke::new(1.0, ink),
+        ));
+    } else {
+        painter.line_segment([start, tip], Stroke::new(1.0, ink));
+    }
+    painter.circle(start, 4.0, outline, Stroke::new(1.2, ink));
+    painter.circle(tip, 3.0, outline, Stroke::new(1.2, ink));
+}
+
 pub fn ui(
     ui: &egui::Ui,
     response: &egui::Response,

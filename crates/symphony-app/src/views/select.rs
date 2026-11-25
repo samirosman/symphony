@@ -244,6 +244,7 @@ pub fn ui(
     });
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
     let transform_tool = s.tool == Tool::Transform;
+    let cutter = !transform_tool && s.cutter_mode;
 
     // The box we're working with: drawing-local bounds and local -> screen.
     let target: Option<([f32; 2], [f32; 2], Affine)> = if transform_tool {
@@ -293,7 +294,7 @@ pub fn ui(
 
     let camera_space = st.camera_space;
     // Start a gesture.
-    if response.drag_started() {
+    if response.drag_started_by(egui::PointerButton::Primary) {
         if let Some(p) = view_pointer.or(response.interact_pointer_pos()) {
             let on_box = target.and_then(|(lo, hi, m)| grab(p, lo, hi, m).map(|k| (k, lo, hi, m)));
             let start_drag =
@@ -329,13 +330,15 @@ pub fn ui(
             if !st.polygon.is_empty() {
                 st.polygon_drag = Some(p);
             } else if let Some((kind, lo, hi, m)) = on_box.filter(|(k, ..)| {
-                (transform_tool || !shift && !ctrl)
+                !cutter
+                    && (transform_tool || !shift && !ctrl)
                     && (*k != Kind::Move
                         || s.easy_drag
                         || hit_selection(s, p, view, items, transform_tool))
             }) {
                 st.drag = Some(start_drag(kind, lo, hi, m, s));
-            } else if (transform_tool || !shift && !ctrl)
+            } else if !cutter
+                && (transform_tool || !shift && !ctrl)
                 && pick(s, p, view, items, transform_tool, false, false).is_some()
             {
                 // Dragging unselected artwork selects it and moves it at once.
@@ -437,7 +440,7 @@ pub fn ui(
             (points.len() >= 3).then(|| points.into_iter().map(|p| [p.x, p.y]).collect())
         } else {
             if let Some(at) = st.lasso.first().copied() {
-                if pick(s, at, view, items, false, shift, ctrl).is_none() {
+                if cutter || pick(s, at, view, items, false, shift, ctrl).is_none() {
                     st.polygon.push(Anchor {
                         at,
                         handle: Vec2::ZERO,
@@ -452,11 +455,12 @@ pub fn ui(
         }
     }
 
-    if response.clicked() {
+    if response.clicked_by(egui::PointerButton::Primary) {
         if let Some(p) = response.interact_pointer_pos() {
             if st.polygon.len() >= 3 && p.distance(st.polygon[0].at) <= CLOSE_RADIUS {
                 finish_polygon = true;
-            } else if !st.polygon.is_empty()
+            } else if cutter
+                || !st.polygon.is_empty()
                 || (pick(s, p, view, items, transform_tool, shift, ctrl).is_none()
                     && !transform_tool)
             {
@@ -529,6 +533,36 @@ pub fn ui(
     if let Some((lo, hi, m)) = target {
         let m = st.preview.map_or(m, |l| m.compose(l));
         draw_box(painter, lo, hi, m);
+        if s.show_selected_points && !transform_tool {
+            let mark = |x, y| {
+                let at = pos(m.apply(x, y));
+                if painter.clip_rect().contains(at) {
+                    painter.circle(
+                        at,
+                        3.0,
+                        theme::BG_BASE,
+                        EStroke::new(1.0, theme::ACCENT_SELECT),
+                    );
+                }
+            };
+            for stroke in s.selected_strokes() {
+                if stroke.shape.is_empty() {
+                    for point in &stroke.points {
+                        mark(point.x, point.y);
+                    }
+                } else {
+                    for &[x, y] in stroke.shape.iter().flatten() {
+                        mark(x, y);
+                    }
+                }
+            }
+            for fill in s.selected_fills() {
+                for &[x, y] in fill.contours.iter().flatten() {
+                    mark(x, y);
+                }
+            }
+        }
+
         if transform_tool {
             if let Some(p) = s.transform_peg(s.selected) {
                 // The pivot is amber, because it belongs to animation (DESIGN §4.3).
@@ -726,6 +760,20 @@ fn select_area(
     let Some(d) = s.selection.drawing else { return };
     let world = world_of(s, items);
     let m = view.compose(world);
+    if s.cutter_mode {
+        if let Some(local) = m.inverse() {
+            let polygon = poly
+                .iter()
+                .map(|&[x, y]| {
+                    let (x, y) = local.apply(x, y);
+                    [x, y]
+                })
+                .collect();
+            s.cut_area(d, polygon, add, remove);
+            s.cutter_mode = false;
+        }
+        return;
+    }
     let Some(dr) = s.doc.drawings.get(&d) else {
         return;
     };

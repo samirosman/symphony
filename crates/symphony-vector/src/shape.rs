@@ -306,6 +306,32 @@ pub fn erase(shape: &Shape, eraser: &[Vec<[f32; 2]>]) -> Option<Vec<Shape>> {
     Some(left)
 }
 
+/// Split outlines along a cutter boundary, returning the inside and outside.
+pub fn split(shapes: &[Shape], clip: &Shape) -> Option<(Vec<Shape>, Vec<Shape>)> {
+    let (lo, hi) = bbox(clip)?;
+    let mut inside = Vec::new();
+    let mut outside = Vec::new();
+    for shape in shapes {
+        let Some((a, b)) = bbox(shape) else { continue };
+        if lo[0] > b[0] || lo[1] > b[1] || hi[0] < a[0] || hi[1] < a[1] {
+            outside.push(shape.clone());
+            continue;
+        }
+        let parts = to_f32(shape.overlay(clip, OverlayRule::Intersect, FillRule::NonZero));
+        if parts.is_empty() {
+            outside.push(shape.clone());
+        } else {
+            inside.extend(parts);
+            outside.extend(to_f32(shape.overlay(
+                clip,
+                OverlayRule::Difference,
+                FillRule::NonZero,
+            )));
+        }
+    }
+    (!inside.is_empty()).then_some((inside, outside))
+}
+
 /// Is (`x`, `y`) inside the shape, or within `r` of its edge?
 pub fn hits_shape(shape: &Shape, x: f32, y: f32, r: f32) -> bool {
     let mut inside = false;

@@ -31,6 +31,8 @@ pub enum Command {
     SetFrameRate(f32),
     AddSwatch,
     ReduceStrokePoints,
+    ToggleSelectedPoints,
+    SelectCutter,
     #[cfg(target_os = "macos")]
     PickScreenColour,
     ToggleAnimate,
