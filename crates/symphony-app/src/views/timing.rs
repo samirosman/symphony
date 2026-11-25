@@ -461,6 +461,7 @@ fn layer_chain(s: &Session, layer: usize) -> (Vec<NodeId>, Vec<NodeId>) {
             Some(
                 NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
+                    | NodeKind::KinematicOutput
                     | NodeKind::Skeleton(_)
                     | NodeKind::Bone(_)
             )

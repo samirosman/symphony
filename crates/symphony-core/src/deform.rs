@@ -594,6 +594,11 @@ impl ChainPose {
             .reduce(f32::min)
     }
 
+    /// How many bones the chain has.
+    pub fn bone_count(&self) -> usize {
+        self.rest.len()
+    }
+
     /// Kinematic Output: how the end of bone `i` moves from the rest pose
     /// to the animated pose, for a drawing that follows it without being
     /// deformed. The identity for a bone that doesn't exist.
