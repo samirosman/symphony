@@ -124,6 +124,10 @@ pub fn ui(
     state: &mut RigEdit,
     view: Affine,
 ) -> bool {
+    if !s.show_rig_controls {
+        finish(s, state);
+        return false;
+    }
     let selected = s
         .selected_node
         .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node));
@@ -557,6 +561,72 @@ pub(super) fn apply_rig_solution(
             );
         }
     }
+}
+
+/// The rig of the selected bone, skeleton, or drawing on a bone.
+fn selected_rig(s: &Session) -> Option<NodeId> {
+    let id = s
+        .selected_node
+        .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node))?;
+    let bone = match &s.doc.graph.node(id)?.kind {
+        NodeKind::Bone(_) | NodeKind::Skeleton(_) => id,
+        NodeKind::Drawing { .. } => s.doc.graph.drawing_bone(id, s.frame)?,
+        _ => return None,
+    };
+    Some(s.doc.graph.rig_root(bone))
+}
+
+/// Key every bone of the selected rig, and its skeleton's position, on
+/// this frame with the values they show now (Moho's Freeze Pose). A key
+/// made later then starts its motion here, not at the last key.
+pub fn key_rig(s: &mut Session) {
+    let Some(root) = selected_rig(s) else {
+        s.note("Select a bone to key its rig");
+        return;
+    };
+    let frame = s.frame;
+    let key = |value: &mut Value| {
+        let now = value.at(frame);
+        value.set_key(frame, now);
+    };
+    let mut edits = Vec::new();
+    let mut ids = s.doc.graph.rig_bones(root);
+    ids.push(root);
+    for id in ids {
+        let Some(before) = s.doc.graph.node(id).cloned() else {
+            continue;
+        };
+        let mut after = before.clone();
+        match &mut after.kind {
+            NodeKind::Bone(bone) => {
+                key(&mut bone.rotation);
+                if bone.stretch_mode != symphony_core::rig::Stretch::Rigid {
+                    key(&mut bone.stretch);
+                }
+                if let Some(joint) = bone.smart.as_mut() {
+                    joint.target.iter_mut().for_each(key);
+                }
+                if let Some(anchor) = bone.anchor.as_mut() {
+                    anchor.target.iter_mut().for_each(key);
+                }
+            }
+            NodeKind::Skeleton(peg) => {
+                key(&mut peg.x);
+                key(&mut peg.y);
+                key(&mut peg.rotation);
+            }
+            _ => continue,
+        }
+        if after != before {
+            edits.push(Edit::SetNodeProperties { id, before, after });
+        }
+    }
+    if edits.is_empty() {
+        return;
+    }
+    s.end_gesture();
+    s.history
+        .apply(&mut s.doc, "Set keyframe on whole rig", edits);
 }
 
 /// A: cycle the selected bone's anchor: none, Locked, Aim.

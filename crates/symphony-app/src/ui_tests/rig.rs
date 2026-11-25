@@ -113,6 +113,49 @@ fn a_turn_stops_at_the_angle_limit() {
 }
 
 #[test]
+fn hidden_rig_controls_take_no_drag() {
+    let (mut h, skeleton, bone) = one_bone(Stretch::Rigid);
+    h.state_mut().s.show_rig_controls = false;
+    h.run_steps(1);
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
+    let NodeKind::Skeleton(peg) = &h.state().s.doc.graph.node(skeleton).unwrap().kind else {
+        panic!("not a skeleton");
+    };
+    assert_eq!((peg.x.at(1), peg.y.at(1)), (0.0, 0.0));
+}
+
+#[test]
+fn key_rig_keys_every_bone_and_the_skeleton_in_one_step() {
+    use symphony_core::anim::Value;
+    let (mut h, skeleton, bone) = one_bone(Stretch::Rigid);
+    let s = &mut h.state_mut().s;
+    let child = s.doc.graph.add(
+        "Hand",
+        NodeKind::Bone(Bone {
+            length: 50.0,
+            rotation: Value::Constant(15.0),
+            ..Bone::default()
+        }),
+    );
+    s.doc.graph.connect(bone, child, 0);
+    s.frame = 5;
+    let steps = s.history.undo_len();
+    crate::views::rig_edit::key_rig(s);
+    assert_eq!(s.history.undo_len(), steps + 1, "one undo step");
+    let graph = &s.doc.graph;
+    for id in [bone, child] {
+        let rotation = &graph.bone(id).unwrap().rotation;
+        assert!(matches!(rotation, Value::Keys(k) if k.iter().any(|k| k.frame == 5)));
+    }
+    assert_eq!(graph.bone(child).unwrap().rotation.at(5), 15.0, "same pose");
+    let NodeKind::Skeleton(peg) = &graph.node(skeleton).unwrap().kind else {
+        panic!("not a skeleton");
+    };
+    assert!(peg.has_key(5));
+}
+
+#[test]
 fn a_locked_bone_takes_no_drag() {
     let (mut h, _, bone) = one_bone(Stretch::Rigid);
     let graph = &mut h.state_mut().s.doc.graph;

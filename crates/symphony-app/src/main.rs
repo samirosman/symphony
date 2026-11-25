@@ -1483,6 +1483,8 @@ impl SymphonyApp {
             Action::ToggleCameraEffects => self.camera.render_effects = !self.camera.render_effects,
             Action::ToggleAutoKey => self.s.animate = !self.s.animate,
             Action::ToggleLayerVisible => self.s.toggle_visible(self.s.selected),
+            Action::ToggleRigControls => self.s.show_rig_controls = !self.s.show_rig_controls,
+            Action::KeyRig => views::rig_edit::key_rig(&mut self.s),
             Action::Timeline(action) => {
                 if action.enabled(&self.s) {
                     action.run(&mut self.s);
@@ -1902,6 +1904,7 @@ impl SymphonyApp {
             });
             ui.separator();
             views::timing::TimelineAction::SetKey.menu(ui, &mut self.s, self.profile);
+            self.menu_action(ui, Action::KeyRig);
             views::timing::TimelineAction::Duplicate.menu(ui, &mut self.s, self.profile);
             views::timing::TimelineAction::InsertNew.menu(ui, &mut self.s, self.profile);
             views::timing::TimelineAction::Extend.menu(ui, &mut self.s, self.profile);
@@ -1944,6 +1947,8 @@ impl SymphonyApp {
             let on = self.s.show_strokes;
             self.menu_toggle(ui, Action::ShowStrokes, on);
             self.menu_toggle(ui, Action::ToggleCameraEffects, self.camera.render_effects);
+            let on = self.s.show_rig_controls;
+            self.menu_toggle(ui, Action::ToggleRigControls, on);
             ui.separator();
             self.menu_action(ui, Action::ZoomIn);
             self.menu_action(ui, Action::ZoomOut);
