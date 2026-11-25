@@ -57,8 +57,7 @@ pub enum Setting {
     InterfaceAnimations,
     InterfaceEffects,
     UseNoAi,
-    ProfileHarmony,
-    ProfileSymphony,
+    Profile(crate::keymap::Profile),
     StrokeDetail,
     StageColour,
 }
