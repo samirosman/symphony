@@ -943,10 +943,10 @@ impl Graph {
         let parent = self.parent_bone(id);
         let (rest_base, posed_base, parent_skin) = if let Some(parent) = parent {
             let parent = self.bone_pose_inner(parent, frame, depth + 1)?;
-            let end = Affine::translate(parent.length, 0.0);
+            // Children start at the stretched tip, without being stretched.
             (
-                parent.rest.compose(end),
-                parent.posed.compose(end),
+                parent.rest.compose(Affine::translate(parent.length, 0.0)),
+                parent.posed.compose(Affine::translate(parent.reach(), 0.0)),
                 parent.skin(),
             )
         } else {
@@ -974,12 +974,221 @@ impl Graph {
                 }
             }
         }
+        let stretch = if self.enabled_at(id, frame) {
+            bone.stretch_at(frame)
+        } else {
+            1.0
+        };
         Ok(BonePose {
             rest: rest_base.compose(rest_turn),
             posed: posed_base.compose(Affine::rotate_deg(turn)),
             parent_skin,
             length: bone.length(),
+            scale: bone.stretch_scale(stretch),
         })
+    }
+
+    /// Every bone in the rig `root` (see [`Graph::rig_root`]), parents
+    /// before their children.
+    pub fn rig_bones(&self, root: NodeId) -> Vec<NodeId> {
+        let mut bones: Vec<(usize, NodeId)> = self
+            .nodes()
+            .filter(|(id, _)| self.bone(*id).is_some() && self.rig_root(*id) == root)
+            .map(|(id, _)| {
+                let mut depth = 0;
+                let mut at = id;
+                while let Some(p) = self.parent_bone(at) {
+                    depth += 1;
+                    at = p;
+                    if depth > MAX_DEPTH {
+                        break;
+                    }
+                }
+                (depth, id)
+            })
+            .collect();
+        bones.sort();
+        bones.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Smart rigs: the bone values that put `dragged`'s tip at `target`
+    /// (skeleton space) with the rig's anchors respected: the chain from
+    /// the dragged bone up to the nearest locked joint (or the root) is
+    /// solved, chains below it that end in a locked anchor are re-solved
+    /// so they stay planted, aim anchors turn their bones to their
+    /// targets, and every other bone keeps its pose relative to its
+    /// parent. None when the rig has no anchors (posing is then bone by
+    /// bone) or a smart joint is in the way. Returns (bone, rotation,
+    /// stretch) to set.
+    pub fn solve_rig(
+        &self,
+        dragged: NodeId,
+        target: [f32; 2],
+        frame: u32,
+    ) -> Option<Vec<(NodeId, f32, f32)>> {
+        use crate::rig::{solve_chain, AnchorKind, Link};
+        use std::collections::{BTreeMap, BTreeSet};
+        let root = self.rig_root(dragged);
+        let bones = self.rig_bones(root);
+        let anchored: Vec<NodeId> = bones
+            .iter()
+            .copied()
+            .filter(|&b| self.bone(b).is_some_and(|x| x.anchor.is_some()))
+            .collect();
+        if anchored.is_empty() {
+            return None;
+        }
+        if bones
+            .iter()
+            .any(|&b| self.smart_controller(b, frame).is_some())
+        {
+            return None;
+        }
+        let poses: BTreeMap<NodeId, crate::rig::BonePose> = bones
+            .iter()
+            .filter_map(|&b| self.bone_pose(b, frame).map(|p| (b, p)))
+            .collect();
+        let point = |m: Affine, x: f32| {
+            let (px, py) = m.apply(x, 0.0);
+            [px, py]
+        };
+        let angle_of = |m: Affine| m.b.atan2(m.a);
+        let locked = |b: NodeId| {
+            self.bone(b)
+                .and_then(|x| x.anchor.as_ref())
+                .filter(|a| a.kind == AnchorKind::Locked)
+                .map(|a| [a.target[0].at(frame), a.target[1].at(frame)])
+        };
+        let link = |b: NodeId| {
+            let bone = self.bone(b)?;
+            Some(Link {
+                length: bone.length(),
+                stretch: bone.stretch_range(),
+            })
+        };
+        // New absolute angle and stretch for bones the solve decides.
+        let mut fixed: BTreeMap<NodeId, (f32, f32)> = BTreeMap::new();
+        let set_from =
+            |chain: &[NodeId], joints: &[[f32; 2]], fixed: &mut BTreeMap<NodeId, (f32, f32)>| {
+                for (i, &b) in chain.iter().enumerate() {
+                    let (a, z) = (joints[i], joints[i + 1]);
+                    let len = (z[0] - a[0]).hypot(z[1] - a[1]);
+                    let rest = self.bone(b).map_or(1.0, |x| x.length());
+                    fixed.insert(b, ((z[1] - a[1]).atan2(z[0] - a[0]), len / rest));
+                }
+            };
+        // The dragged chain: up to a locked joint or the root.
+        let mut chain = vec![dragged];
+        while let Some(p) = self.parent_bone(*chain.last()?) {
+            if locked(p).is_some() {
+                break;
+            }
+            chain.push(p);
+        }
+        chain.reverse();
+        let base = point(poses.get(&chain[0])?.posed, 0.0);
+        let mut joints = vec![base];
+        for &b in &chain {
+            let p = poses.get(&b)?;
+            joints.push(point(p.posed, p.reach()));
+        }
+        let links: Vec<Link> = chain.iter().map(|&b| link(b)).collect::<Option<_>>()?;
+        let solved = solve_chain(&joints, &links, target);
+        set_from(&chain, &solved, &mut fixed);
+        let moved: BTreeSet<NodeId> = chain.iter().copied().collect();
+        // Where a decided bone's tip ends up.
+        let new_tip = |b: NodeId, fixed: &BTreeMap<NodeId, (f32, f32)>| -> Option<[f32; 2]> {
+            let i = chain.iter().position(|&c| c == b)?;
+            let _ = fixed;
+            Some(solved[i + 1])
+        };
+        // Locked anchors hanging off the moved chain stay planted.
+        for &a in &anchored {
+            let Some(goal) = locked(a) else { continue };
+            if moved.contains(&a) {
+                continue;
+            }
+            let mut sub = vec![a];
+            let mut hook = None;
+            while let Some(p) = self.parent_bone(*sub.last()?) {
+                if moved.contains(&p) {
+                    hook = Some(p);
+                    break;
+                }
+                if locked(p).is_some() {
+                    break;
+                }
+                sub.push(p);
+            }
+            let Some(hook) = hook else { continue };
+            sub.reverse();
+            let start = new_tip(hook, &fixed)?;
+            let mut js = vec![start];
+            for &b in &sub {
+                let p = poses.get(&b)?;
+                js.push(point(p.posed, p.reach()));
+            }
+            let ls: Vec<Link> = sub.iter().map(|&b| link(b)).collect::<Option<_>>()?;
+            let done = solve_chain(&js, &ls, goal);
+            set_from(&sub, &done, &mut fixed);
+        }
+        // Rebuild every bone's absolute angle (decided, or kept relative
+        // to its parent), then aim anchors turn their bones.
+        let mut abs: BTreeMap<NodeId, (f32, [f32; 2], f32)> = BTreeMap::new(); // angle, base, reach
+        for &b in &bones {
+            let p = poses.get(&b)?;
+            let old = angle_of(p.posed);
+            let bone = self.bone(b)?;
+            let parent = self.parent_bone(b);
+            let base = match parent.and_then(|q| abs.get(&q)) {
+                Some(&(qa, qb, qr)) => [qb[0] + qa.cos() * qr, qb[1] + qa.sin() * qr],
+                None => point(p.posed, 0.0),
+            };
+            let (mut angle, stretch) = match fixed.get(&b) {
+                Some(&(a, st)) => (a, st),
+                None => {
+                    let rel = parent
+                        .and_then(|q| poses.get(&q))
+                        .map_or(old, |q| old - angle_of(q.posed));
+                    let parent_abs = parent.and_then(|q| abs.get(&q)).map_or(0.0, |v| v.0);
+                    (
+                        if parent.is_some() {
+                            parent_abs + rel
+                        } else {
+                            old
+                        },
+                        p.scale[0],
+                    )
+                }
+            };
+            if let Some(a) = bone.anchor.as_ref().filter(|a| a.kind == AnchorKind::Aim) {
+                let t = [a.target[0].at(frame), a.target[1].at(frame)];
+                angle = (t[1] - base[1]).atan2(t[0] - base[0]);
+            }
+            abs.insert(b, (angle, base, bone.length() * stretch));
+        }
+        // Back to each bone's own rotation value.
+        let mut out = Vec::new();
+        for &b in &bones {
+            let bone = self.bone(b)?;
+            let (angle, _, reach) = abs[&b];
+            let parent_abs = self
+                .parent_bone(b)
+                .and_then(|q| abs.get(&q))
+                .map_or(0.0, |v| v.0);
+            let mut turn = (angle - parent_abs).to_degrees() - bone.rest_angle;
+            // Nearest to the current value (no spins through 360).
+            let now = bone.rotation.at(frame);
+            turn = now + ((turn - now + 180.0).rem_euclid(360.0) - 180.0);
+            let stretch = reach / bone.length();
+            let changed = (turn - now).abs() > 1e-3
+                || (bone.stretch_mode != crate::rig::Stretch::Rigid
+                    && (stretch - bone.stretch_at(frame)).abs() > 1e-4);
+            if changed {
+                out.push((b, turn, stretch));
+            }
+        }
+        Some(out)
     }
 
     /// The skeleton that owns this bone, or the disconnected chain's root bone.
@@ -1013,7 +1222,7 @@ impl Graph {
         let bone = self.bone(upper)?;
         let base = if let Some(parent) = self.parent_bone(upper) {
             let pose = self.bone_pose(parent, frame)?;
-            pose.posed.compose(Affine::translate(pose.length, 0.0))
+            pose.posed.compose(Affine::translate(pose.reach(), 0.0))
         } else {
             Affine::translate(bone.origin[0], bone.origin[1])
         };
@@ -1270,5 +1479,107 @@ mod tests {
         assert!(g.node(body_peg).is_none());
         g.restore(body_peg, node, &links);
         assert_eq!(g.evaluate(display, &xs, 2).unwrap()[0].transform.tx, 10.0);
+    }
+    /// A leg: hip -> knee -> ankle -> toe, three bones of 100.
+    fn leg() -> (Graph, [NodeId; 3]) {
+        let mut graph = Graph::default();
+        let skeleton = graph.add("Skeleton", NodeKind::Skeleton(PegParams::default()));
+        let mut bones = [NodeId(0); 3];
+        let mut up = skeleton;
+        for (i, b) in bones.iter_mut().enumerate() {
+            *b = graph.add(
+                format!("Bone {i}"),
+                NodeKind::Bone(Bone {
+                    length: 100.0,
+                    ..Bone::default()
+                }),
+            );
+            graph.connect(up, *b, 0);
+            up = *b;
+        }
+        (graph, bones)
+    }
+
+    fn apply(graph: &mut Graph, changes: &[(NodeId, f32, f32)]) {
+        for &(id, rotation, stretch) in changes {
+            if let Some(NodeKind::Bone(b)) = graph.node_mut(id).map(|n| &mut n.kind) {
+                b.rotation = Value::Constant(rotation);
+                b.stretch = Value::Constant(stretch);
+            }
+        }
+    }
+
+    fn near(a: (f32, f32), b: [f32; 2], within: f32) -> bool {
+        (a.0 - b[0]).hypot(a.1 - b[1]) <= within
+    }
+
+    #[test]
+    fn smart_rigs_solve_around_locked_anchors() {
+        let (mut graph, [hip, knee, foot]) = leg();
+        // No anchors: posing stays bone by bone.
+        assert!(graph.solve_rig(knee, [150.0, 80.0], 1).is_none());
+        // The foot's tip locked a little in from where it is.
+        if let Some(NodeKind::Bone(b)) = graph.node_mut(foot).map(|n| &mut n.kind) {
+            b.anchor = Some(Box::new(crate::rig::Anchor {
+                kind: crate::rig::AnchorKind::Locked,
+                target: [Value::Constant(280.0), Value::Constant(0.0)],
+            }));
+        }
+        // Drag the knee in (the leg bends): it gets there, the foot stays
+        // planted (the foot bone is 100 long, as far as the anchor is from
+        // the knee), the hip stays.
+        let changes = graph.solve_rig(knee, [180.0, 0.0], 1).unwrap();
+        apply(&mut graph, &changes);
+        let pose = |id| graph.bone_pose(id, 1).unwrap();
+        assert!(
+            near(pose(knee).tip(), [180.0, 0.0], 0.5),
+            "{:?}",
+            pose(knee).tip()
+        );
+        assert!(
+            near(pose(foot).tip(), [280.0, 0.0], 0.5),
+            "{:?}",
+            pose(foot).tip()
+        );
+        assert!(near(pose(hip).posed.apply(0.0, 0.0), [0.0, 0.0], 1e-3));
+        // Bones keep their length (rigid).
+        let len = |id| {
+            let p = pose(id);
+            let (a, b) = (p.posed.apply(0.0, 0.0), p.tip());
+            (b.0 - a.0).hypot(b.1 - a.1)
+        };
+        assert!((len(hip) - 100.0).abs() < 0.5 && (len(knee) - 100.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn stretchy_bones_reach_and_aim_anchors_aim() {
+        let (mut graph, [hip, knee, foot]) = leg();
+        for id in [hip, knee] {
+            if let Some(NodeKind::Bone(b)) = graph.node_mut(id).map(|n| &mut n.kind) {
+                b.stretch_mode = crate::rig::Stretch::Simple;
+                b.stretch_limits = Some([0.5, 1.5]);
+            }
+        }
+        // The foot aims straight down.
+        if let Some(NodeKind::Bone(b)) = graph.node_mut(foot).map(|n| &mut n.kind) {
+            b.anchor = Some(Box::new(crate::rig::Anchor {
+                kind: crate::rig::AnchorKind::Aim,
+                target: [Value::Constant(250.0), Value::Constant(1000.0)],
+            }));
+        }
+        // Pull the knee out of rigid reach (250 > 200): the bones stretch.
+        let changes = graph.solve_rig(knee, [250.0, 0.0], 1).unwrap();
+        apply(&mut graph, &changes);
+        let pose = |id| graph.bone_pose(id, 1).unwrap();
+        assert!(
+            near(pose(knee).tip(), [250.0, 0.0], 0.5),
+            "{:?}",
+            pose(knee).tip()
+        );
+        let (a, b) = (pose(foot).posed.apply(0.0, 0.0), pose(foot).tip());
+        assert!(
+            (b.0 - a.0).abs() < 1.0 && b.1 > a.1 + 90.0,
+            "the foot points down"
+        );
     }
 }

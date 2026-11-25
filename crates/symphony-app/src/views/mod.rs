@@ -6,7 +6,7 @@ pub mod multiplane;
 pub mod node;
 pub mod palette;
 pub mod panels;
-mod rig_edit;
+pub mod rig_edit;
 mod rope;
 pub mod select;
 pub mod textured;

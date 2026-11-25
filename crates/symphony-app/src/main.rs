@@ -1551,6 +1551,43 @@ impl SymphonyApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        // Rig keys while posing a bone (Transform tool): A cycles the
+        // anchor, F flips a smart joint's bend, arrows nudge (Shift: 10).
+        let posing_bone = self.s.tool == Tool::Transform
+            && self
+                .s
+                .selected_node
+                .is_some_and(|id| self.s.doc.graph.bone(id).is_some());
+        if self.palette.is_none() && posing_bone {
+            use egui::{Key, Modifiers};
+            let (cycle, flip, nudge) = ctx.input_mut(|i| {
+                let cycle = i.consume_key(Modifiers::NONE, Key::A);
+                let flip = i.consume_key(Modifiers::NONE, Key::F);
+                let step = if i.modifiers.shift { 10.0 } else { 1.0 };
+                let mut d = [0.0f32; 2];
+                for (key, v) in [
+                    (Key::ArrowLeft, [-step, 0.0]),
+                    (Key::ArrowRight, [step, 0.0]),
+                    (Key::ArrowUp, [0.0, -step]),
+                    (Key::ArrowDown, [0.0, step]),
+                ] {
+                    if i.consume_key(Modifiers::NONE, key) || i.consume_key(Modifiers::SHIFT, key) {
+                        d[0] += v[0];
+                        d[1] += v[1];
+                    }
+                }
+                (cycle, flip, d)
+            });
+            if cycle {
+                views::rig_edit::cycle_anchor(&mut self.s);
+            }
+            if flip {
+                views::rig_edit::flip_bend(&mut self.s);
+            }
+            if nudge != [0.0, 0.0] {
+                views::rig_edit::nudge(&mut self.s, nudge[0], nudge[1]);
+            }
+        }
         if self.palette.is_none() && self.s.tool == Tool::Select {
             self.s.validate_selection();
             if !self.s.selection.strokes.is_empty() {

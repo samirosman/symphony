@@ -2390,3 +2390,71 @@ fn sketches_stay_out_of_exports_unless_included() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Smart rigs in the app: with the foot anchored, dragging the knee
+/// re-poses the leg in one undo step; A cycles the selected bone's anchor
+/// through Locked, Aim and none.
+#[test]
+fn smart_rig_drags_and_anchor_keys() {
+    use crate::views::rig_edit::{cycle_anchor, pose_to};
+    use symphony_core::graph::{NodeKind, PegParams};
+    use symphony_core::rig::{AnchorKind, Bone};
+    let mut s = crate::session::Session::new_scene();
+    let skeleton = s
+        .doc
+        .graph
+        .add("Skeleton", NodeKind::Skeleton(PegParams::default()));
+    let mut up = skeleton;
+    let mut bones = Vec::new();
+    for i in 0..3 {
+        let b = s.doc.graph.add(
+            format!("Bone {i}"),
+            NodeKind::Bone(Bone {
+                length: 100.0,
+                ..Bone::default()
+            }),
+        );
+        s.doc.graph.connect(up, b, 0);
+        bones.push(b);
+        up = b;
+    }
+    let (knee, foot) = (bones[1], bones[2]);
+    s.selected_node = Some(foot);
+    let kind = |s: &crate::session::Session| {
+        s.doc
+            .graph
+            .bone(foot)
+            .unwrap()
+            .anchor
+            .as_ref()
+            .map(|a| a.kind)
+    };
+    cycle_anchor(&mut s);
+    assert_eq!(kind(&s), Some(AnchorKind::Locked));
+    // Pinned a little in from the outstretched tip, so the leg has slack.
+    if let Some(NodeKind::Bone(b)) = s.doc.graph.node_mut(foot).map(|n| &mut n.kind) {
+        b.anchor.as_mut().unwrap().target = [
+            symphony_core::anim::Value::Constant(270.0),
+            symphony_core::anim::Value::Constant(0.0),
+        ];
+    }
+    let steps = s.history.undo_len();
+    // Two points of one drag, each 100 (the foot's length) from the pin.
+    pose_to(&mut s, knee, [170.0, 0.0], false);
+    pose_to(&mut s, knee, [175.0, 31.22], false);
+    s.end_gesture();
+    assert_eq!(s.history.undo_len(), steps + 1, "a drag is one step");
+    let knee_tip = s.doc.graph.bone_pose(knee, 1).unwrap().tip();
+    assert!((knee_tip.0 - 175.0).abs() < 0.5 && (knee_tip.1 - 31.22).abs() < 0.5);
+    let tip = s.doc.graph.bone_pose(foot, 1).unwrap().tip();
+    assert!(
+        (tip.0 - 270.0).abs() < 0.5 && tip.1.abs() < 0.5,
+        "the foot stayed: {tip:?}"
+    );
+    s.undo();
+    assert_eq!(s.doc.graph.bone(knee).unwrap().rotation.at(1), 0.0);
+    cycle_anchor(&mut s);
+    assert_eq!(kind(&s), Some(AnchorKind::Aim));
+    cycle_anchor(&mut s);
+    assert_eq!(kind(&s), None);
+}

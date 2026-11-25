@@ -1249,8 +1249,97 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         egui::DragValue::new(&mut bone.bend_radius)
                             .range(0.0..=100_000.0)
                             .prefix("Bend radius "),
-                    );
+                    )
+                    .on_hover_text("How softly the artwork bends at this joint.");
                 }
+            });
+            ui.collapsing("Stretch", |ui| {
+                use symphony_core::rig::Stretch;
+                egui::ComboBox::from_id_salt("bone-stretch")
+                    .selected_text(match bone.stretch_mode {
+                        Stretch::Rigid => "Rigid",
+                        Stretch::Simple => "Simple Stretch",
+                        Stretch::SquashStretch => "Squash & Stretch",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut bone.stretch_mode, Stretch::Rigid, "Rigid")
+                            .on_hover_text("Always its rest length.");
+                        ui.selectable_value(
+                            &mut bone.stretch_mode,
+                            Stretch::Simple,
+                            "Simple Stretch",
+                        )
+                        .on_hover_text("Longer or shorter; the artwork keeps its width.");
+                        ui.selectable_value(
+                            &mut bone.stretch_mode,
+                            Stretch::SquashStretch,
+                            "Squash & Stretch",
+                        )
+                        .on_hover_text("Longer and thinner, or shorter and fatter.");
+                    });
+                if bone.stretch_mode != Stretch::Rigid {
+                    peg_value(ui, "Stretch", &mut bone.stretch, s.frame, s.animate);
+                    let mut limited = bone.stretch_limits.is_some();
+                    widgets::checkbox(ui, &mut limited, "Limit")
+                        .on_hover_text("Resistance grows as it nears its shortest or longest.");
+                    if limited != bone.stretch_limits.is_some() {
+                        bone.stretch_limits = limited.then_some([0.5, 2.0]);
+                    }
+                    if let Some([lo, hi]) = &mut bone.stretch_limits {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(lo)
+                                    .range(0.05..=1.0)
+                                    .speed(0.01)
+                                    .prefix("Shortest ×"),
+                            );
+                            ui.add(
+                                egui::DragValue::new(hi)
+                                    .range(1.0..=20.0)
+                                    .speed(0.01)
+                                    .prefix("Longest ×"),
+                            );
+                        });
+                    }
+                }
+            });
+            ui.collapsing("Anchor", |ui| {
+                use symphony_core::rig::{Anchor, AnchorKind};
+                let mut kind = bone.anchor.as_ref().map(|a| a.kind);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut kind, None, "None");
+                    ui.selectable_value(&mut kind, Some(AnchorKind::Locked), "Locked");
+                    ui.selectable_value(&mut kind, Some(AnchorKind::Aim), "Aim");
+                });
+                if kind != bone.anchor.as_ref().map(|a| a.kind) {
+                    match kind {
+                        None => bone.anchor = None,
+                        Some(k) => {
+                            // A new anchor starts where the tip is.
+                            let tip = s
+                                .doc
+                                .graph
+                                .bone_pose(draft.id, s.frame)
+                                .map(|p| p.tip())
+                                .unwrap_or((0.0, 0.0));
+                            let target =
+                                bone.anchor.as_ref().map(|a| a.target.clone()).unwrap_or([
+                                    symphony_core::anim::Value::Constant(tip.0),
+                                    symphony_core::anim::Value::Constant(tip.1),
+                                ]);
+                            bone.anchor = Some(Box::new(Anchor { kind: k, target }));
+                        }
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Locked pins this bone's tip; Aim keeps the bone pointing at its target. \
+                         With anchors, dragging a joint in the Camera view solves the rig around \
+                         them (A toggles the selected bone's anchor).",
+                    )
+                    .font(theme::dense())
+                    .color(theme::TEXT_SECONDARY),
+                );
             });
         }
         NodeKind::MeshWarp(warp) => {

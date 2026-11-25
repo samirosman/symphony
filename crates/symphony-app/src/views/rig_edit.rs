@@ -17,6 +17,8 @@ pub struct RigEdit {
 #[derive(Clone, Copy)]
 enum Drag {
     Tip(NodeId),
+    /// An anchor's target (on the bone's tip).
+    Anchor(NodeId),
     MoveSkeleton {
         id: NodeId,
         grab: Pos2,
@@ -159,6 +161,46 @@ pub fn ui(
         painter.circle_filled(origin, 7.0, theme::BG_BASE);
         painter.circle_stroke(origin, 5.0, Stroke::new(2.0, theme::ACCENT_SELECT));
     }
+    // Anchors: a pin (Locked) or a ring (Aim) on their targets, tied to
+    // the joint they hold.
+    let mut anchors: Vec<(NodeId, Pos2)> = Vec::new();
+    for &(id, _, tip, _, _) in &handles {
+        let Some(anchor) = graph.bone(id).and_then(|b| b.anchor.as_ref()) else {
+            continue;
+        };
+        let Some(screen) = screen_basis(s, id, view) else {
+            continue;
+        };
+        let at = pos(screen.apply(anchor.target[0].at(s.frame), anchor.target[1].at(s.frame)));
+        let ink = theme::ACCENT_TIME;
+        if at.distance(tip) > 3.0 {
+            painter.line_segment([tip, at], Stroke::new(1.0, ink.gamma_multiply(0.6)));
+        }
+        match anchor.kind {
+            symphony_core::rig::AnchorKind::Locked => {
+                painter.circle_filled(at, 7.0, theme::BG_BASE);
+                painter.rect_filled(
+                    egui::Rect::from_center_size(at, egui::vec2(9.0, 9.0)),
+                    2.0,
+                    ink,
+                );
+            }
+            symphony_core::rig::AnchorKind::Aim => {
+                painter.circle_filled(at, 7.0, theme::BG_BASE);
+                painter.circle_stroke(at, 5.5, Stroke::new(2.0, ink));
+                painter.circle_filled(at, 1.8, ink);
+            }
+        }
+        anchors.push((id, at));
+    }
+    let nearest_anchor = |pointer: Pos2| {
+        anchors
+            .iter()
+            .map(|&(id, at)| (id, pointer.distance(at)))
+            .filter(|(_, d)| *d <= 10.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
+    };
     let menu_key = response.id.with("rig-joint-menu");
     if response.secondary_clicked() {
         let id = response
@@ -188,7 +230,9 @@ pub fn ui(
                     start,
                 });
             }
-            nearest(grab, false).map(Drag::Tip)
+            nearest_anchor(grab)
+                .map(Drag::Anchor)
+                .or_else(|| nearest(grab, false).map(Drag::Tip))
         });
         if let Some(Drag::Tip(id)) = state.drag {
             s.select_graph_node(id, true);
@@ -204,8 +248,10 @@ pub fn ui(
     }
     if let Some(drag) = state.drag {
         if let Some(p) = response.interact_pointer_pos() {
+            let snap = ui.input(|i| i.modifiers.shift);
             match drag {
-                Drag::Tip(id) => pose_tip(s, id, view, p),
+                Drag::Tip(id) => pose_tip(s, id, view, p, snap),
+                Drag::Anchor(id) => move_anchor(s, id, view, p),
                 Drag::MoveSkeleton { id, grab, start } => {
                     move_skeleton(s, id, view, grab, p, start)
                 }
@@ -240,8 +286,61 @@ fn screen_basis(s: &Session, id: NodeId, view: Affine) -> Option<Affine> {
     Some(view.compose(plane).compose(pose.transform))
 }
 
-fn pose_tip(s: &mut Session, id: NodeId, view: Affine, pointer: Pos2) {
+fn pose_tip(s: &mut Session, id: NodeId, view: Affine, pointer: Pos2, snap: bool) {
+    let Some(back) = screen_basis(s, id, view).and_then(|m| m.inverse()) else {
+        return;
+    };
+    let (x, y) = back.apply(pointer.x, pointer.y);
+    pose_to(s, id, [x, y], snap);
+}
+
+/// Put bone `id`'s tip at `target` (skeleton space). With anchors in the
+/// rig, the rig is solved around them (smart rigs); otherwise the bone
+/// turns (and stretches, if it may) to point there. `snap` keeps the
+/// bone's direction to 22.5° steps.
+pub fn pose_to(s: &mut Session, id: NodeId, target: [f32; 2], snap: bool) {
     let graph = &s.doc.graph;
+    let (frame, animate) = (s.frame, s.animate);
+    let mut target = target;
+    if snap {
+        if let Some(pose) = graph.bone_pose(id, frame) {
+            let (bx, by) = pose.posed.apply(0.0, 0.0);
+            let (dx, dy) = (target[0] - bx, target[1] - by);
+            let step = 22.5f32.to_radians();
+            let a = (dy.atan2(dx) / step).round() * step;
+            let len = dx.hypot(dy);
+            target = [bx + a.cos() * len, by + a.sin() * len];
+        }
+    }
+    let root = graph.rig_root(id);
+    let key = format!("rig-pose-{}", root.0);
+    if let Some(changes) = graph.solve_rig(id, target, frame) {
+        for (bone, rotation, stretch) in changes {
+            let Some(before) = s.doc.graph.node(bone).cloned() else {
+                continue;
+            };
+            let mut after = before.clone();
+            if let NodeKind::Bone(b) = &mut after.kind {
+                set_value(&mut b.rotation, rotation, frame, animate);
+                if b.stretch_mode != symphony_core::rig::Stretch::Rigid {
+                    set_value(&mut b.stretch, stretch, frame, animate);
+                }
+            }
+            if before != after {
+                s.history.apply_merged(
+                    &mut s.doc,
+                    "Pose rig",
+                    &key,
+                    Edit::SetNodeProperties {
+                        id: bone,
+                        before,
+                        after,
+                    },
+                );
+            }
+        }
+        return;
+    }
     let Some(before) = graph.node(id).cloned() else {
         return;
     };
@@ -249,46 +348,178 @@ fn pose_tip(s: &mut Session, id: NodeId, view: Affine, pointer: Pos2) {
     let NodeKind::Bone(bone) = &mut after.kind else {
         return;
     };
-    let Some(screen) = screen_basis(s, id, view) else {
-        return;
-    };
-    let (x, y) = (pointer.x, pointer.y);
     if let Some(joint) = bone
         .smart
         .as_mut()
-        .filter(|_| graph.smart_controller(id, s.frame) == Some(id))
+        .filter(|_| graph.smart_controller(id, frame) == Some(id))
     {
         let Some(back) = graph
-            .smart_target_basis(id, s.frame)
-            .and_then(|basis| screen.compose(basis).inverse())
+            .smart_target_basis(id, frame)
+            .and_then(|basis| basis.inverse())
         else {
             return;
         };
-        let (x, y) = back.apply(x, y);
-        set_value(&mut joint.target[0], x, s.frame, s.animate);
-        set_value(&mut joint.target[1], y, s.frame, s.animate);
+        let (x, y) = back.apply(target[0], target[1]);
+        set_value(&mut joint.target[0], x, frame, animate);
+        set_value(&mut joint.target[1], y, frame, animate);
     } else {
-        let Some(pose) = graph.bone_pose(id, s.frame) else {
+        let Some(pose) = graph.bone_pose(id, frame) else {
             return;
         };
-        let Some(back) = screen.compose(pose.posed).inverse() else {
+        let Some(back) = pose.posed.inverse() else {
             return;
         };
-        let (x, y) = back.apply(x, y);
+        let (x, y) = back.apply(target[0], target[1]);
         if x.hypot(y) < 1e-3 {
             return;
         }
-        let rotation = bone.rotation.at(s.frame) + y.atan2(x).to_degrees();
-        set_value(&mut bone.rotation, rotation, s.frame, s.animate);
+        let rotation = bone.rotation.at(frame) + y.atan2(x).to_degrees();
+        set_value(&mut bone.rotation, rotation, frame, animate);
+        // A stretchable bone also follows the pull's length (resisting
+        // near its limits).
+        if bone.stretch_mode != symphony_core::rig::Stretch::Rigid {
+            let wanted = x.hypot(y) / bone.length();
+            let stretch = bone.resist(wanted);
+            set_value(&mut bone.stretch, stretch, frame, animate);
+        }
     }
     if before != after {
         s.history.apply_merged(
             &mut s.doc,
             "Pose bone",
-            &format!("bone-tip-{}", id.0),
+            &key,
             Edit::SetNodeProperties { id, before, after },
         );
     }
+}
+
+/// Drag an anchor's target (skeleton space), then re-solve so the rig
+/// follows its pins.
+fn move_anchor(s: &mut Session, id: NodeId, view: Affine, pointer: Pos2) {
+    let Some(back) = screen_basis(s, id, view).and_then(|m| m.inverse()) else {
+        return;
+    };
+    let (x, y) = back.apply(pointer.x, pointer.y);
+    let (frame, animate) = (s.frame, s.animate);
+    let Some(before) = s.doc.graph.node(id).cloned() else {
+        return;
+    };
+    let mut after = before.clone();
+    let Some(anchor) = (match &mut after.kind {
+        NodeKind::Bone(b) => b.anchor.as_mut(),
+        _ => None,
+    }) else {
+        return;
+    };
+    set_value(&mut anchor.target[0], x, frame, animate);
+    set_value(&mut anchor.target[1], y, frame, animate);
+    let locked = anchor.kind == symphony_core::rig::AnchorKind::Locked;
+    let key = format!("rig-pose-{}", s.doc.graph.rig_root(id).0);
+    s.history.apply_merged(
+        &mut s.doc,
+        "Move anchor",
+        &key,
+        Edit::SetNodeProperties { id, before, after },
+    );
+    // A locked joint goes where its pin goes; an aim turns its bone.
+    let tip = if locked {
+        [x, y]
+    } else {
+        match s.doc.graph.bone_pose(id, frame) {
+            Some(p) => {
+                let (tx, ty) = p.tip();
+                [tx, ty]
+            }
+            None => return,
+        }
+    };
+    pose_to(s, id, tip, false);
+}
+
+/// A: cycle the selected bone's anchor: none, Locked, Aim.
+pub fn cycle_anchor(s: &mut Session) {
+    use symphony_core::rig::{Anchor, AnchorKind};
+    let Some(id) = s.selected_node else { return };
+    let Some(before) = s.doc.graph.node(id).cloned() else {
+        return;
+    };
+    let tip = s.doc.graph.bone_pose(id, s.frame).map(|p| p.tip());
+    let mut after = before.clone();
+    let NodeKind::Bone(bone) = &mut after.kind else {
+        return;
+    };
+    let (x, y) = tip.unwrap_or((0.0, 0.0));
+    let (anchor, note) = match bone.anchor.as_ref().map(|a| a.kind) {
+        None => (
+            Some(Box::new(Anchor {
+                kind: AnchorKind::Locked,
+                target: [Value::Constant(x), Value::Constant(y)],
+            })),
+            "Locked anchor: this joint stays put",
+        ),
+        Some(AnchorKind::Locked) => (
+            bone.anchor.clone().map(|a| {
+                Box::new(Anchor {
+                    kind: AnchorKind::Aim,
+                    ..*a
+                })
+            }),
+            "Aim anchor: this bone points at its target",
+        ),
+        Some(AnchorKind::Aim) => (None, "Anchor removed"),
+    };
+    bone.anchor = anchor;
+    s.history.apply(
+        &mut s.doc,
+        "Toggle anchor",
+        vec![Edit::SetNodeProperties { id, before, after }],
+    );
+    s.note(note);
+}
+
+/// F: flip the bend of the selected bone's smart joint.
+pub fn flip_bend(s: &mut Session) {
+    let Some(id) = s.selected_node else { return };
+    let graph = &s.doc.graph;
+    let lower = graph
+        .smart_controller(id, s.frame)
+        .or_else(|| graph.bone(id).and_then(|b| b.smart.as_ref()).map(|_| id));
+    let Some(lower) = lower else {
+        s.note("Flip bend works on a smart joint");
+        return;
+    };
+    let Some(before) = s.doc.graph.node(lower).cloned() else {
+        return;
+    };
+    let mut after = before.clone();
+    if let NodeKind::Bone(b) = &mut after.kind {
+        if let Some(j) = b.smart.as_mut() {
+            j.flip = !j.flip;
+        }
+    }
+    s.history.apply(
+        &mut s.doc,
+        "Flip bend",
+        vec![Edit::SetNodeProperties {
+            id: lower,
+            before,
+            after,
+        }],
+    );
+}
+
+/// Arrow keys: nudge the selected bone's tip (one unit, or ten with
+/// Shift), solving the rig as a drag would.
+pub fn nudge(s: &mut Session, dx: f32, dy: f32) {
+    let Some(id) = s.selected_node.filter(|&id| s.doc.graph.bone(id).is_some()) else {
+        return;
+    };
+    let Some(pose) = s.doc.graph.bone_pose(id, s.frame) else {
+        return;
+    };
+    let (x, y) = pose.tip();
+    pose_to(s, id, [x + dx, y + dy], false);
+    s.end_gesture();
 }
 
 fn move_skeleton(s: &mut Session, id: NodeId, view: Affine, grab: Pos2, p: Pos2, start: [f32; 2]) {

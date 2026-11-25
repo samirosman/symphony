@@ -257,14 +257,22 @@ continues.
   directly attached drawings at the current frame. New artwork can connect
   straight to its bone. Preserve existing pegs that carry transforms or keys.
   Show the posed rig in Camera when a bone or its attached drawing is selected.
-- ⬜ **Smart rigs**. Toggle any joint or free endpoint into an editable
+- 🟡 **Smart rigs** (✅ Locked and Aim anchors on any bone tip (A cycles,
+  Bone properties), drawn and draggable in Camera; dragging a joint solves
+  the chain to the nearest locked joint (FABRIK) and re-plants locked
+  chains below it; with no anchors, bones pose one at a time; F flips a
+  smart joint, arrows nudge, Shift snaps to 22.5°. Anchors on the root's
+  base and dragging the rig by a free point with no anchors are still to
+  do). Toggle any joint or free endpoint into an editable
   anchor. Locked anchors pin joints to their targets. Aim anchors let joints
   move while their bones aim at the targets. With anchors active, dragging
   a free point solves the rig around them. With no anchors, dragging a free
   point moves the rig. Add contextual shortcuts for toggling anchors and
   flipping bends, arrow-key nudging, and Shift-drag along straight lines
   snapped to 22.5° increments. Defer dedicated controller objects.
-- ⬜ **Bone flexibility and stretch limits**. Give bones separate bend and
+- ✅ **Bone flexibility and stretch limits** (Bend radius; Rigid, Simple
+  Stretch, Squash & Stretch; optional shortest/longest with resistance;
+  the solver stays in range). Give bones separate bend and
   stretch controls. Simple Stretch changes length at constant width.
   Squash & Stretch adjusts width in the opposite direction to suggest
   volume. A stretchable bone can be unlimited or have a minimum and maximum
