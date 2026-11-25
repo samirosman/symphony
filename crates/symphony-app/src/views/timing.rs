@@ -800,15 +800,29 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
 
     let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, scroll_viewport| {
             let size = Vec2::new(
                 width.max(ui.available_width()),
                 (RULER + track_count as f32 * rh + 8.0).max(ui.available_height()),
             );
-            let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+            let (resp, viewport_painter) = ui.allocate_painter(size, Sense::click_and_drag());
             let o = resp.rect.min;
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
+            // The ruler shares the tracks' horizontal scroll origin.
+            let viewport = ui.clip_rect();
+            let ruler_top = o.y + scroll_viewport.top().max(0.0);
+            let ruler_bottom = ruler_top + RULER;
+            let ruler = viewport_painter.with_clip_rect(Rect::from_min_max(
+                Pos2::new(viewport.left(), ruler_top),
+                Pos2::new(viewport.right(), ruler_bottom),
+            ));
+            let track_clip = Rect::from_min_max(
+                Pos2::new(viewport.left(), ruler_bottom.min(viewport.bottom())),
+                viewport.max,
+            );
+            ui.set_clip_rect(track_clip);
+            let painter = viewport_painter.with_clip_rect(track_clip);
 
             // Beats follow the frame rate: the second, its half and a
             // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
@@ -843,13 +857,16 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     1 => 18.0,
                     _ => 15.0,
                 };
-                painter.line_segment(
-                    [Pos2::new(x, o.y + top), Pos2::new(x, o.y + RULER - 2.0)],
+                ruler.line_segment(
+                    [
+                        Pos2::new(x, ruler_top + top),
+                        Pos2::new(x, ruler_bottom - 2.0),
+                    ],
                     Stroke::new(1.0, theme::LINE_STRONG),
                 );
                 if f == 1 || f % label_step == 0 {
-                    painter.text(
-                        Pos2::new(x, o.y + 4.0),
+                    ruler.text(
+                        Pos2::new(x, ruler_top + 4.0),
                         Align2::CENTER_TOP,
                         f.to_string(),
                         theme::numbers(),
@@ -1117,10 +1134,10 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
             if let Some((a, b)) = s.play_range {
                 let (a, b) = (a.clamp(1, len), b.clamp(1, len));
                 let band = Rect::from_min_max(
-                    Pos2::new(frame_x(a.min(b)), o.y + 2.0),
-                    Pos2::new(frame_x(a.max(b)) + cw, o.y + RULER - 2.0),
+                    Pos2::new(frame_x(a.min(b)), ruler_top + 2.0),
+                    Pos2::new(frame_x(a.max(b)) + cw, ruler_bottom - 2.0),
                 );
-                painter.rect_filled(
+                ruler.rect_filled(
                     band,
                     theme::RADIUS_CONTROL,
                     theme::ACCENT_TIME.gamma_multiply(0.16),
@@ -1166,12 +1183,25 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                 + (frame_x((whole + 1).min(len)) - frame_x(whole)) * shown.fract()
                 + cw / 2.0;
             painter.line_segment(
-                [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
+                [
+                    Pos2::new(cx, ruler_bottom),
+                    Pos2::new(cx, rows_bottom.max(ruler_bottom)),
+                ],
                 Stroke::new(1.5, theme::ACCENT_TIME),
             );
-            frame_tag(&painter, Pos2::new(cx, o.y + RULER - 12.0), s.frame);
+            ruler.line_segment(
+                [
+                    Pos2::new(cx, ruler_bottom - 4.0),
+                    Pos2::new(cx, ruler_bottom),
+                ],
+                Stroke::new(1.5, theme::ACCENT_TIME),
+            );
+            frame_tag(&ruler, Pos2::new(cx, ruler_bottom - 12.0), s.frame);
 
             let slot_at = |p: Pos2| -> Option<Slot> {
+                if p.y < ruler_bottom {
+                    return None;
+                }
                 let r = ((p.y - o.y - RULER) / rh).floor();
                 (r >= 0.0)
                     .then(|| layout.get(r as usize).map(|&(row, _)| row))
@@ -1306,6 +1336,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile
                     ),
                 );
             }
+            ui.set_clip_rect(viewport);
         });
     // More tracks below (or above): a soft fade at that edge says so.
     let view = out.inner_rect;
@@ -1542,6 +1573,48 @@ mod hierarchy_tests {
         harness.run_steps(1);
         assert_eq!(harness.state().0.frame, 1);
         assert!(!harness.state().1.scrubbing);
+    }
+
+    #[test]
+    fn timeline_ruler_stays_above_scrolling_tracks() {
+        let mut session = Session::new_scene();
+        for _ in 0..12 {
+            session.add_layer();
+        }
+        let track = session.layer_name(3).to_owned();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| timeline(ui, session, timing, Profile::Symphony),
+                (session, TimingState::default()),
+            );
+        let text_y = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos.y),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing timeline label {label}"))
+        };
+        harness.run_steps(3);
+        let ruler_before = text_y(harness.output(), "6");
+        let track_before = text_y(harness.output(), &track);
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(Pos2::new(320.0, 220.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -56.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+                source: egui::MouseWheelSource::Unknown,
+            },
+        ]);
+        harness.run_steps(12);
+        assert!((text_y(harness.output(), "6") - ruler_before).abs() < 0.1);
+        assert!(text_y(harness.output(), &track) < track_before - 10.0);
     }
 
     #[test]
