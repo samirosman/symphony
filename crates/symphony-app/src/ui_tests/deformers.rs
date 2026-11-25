@@ -15,7 +15,7 @@ use crate::session::Tool;
 
 /// Press at the first scene point, move through the rest, release at the
 /// last, one frame each, with `mods` held.
-fn mouse(h: &mut Harness<'static, Rig>, pts: &[(f32, f32)], mods: Modifiers) {
+pub(super) fn mouse(h: &mut Harness<'static, Rig>, pts: &[(f32, f32)], mods: Modifiers) {
     mouse_with(h, pts, mods, egui::PointerButton::Primary);
 }
 
@@ -62,7 +62,12 @@ fn mouse_with(
     h.run_steps(2);
 }
 
-fn drag(h: &mut Harness<'static, Rig>, from: (f32, f32), to: (f32, f32), mods: Modifiers) {
+pub(super) fn drag(
+    h: &mut Harness<'static, Rig>,
+    from: (f32, f32),
+    to: (f32, f32),
+    mods: Modifiers,
+) {
     mouse(h, &super::line(from, to, 8), mods);
 }
 
@@ -98,7 +103,7 @@ const ALT: Modifiers = Modifiers {
     command: false,
 };
 
-const CTRL: Modifiers = Modifiers {
+pub(super) const CTRL: Modifiers = Modifiers {
     alt: false,
     ctrl: true,
     shift: false,

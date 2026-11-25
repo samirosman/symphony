@@ -17,6 +17,14 @@ pub struct RigEdit {
 #[derive(Clone, Copy)]
 enum Drag {
     Tip(NodeId, Pos2),
+    /// A drag on a bone's body turns it about its base (Ctrl: and
+    /// stretches it), as Harmony's Skeleton Controller does.
+    Turn {
+        id: NodeId,
+        base: Pos2,
+        tip: Pos2,
+        grab: Pos2,
+    },
     /// An anchor's target (on the bone's tip).
     Anchor(NodeId, Pos2),
     MoveSkeleton {
@@ -251,15 +259,17 @@ pub fn ui(
                 .map(|id| Drag::Anchor(id, grab))
                 .or_else(|| nearest(grab, false).map(|id| Drag::Tip(id, grab)))
                 .or_else(|| {
-                    let (_, start) = skeleton.filter(|_| bone_at(grab).is_some())?;
-                    Some(Drag::MoveSkeleton {
-                        id: root,
+                    let id = bone_at(grab)?;
+                    let &(_, base, tip, _, _) = handles.iter().find(|h| h.0 == id)?;
+                    Some(Drag::Turn {
+                        id,
+                        base,
+                        tip,
                         grab,
-                        start,
                     })
                 })
         });
-        if let Some(Drag::Tip(id, _) | Drag::Anchor(id, _)) = state.drag {
+        if let Some(Drag::Tip(id, _) | Drag::Anchor(id, _) | Drag::Turn { id, .. }) = state.drag {
             s.select_graph_node(id, true);
         }
     }
@@ -277,6 +287,16 @@ pub fn ui(
             let snap = ui.input(|i| i.modifiers.shift);
             match drag {
                 Drag::Tip(id, grab) => pose_tip(s, id, view, snapped(p, grab, snap), false),
+                Drag::Turn {
+                    id,
+                    base,
+                    tip,
+                    grab,
+                } => {
+                    let stretch = ui.input(|i| i.modifiers.command);
+                    let target = turned(base, tip, grab, p, stretch);
+                    pose_tip(s, id, view, target, snap);
+                }
                 Drag::Anchor(id, grab) => move_anchor(s, id, view, snapped(p, grab, snap)),
                 Drag::MoveSkeleton { id, grab, start } => {
                     move_skeleton(s, id, view, grab, snapped(p, grab, snap), start)
@@ -309,6 +329,25 @@ fn snapped(pointer: Pos2, start: Pos2, snap: bool) -> Pos2 {
     let step = 22.5_f32.to_radians();
     let angle = (delta.y.atan2(delta.x) / step).round() * step;
     start + egui::vec2(angle.cos(), angle.sin()) * delta.length()
+}
+
+/// Where a turned bone's tip goes: the tip at the press, turned about
+/// the base by the angle the pointer swept, and with `stretch` also
+/// scaled by how far the pointer moved from the base.
+fn turned(base: Pos2, tip: Pos2, grab: Pos2, pointer: Pos2, stretch: bool) -> Pos2 {
+    let (from, to) = (grab - base, pointer - base);
+    if from.length() < 1.0 || to.length() < 1.0 {
+        return tip;
+    }
+    let angle = to.y.atan2(to.x) - from.y.atan2(from.x);
+    let scale = if stretch {
+        to.length() / from.length()
+    } else {
+        1.0
+    };
+    let arm = tip - base;
+    let (sin, cos) = angle.sin_cos();
+    base + egui::vec2(arm.x * cos - arm.y * sin, arm.x * sin + arm.y * cos) * scale
 }
 
 fn pos((x, y): (f32, f32)) -> Pos2 {

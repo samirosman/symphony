@@ -14,6 +14,7 @@ use crate::session::{Session, Tool};
 use crate::views::camera::{self, CanvasState};
 
 mod deformers;
+mod rig;
 
 pub struct Rig {
     pub s: Session,
