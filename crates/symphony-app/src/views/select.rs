@@ -1424,6 +1424,65 @@ mod tests {
         assert!(outline(anchors, false).iter().any(|point| point.y < 95.0));
     }
 
+    /// A polygon lasso: each click on empty space places an anchor, and a
+    /// double click ends the polygon (it selects what is inside and
+    /// clears the anchors); a single click only adds one more.
+    #[test]
+    fn a_double_click_ends_the_polygon_lasso() {
+        let mut session = Session::new_scene();
+        session.tool = Tool::Select;
+        // Frames at 60 per second: a double click is two clicks within
+        // 0.3 s.
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(500.0, 400.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, (session, state)| {
+                    let (response, painter) =
+                        ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+                    super::ui(
+                        ui,
+                        &response,
+                        &painter,
+                        session,
+                        state,
+                        Affine::IDENTITY,
+                        &[],
+                    );
+                },
+                (session, SelectState::default()),
+            );
+        let click = |h: &mut Harness<'_, (Session, SelectState)>, pos: Pos2| {
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.run_steps(1);
+            }
+        };
+        let wait = |h: &mut Harness<'_, (Session, SelectState)>| h.run_steps(40);
+        for p in [(100.0, 100.0), (300.0, 100.0), (300.0, 300.0)] {
+            click(&mut h, Pos2::new(p.0, p.1));
+            wait(&mut h);
+        }
+        assert_eq!(h.state().1.polygon.len(), 3);
+        click(&mut h, Pos2::new(100.0, 300.0));
+        wait(&mut h);
+        assert_eq!(
+            h.state().1.polygon.len(),
+            4,
+            "a single click adds an anchor"
+        );
+        click(&mut h, Pos2::new(150.0, 320.0));
+        click(&mut h, Pos2::new(150.0, 320.0));
+        h.run_steps(2);
+        assert!(h.state().1.polygon.is_empty(), "a double click ends it");
+    }
+
     #[test]
     fn the_transform_tool_picks_and_moves_an_image_layer() {
         let mut session = Session::new_scene();
@@ -1813,6 +1872,58 @@ mod tests {
         // One click is one undo step.
         s.undo();
         assert!(close(current_peg(&s, 0).rotation, 0.0));
+    }
+
+    /// The fields in Tool Properties, as an artist uses them: typed X,
+    /// Width and Angle values change the current layer, each as one undo
+    /// step, and Rotate 90° CW turns it a quarter more.
+    #[test]
+    fn typed_transform_fields_change_the_layer() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let (mut s, _) = two_layers();
+        s.selected = 1;
+        s.tool = Tool::Transform;
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(360.0, 420.0))
+            .with_accessibility_check(false)
+            .build_ui_state(operations_ui, s);
+        h.run_steps(2);
+        // X, Y, Width, Height, Angle, in that order.
+        let set = |h: &mut Harness<'_, Session>, field: usize, value: f64| {
+            h.get_all_by_role(Role::SpinButton)
+                .nth(field)
+                .expect("five fields")
+                .set_value_accesskit(value);
+            h.run_steps(2);
+        };
+        set(&mut h, 0, 30.0);
+        set(&mut h, 2, 150.0);
+        set(&mut h, 4, 45.0);
+        let v = current_peg(h.state(), 1);
+        assert!(close(v.x, 30.0), "{v:?}");
+        assert!(
+            close(v.scale_x, 1.5) && close(v.scale_y, 1.5),
+            "locked ratio: {v:?}"
+        );
+        assert!(close(v.rotation, 45.0), "{v:?}");
+        assert!(
+            close(current_peg(h.state(), 0).x, 0.0),
+            "the other layer stays"
+        );
+        h.get_by_label("Rotate 90° CW").click();
+        h.run_steps(2);
+        assert!(close(current_peg(h.state(), 1).rotation, 135.0));
+        // Four changes, four undo steps.
+        for _ in 0..4 {
+            h.state_mut().undo();
+        }
+        h.run_steps(1);
+        let v = current_peg(h.state(), 1);
+        assert!(
+            close(v.x, 0.0) && close(v.scale_x, 1.0) && close(v.rotation, 0.0),
+            "{v:?}"
+        );
     }
 
     #[test]

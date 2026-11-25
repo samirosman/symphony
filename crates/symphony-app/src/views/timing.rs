@@ -1949,6 +1949,71 @@ mod hierarchy_tests {
         assert!(!harness.state().1.scrubbing);
     }
 
+    /// A layer under a peg is indented, and so is its eye: a click on the
+    /// eye where it is drawn hides the layer, and a click just past it
+    /// does not.
+    #[test]
+    fn the_eye_of_an_indented_layer_follows_the_indent() {
+        let mut session = Session::new_scene();
+        let peg = session.doc.layers[0].peg;
+        crate::views::node::insert_near(
+            &mut session,
+            peg,
+            symphony_core::graph::NodeKind::Peg(Default::default()),
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (session, TimingState::default()),
+            );
+        harness.run_steps(3);
+        let click = |harness: &mut egui_kittest::Harness<'_, (Session, TimingState)>, pos| {
+            for pressed in [true, false] {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(1);
+            }
+        };
+        // Down the indented eye's column until a click hides a layer.
+        let eye_x = 22.0 + INDENT;
+        let y = (20..300)
+            .map(|y| y as f32)
+            .find(|&y| {
+                click(&mut harness, Pos2::new(eye_x, y));
+                let s = &harness.state().0;
+                (0..s.layer_count()).any(|i| !s.layer_visible(i))
+            })
+            .expect("an eye");
+        let s = &harness.state().0;
+        assert!(!s.layer_visible(0), "the indented layer's eye");
+        assert!((1..s.layer_count()).all(|i| s.layer_visible(i)));
+        click(&mut harness, Pos2::new(eye_x, y));
+        assert!(
+            harness.state().0.layer_visible(0),
+            "a second click shows it"
+        );
+        // Just past the end of the eye: no change.
+        click(&mut harness, Pos2::new(eye_x + 16.0, y));
+        assert!(harness.state().0.layer_visible(0));
+    }
+
     #[test]
     fn the_ruler_stays_on_top_when_the_rows_scroll() {
         let mut session = Session::new_scene();
