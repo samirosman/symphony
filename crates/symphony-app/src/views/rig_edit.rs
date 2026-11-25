@@ -386,7 +386,8 @@ pub fn pose_to(s: &mut Session, id: NodeId, target: [f32; 2], snap: bool) {
         if x.hypot(y) < 1e-3 {
             return;
         }
-        let rotation = bone.rotation.at(frame) + y.atan2(x).to_degrees();
+        let wanted = bone.rotation.at(frame) + y.atan2(x).to_degrees();
+        let rotation = bone.spring_rotation(wanted);
         set_value(&mut bone.rotation, rotation, frame, animate);
         // A stretchable bone also follows the pull's length (resisting
         // near its limits).

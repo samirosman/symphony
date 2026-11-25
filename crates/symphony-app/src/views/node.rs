@@ -273,6 +273,7 @@ struct PropertyDraft {
     initial_motion: Option<symphony_core::doc::CameraMotion>,
     motion: Option<symphony_core::doc::CameraMotion>,
     node: Node,
+    bone_thumb: Option<Option<egui::TextureHandle>>,
 }
 
 impl PropertyDraft {
@@ -292,6 +293,7 @@ impl PropertyDraft {
             initial_motion: motion.clone(),
             motion,
             node,
+            bone_thumb: None,
         })
     }
 }
@@ -343,7 +345,6 @@ pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
     [
         NodeKind::Peg(Default::default()),
         NodeKind::Skeleton(Default::default()),
-        NodeKind::Bone(Default::default()),
         mesh_warp(1920, 1080),
         NodeKind::Composite,
     ]
@@ -1123,7 +1124,6 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
             for kind in [
                 NodeKind::Peg(Default::default()),
                 NodeKind::Skeleton(Default::default()),
-                NodeKind::Bone(Default::default()),
                 mesh_warp(s.doc.settings.width, s.doc.settings.height),
                 NodeKind::Composite,
             ] {
@@ -1183,30 +1183,8 @@ fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
         .show(ctx, |ui| property_form(ui, s, draft));
 }
 
-fn bone_has_drawing(graph: &symphony_core::graph::Graph, bone: NodeId) -> bool {
-    let mut pending = vec![bone];
-    let mut seen = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        for link in graph
-            .links()
-            .iter()
-            .filter(|link| link.from == id && link.port == 0)
-        {
-            match graph.node(link.to).map(|node| &node.kind) {
-                Some(NodeKind::Drawing { .. }) => return true,
-                Some(NodeKind::Peg(_) | NodeKind::MeshWarp(_)) => pending.push(link.to),
-                _ => {}
-            }
-        }
-    }
-    false
-}
-
 fn add_bone_drawing(s: &mut Session, bone: NodeId) {
-    if s.doc.graph.bone(bone).is_none() || bone_has_drawing(&s.doc.graph, bone) {
+    if s.doc.graph.bone(bone).is_none() {
         return;
     }
     let at = node_position(s, bone, &default_positions(s));
@@ -1218,7 +1196,177 @@ fn add_bone_drawing(s: &mut Session, bone: NodeId) {
         Some((s.doc.graph.next_id(), peg)),
     );
     s.add_layer_for_bone(bone, peg, drawing);
-    s.select_graph_node(s.doc.layers[s.selected].node, true);
+}
+
+pub(super) fn bone_thumbnail(
+    s: &Session,
+    bone: NodeId,
+    ctx: &egui::Context,
+) -> Option<egui::TextureHandle> {
+    let drawings: Vec<_> = s
+        .doc
+        .layers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, layer)| {
+            if s.doc.graph.drawing_bone(layer.node, s.frame) != Some(bone) {
+                return None;
+            }
+            s.doc
+                .exposed(index, s.frame)
+                .map(|drawing| (layer.node, layer.column, drawing))
+        })
+        .collect();
+    let pix = symphony_render::render_drawing_thumbnails(&s.doc, &drawings, s.frame, 96)?;
+    let image = egui::ColorImage::from_rgba_premultiplied([96, 96], pix.data());
+    Some(ctx.load_texture("bone-drawings", image, egui::TextureOptions::LINEAR))
+}
+
+/// Return the input that belongs only to this drawing. An existing
+/// dedicated peg stays in the path, so its keyed transforms still apply.
+fn drawing_attachment_input(
+    graph: &symphony_core::graph::Graph,
+    layer: symphony_core::doc::Layer,
+) -> NodeId {
+    let mut input = layer.node;
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = graph.input(input, 0).filter(|p| seen.insert(*p)) {
+        let private = graph
+            .links()
+            .iter()
+            .filter(|link| link.from == parent)
+            .count()
+            == 1;
+        if !private
+            || !graph
+                .node(parent)
+                .is_some_and(|node| matches!(node.kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_)))
+        {
+            break;
+        }
+        input = parent;
+    }
+    input
+}
+
+fn change_bone_drawing(
+    s: &mut Session,
+    bone: NodeId,
+    layer: symphony_core::doc::Layer,
+    attach: bool,
+) {
+    let graph = &s.doc.graph;
+    let mut input = drawing_attachment_input(graph, layer);
+    if !attach {
+        // A shared control belongs to other drawings too. Detach this
+        // branch only rather than changing the other attachments.
+        if graph.input(input, 0) != Some(bone) {
+            input = layer.node;
+        }
+    } else if !graph.can_connect_to(bone, input, 0) {
+        return;
+    }
+    let before = graph.links().to_vec();
+    let mut after = before.clone();
+    after.retain(|link| link.to != input || link.port != 0);
+    if attach {
+        after.push(Link {
+            from: bone,
+            to: input,
+            port: 0,
+        });
+    } else if input == layer.node && graph.input(layer.peg, 0).is_none() {
+        after.push(Link {
+            from: layer.peg,
+            to: input,
+            port: 0,
+        });
+    }
+    if before != after {
+        let was_custom = s.doc.custom_wiring;
+        s.history.apply(
+            &mut s.doc,
+            if attach {
+                "Attach drawing to bone"
+            } else {
+                "Detach drawing from bone"
+            },
+            vec![Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            }],
+        );
+    }
+}
+
+fn bone_drawings(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    id: NodeId,
+    thumb: &mut Option<Option<egui::TextureHandle>>,
+) -> bool {
+    let (attached, available): (Vec<_>, Vec<_>) = s
+        .doc
+        .layers
+        .iter()
+        .copied()
+        .enumerate()
+        .partition(|(_, layer)| s.doc.graph.drawing_bone(layer.node, s.frame) == Some(id));
+    ui.label("Drawings");
+    if !attached.is_empty() {
+        if let Some(texture) = thumb.get_or_insert_with(|| bone_thumbnail(s, id, ui.ctx())) {
+            ui.add(
+                egui::Image::new((texture.id(), Vec2::splat(80.0)))
+                    .alt_text("Attached drawings at the current frame"),
+            );
+        } else {
+            ui.label("No artwork at this frame");
+        }
+    }
+    for (index, layer) in attached {
+        let remove = ui
+            .horizontal(|ui| {
+                ui.label(s.layer_name(index));
+                ui.small_button("Detach").clicked()
+            })
+            .inner;
+        if remove {
+            change_bone_drawing(s, id, layer, false);
+            return true;
+        }
+    }
+    let mut add = None;
+    if !available.is_empty() {
+        ui.menu_button("Attach drawing", |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(230.0)
+                .show(ui, |ui| {
+                    for (index, layer) in available {
+                        let other = s.doc.graph.drawing_bone(layer.node, s.frame);
+                        let result = ui.button(s.layer_name(index));
+                        let result = if other.is_some() {
+                            result.on_hover_text("Move this drawing from its current bone")
+                        } else {
+                            result
+                        };
+                        if result.clicked() {
+                            add = Some(layer);
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    }
+    if let Some(layer) = add {
+        change_bone_drawing(s, id, layer, true);
+        return true;
+    }
+    if ui.button("New drawing").clicked() {
+        add_bone_drawing(s, id);
+        return true;
+    }
+    false
 }
 
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
@@ -1271,15 +1419,19 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             }
         }
         NodeKind::Bone(bone) => {
-            if !bone_has_drawing(&s.doc.graph, draft.id)
-                && ui
-                    .button("Add drawing")
-                    .on_hover_text("Create a drawing layer driven by this bone")
-                    .clicked()
-            {
-                add_bone_drawing(s, draft.id);
+            if bone_drawings(ui, s, draft.id, &mut draft.bone_thumb) {
+                if let Some(current) = PropertyDraft::new(s, draft.id) {
+                    *draft = current;
+                }
                 return;
             }
+            ui.add_space(4.0);
+            ui.add(
+                egui::Slider::new(&mut bone.spring_stiffness, 0.0..=1.0).text("Spring stiffness"),
+            )
+            .on_hover_text(
+                "Resists rotating away from the rest angle. Locked anchors take priority.",
+            );
             use symphony_core::rig::AnchorKind;
             let parent = s.doc.graph.parent_bone(draft.id);
             let root = s.doc.graph.rig_root(draft.id);
@@ -2637,8 +2789,10 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         .doc
         .graph
         .nodes()
+        .filter(|(_, node)| !matches!(node.kind, NodeKind::Bone(_)))
         .map(|(id, _)| (id, node_position(s, id, &defaults)))
         .collect();
+    state.selection.retain(|id| placed.contains_key(id));
     let mut held = BTreeSet::new();
     if let Some(Drag::Node(moving, delta)) = state.drag {
         for (id, position) in placed.iter_mut() {
@@ -2678,7 +2832,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     let mut inputs = BTreeMap::<Input, Pos2>::new();
     let mut outputs = BTreeMap::new();
     for (id, node) in s.doc.graph.nodes() {
-        let position = placed.get(&id).copied().unwrap_or_default();
+        let Some(&position) = placed.get(&id) else {
+            continue;
+        };
         let center = origin + position * zoom;
         let ports = if matches!(node.kind, NodeKind::Composite) {
             let mut used: Vec<_> = s
@@ -2831,9 +2987,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         if let Some(point) = ui.input(|i| i.pointer.press_origin()) {
             state.drag = if space {
                 Some(Drag::Pan)
-            } else if let Some(input) =
-                input_at(point).filter(|input| s.doc.graph.input(input.0, input.1).is_some())
-            {
+            } else if let Some(input) = input_at(point).filter(|input| {
+                s.doc
+                    .graph
+                    .input(input.0, input.1)
+                    .is_some_and(|source| outputs.contains_key(&source))
+            }) {
                 s.doc
                     .graph
                     .input(input.0, input.1)
@@ -2882,7 +3041,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             .selection
             .iter()
             .copied()
-            .chain(s.selected_node)
+            .chain(s.selected_node.filter(|id| cards.contains_key(id)))
             .collect();
         if delete_nodes(s, &chosen) > 0 {
             state.selection.clear();
@@ -3111,12 +3270,17 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
 
     let dt = state.cable_time.map_or(0.0, |last| (now - last) as f32);
     state.cable_time = Some(now);
+    let graph = &s.doc.graph;
     let mut ends: Vec<(Link, Pos2, Pos2)> = Vec::new();
-    for link in s.doc.graph.links() {
+    for &actual in graph.links() {
+        let mut link = actual;
+        if graph.bone(link.from).is_some() {
+            link.from = graph.rig_root(link.from);
+        }
         if let (Some(&from), Some(&to)) =
             (outputs.get(&link.from), inputs.get(&(link.to, link.port)))
         {
-            ends.push((*link, from, to));
+            ends.push((link, from, to));
         }
     }
     // Where a cable was just let go, and its rope (a fraction of a second).
@@ -3258,22 +3422,17 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             }
         }
     }
-    for link in s.doc.graph.links() {
-        if auto_wire.and_then(AutoWire::replaced) == Some(*link) {
-            continue;
-        }
-        if moving.contains(link) {
+    for &(link, from, to) in &state.drawn_links {
+        if auto_wire.and_then(AutoWire::replaced) == Some(link) || moving.contains(&link) {
             continue;
         }
         let input = (link.to, link.port);
         if matches!(state.drag, Some(Drag::Cable { old_input: Some(old), .. }) if old == input) {
             continue;
         }
-        if let (Some(&from), Some(&to)) = (outputs.get(&link.from), inputs.get(&input)) {
-            let removing =
-                cut == Some(*link) || detach.is_some_and(|id| link.from == id || link.to == id);
-            curve(&painter, from, to, cable_style(*link, removing));
-        }
+        let removing =
+            cut == Some(link) || detach.is_some_and(|id| link.from == id || link.to == id);
+        curve(&painter, from, to, cable_style(link, removing));
     }
     if let Some(Drag::Cable { source, .. }) = state.drag {
         if let (Some(&from), Some(pointer)) =
@@ -4015,14 +4174,19 @@ mod tests {
         let layer = s.doc.layers[s.selected];
         assert_eq!(s.doc.graph.input(layer.peg, 0), Some(bone));
         assert_eq!(s.doc.graph.input(layer.node, 0), Some(layer.peg));
-        assert!(bone_has_drawing(&s.doc.graph, bone));
+        assert_eq!(s.doc.graph.drawing_bone(layer.node, s.frame), Some(bone));
         add_bone_drawing(&mut s, bone);
+        assert_eq!(s.layer_count(), 3);
+        s.undo();
         assert_eq!(s.layer_count(), 2);
         s.undo();
         assert_eq!(s.layer_count(), 1);
-        assert!(!bone_has_drawing(&s.doc.graph, bone));
         s.redo();
-        assert!(bone_has_drawing(&s.doc.graph, bone));
+        assert_eq!(s.doc.graph.drawing_bone(layer.node, s.frame), Some(bone));
+        change_bone_drawing(&mut s, bone, layer, false);
+        assert_eq!(s.doc.graph.drawing_bone(layer.node, s.frame), None);
+        s.undo();
+        assert_eq!(s.doc.graph.drawing_bone(layer.node, s.frame), Some(bone));
     }
 
     #[test]

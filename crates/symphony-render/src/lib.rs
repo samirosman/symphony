@@ -58,20 +58,39 @@ pub fn render_drawing_thumbnail(
     frame: u32,
     side: u32,
 ) -> Option<Pixmap> {
-    let d = scene.drawings.get(&drawing)?;
+    render_drawing_thumbnails(scene, &[(node, column, drawing)], frame, side)
+}
+
+/// Fit several drawings to the same bounds, composited in layer order.
+pub fn render_drawing_thumbnails(
+    scene: &Scene,
+    drawings: &[(symphony_core::graph::NodeId, Id, Id)],
+    frame: u32,
+    side: u32,
+) -> Option<Pixmap> {
     let mut lo = [f32::INFINITY; 2];
     let mut hi = [f32::NEG_INFINITY; 2];
-    for st in &d.strokes {
-        if let Some((a, b)) = symphony_vector::bounds(st) {
-            lo = [lo[0].min(a[0]), lo[1].min(a[1])];
-            hi = [hi[0].max(b[0]), hi[1].max(b[1])];
+    for (_, _, drawing) in drawings {
+        let Some(d) = scene.drawings.get(drawing) else {
+            continue;
+        };
+        if let Some(image) = d.image {
+            let [x, y, width, height] = image.rect;
+            lo = [lo[0].min(x), lo[1].min(y)];
+            hi = [hi[0].max(x + width), hi[1].max(y + height)];
         }
-    }
-    for fill in &d.fills {
-        for c in &fill.contours {
-            for p in c {
-                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
-                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+        for st in &d.strokes {
+            if let Some((a, b)) = symphony_vector::bounds(st) {
+                lo = [lo[0].min(a[0]), lo[1].min(a[1])];
+                hi = [hi[0].max(b[0]), hi[1].max(b[1])];
+            }
+        }
+        for fill in &d.fills {
+            for c in &fill.contours {
+                for p in c {
+                    lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                    hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+                }
             }
         }
     }
@@ -90,16 +109,18 @@ pub fn render_drawing_thumbnail(
     // drawing is shown as drawn.
     let project = scene.project_plane(frame, 0.0)?;
     let view = fit.compose(project.inverse()?);
-    let item = RenderItem {
-        node,
-        column,
-        drawing,
-        transform: Affine::IDENTITY,
-        depth: 0.0,
-        matte_pass: false,
-        warp: None,
-    };
-    paint_drawing(&mut pix, scene, frame, view, item, None, None);
+    for &(node, column, drawing) in drawings.iter().rev() {
+        let item = RenderItem {
+            node,
+            column,
+            drawing,
+            transform: Affine::IDENTITY,
+            depth: 0.0,
+            matte_pass: false,
+            warp: None,
+        };
+        paint_drawing(&mut pix, scene, frame, view, item, None, None);
+    }
     Some(pix)
 }
 

@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
 use symphony_core::history::Edit;
-use symphony_core::id::Id;
 use symphony_core::math::Affine;
 use symphony_core::rig::Bone;
 use symphony_ui::theme;
@@ -30,8 +29,9 @@ pub struct SetupState {
     /// Skeleton space -> screen, frozen while dragging (the view doesn't
     /// refit under the pointer).
     frozen: Option<Affine>,
-    /// Thumbnails by (drawing, scene version, frame).
-    thumbs: HashMap<(Id, u64, u32), Option<egui::TextureHandle>>,
+    /// Thumbnails by bone, scene version, and frame.
+    thumb_scene: String,
+    thumbs: HashMap<(NodeId, u64, u32), Option<egui::TextureHandle>>,
 }
 
 #[derive(Clone, Copy)]
@@ -356,40 +356,22 @@ fn grow_bone(s: &mut Session, parent: NodeId, origin: Option<[f32; 2]>) -> Optio
     super::node::add_bone_under(s, parent, bone)
 }
 
-/// A thumbnail of the first drawing hanging straight off bone `b` (at
-/// this frame), made once per scene version.
+/// Combined preview of the bone’s attached drawings at the current frame.
 fn thumbnail(
     s: &Session,
     state: &mut SetupState,
     b: NodeId,
     ctx: &egui::Context,
 ) -> Option<egui::TextureHandle> {
-    let graph = &s.doc.graph;
-    let (node, column) =
-        graph.links().iter().filter(|l| l.from == b).find_map(|l| {
-            match graph.node(l.to).map(|n| &n.kind) {
-                Some(NodeKind::Drawing { column }) => Some((l.to, *column)),
-                _ => None,
-            }
-        })?;
-    let drawing = s.doc.xsheet.column(column)?.get(s.frame)?;
-    let key = (drawing, s.doc.version, s.frame);
-    if state.thumbs.len() > 256 {
+    let key = (b, s.doc.version, s.frame);
+    if state.thumb_scene != s.key || state.thumbs.len() > 256 {
+        state.thumb_scene.clone_from(&s.key);
         state.thumbs.clear();
     }
     state
         .thumbs
         .entry(key)
-        .or_insert_with(|| {
-            let pix = symphony_render::render_drawing_thumbnail(
-                &s.doc, node, column, drawing, s.frame, 96,
-            )?;
-            let image = egui::ColorImage::from_rgba_premultiplied(
-                [pix.width() as usize, pix.height() as usize],
-                pix.data(),
-            );
-            Some(ctx.load_texture("bone-thumb", image, egui::TextureOptions::LINEAR))
-        })
+        .or_insert_with(|| super::node::bone_thumbnail(s, b, ctx))
         .clone()
 }
 

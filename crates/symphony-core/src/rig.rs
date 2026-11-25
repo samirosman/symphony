@@ -11,6 +11,8 @@ pub struct Bone {
     pub rest_angle: f32,
     pub rotation: Value,
     pub bend_radius: f32,
+    #[serde(default)]
+    pub spring_stiffness: f32,
     pub smart: Option<SmartJoint>,
     /// How the bone may change length.
     #[serde(default)]
@@ -69,6 +71,7 @@ impl Default for Bone {
             rest_angle: 0.0,
             rotation: Value::default(),
             bend_radius: 28.0,
+            spring_stiffness: 0.0,
             smart: None,
             stretch_mode: Stretch::Rigid,
             stretch: one(),
@@ -79,6 +82,12 @@ impl Default for Bone {
 }
 
 impl Bone {
+    /// Soften an intentional rotation relative to the bone's rest angle.
+    pub fn spring_rotation(&self, wanted: f32) -> f32 {
+        let from_rest = (wanted + 180.0).rem_euclid(360.0) - 180.0;
+        wanted - from_rest * self.spring_stiffness.clamp(0.0, 1.0) * 0.9
+    }
+
     pub fn length(&self) -> f32 {
         self.length.clamp(1.0, 100_000.0)
     }
@@ -311,6 +320,8 @@ pub(crate) struct RigEdge {
     pub end: usize,
     pub length: f32,
     pub range: [f32; 2],
+    pub spring_stiffness: f32,
+    pub rest_angle: f32,
 }
 
 /// Project the whole tree together. Roots, locked anchors, and the
@@ -348,6 +359,13 @@ pub(crate) fn solve_tree(
             len >= lo - 0.008 && len <= hi + 0.008
         })
     };
+    let mut parents = vec![None; rest.len()];
+    for (index, edge) in edges.iter().enumerate() {
+        parents[edge.end] = Some(index);
+    }
+    let springs = edges
+        .iter()
+        .any(|edge| edge.spring_stiffness > 0.0 && active[edge.end]);
     let relax = |stretch: bool, pull: bool| {
         let mut points = initial.clone();
         if !pull && lengths_fit(&points, stretch) {
@@ -371,6 +389,32 @@ pub(crate) fn solve_tree(
                             *value += (desired - *value) * 0.35;
                         }
                     }
+                }
+            }
+            if springs && step < 100 {
+                let angle = |points: &[[f32; 2]], edge: &RigEdge| {
+                    let (a, b) = (points[edge.start], points[edge.end]);
+                    (b[1] - a[1]).atan2(b[0] - a[0])
+                };
+                for edge in edges
+                    .iter()
+                    .filter(|edge| active[edge.end] && !pinned[edge.end])
+                {
+                    let strength = edge.spring_stiffness.clamp(0.0, 1.0);
+                    if strength == 0.0 {
+                        continue;
+                    }
+                    let current = angle(&points, edge);
+                    let parent = parents[edge.start].map_or(0.0, |i| angle(&points, &edges[i]));
+                    let preferred = parent + edge.rest_angle.to_radians();
+                    let turn = (preferred - current + std::f32::consts::PI)
+                        .rem_euclid(std::f32::consts::TAU)
+                        - std::f32::consts::PI;
+                    let next = current + turn * strength * 0.2;
+                    let base = points[edge.start];
+                    let length = distance(base, points[edge.end]);
+                    points[edge.end] =
+                        [base[0] + next.cos() * length, base[1] + next.sin() * length];
                 }
             }
             let mut project = |edge: &RigEdge| {
@@ -407,11 +451,12 @@ pub(crate) fn solve_tree(
             };
             edges.iter().rev().for_each(&mut project);
             edges.iter().for_each(&mut project);
-            if (!pull
-                || step >= 100
-                || soft
-                    .iter()
-                    .all(|&(i, target)| distance(points[i], target) < 0.008))
+            if (step >= 100
+                || (!springs
+                    && (!pull
+                        || soft
+                            .iter()
+                            .all(|&(i, target)| distance(points[i], target) < 0.008))))
                 && lengths_fit(&points, stretch)
             {
                 return Some(points);

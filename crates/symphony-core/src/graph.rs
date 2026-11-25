@@ -1099,6 +1099,8 @@ impl Graph {
                 end,
                 length: pose.reach(),
                 range: [length * min, length * max],
+                spring_stiffness: bone.spring_stiffness,
+                rest_angle: bone.rest_angle,
             });
             if let Some(anchor) = bone.anchor.as_ref().filter(|_| self.enabled_at(id, frame)) {
                 let goal = [anchor.target[0].at(frame), anchor.target[1].at(frame)];
@@ -1136,7 +1138,20 @@ impl Graph {
         if flip.is_some() && reflected.is_none() {
             return Some(RigSolution::default());
         }
-        let drive = drag.and_then(|(id, goal)| joint_index.get(&id).map(|&index| (index, goal)));
+        let drive = drag.and_then(|(id, mut goal)| {
+            let index = *joint_index.get(&id)?;
+            let bone = self.bone(id)?;
+            if bone.spring_stiffness > 0.0 && bone.anchor.is_none() {
+                let pose = self.bone_pose(id, frame)?;
+                let (x, y) = pose.posed.inverse()?.apply(goal[0], goal[1]);
+                let wanted = bone.rotation.at(frame) + y.atan2(x).to_degrees();
+                let turn = (bone.spring_rotation(wanted) - bone.rotation.at(frame)).to_radians();
+                let reach = x.hypot(y);
+                let (x, y) = pose.posed.apply(reach * turn.cos(), reach * turn.sin());
+                goal = [x, y];
+            }
+            Some((index, goal))
+        });
         let attempt = |fraction: f32| {
             let shift = translation.map(|v| v * fraction);
             let local = |p: [f32; 2]| [p[0] - shift[0], p[1] - shift[1]];
@@ -1548,6 +1563,35 @@ mod tests {
 
     fn near(a: (f32, f32), b: [f32; 2], within: f32) -> bool {
         (a.0 - b[0]).hypot(a.1 - b[1]) <= within
+    }
+
+    #[test]
+    fn spring_resists_rotation_with_an_anchored_rig() {
+        let (mut graph, [hip, _, foot]) = leg();
+        let NodeKind::Bone(bone) = &mut graph.node_mut(foot).unwrap().kind else {
+            unreachable!()
+        };
+        bone.anchor = Some(Box::new(crate::rig::Anchor {
+            kind: crate::rig::AnchorKind::Locked,
+            target: [Value::Constant(230.0), Value::Constant(0.0)],
+        }));
+        let drag = [80.0, 60.0];
+        let loose = graph.solve_rig(hip, drag, 1).unwrap();
+        let NodeKind::Bone(bone) = &mut graph.node_mut(hip).unwrap().kind else {
+            unreachable!()
+        };
+        bone.spring_stiffness = 1.0;
+        let stiff = graph.solve_rig(hip, drag, 1).unwrap();
+        apply(&mut graph, &stiff.changes);
+        let stiff_tip = graph.bone_pose(hip, 1).unwrap().tip();
+        assert!(stiff_tip.1.abs() < 15.0, "{stiff_tip:?}");
+        assert!(near(
+            graph.bone_pose(foot, 1).unwrap().tip(),
+            [230.0, 0.0],
+            0.04
+        ));
+        apply(&mut graph, &loose.changes);
+        assert!(near(graph.bone_pose(hip, 1).unwrap().tip(), drag, 0.04));
     }
 
     #[test]
