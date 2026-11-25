@@ -981,8 +981,12 @@ pub fn timeline(
             let viewport = ui.clip_rect();
             let ruler_top = o.y + scroll_viewport.top().max(0.0);
             let ruler_bottom = ruler_top + RULER;
+            // The names stay at the left of the view while the frames
+            // scroll under them, as the ruler does at the top.
+            let hx = o.x + scroll_viewport.left().max(0.0);
+            let frames_left = (hx + HEAD).min(viewport.right());
             let ruler = viewport_painter.with_clip_rect(Rect::from_min_max(
-                Pos2::new(viewport.left(), ruler_top),
+                Pos2::new(frames_left, ruler_top),
                 Pos2::new(viewport.right(), ruler_bottom),
             ));
             let track_clip = Rect::from_min_max(
@@ -990,7 +994,17 @@ pub fn timeline(
                 viewport.max,
             );
             ui.set_clip_rect(track_clip);
-            let painter = viewport_painter.with_clip_rect(track_clip);
+            // Row highlights span the whole width; frames stop at the
+            // names; the names have their own column.
+            let full = viewport_painter.with_clip_rect(track_clip);
+            let painter = full.with_clip_rect(Rect::from_min_max(
+                Pos2::new(frames_left, track_clip.top()),
+                track_clip.max,
+            ));
+            let head = full.with_clip_rect(Rect::from_min_max(
+                track_clip.min,
+                Pos2::new(frames_left, track_clip.bottom()),
+            ));
 
             // Beats follow the frame rate: the second, its half and a
             // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
@@ -1036,9 +1050,12 @@ pub fn timeline(
                 );
                 reveal_track(ui, row, reveal == Some(node));
                 if sel {
-                    painter.rect_filled(row, theme::RADIUS_CONTROL as f32, theme::BG_RAISED);
-                    let edge = Rect::from_min_size(row.min, Vec2::new(3.0, row.height()));
-                    painter.rect_filled(
+                    full.rect_filled(row, theme::RADIUS_CONTROL as f32, theme::BG_RAISED);
+                    let edge = Rect::from_min_size(
+                        Pos2::new(hx + 4.0, row.min.y),
+                        Vec2::new(3.0, row.height()),
+                    );
+                    head.rect_filled(
                         edge,
                         CornerRadius {
                             nw: 2,
@@ -1051,11 +1068,11 @@ pub fn timeline(
                 }
                 let eye = if visible { Icon::Eye } else { Icon::EyeOff };
                 let eye_rect = Rect::from_center_size(
-                    Pos2::new(o.x + 22.0 + indent, y + rh / 2.0),
+                    Pos2::new(hx + 22.0 + indent, y + rh / 2.0),
                     Vec2::splat(16.0),
                 );
                 icons::paint(
-                    &painter,
+                    &head,
                     eye_rect,
                     eye,
                     if visible {
@@ -1067,11 +1084,11 @@ pub fn timeline(
                 // Locked: a closed padlock and the name in red, as in Harmony.
                 let locked = s.layer_locked(i);
                 let lock_rect = Rect::from_center_size(
-                    Pos2::new(o.x + (LOCK.start + LOCK.end) / 2.0, y + rh / 2.0),
+                    Pos2::new(hx + (LOCK.start + LOCK.end) / 2.0, y + rh / 2.0),
                     Vec2::splat(16.0),
                 );
                 icons::paint(
-                    &painter,
+                    &head,
                     lock_rect,
                     if locked { Icon::Lock } else { Icon::Unlock },
                     if locked {
@@ -1082,7 +1099,7 @@ pub fn timeline(
                 );
                 if resp
                     .hover_pos()
-                    .is_some_and(|p| LOCK.contains(&(p.x - o.x)) && (y..y + rh).contains(&p.y))
+                    .is_some_and(|p| LOCK.contains(&(p.x - hx)) && (y..y + rh).contains(&p.y))
                 {
                     resp.clone()
                         .on_hover_text_at_pointer(keymap::tooltip(profile, Action::ToggleLock));
@@ -1097,8 +1114,8 @@ pub fn timeline(
                     };
                     widgets::fitted_text(
                         ui,
-                        &painter,
-                        Pos2::new(o.x + 40.0 + indent, y + rh / 2.0),
+                        &head,
+                        Pos2::new(hx + 40.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         s.layer_name(i),
                         theme::body(),
@@ -1108,12 +1125,12 @@ pub fn timeline(
                 }
                 parameters_field(
                     ui,
-                    &painter,
+                    &head,
                     s,
                     t,
                     i,
                     Rect::from_min_size(
-                        Pos2::new(o.x + HEAD - PARAM_W - 6.0, y + 4.0),
+                        Pos2::new(hx + HEAD - PARAM_W - 6.0, y + 4.0),
                         Vec2::new(PARAM_W, rh - 8.0),
                     ),
                 );
@@ -1195,12 +1212,12 @@ pub fn timeline(
                 );
                 reveal_track(ui, row, reveal == Some(*node));
                 if visible_node == Some(*node) {
-                    painter.rect_filled(row, theme::RADIUS_CONTROL, theme::BG_RAISED);
+                    full.rect_filled(row, theme::RADIUS_CONTROL, theme::BG_RAISED);
                 }
                 widgets::fitted_text(
                     ui,
-                    &painter,
-                    Pos2::new(o.x + 18.0 + indent, y + rh / 2.0),
+                    &head,
+                    Pos2::new(hx + 18.0 + indent, y + rh / 2.0),
                     Align2::LEFT_CENTER,
                     name,
                     theme::body(),
@@ -1223,11 +1240,11 @@ pub fn timeline(
                 let y = o.y + RULER + sound_slot[j] as f32 * rh;
                 let on = !track.muted;
                 let eye_rect =
-                    Rect::from_center_size(Pos2::new(o.x + 22.0, y + rh / 2.0), Vec2::splat(16.0));
+                    Rect::from_center_size(Pos2::new(hx + 22.0, y + rh / 2.0), Vec2::splat(16.0));
                 // Mute uses the layer's show/hide icon until the icon set
                 // has a speaker.
                 icons::paint(
-                    &painter,
+                    &head,
                     eye_rect,
                     if on { Icon::Eye } else { Icon::EyeOff },
                     if on {
@@ -1239,8 +1256,8 @@ pub fn timeline(
                 if !matches!(&t.renaming_sound, Some((id, _)) if *id == track.id) {
                     widgets::fitted_text(
                         ui,
-                        &painter,
-                        Pos2::new(o.x + 40.0, y + rh / 2.0),
+                        &head,
+                        Pos2::new(hx + 40.0, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         &track.name,
                         theme::body(),
@@ -1393,7 +1410,7 @@ pub fn timeline(
                 if let Some(row) = order.iter().position(|c| c == id) {
                     let k = 1.0 - ((now - at) / 0.8) as f32;
                     let y = o.y + RULER + layer_slot[row] as f32 * rh;
-                    painter.rect_filled(
+                    full.rect_filled(
                         Rect::from_min_size(
                             Pos2::new(o.x + 4.0, y + 1.0),
                             Vec2::new(width - 8.0, rh - 2.0),
@@ -1459,11 +1476,11 @@ pub fn timeline(
                 t.scrubbing = !on_block
                     && ui
                         .input(|i| i.pointer.press_origin())
-                        .is_some_and(|p| p.x >= o.x + HEAD && p.y >= o.y);
+                        .is_some_and(|p| p.x >= hx + HEAD && p.y >= o.y);
             }
             let scrub = t.scrubbing && (resp.dragged() || resp.drag_stopped());
             if let Some(p) = resp.interact_pointer_pos().filter(|p| {
-                scrub || (resp.clicked_by(egui::PointerButton::Primary) && p.x >= o.x + HEAD)
+                scrub || (resp.clicked_by(egui::PointerButton::Primary) && p.x >= hx + HEAD)
             }) {
                 let frame =
                     (((p.x - o.x - HEAD) / cw).floor() as i64 + 1).clamp(1, i64::from(len)) as u32;
@@ -1530,9 +1547,10 @@ pub fn timeline(
             if resp.drag_started_by(egui::PointerButton::Primary) && !t.scrubbing {
                 let origin = ui.input(|i| i.pointer.press_origin());
                 if let (Some(p), Some(row)) = (origin, origin.and_then(row_at)) {
-                    let x = p.x - o.x;
+                    let x = p.x - hx;
                     // Layer rows only: sound rows sit below the layers.
-                    if row < layers && (32.0..LOCK.start).contains(&x) {
+                    let eye_end = 32.0 + layer_depth.get(row).copied().unwrap_or(0) as f32 * INDENT;
+                    if row < layers && (eye_end..LOCK.start).contains(&x) {
                         t.layer_drag = Some(row);
                     }
                 }
@@ -1550,8 +1568,8 @@ pub fn timeline(
                     layer_slot.iter().max().map_or(0, |m| m + 1)
                 };
                 let y = o.y + RULER + line_slot as f32 * rh;
-                painter.line_segment(
-                    [Pos2::new(o.x + 8.0, y), Pos2::new(o.x + width - 8.0, y)],
+                full.line_segment(
+                    [Pos2::new(hx + 8.0, y), Pos2::new(o.x + width - 8.0, y)],
                     Stroke::new(2.0, theme::ACCENT_SELECT),
                 );
                 if resp.drag_stopped() {
@@ -1567,7 +1585,9 @@ pub fn timeline(
             // be a click.
             let picks = !dragging_sound && (!on_block || resp.clicked()) && t.layer_drag.is_none();
             if let Some(p) = resp.interact_pointer_pos().filter(|_| picks) {
-                let rel = p - o;
+                // Name column positions are from its left edge, which
+                // stays in view.
+                let rel = Vec2::new(p.x - hx, p.y - o.y);
                 if let Some(Slot::Sound(j)) = slot_at(p) {
                     let id = s.doc.sounds[j].id;
                     if rel.x < 32.0 && resp.clicked() {
@@ -1579,8 +1599,10 @@ pub fn timeline(
                         t.sound_editor = Some(SoundEditor::new(&s.doc.sounds[j]));
                     }
                 } else if let Some(row) = row_at(p) {
+                    // The eye moves right with the row's indent.
+                    let eye_end = 32.0 + layer_depth[row] as f32 * INDENT;
                     if resp.clicked() || resp.drag_started() {
-                        if rel.x < 32.0 && resp.clicked() {
+                        if rel.x < eye_end && resp.clicked() {
                             s.toggle_visible(row);
                         } else if LOCK.contains(&rel.x) && resp.clicked() {
                             s.toggle_locked(row);
@@ -1605,7 +1627,7 @@ pub fn timeline(
                 match resp.interact_pointer_pos().and_then(slot_at) {
                     Some(Slot::Layer(r)) => {
                         t.menu_row = Some(r);
-                        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.x >= o.x + HEAD) {
+                        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.x >= hx + HEAD) {
                             s.frame = (((p.x - o.x - HEAD) / cw) as u32 + 1).clamp(1, len);
                         }
                         t.menu_node = Some(s.doc.layers[r].node);
@@ -1658,7 +1680,7 @@ pub fn timeline(
                     s,
                     t,
                     Rect::from_min_size(
-                        Pos2::new(o.x + 36.0, y + 3.0),
+                        Pos2::new(hx + 36.0, y + 3.0),
                         Vec2::new(HEAD - 52.0, rh - 6.0),
                     ),
                 );
@@ -1670,7 +1692,7 @@ pub fn timeline(
                     s,
                     t,
                     Rect::from_min_size(
-                        Pos2::new(o.x + 36.0, y + 3.0),
+                        Pos2::new(hx + 36.0, y + 3.0),
                         Vec2::new(HEAD - 52.0 - PARAM_W, rh - 6.0),
                     ),
                 );
@@ -2043,6 +2065,76 @@ mod hierarchy_tests {
         harness.run_steps(12);
         assert!((text_y(harness.output(), "6") - ruler_before).abs() < 0.1);
         assert!(text_y(harness.output(), &track) < track_before - 10.0);
+    }
+
+    /// The layer names stay at the left while the frames scroll under
+    /// them, and their eye still hides the layer.
+    #[test]
+    fn layer_names_stay_put_when_the_frames_scroll() {
+        let session = Session::new_scene();
+        let name = session.layer_name(0).to_owned();
+        let timing = TimingState {
+            frame_w: Some(48.0),
+            ..TimingState::default()
+        };
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (session, timing),
+            );
+        let text_at = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing timeline label {label}"))
+        };
+        harness.run_steps(3);
+        let name_before = text_at(harness.output(), &name);
+        let ruler_before = text_at(harness.output(), "6");
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(Pos2::new(500.0, 200.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(-200.0, 0.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+                source: egui::MouseWheelSource::Unknown,
+            },
+        ]);
+        harness.run_steps(12);
+        let name_after = text_at(harness.output(), &name);
+        assert!((name_after.x - name_before.x).abs() < 0.1);
+        assert!(text_at(harness.output(), "6").x < ruler_before.x - 50.0);
+        // The eye sits 18 points left of the name.
+        let eye = Pos2::new(name_after.x - 18.0, name_after.y + 6.0);
+        assert!(harness.state().0.layer_visible(0));
+        for pressed in [true, false] {
+            harness.input_mut().events.extend([
+                egui::Event::PointerMoved(eye),
+                egui::Event::PointerButton {
+                    pos: eye,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            harness.run_steps(1);
+        }
+        assert!(!harness.state().0.layer_visible(0));
     }
 
     #[test]
