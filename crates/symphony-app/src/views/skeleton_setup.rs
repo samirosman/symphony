@@ -5,7 +5,7 @@
 //! that meet there). Press and hold an endpoint, then drag, to grow a new
 //! bone from it. Back returns to the graph.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_core::graph::{NodeId, NodeKind};
@@ -26,12 +26,83 @@ pub struct SetupState {
     /// The skeleton open in the panel.
     pub open: Option<NodeId>,
     drag: Option<Drag>,
+    selection_scope: Option<(String, NodeId)>,
+    selected: BTreeSet<NodeId>,
     /// Skeleton space -> screen, frozen while dragging (the view doesn't
     /// refit under the pointer).
     frozen: Option<Affine>,
     /// Thumbnails by bone, scene version, and frame.
     thumb_scene: String,
     thumbs: HashMap<(NodeId, u64, u32), Option<egui::TextureHandle>>,
+}
+
+impl SetupState {
+    pub(super) fn selected_bones(&self, s: &Session) -> Vec<NodeId> {
+        let Some((scene, skeleton)) = &self.selection_scope else {
+            return Vec::new();
+        };
+        if self.open != Some(*skeleton)
+            || scene != &s.key
+            || !s
+                .selected_node
+                .is_some_and(|id| self.selected.contains(&id))
+        {
+            return Vec::new();
+        }
+        self.selected
+            .iter()
+            .copied()
+            .filter(|&id| s.doc.graph.bone(id).is_some() && s.doc.graph.rig_root(id) == *skeleton)
+            .collect()
+    }
+
+    fn select(&mut self, s: &mut Session, id: NodeId, extend: bool, toggle: bool) {
+        let mut selected: BTreeSet<_> = if extend || toggle {
+            self.selected_bones(s)
+                .into_iter()
+                .chain(s.selected_node.filter(|&current| {
+                    s.doc.graph.bone(current).is_some()
+                        && Some(s.doc.graph.rig_root(current)) == self.open
+                }))
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let primary = if toggle && selected.remove(&id) {
+            s.selected_node
+                .filter(|current| selected.contains(current))
+                .or_else(|| selected.iter().next().copied())
+                .or(self.open)
+        } else {
+            selected.insert(id);
+            Some(id)
+        };
+        self.selected = selected;
+        if let Some(primary) = primary {
+            s.select_graph_node(primary, true);
+        }
+    }
+}
+
+pub(super) fn bone_body_distance(point: Pos2, base: Pos2, tip: Pos2) -> Option<f32> {
+    let axis = tip - base;
+    let length = axis.length();
+    if length <= 4.0 {
+        return None;
+    }
+    let along = (point - base).dot(axis) / length;
+    let fraction = along / length;
+    if !(0.0..=1.0).contains(&fraction) {
+        return None;
+    }
+    let width = (length * 0.12).clamp(4.0, 16.0);
+    let contour = if fraction < 0.22 {
+        fraction / 0.22
+    } else {
+        (1.0 - fraction) / 0.78
+    };
+    let distance = point.distance(base + axis * fraction);
+    (distance <= (width * contour + 3.0).max(6.0)).then_some(distance)
 }
 
 #[derive(Clone, Copy)]
@@ -59,25 +130,39 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut SetupState) -> bool {
         )
     }) else {
         state.open = None;
+        state.selected.clear();
         return false;
     };
+    if state
+        .selection_scope
+        .as_ref()
+        .is_none_or(|(scene, id)| scene != &s.key || *id != skeleton)
+    {
+        state.selected.clear();
+        state.selection_scope = Some((s.key.clone(), skeleton));
+    }
     let mut back = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("← Back").clicked() {
             back = true;
         }
-        let name = s.doc.graph.node(skeleton).map(|n| n.name.clone()).unwrap_or_default();
+        let name = s
+            .doc
+            .graph
+            .node(skeleton)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
         ui.label(egui::RichText::new(name).strong());
         ui.label(
-            egui::RichText::new(
-                "Rest pose. Drag a base or tip to reshape; hold an endpoint, then drag, to grow a bone.",
-            )
-            .font(theme::dense())
-            .color(theme::TEXT_SECONDARY),
-        );
+            egui::RichText::new("Shift-click to add bones")
+                .font(theme::dense())
+                .color(theme::TEXT_SECONDARY),
+        )
+        .on_hover_text("Drag an endpoint to reshape. Hold it before dragging to grow a bone.");
     });
     if back {
         state.open = None;
+        state.selected.clear();
         return false;
     }
     let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
@@ -148,12 +233,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut SetupState) -> bool {
         }
     }
     // Bones as diamonds, base to tip.
-    let selected = s.selected_node;
+    let selected = state.selected_bones(s);
     for &(b, a, z) in &rest {
         let (pa, pz) = (screen(a), screen(z));
         let d = pz - pa;
         let len = d.length();
-        let ink = if selected == Some(b) {
+        let ink = if selected.contains(&b) || s.selected_node == Some(b) {
             theme::ACCENT_SELECT
         } else {
             theme::TEXT_SECONDARY
@@ -193,6 +278,14 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut SetupState) -> bool {
             .filter(|(_, d)| *d <= GRAB)
             .min_by(|x, y| x.1.total_cmp(&y.1))
             .map(|(e, _)| e)
+    };
+    let body_at = |p: Pos2| {
+        rest.iter()
+            .filter_map(|&(id, base, tip)| {
+                bone_body_distance(p, screen(base), screen(tip)).map(|d| (id, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
     };
     let hovered = pointer.and_then(nearest);
     // Holding an endpoint: a ring fills up, then a drag grows a bone.
@@ -261,7 +354,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut SetupState) -> bool {
             }
         });
         if let Some(Drag::Tip(b) | Drag::Base(b)) = state.drag {
-            s.select_graph_node(b, true);
+            state.select(s, b, false, false);
         }
     }
     if let (Some(drag), Some(p), Some(back)) = (
@@ -277,6 +370,8 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut SetupState) -> bool {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     } else if hovered.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    } else if response.hover_pos().and_then(body_at).is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if response.drag_stopped() || (state.drag.is_some() && !ui.input(|i| i.pointer.primary_down()))
     {
@@ -284,9 +379,19 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut SetupState) -> bool {
         state.frozen = None;
         s.end_gesture();
     }
-    if response.clicked() {
-        if let Some(End::Tip(b) | End::Base(b)) = pointer.and_then(nearest) {
-            s.select_graph_node(b, true);
+    if response.clicked_by(egui::PointerButton::Primary) {
+        let modifiers = ui.input(|i| i.modifiers);
+        if let Some(id) = pointer.and_then(|p| {
+            nearest(p)
+                .map(|end| match end {
+                    End::Tip(id) | End::Base(id) => id,
+                })
+                .or_else(|| body_at(p))
+        }) {
+            state.select(s, id, modifiers.shift, modifiers.command || modifiers.ctrl);
+        } else if !modifiers.shift && !modifiers.command && !modifiers.ctrl {
+            state.selected.clear();
+            s.select_graph_node(skeleton, true);
         }
     }
     true
@@ -379,6 +484,36 @@ fn thumbnail(
 mod tests {
     use super::*;
     use symphony_core::graph::PegParams;
+
+    #[test]
+    fn bone_body_selection_extends_and_toggles() {
+        let mut s = Session::new_scene();
+        let root = s
+            .doc
+            .graph
+            .add("Rig", NodeKind::Skeleton(PegParams::default()));
+        let upper = s.doc.graph.add("Upper", NodeKind::Bone(Bone::default()));
+        let lower = s.doc.graph.add("Lower", NodeKind::Bone(Bone::default()));
+        s.doc.graph.connect(root, upper, 0);
+        s.doc.graph.connect(upper, lower, 0);
+        let mut state = SetupState {
+            open: Some(root),
+            selection_scope: Some((s.key.clone(), root)),
+            ..Default::default()
+        };
+        let base = Pos2::new(20.0, 40.0);
+        let tip = Pos2::new(120.0, 40.0);
+        assert!(bone_body_distance(Pos2::new(44.0, 50.0), base, tip).is_some());
+        assert!(bone_body_distance(Pos2::new(100.0, 62.0), base, tip).is_none());
+        state.select(&mut s, upper, false, false);
+        state.select(&mut s, lower, true, false);
+        assert_eq!(state.selected_bones(&s), [upper, lower]);
+        state.select(&mut s, lower, false, true);
+        assert_eq!(state.selected_bones(&s), [upper]);
+        state.select(&mut s, upper, false, true);
+        assert!(state.selected_bones(&s).is_empty());
+        assert_eq!(s.selected_node, Some(root));
+    }
 
     /// Reshaping in the rest pose: dragging a tip changes the bone's
     /// length and angle, the bone hanging from it stays attached, and

@@ -826,17 +826,70 @@ fn sync_properties(s: &Session, state: &mut NodeViewState) {
 
 pub fn inspector(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
     sync_properties(s, state);
+    let bones = state.setup.selected_bones(s);
     if let Some(draft) = &mut state.properties {
-        egui::Frame::new()
-            .inner_margin(egui::Margin::same(theme::CARD_PAD))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading(kind_label(&draft.node.kind));
-                    property_form(ui, s, draft);
-                });
-            });
+        inspector_content(ui, s, draft, &bones);
     } else {
-        ui.label("Select a node to edit its properties.");
+        egui::Frame::new()
+            .inner_margin(theme::CARD_PAD)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Select a node to see its properties.")
+                        .color(theme::TEXT_SECONDARY),
+                );
+            });
+    }
+}
+
+fn inspector_content(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    draft: &mut PropertyDraft,
+    bones: &[NodeId],
+) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Frame::new()
+                .inner_margin(theme::CARD_PAD)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    if bones.len() > 1 {
+                        ui.label(
+                            egui::RichText::new(format!("{} bones selected", bones.len()))
+                                .size(theme::SIZE_HEADING)
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                        bone_batch_form(ui, s, bones);
+                    } else {
+                        ui.push_id(draft.id, |ui| property_form(ui, s, draft));
+                    }
+                });
+        });
+}
+
+fn property_heading(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .strong()
+            .color(theme::TEXT_PRIMARY),
+    );
+}
+
+/// Share the value column at normal widths and stack the field in narrow docks.
+fn property_row<R>(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let text = egui::RichText::new(label).color(theme::TEXT_SECONDARY);
+    if ui.available_width() >= 240.0 {
+        ui.horizontal(|ui| {
+            ui.add_sized([116.0, 24.0], egui::Label::new(text).truncate())
+                .on_hover_text(label);
+            control(ui)
+        })
+        .inner
+    } else {
+        ui.label(text);
+        control(ui)
     }
 }
 
@@ -1176,11 +1229,13 @@ fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
     let Some(draft) = &mut state.properties else {
         return;
     };
-    egui::Window::new(format!("{} properties", kind_label(&draft.node.kind)))
+    let bones = state.setup.selected_bones(s);
+    egui::Window::new("Node Properties")
+        .default_size([328.0, 420.0])
         .id(egui::Id::unique("node-properties"))
         .collapsible(false)
         .open(&mut state.properties_open)
-        .show(ctx, |ui| property_form(ui, s, draft));
+        .show(ctx, |ui| inspector_content(ui, s, draft, &bones));
 }
 
 fn add_bone_drawing(s: &mut Session, bone: NodeId) {
@@ -1313,22 +1368,38 @@ fn bone_drawings(
         .copied()
         .enumerate()
         .partition(|(_, layer)| s.doc.graph.drawing_bone(layer.node, s.frame) == Some(id));
-    ui.label("Drawings");
+    property_heading(ui, "Drawings");
     if !attached.is_empty() {
         if let Some(texture) = thumb.get_or_insert_with(|| bone_thumbnail(s, id, ui.ctx())) {
-            ui.add(
-                egui::Image::new((texture.id(), Vec2::splat(80.0)))
-                    .alt_text("Attached drawings at the current frame"),
-            );
+            egui::Frame::new()
+                .fill(theme::BG_BASE)
+                .corner_radius(theme::RADIUS_CARD)
+                .inner_margin(8)
+                .show(ui, |ui| {
+                    let side = ui.available_width().clamp(24.0, 96.0);
+                    ui.add(
+                        egui::Image::new((texture.id(), Vec2::splat(side)))
+                            .alt_text("Attached drawings at the current frame"),
+                    );
+                });
         } else {
             ui.label("No artwork at this frame");
         }
     }
+    if attached.is_empty() {
+        ui.label(egui::RichText::new("No drawings attached").color(theme::TEXT_SECONDARY));
+    }
     for (index, layer) in attached {
         let remove = ui
             .horizontal(|ui| {
-                ui.label(s.layer_name(index));
-                ui.small_button("Detach").clicked()
+                let name = s.layer_name(index);
+                ui.add_sized(
+                    [(ui.available_width() - 64.0).max(16.0), 24.0],
+                    egui::Label::new(name).truncate(),
+                )
+                .on_hover_text(name);
+                ui.add_sized([56.0, 24.0], egui::Button::new("Detach"))
+                    .clicked()
             })
             .inner;
         if remove {
@@ -1369,18 +1440,295 @@ fn bone_drawings(
     false
 }
 
+fn bone_number(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &str,
+    mixed: bool,
+) -> egui::Response {
+    property_row(ui, label, |ui| {
+        let field = egui::DragValue::new(value).range(range).speed(0.1);
+        let field = if mixed {
+            field.custom_formatter(|_, _| "Mixed".into())
+        } else {
+            field.suffix(suffix)
+        };
+        ui.add_sized([84.0, 24.0], field)
+    })
+}
+
+fn stretch_name(mode: symphony_core::rig::Stretch) -> &'static str {
+    use symphony_core::rig::Stretch;
+    match mode {
+        Stretch::Rigid => "Rigid",
+        Stretch::Simple => "Simple stretch",
+        Stretch::SquashStretch => "Squash & stretch",
+    }
+}
+
+fn stretch_picker(
+    ui: &mut egui::Ui,
+    mode: Option<symphony_core::rig::Stretch>,
+) -> Option<symphony_core::rig::Stretch> {
+    use symphony_core::rig::Stretch;
+    let mut value = mode;
+    property_row(ui, "Stretch mode", |ui| {
+        egui::ComboBox::from_id_salt("stretch-mode")
+            .width(ui.available_width().min(148.0))
+            .selected_text(mode.map_or("Mixed", stretch_name))
+            .show_ui(ui, |ui| {
+                for mode in [Stretch::Rigid, Stretch::Simple, Stretch::SquashStretch] {
+                    ui.selectable_value(&mut value, Some(mode), stretch_name(mode));
+                }
+            });
+    });
+    value.filter(|value| Some(*value) != mode)
+}
+
+fn edit_bone_batch(
+    s: &mut Session,
+    ids: &[NodeId],
+    field: &str,
+    merged: bool,
+    mut change: impl FnMut(NodeId, &mut symphony_core::rig::Bone),
+) {
+    let mut roots = BTreeSet::new();
+    let edits: Vec<_> = ids
+        .iter()
+        .filter_map(|&id| {
+            let before = s.doc.graph.node(id)?.clone();
+            let mut after = before.clone();
+            let NodeKind::Bone(bone) = &mut after.kind else {
+                return None;
+            };
+            change(id, bone);
+            if before == after {
+                return None;
+            }
+            roots.insert(s.doc.graph.rig_root(id));
+            Some(Edit::SetNodeProperties { id, before, after })
+        })
+        .collect();
+    if edits.is_empty() {
+        return;
+    }
+
+    let mut solutions = Vec::new();
+    if roots
+        .iter()
+        .any(|&root| s.doc.graph.rig_has_anchors(root, s.frame))
+    {
+        let mut preview = s.doc.graph.clone();
+        for edit in &edits {
+            if let Edit::SetNodeProperties { id, after, .. } = edit {
+                if let Some(node) = preview.node_mut(*id) {
+                    *node = after.clone();
+                }
+            }
+        }
+        for root in roots {
+            if let Some(solution) = preview.solve_rig_translation(root, [0.0; 2], s.frame) {
+                if !solution.feasible {
+                    s.note("This change would move a locked anchor.");
+                    return;
+                }
+                solutions.push((root, solution));
+            }
+        }
+    }
+    let key = format!("bone-properties-{field}-{ids:?}");
+    if !merged {
+        s.end_gesture();
+    }
+    for edit in edits {
+        s.history
+            .apply_merged(&mut s.doc, "Change bone properties", &key, edit);
+    }
+    for (root, solution) in solutions {
+        super::rig_edit::apply_rig_solution(s, root, &key, solution, None);
+    }
+    if !merged {
+        s.end_gesture();
+    }
+}
+
+fn bone_batch_form(ui: &mut egui::Ui, s: &mut Session, ids: &[NodeId]) {
+    fn shared<T: Copy + PartialEq>(
+        bones: &[symphony_core::rig::Bone],
+        value: impl Fn(&symphony_core::rig::Bone) -> T,
+    ) -> Option<T> {
+        let first = value(bones.first()?);
+        bones
+            .iter()
+            .all(|bone| value(bone) == first)
+            .then_some(first)
+    }
+
+    use symphony_core::rig::{AnchorKind, Bone, Stretch};
+    let bones: Vec<_> = ids
+        .iter()
+        .filter_map(|&id| s.doc.graph.bone(id).cloned())
+        .collect();
+    let Some(first) = bones.first() else { return };
+    property_heading(ui, "Posing");
+    let mut stiffness = first.spring_stiffness * 100.0;
+    let mixed = shared(&bones, |bone| bone.spring_stiffness).is_none();
+    let response = bone_number(
+        ui,
+        "Spring stiffness",
+        &mut stiffness,
+        0.0..=100.0,
+        "%",
+        mixed,
+    );
+    if response.changed() {
+        edit_bone_batch(s, ids, "stiffness", response.dragged(), |_, bone| {
+            bone.spring_stiffness = stiffness / 100.0
+        });
+    }
+    if response.drag_stopped() {
+        s.end_gesture();
+    }
+
+    let anchor = shared(&bones, |bone| {
+        bone.anchor.as_ref().map(|anchor| anchor.kind)
+    });
+    let mut selected = anchor;
+    property_row(ui, "Anchor", |ui| {
+        egui::ComboBox::from_id_salt("batch-anchor")
+            .selected_text(match anchor {
+                None => "Mixed",
+                Some(None) => "Off",
+                Some(Some(AnchorKind::Locked)) => "Locked",
+                Some(Some(AnchorKind::Aim)) => "Aim",
+            })
+            .show_ui(ui, |ui| {
+                for (value, label) in [
+                    (None, "Off"),
+                    (Some(AnchorKind::Locked), "Locked"),
+                    (Some(AnchorKind::Aim), "Aim"),
+                ] {
+                    ui.selectable_value(&mut selected, Some(value), label);
+                }
+            });
+    });
+    if let Some(mode) = selected.filter(|mode| Some(*mode) != anchor) {
+        let tips: BTreeMap<_, _> = ids
+            .iter()
+            .filter_map(|&id| {
+                s.doc
+                    .graph
+                    .bone_pose(id, s.frame)
+                    .map(|pose| (id, pose.tip()))
+            })
+            .collect();
+        edit_bone_batch(s, ids, "anchor", false, |id, bone| {
+            if let Some(&tip) = tips.get(&id) {
+                super::rig_edit::update_anchor_mode(bone, mode, tip);
+            }
+        });
+    }
+
+    ui.add_space(8.0);
+    property_heading(ui, "Deformation");
+    let mut radius = first.bend_radius;
+    let mixed = shared(&bones, |bone| bone.bend_radius).is_none();
+    let response = bone_number(
+        ui,
+        "Bend radius",
+        &mut radius,
+        0.0..=100_000.0,
+        " px",
+        mixed,
+    );
+    if response.changed() {
+        edit_bone_batch(s, ids, "bend-radius", response.dragged(), |_, bone| {
+            bone.bend_radius = radius
+        });
+    }
+    if response.drag_stopped() {
+        s.end_gesture();
+    }
+
+    if let Some(mode) = stretch_picker(ui, shared(&bones, |bone| bone.stretch_mode)) {
+        edit_bone_batch(s, ids, "stretch-mode", false, |_, bone| {
+            bone.stretch_mode = mode
+        });
+    }
+    if bones.iter().all(|bone| bone.stretch_mode != Stretch::Rigid) {
+        let limits = shared(&bones, |bone| bone.stretch_limits.is_some());
+        let mut limit = limits.unwrap_or(false);
+        if widgets::checkbox(
+            ui,
+            &mut limit,
+            if limits.is_some() {
+                "Limit stretch"
+            } else {
+                "Limit stretch · Mixed"
+            },
+        )
+        .changed()
+        {
+            edit_bone_batch(s, ids, "stretch-limit", false, |_, bone| {
+                bone.stretch_limits = limit.then(|| bone.stretch_limits.unwrap_or([0.5, 2.0]));
+            });
+        }
+        if limits == Some(true) {
+            for (axis, name, range) in [(0, "Shortest", 0.05..=1.0), (1, "Longest", 1.0..=20.0)] {
+                let get = |bone: &Bone| {
+                    bone.stretch_limits.expect("all selected bones have limits")[axis]
+                };
+                let mut value = get(first);
+                let response = bone_number(
+                    ui,
+                    name,
+                    &mut value,
+                    range,
+                    "×",
+                    shared(&bones, get).is_none(),
+                );
+                if response.changed() {
+                    edit_bone_batch(s, ids, name, response.dragged(), |_, bone| {
+                        if let Some(limits) = &mut bone.stretch_limits {
+                            limits[axis] = value;
+                        }
+                    });
+                }
+                if response.drag_stopped() {
+                    s.end_gesture();
+                }
+            }
+        }
+    }
+}
+
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
     let mut build_mesh_now = false;
-    ui.horizontal(|ui| {
-        ui.label("Name");
-        ui.text_edit_singleline(&mut draft.node.name);
+    ui.add_sized(
+        [ui.available_width(), 28.0],
+        egui::TextEdit::singleline(&mut draft.node.name)
+            .font(egui::FontId::proportional(theme::SIZE_HEADING))
+            .hint_text("Node name"),
+    )
+    .on_hover_text("Node name");
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new(kind_label(&draft.node.kind))
+                .font(theme::dense())
+                .color(theme::TEXT_SECONDARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            widgets::checkbox(ui, &mut draft.node.enabled, "Enabled");
+        });
     });
-    ui.checkbox(&mut draft.node.enabled, "Enabled");
-    ui.separator();
+    ui.add_space(8.0);
     let skeleton_anchored = matches!(draft.node.kind, NodeKind::Skeleton(_))
         && s.doc.graph.rig_has_anchors(draft.id, s.frame);
     match &mut draft.node.kind {
         NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => {
+            property_heading(ui, "Transform");
             let x = peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
             let y = peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
             if skeleton_anchored {
@@ -1397,7 +1745,6 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 }
             } else {
                 peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
-                ui.label("Transform values update live.");
                 ui.collapsing("Scale, pivot and depth", |ui| {
                     peg_value(ui, "Depth Z", &mut peg.z, s.frame, s.animate);
                     for (label, value) in
@@ -1425,18 +1772,27 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 }
                 return;
             }
-            ui.add_space(4.0);
-            ui.add(
-                egui::Slider::new(&mut bone.spring_stiffness, 0.0..=1.0).text("Spring stiffness"),
+            ui.add_space(8.0);
+            property_heading(ui, "Posing");
+            let mut percent = bone.spring_stiffness * 100.0;
+            if bone_number(
+                ui,
+                "Spring stiffness",
+                &mut percent,
+                0.0..=100.0,
+                "%",
+                false,
             )
-            .on_hover_text(
-                "Resists rotating away from the rest angle. Locked anchors take priority.",
-            );
+            .on_hover_text("Resists rotating away from the rest angle.")
+            .changed()
+            {
+                bone.spring_stiffness = percent / 100.0;
+            }
             use symphony_core::rig::AnchorKind;
             let parent = s.doc.graph.parent_bone(draft.id);
             let root = s.doc.graph.rig_root(draft.id);
             let anchored = s.doc.graph.rig_has_anchors(root, s.frame);
-            ui.label("Anchor");
+            ui.label(egui::RichText::new("Anchor").color(theme::TEXT_SECONDARY));
             let mut kind = bone.anchor.as_ref().map(|anchor| anchor.kind);
             widgets::segmented(
                 ui,
@@ -1534,28 +1890,9 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             });
             ui.collapsing("Stretch", |ui| {
                 use symphony_core::rig::Stretch;
-                egui::ComboBox::from_id_salt("bone-stretch")
-                    .selected_text(match bone.stretch_mode {
-                        Stretch::Rigid => "Rigid",
-                        Stretch::Simple => "Simple Stretch",
-                        Stretch::SquashStretch => "Squash & Stretch",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut bone.stretch_mode, Stretch::Rigid, "Rigid")
-                            .on_hover_text("Always its rest length.");
-                        ui.selectable_value(
-                            &mut bone.stretch_mode,
-                            Stretch::Simple,
-                            "Simple Stretch",
-                        )
-                        .on_hover_text("Longer or shorter; the artwork keeps its width.");
-                        ui.selectable_value(
-                            &mut bone.stretch_mode,
-                            Stretch::SquashStretch,
-                            "Squash & Stretch",
-                        )
-                        .on_hover_text("Longer and thinner, or shorter and fatter.");
-                    });
+                if let Some(mode) = stretch_picker(ui, Some(bone.stretch_mode)) {
+                    bone.stretch_mode = mode;
+                }
                 if bone.stretch_mode != Stretch::Rigid {
                     if !anchored {
                         peg_value(ui, "Stretch", &mut bone.stretch, s.frame, s.animate);
@@ -1715,14 +2052,16 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         }
         NodeKind::Drawing { column } => {
             if let Some(source) = s.doc.xsheet.column(*column) {
-                ui.label(format!("Exposure column  {}", source.name));
-                ui.label(format!(
-                    "Current drawing  {}",
-                    s.doc
-                        .layer_of(*column)
-                        .and_then(|layer| s.drawing_name(layer, s.frame))
-                        .unwrap_or("Empty")
-                ));
+                property_heading(ui, "Exposure");
+                property_row(ui, "Column", |ui| ui.label(&source.name));
+                property_row(ui, "Current drawing", |ui| {
+                    ui.label(
+                        s.doc
+                            .layer_of(*column)
+                            .and_then(|layer| s.drawing_name(layer, s.frame))
+                            .unwrap_or("Empty"),
+                    )
+                });
             }
         }
         NodeKind::Composite => {
@@ -1742,14 +2081,17 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 .graph
                 .input(draft.id, 0)
                 .and_then(|from| s.doc.graph.node(from));
-            ui.label(format!(
-                "Input  {}",
-                input.map_or("Disconnected", node_name)
-            ));
-            ui.label(format!(
-                "Stage  {} × {}",
-                s.doc.settings.width, s.doc.settings.height
-            ));
+            property_heading(ui, "Camera");
+            property_row(ui, "Input", |ui| {
+                ui.label(input.map_or("Disconnected", node_name))
+            });
+            property_row(ui, "Stage", |ui| {
+                ui.label(format!(
+                    "{} × {}",
+                    s.doc.settings.width, s.doc.settings.height
+                ))
+            });
+            ui.add_space(8.0);
             if let Some(fov) = &mut draft.fov {
                 ui.horizontal_wrapped(|ui| {
                     for (title, angle) in [("Tight", 35.0), ("Standard", 60.0), ("Wide", 90.0)] {
@@ -1820,9 +2162,8 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                     .step_by(0.01)
                     .text("Amount"),
             );
-            ui.horizontal(|ui| {
-                ui.label("Seed");
-                ui.add(egui::DragValue::new(seed));
+            property_row(ui, "Seed", |ui| {
+                ui.add_sized([84.0, 24.0], egui::DragValue::new(seed))
             });
         }
         NodeKind::Effect(Effect::Mask { inverted }) => {
@@ -1958,11 +2299,10 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
         draft.node.kind,
         NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_)
     );
+    ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
         if (has_staged_controls || changed)
-            && ui
-                .add_enabled(changed, egui::Button::new("Apply changes"))
-                .clicked()
+            && widgets::primary_button(ui, "Apply changes", changed).clicked()
         {
             let animatable_changed = draft.node.enabled != draft.initial.enabled
                 || draft.node.kind != draft.initial.kind
@@ -2165,13 +2505,10 @@ fn peg_value(
 ) -> bool {
     use symphony_core::anim::Value;
     let mut number = value.at(frame);
-    let changed = ui
-        .horizontal(|ui| {
-            ui.label(label);
-            ui.add(egui::DragValue::new(&mut number).speed(0.1))
-                .changed()
-        })
-        .inner;
+    let changed = property_row(ui, label, |ui| {
+        ui.add_sized([84.0, 24.0], egui::DragValue::new(&mut number).speed(0.1))
+            .changed()
+    });
     if changed {
         match value {
             Value::Constant(current) if !animate => *current = number,
@@ -4165,6 +4502,53 @@ mod tests {
 
     /// Arrange: nothing overlaps, each peg sits straight above its drawing,
     /// and cables between rows don't cross.
+    #[test]
+    fn bone_batch_updates_only_selected_fields_and_undoes_together() {
+        use symphony_core::rig::Bone;
+        let mut s = Session::new_scene();
+        let graph = &mut s.doc.graph;
+        let root = graph.add("Rig", NodeKind::Skeleton(Default::default()));
+        let a = graph.add(
+            "Shoulder",
+            NodeKind::Bone(Bone {
+                length: 90.0,
+                ..Bone::default()
+            }),
+        );
+        let b = graph.add(
+            "Hip",
+            NodeKind::Bone(Bone {
+                length: 140.0,
+                ..Bone::default()
+            }),
+        );
+        let other = graph.add("Hand", NodeKind::Bone(Bone::default()));
+        for id in [a, b, other] {
+            graph.connect(root, id, 0);
+        }
+        edit_bone_batch(&mut s, &[a, b], "stiffness", true, |_, bone| {
+            bone.spring_stiffness = 0.2
+        });
+        edit_bone_batch(&mut s, &[a, b], "stiffness", true, |_, bone| {
+            bone.spring_stiffness = 0.7
+        });
+        s.end_gesture();
+        let stiffness = |s: &Session, id| s.doc.graph.bone(id).unwrap().spring_stiffness;
+        assert_eq!(
+            [stiffness(&s, a), stiffness(&s, b), stiffness(&s, other)],
+            [0.7, 0.7, 0.0]
+        );
+        assert_eq!(
+            [
+                s.doc.graph.bone(a).unwrap().length,
+                s.doc.graph.bone(b).unwrap().length
+            ],
+            [90.0, 140.0]
+        );
+        s.undo();
+        assert_eq!([stiffness(&s, a), stiffness(&s, b)], [0.0, 0.0]);
+    }
+
     #[test]
     fn bone_add_drawing_wires_a_layer_and_undoes_in_one_step() {
         let mut s = Session::new_scene();

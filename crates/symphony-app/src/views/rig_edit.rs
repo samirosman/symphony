@@ -209,15 +209,14 @@ pub fn ui(
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id)
     };
-    let over_bone = |pointer: Pos2| {
-        handles.iter().any(|&(_, start, end, _, _)| {
-            let segment = end - start;
-            let span = segment.length_sq();
-            span > 1.0 && {
-                let t = ((pointer - start).dot(segment) / span).clamp(0.0, 1.0);
-                pointer.distance(start + t * segment) <= 6.0
-            }
-        })
+    let bone_at = |pointer: Pos2| {
+        handles
+            .iter()
+            .filter_map(|&(id, start, end, _, _)| {
+                super::skeleton_setup::bone_body_distance(pointer, start, end).map(|d| (id, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
     };
     let menu_key = response.id.with("rig-joint-menu");
     if response.secondary_clicked() {
@@ -252,7 +251,7 @@ pub fn ui(
                 .map(|id| Drag::Anchor(id, grab))
                 .or_else(|| nearest(grab, false).map(|id| Drag::Tip(id, grab)))
                 .or_else(|| {
-                    let (_, start) = skeleton.filter(|_| over_bone(grab))?;
+                    let (_, start) = skeleton.filter(|_| bone_at(grab).is_some())?;
                     Some(Drag::MoveSkeleton {
                         id: root,
                         grab,
@@ -265,10 +264,11 @@ pub fn ui(
         }
     }
     if response.clicked_by(egui::PointerButton::Primary) {
-        if let Some(id) = response
-            .interact_pointer_pos()
-            .and_then(|p| nearest(p, true).or_else(|| nearest(p, false)))
-        {
+        if let Some(id) = response.interact_pointer_pos().and_then(|p| {
+            nearest(p, true)
+                .or_else(|| nearest(p, false))
+                .or_else(|| bone_at(p))
+        }) {
             s.select_graph_node(id, true);
         }
     }
@@ -284,10 +284,9 @@ pub fn ui(
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
-    } else if response
-        .hover_pos()
-        .is_some_and(|p| nearest_anchor(p).is_some() || nearest(p, false).is_some() || over_bone(p))
-    {
+    } else if response.hover_pos().is_some_and(|p| {
+        nearest_anchor(p).is_some() || nearest(p, false).is_some() || bone_at(p).is_some()
+    }) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     if !ui.input(|i| i.pointer.primary_down()) {
@@ -484,8 +483,28 @@ pub fn cycle_anchor(s: &mut Session) {
     set_anchor_mode(s, id, kind);
 }
 
-pub fn set_anchor_mode(s: &mut Session, id: NodeId, kind: Option<symphony_core::rig::AnchorKind>) {
+pub(super) fn update_anchor_mode(
+    bone: &mut symphony_core::rig::Bone,
+    kind: Option<symphony_core::rig::AnchorKind>,
+    tip: (f32, f32),
+) {
     use symphony_core::rig::{Anchor, AnchorKind};
+    if bone.anchor.as_ref().map(|anchor| anchor.kind) == kind {
+        return;
+    }
+    let (x, y) = tip;
+    bone.anchor = kind.map(|kind| {
+        let target = bone
+            .anchor
+            .as_ref()
+            .filter(|_| kind == AnchorKind::Aim)
+            .map(|anchor| anchor.target.clone())
+            .unwrap_or([Value::Constant(x), Value::Constant(y)]);
+        Box::new(Anchor { kind, target })
+    });
+}
+
+pub fn set_anchor_mode(s: &mut Session, id: NodeId, kind: Option<symphony_core::rig::AnchorKind>) {
     let graph = &s.doc.graph;
     let Some(before) = graph.node(id).cloned() else {
         return;
@@ -498,16 +517,7 @@ pub fn set_anchor_mode(s: &mut Session, id: NodeId, kind: Option<symphony_core::
         return;
     };
     let root = graph.rig_root(id);
-    let (x, y) = pose.tip();
-    bone.anchor = kind.map(|kind| {
-        let target = bone
-            .anchor
-            .as_ref()
-            .filter(|_| kind == AnchorKind::Aim)
-            .map(|anchor| anchor.target.clone())
-            .unwrap_or([Value::Constant(x), Value::Constant(y)]);
-        Box::new(Anchor { kind, target })
-    });
+    update_anchor_mode(bone, kind, pose.tip());
     if before == after {
         return;
     }
