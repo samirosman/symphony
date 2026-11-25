@@ -20,7 +20,9 @@ const NODE_RADIUS: f32 = 9.0;
 type Input = (NodeId, usize);
 
 enum Drag {
-    Pan,
+    /// A box drawn on empty space, from this point: it selects the nodes
+    /// it touches. (The middle button pans.)
+    Box(Pos2),
     Node(NodeId, Vec2),
     Cable {
         source: NodeId,
@@ -2548,14 +2550,28 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 select_in_graph(s, state, node, extend);
                 Some(Drag::Node(node, Vec2::ZERO))
             } else {
-                Some(Drag::Pan)
+                Some(Drag::Box(point))
             };
         }
     }
     if resp.dragged() {
         match state.drag.as_mut() {
-            Some(Drag::Pan) => state.pan += resp.drag_delta(),
             Some(Drag::Node(_, delta)) => *delta += resp.drag_delta() / zoom,
+            Some(Drag::Box(from)) => {
+                if let Some(to) = resp.interact_pointer_pos() {
+                    // Over the cards, so the whole box shows.
+                    let top = egui::LayerId::new(egui::Order::Foreground, resp.id);
+                    let over = ui.ctx().layer_painter(top).with_clip_rect(viewport);
+                    let area = Rect::from_two_pos(*from, to);
+                    over.rect_filled(area, 0.0, theme::ACCENT_SELECT.gamma_multiply(0.12));
+                    over.rect_stroke(
+                        area,
+                        0.0,
+                        Stroke::new(1.0, theme::ACCENT_SELECT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
             _ => {}
         }
         ui.ctx().request_repaint();
@@ -2609,6 +2625,28 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     let animated = symphony_ui::motion::enabled(ui.ctx());
     if resp.drag_stopped() {
         match state.drag.take() {
+            Some(Drag::Box(from)) => {
+                let to = resp
+                    .interact_pointer_pos()
+                    .or_else(|| ui.input(|i| i.pointer.latest_pos()))
+                    .unwrap_or(from);
+                let area = Rect::from_two_pos(from, to);
+                // Shift adds to the selection.
+                if !ui.input(|i| i.modifiers.shift) {
+                    state.selection.clear();
+                }
+                let touched: Vec<NodeId> = cards
+                    .iter()
+                    .filter(|(_, (card, _))| card.intersects(area))
+                    .map(|(&id, _)| id)
+                    .collect();
+                state.selection.extend(&touched);
+                // The view drops a selection that lacks the session's node.
+                let keeps = selected_node(s).is_some_and(|id| state.selection.contains(&id));
+                if let Some(&id) = touched.last().filter(|_| !keeps) {
+                    s.select_graph_node(id, false);
+                }
+            }
             Some(Drag::Node(id, delta)) if delta.length_sq() > 0.0 => {
                 if cards.contains_key(&id) {
                     // Keep every selected node's relative position during a group move.
@@ -4127,6 +4165,52 @@ mod tests {
         assert_eq!(s.doc.graph.input(inserted, 0), None);
         assert_eq!(s.doc.graph.input(layer.node, 0), Some(layer.peg));
         assert_eq!(s.doc.node_positions[&inserted], start);
+    }
+
+    #[test]
+    fn a_drag_on_empty_space_selects_the_nodes_in_its_box_and_does_not_pan() {
+        let mut session = Session::new_scene();
+        let layer = session.doc.layers[0];
+        let inside = session.doc.graph.next_id();
+        add_node(
+            &mut session,
+            NodeKind::Peg(Default::default()),
+            [220.0, 82.0],
+        );
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(760.0, 560.0))
+            .build_ui_state(
+                |ui, (session, state, origin)| {
+                    *origin = ui.available_rect_before_wrap().center_top();
+                    canvas(ui, session, state, None);
+                },
+                (session, NodeViewState::default(), Pos2::ZERO),
+            );
+        harness.run_steps(2);
+        let origin = harness.state().2;
+        let pan = harness.state().1.pan;
+        let from = origin + Vec2::new(330.0, 20.0);
+        let to = origin + Vec2::new(200.0, 100.0);
+        for (pos, pressed) in [(from, Some(true)), (to, None), (to, Some(false))] {
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                harness.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run_steps(1);
+        }
+        let (s, state, _) = harness.state();
+        assert_eq!(state.selection, BTreeSet::from([inside]));
+        assert_eq!(s.selected_node, Some(inside));
+        assert_ne!(Some(layer.peg), s.selected_node);
+        assert_eq!(state.pan, pan);
     }
 
     #[test]
