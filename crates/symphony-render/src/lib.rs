@@ -232,16 +232,24 @@ fn paint_drawing(
         return;
     };
     let m = view.compose(project).compose(item.transform);
-    // An imported image sits under everything else in the drawing.
+    // An imported image sits under everything else in the drawing. Bones
+    // and Mesh Warps bend it as they bend the lines.
     if let Some(img) = d.image {
-        let transform = item
-            .warp
-            .as_deref()
-            .and_then(|warp| warp.raster_transform())
-            .map_or(m, |raster| view.compose(project).compose(raster));
-        bitmap::paint_image(pix, scene, img, transform);
+        match item.warp.as_deref() {
+            Some(warp) => {
+                warp::paint_image_bent(
+                    pix,
+                    scene,
+                    img,
+                    view.compose(project).compose(warp.outer()),
+                    |p| warp.bend(p),
+                    &symphony_core::deform::MeshDetail::default(),
+                );
+            }
+            None => bitmap::paint_image(pix, scene, img, m),
+        }
     }
-    // Under Mesh Warps: draw the drawing bent (pictures aren't bent).
+    // Under bones or Mesh Warps: draw the drawing bent.
     let bent;
     let (d, m) = match item.warp.as_deref() {
         Some(warp) => {
@@ -1142,14 +1150,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn renders_an_imported_image_behind_the_drawing() {
+    /// `scene_with_line` plus a blue image that fills the stage, on a
+    /// layer behind the line's. Returns the folder to remove at the end.
+    fn scene_with_image() -> (Scene, std::path::PathBuf, symphony_core::doc::Layer) {
         use symphony_core::doc::{Media, MediaKind};
         use symphony_core::history::Edit;
         use symphony_core::stroke::PlacedImage;
         let mut s = scene_with_line();
         let mut bytes = Vec::new();
-        image::RgbaImage::from_pixel(2, 1, image::Rgba([0, 0, 255, 255]))
+        image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 255, 255]))
             .write_to(
                 &mut std::io::Cursor::new(&mut bytes),
                 image::ImageFormat::Png,
@@ -1166,16 +1175,17 @@ mod tests {
                 kind: MediaKind::Image,
                 file: "5.png".into(),
                 name: "BG".into(),
-                size: [2, 1],
+                size: [200, 100],
                 seconds: 0.0,
                 rate: 0,
                 channels: 0,
                 samples: 0,
             },
         );
-        // Index 1 is behind the line's layer. A 2:1 image fills the 2:1 stage.
+        // Index 1 is behind the line's layer. The image is as large as the stage.
         let snap = s.make_layer("BG", 1);
-        let column = snap.layer.column;
+        let layer = snap.layer;
+        let column = layer.column;
         let mut d = s.make_drawing(column);
         let (w, h) = (s.settings.width as f32, s.settings.height as f32);
         d.image = Some(PlacedImage {
@@ -1194,11 +1204,51 @@ mod tests {
             Edit::AddDrawing { drawing: d },
         ];
         History::default().apply(&mut s, "Import image", edits);
+        (s, dir, layer)
+    }
+
+    #[test]
+    fn renders_an_imported_image_behind_the_drawing() {
+        let (s, dir, _) = scene_with_image();
         let img = render_frame(&s, 2, 200, 100).unwrap();
         assert_eq!(img.get_pixel(10, 10).0, [0, 0, 255, 255]);
         assert_eq!(img.get_pixel(190, 90).0, [0, 0, 255, 255]);
         // The line stays in front of the image.
         assert_eq!(img.get_pixel(100, 50).0, [24, 24, 32, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bone_bends_an_imported_image() {
+        use symphony_core::{anim::Value, graph::NodeKind, rig::Bone};
+        let (mut s, dir, layer) = scene_with_image();
+        let upper = s.graph.add(
+            "Upper",
+            NodeKind::Bone(Bone {
+                length: 50.0,
+                ..Bone::default()
+            }),
+        );
+        let lower = s.graph.add(
+            "Lower",
+            NodeKind::Bone(Bone {
+                length: 50.0,
+                rotation: Value::Constant(90.0),
+                bend_radius: 12.0,
+                ..Bone::default()
+            }),
+        );
+        s.graph.connect(upper, lower, 0);
+        s.graph.connect(lower, layer.peg, 0);
+        let img = render_frame(&s, 2, 200, 100).unwrap();
+        // The half on the first bone stays. The half past the joint at
+        // (50, 0) turns a quarter with the second bone: it leaves the
+        // top right corner and still covers the bottom right one.
+        assert_eq!(img.get_pixel(10, 10).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(195, 10).0, [255; 4]);
+        assert_eq!(img.get_pixel(195, 90).0, [0, 0, 255, 255]);
+        // The fold leaves no hole next to the joint.
+        assert_eq!(img.get_pixel(152, 60).0, [0, 0, 255, 255]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

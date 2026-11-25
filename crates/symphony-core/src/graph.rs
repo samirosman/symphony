@@ -1158,8 +1158,6 @@ mod tests {
             let tip = warp.bend([160.0, 0.0]);
             assert!((tip[0] - 100.0).abs() < 0.001 && (tip[1] - 60.0).abs() < 0.001);
             assert_eq!(warp.outer().tx, 30.0);
-            let raster = warp.raster_transform().unwrap().apply(160.0, 0.0);
-            assert!((raster.0 - 130.0).abs() < 0.001 && (raster.1 - 60.0).abs() < 0.001);
         }
         assert!(graph.render_commands(lower, &xs, 1).unwrap().is_empty());
     }

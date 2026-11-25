@@ -69,6 +69,9 @@ pub struct CanvasState {
     /// Drawings bent by Mesh Warps, by drawing: rebuilt only when the
     /// drawing or the warp changes (key), never every frame.
     bent: std::collections::HashMap<Id, (u64, std::sync::Arc<symphony_core::stroke::Drawing>)>,
+    /// The meshes of images bent by bones or Mesh Warps, by drawing:
+    /// rebuilt only when the warp or the view changes (key).
+    bent_images: std::collections::HashMap<Id, (u64, std::sync::Arc<egui::Mesh>)>,
 }
 
 impl Default for CanvasState {
@@ -94,6 +97,7 @@ impl Default for CanvasState {
             rig_edit: Default::default(),
             text: None,
             bent: Default::default(),
+            bent_images: Default::default(),
         }
     }
 }
@@ -1242,20 +1246,27 @@ pub fn ui(
         state
             .bent
             .retain(|d, _| warps.iter().any(|(w, _, _)| w == d));
+        state
+            .bent_images
+            .retain(|d, _| warps.iter().any(|(w, _, _)| w == d));
         for (_, d, m) in &items {
             let Some(original) = s.doc.drawings.get(d) else {
                 continue;
             };
             let world = view.compose(*m);
             // An imported image sits under all of the drawing's art layers.
-            let image_world = warps
-                .iter()
-                .find(|(w, _, _)| w == d)
-                .and_then(|(_, warp, stage)| {
-                    Some(view.compose(*stage).compose(warp.raster_transform()?))
-                })
-                .unwrap_or(world);
-            paint_image(&painter, images, original, image_world);
+            // Bones and Mesh Warps bend it as they bend the lines.
+            match warps.iter().find(|(w, _, _)| w == d) {
+                Some((_, warp, stage)) => paint_image_bent(
+                    &painter,
+                    images,
+                    &mut state.bent_images,
+                    original,
+                    warp,
+                    view.compose(*stage).compose(warp.outer()),
+                ),
+                None => paint_image(&painter, images, original, world),
+            }
             // Under a Mesh Warp: the bent copy, drawn with the warp's
             // outer transform (on the same plane).
             let bent_copy;
@@ -1858,6 +1869,71 @@ fn paint_image(painter: &egui::Painter, images: &ImageState, dr: &Drawing, m: Af
     }
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// How finely the Camera view cuts a bent image. Coarser than an
+/// export: at the export's detail a full-HD image takes 24 ms to cut,
+/// at this one 3 ms (measured 2026-11-25, two bones at 60 degrees).
+const VIEW_MESH: symphony_core::deform::MeshDetail = symphony_core::deform::MeshDetail {
+    largest: 64.0,
+    smallest: 8.0,
+    tolerance: 0.5,
+};
+
+/// Draw a drawing's imported image bent by `warp`, as a mesh that is
+/// fine where the warp bends it. `m` takes the warp's output to the
+/// screen. The mesh is kept in `cache` until the warp or `m` changes.
+fn paint_image_bent(
+    painter: &egui::Painter,
+    images: &ImageState,
+    cache: &mut std::collections::HashMap<Id, (u64, std::sync::Arc<egui::Mesh>)>,
+    dr: &Drawing,
+    warp: &symphony_core::warp::Warp,
+    m: Affine,
+) {
+    use std::hash::{Hash, Hasher};
+    let Some(r) = dr.image else { return };
+    let Some(tex) = images.texture(r) else {
+        return;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    warp.key().hash(&mut hasher);
+    (tex.id(), tex.size(), r.media).hash(&mut hasher);
+    for v in [m.a, m.b, m.c, m.d, m.tx, m.ty].into_iter().chain(r.rect) {
+        v.to_bits().hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    if let Some((_, mesh)) = cache.get(&dr.id).filter(|(k, _)| *k == key) {
+        painter.add(egui::Shape::mesh(mesh.clone()));
+        return;
+    }
+    let [x0, y0, x1, y1] = symphony_render::bitmap::corners(r);
+    let [w, h] = tex.size().map(|n| n as f32);
+    let bent = symphony_render::warp::build(
+        w as u32,
+        h as u32,
+        |[u, v]| {
+            let q = warp.bend([x0 + u / w * (x1 - x0), y0 + v / h * (y1 - y0)]);
+            let (x, y) = m.apply(q[0], q[1]);
+            [x, y]
+        },
+        &VIEW_MESH,
+    );
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    mesh.vertices = bent
+        .points
+        .iter()
+        .zip(&bent.uv)
+        .map(|(p, uv)| egui::epaint::Vertex {
+            pos: Pos2::new(p[0], p[1]),
+            uv: Pos2::new(uv[0] / w, uv[1] / h),
+            color: Color32::WHITE,
+        })
+        .collect();
+    mesh.indices = bent.triangles.into_iter().flatten().collect();
+    let mesh = std::sync::Arc::new(mesh);
+    cache.insert(dr.id, (key, mesh.clone()));
     painter.add(egui::Shape::mesh(mesh));
 }
 

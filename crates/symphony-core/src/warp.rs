@@ -453,21 +453,6 @@ impl Warp {
         self.steps.first().map_or(Affine::IDENTITY, |s| s.outer)
     }
 
-    /// Rigid skin for imported raster layers. Their pixels stay intact
-    /// while the vector artwork uses the full joint deformation.
-    pub fn raster_transform(&self) -> Option<Affine> {
-        let mut changed = false;
-        let mut transform = self.inner;
-        for step in self.steps.iter().rev() {
-            if let WarpField::Bone(bone) = &step.field {
-                transform = bone.child.compose(transform);
-                changed = true;
-            }
-            transform = step.outer.compose(transform);
-        }
-        changed.then_some(transform)
-    }
-
     /// The longest straight piece of drawing-space geometry that still
     /// bends smoothly through every grid.
     pub fn piece(&self) -> f32 {

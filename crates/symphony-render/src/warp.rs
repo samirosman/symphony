@@ -1,5 +1,6 @@
-//! Bending an imported image with a bone chain: the image is cut into a
-//! triangle mesh, each vertex is moved by the chain, and each triangle is
+//! Bending an imported image with a bone chain or a Mesh Warp: the image
+//! is cut into a triangle mesh, each vertex is moved by the bend, and each
+//! triangle is
 //! filled with its own piece of the image.
 //!
 //! The mesh is an adaptive quadtree. Cells start at
@@ -20,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use symphony_core::deform::{ChainPose, MeshDetail};
+use symphony_core::deform::MeshDetail;
 use symphony_core::doc::Scene;
 use symphony_core::math::Affine;
 use symphony_core::stroke::PlacedImage;
@@ -37,20 +38,18 @@ pub struct Mesh {
     pub triangles: Vec<[u32; 3]>,
 }
 
-/// Draw the drawing's image bent by `pose`, then `m` (drawing space to
-/// pixels). Returns the mesh it used, for display and tests.
+/// Draw the drawing's image with every point moved by `bend` (drawing
+/// space, as [`symphony_core::warp::Warp::bend`] or
+/// [`ChainPose::map`]), then `m` (to pixels). Returns the mesh it used,
+/// for display and tests.
 pub fn paint_image_bent(
     pix: &mut Pixmap,
     scene: &Scene,
     r: PlacedImage,
     m: Affine,
-    pose: &ChainPose,
+    bend: impl Fn([f32; 2]) -> [f32; 2],
     detail: &MeshDetail,
 ) -> Option<Mesh> {
-    if pose.moves_nothing() {
-        bitmap::paint_image(pix, scene, r, m);
-        return None;
-    }
     let img = bitmap::cached(scene, r)?;
     let [x0, y0, x1, y1] = bitmap::corners(r);
     // The same cap as the plain image, so a bend never changes its size.
@@ -61,7 +60,7 @@ pub fn paint_image_bent(
         iw,
         ih,
         |[u, v]| {
-            let q = pose.map([x0 + u * kx, y0 + v * ky]);
+            let q = bend([x0 + u * kx, y0 + v * ky]);
             let (x, y) = m.apply(q[0], q[1]);
             [x, y]
         },
@@ -528,7 +527,7 @@ fn over(dst: &mut [u8], s: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symphony_core::deform::{BonePose, Influence};
+    use symphony_core::deform::{BonePose, ChainPose, Influence};
     use tiny_skia::{IntSize, PremultipliedColorU8};
 
     /// Two 100-pixel bones along +x from (-100, 0), joint at the origin.
