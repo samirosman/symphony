@@ -73,6 +73,10 @@ pub enum NodeKind {
     /// Warp). A position node, like a peg.
     /// Boxed: it's much bigger than the other kinds.
     MeshWarp(Box<crate::warp::MeshWarp>),
+    /// Bends the artwork under it with a chain of Bezier segments
+    /// (Harmony's Curve deformer, or its Envelope when closed). A
+    /// position node, like a peg. Boxed for the same reason.
+    Curve(Box<crate::envelope::CurveDeformer>),
     /// Follows the end of the Bone it hangs from, like a peg, without
     /// bending the artwork under it (Harmony's Kinematic Output).
     KinematicOutput,
@@ -449,6 +453,7 @@ impl Graph {
                 NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => peg.has_key(frame),
                 NodeKind::Bone(bone) => bone.has_key(frame),
                 NodeKind::MeshWarp(warp) => warp.has_key(frame),
+                NodeKind::Curve(curve) => curve.has_key(frame),
                 _ => false,
             })
     }
@@ -555,17 +560,21 @@ impl Graph {
             return false;
         };
         let valid = match source.kind {
-            NodeKind::Peg(_) | NodeKind::MeshWarp(_) => matches!(
+            NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_) => matches!(
                 target.kind,
                 NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
+                    | NodeKind::Curve(_)
                     | NodeKind::Skeleton(_)
                     | NodeKind::Drawing { .. }
             ),
             NodeKind::Skeleton(_) => matches!(target.kind, NodeKind::Bone(_)),
             NodeKind::KinematicOutput => matches!(
                 target.kind,
-                NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Drawing { .. }
+                NodeKind::Peg(_)
+                    | NodeKind::MeshWarp(_)
+                    | NodeKind::Curve(_)
+                    | NodeKind::Drawing { .. }
             ),
             NodeKind::Bone(_) => matches!(
                 target.kind,
@@ -573,6 +582,7 @@ impl Graph {
                     | NodeKind::KinematicOutput
                     | NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
+                    | NodeKind::Curve(_)
                     | NodeKind::Drawing { .. }
             ),
             NodeKind::Composite
@@ -781,6 +791,7 @@ impl Graph {
             }
             NodeKind::Peg(_)
             | NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
             | NodeKind::Skeleton(_)
             | NodeKind::Bone(_)
             | NodeKind::KinematicOutput => {}
@@ -853,6 +864,15 @@ impl Graph {
                         outer = Affine::IDENTITY;
                     }
                 }
+                NodeKind::Curve(c) => {
+                    if let Some(field) = c.field_at(frame) {
+                        steps.push(crate::warp::WarpStep {
+                            outer,
+                            field: crate::warp::WarpField::Curve(std::sync::Arc::new(field)),
+                        });
+                        outer = Affine::IDENTITY;
+                    }
+                }
                 _ => {}
             }
         }
@@ -877,7 +897,7 @@ impl Graph {
                         inner = peg.transform_at(frame).compose(inner);
                     }
                 }
-                NodeKind::MeshWarp(_) => {}
+                NodeKind::MeshWarp(_) | NodeKind::Curve(_) => {}
                 _ => return None,
             }
         }

@@ -461,6 +461,7 @@ fn layer_chain(s: &Session, layer: usize) -> (Vec<NodeId>, Vec<NodeId>) {
             Some(
                 NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
+                    | NodeKind::Curve(_)
                     | NodeKind::KinematicOutput
                     | NodeKind::Skeleton(_)
                     | NodeKind::Bone(_)
@@ -880,6 +881,11 @@ pub fn timeline(
             }
             NodeKind::MeshWarp(warp) => {
                 for value in warp.grid_values() {
+                    frames.extend(value.keys().iter().map(|key| key.frame));
+                }
+            }
+            NodeKind::Curve(curve) => {
+                for value in curve.values() {
                     frames.extend(value.keys().iter().map(|key| key.frame));
                 }
             }

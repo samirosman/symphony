@@ -330,8 +330,18 @@ continues.
   per-point Weight, rigidity maps, bending imported pictures.
 - ⬜ Bone deformer (bias, regions of influence, chains)
 - ⬜ Game Bone deformer (game export, no bias or regions)
-- ⬜ Curve deformer (Bézier chain)
-- ⬜ Envelope deformer (closed loop)
+- 🟡 **Curve deformer** (Bézier chain). ✅ One node holds the chain; place
+  points in the Camera view (Transform tool) and pull out their handles;
+  drag points and handles (the opposite handle turns with it, Alt-drag
+  turns one alone); the root moves the whole curve and its ring turns it;
+  Ctrl-drag moves or turns the points after one; arrows nudge; keyed in
+  Animate mode; Edit rest pose; art follows the chain like a spine and
+  imported pictures bend too. Still to do: regions of influence, chains
+  with bones, Kinematic Output at a point.
+- 🟡 **Envelope deformer** (closed loop). ✅ The same node, closed: click
+  the first point to close the loop; every point moves on its own; art
+  inside follows by mean value coordinates. Still to do: Envelope Creator
+  (from artwork), regions of influence.
 - ⬜ Free-form deformer *(verify)*
 - ⬜ Weighted deformation *(verify)*
 - ⬜ Deformation Composite node

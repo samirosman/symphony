@@ -2080,12 +2080,10 @@ fn more_picture_formats_import() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A Mesh Warp bends the drawing under it in renders: a straight line
-/// with the grid's middle point pulled down comes out curved, its middle
-/// lowered and its ends where they were; the drawing itself is unchanged.
-#[test]
-fn mesh_warp_bends_the_drawing_in_renders() {
-    use symphony_core::graph::NodeKind;
+/// A scene with one straight line across the stage at y = 0, from
+/// x = -600 to 600, on its only layer: the session, the layer and the
+/// drawing.
+fn line_scene() -> (crate::session::Session, usize, symphony_core::id::Id) {
     use symphony_core::stroke::{Point, Stroke};
     let mut s = crate::session::Session::new_scene();
     for l in (1..s.layer_count()).rev() {
@@ -2118,15 +2116,27 @@ fn mesh_warp_bends_the_drawing_in_renders() {
     };
     s.doc.drawings.get_mut(&did).unwrap().strokes.push(st);
     s.frame = 1;
-    let dark_rows = |s: &crate::session::Session, x: u32| -> Vec<u32> {
-        let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
-        (0..1080)
-            .filter(|&y| {
-                let p = img.get_pixel(x, y).0;
-                (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
-            })
-            .collect()
-    };
+    (s, layer, did)
+}
+
+/// The rendered frame's dark rows in pixel column `x`.
+fn dark_rows(s: &crate::session::Session, x: u32) -> Vec<u32> {
+    let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+    (0..1080)
+        .filter(|&y| {
+            let p = img.get_pixel(x, y).0;
+            (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+        })
+        .collect()
+}
+
+/// A Mesh Warp bends the drawing under it in renders: a straight line
+/// with the grid's middle point pulled down comes out curved, its middle
+/// lowered and its ends where they were; the drawing itself is unchanged.
+#[test]
+fn mesh_warp_bends_the_drawing_in_renders() {
+    use symphony_core::graph::NodeKind;
+    let (mut s, layer, did) = line_scene();
     let flat = dark_rows(&s, 960);
     assert!(!flat.is_empty(), "the line shows");
     let node = s.doc.layers[layer].node;
@@ -2152,6 +2162,41 @@ fn mesh_warp_bends_the_drawing_in_renders() {
         .is_some_and(|y| (*y as i64 - flat[0] as i64).abs() < 40));
     // The drawing itself is as drawn.
     assert_eq!(s.doc.drawings[&did].strokes[0].points.len(), 2);
+}
+
+/// A Curve deformer along the line bends it where its middle point is
+/// lifted, and the ends stay; with too few points it bends nothing.
+#[test]
+fn curve_deformer_bends_the_drawing_in_renders() {
+    use symphony_core::envelope::{CurveDeformer, CurvePoint, PointPose};
+    use symphony_core::graph::NodeKind;
+    let (mut s, layer, _) = line_scene();
+    let flat = dark_rows(&s, 960);
+    let node = s.doc.layers[layer].node;
+    let mut curve = CurveDeformer::new(false);
+    curve.points.push(CurvePoint::new(PointPose::smooth(
+        [-600.0, 0.0],
+        [200.0, 0.0],
+    )));
+    crate::views::node::insert_near(&mut s, node, NodeKind::Curve(Box::new(curve.clone())));
+    let id = s.doc.graph.input(node, 0).unwrap();
+    assert_eq!(dark_rows(&s, 960), flat, "one point bends nothing");
+    for x in [0.0, 600.0] {
+        curve
+            .points
+            .push(CurvePoint::new(PointPose::smooth([x, 0.0], [200.0, 0.0])));
+    }
+    curve.points[1].anim.y = symphony_core::anim::Value::Constant(150.0);
+    s.doc.graph.node_mut(id).unwrap().kind = NodeKind::Curve(Box::new(curve));
+    let shift = dark_rows(&s, 960)[0] as i64 - flat[0] as i64;
+    assert!(
+        (shift - 150).abs() <= 3,
+        "the middle follows the point: {shift}"
+    );
+    let end = dark_rows(&s, 960 + 590);
+    assert!(end
+        .first()
+        .is_some_and(|y| (*y as i64 - flat[0] as i64).abs() < 40));
 }
 
 /// The Text tool: click, type, ⌘↩: the letters land in the drawing as

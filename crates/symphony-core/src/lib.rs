@@ -14,6 +14,7 @@ pub mod b64;
 pub mod bitmap;
 pub mod deform;
 pub mod doc;
+pub mod envelope;
 pub mod graph;
 pub mod history;
 pub mod id;

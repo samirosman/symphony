@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use symphony_core::envelope::CurveDeformer;
 use symphony_core::{
     graph::{BlendMode, BlurMode, Effect, Link, Node, NodeId, NodeKey, NodeKind},
     history::Edit,
@@ -125,7 +126,11 @@ impl LinkAnim {
 fn passes_through(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Effect(_) | NodeKind::Composite
+        NodeKind::Peg(_)
+            | NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
+            | NodeKind::Effect(_)
+            | NodeKind::Composite
     )
 }
 
@@ -325,6 +330,8 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Skeleton(_) => "Skeleton",
         NodeKind::Bone(_) => "Bone",
         NodeKind::MeshWarp(_) => "Mesh Warp",
+        NodeKind::Curve(c) if c.closed => "Envelope",
+        NodeKind::Curve(_) => "Curve",
         NodeKind::KinematicOutput => "Kinematic Output",
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
@@ -363,6 +370,8 @@ pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
         NodeKind::Peg(Default::default()),
         NodeKind::Skeleton(Default::default()),
         mesh_warp(1920, 1080),
+        NodeKind::Curve(Box::new(CurveDeformer::new(false))),
+        NodeKind::Curve(Box::new(CurveDeformer::new(true))),
         NodeKind::KinematicOutput,
         NodeKind::Composite,
     ]
@@ -397,7 +406,10 @@ pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKin
     let kind = fit_to_stage(s, kind);
     // A Mesh Warp found by search bends the selected layer straight away;
     // a Kinematic Output goes between the selected layer and its bone.
-    if matches!(kind, NodeKind::MeshWarp(_) | NodeKind::KinematicOutput) {
+    if matches!(
+        kind,
+        NodeKind::MeshWarp(_) | NodeKind::Curve(_) | NodeKind::KinematicOutput
+    ) {
         if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
             insert_near(s, node, kind);
             return;
@@ -500,7 +512,12 @@ fn kinematic_splice(
     let mut below = target;
     for _ in 0..32 {
         match graph.input(below, 0) {
-            Some(up) if matches!(kind_of(up), Some(NodeKind::Peg(_) | NodeKind::MeshWarp(_))) => {
+            Some(up)
+                if matches!(
+                    kind_of(up),
+                    Some(NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_))
+                ) =>
+            {
                 below = up;
             }
             _ => break,
@@ -522,6 +539,15 @@ fn kinematic_splice(
 /// it and its old one); an effect or composite goes after the drawing the
 /// target leads to (between it and where its image went). Anything else,
 /// or a target with no such place, is added unconnected beside it.
+/// A peg or a node that sits in the peg chain like one (Mesh Warp,
+/// Curve, Envelope).
+fn peg_like(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_)
+    )
+}
+
 pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
     let graph = &s.doc.graph;
     let kind_of = |id: NodeId| graph.node(id).map(|n| n.kind.clone());
@@ -533,11 +559,9 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         .unwrap_or([0.0, 0.0]);
     // (link to replace, its source, its destination) for the new node.
     let splice: Option<(Option<Link>, Option<NodeId>, Input)> = match &kind {
-        NodeKind::Peg(_) | NodeKind::MeshWarp(_)
-            if matches!(
-                kind_of(target),
-                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_) | NodeKind::MeshWarp(_))
-            ) =>
+        kind if peg_like(kind)
+            && kind_of(target)
+                .is_some_and(|k| peg_like(&k) || matches!(k, NodeKind::Drawing { .. })) =>
         {
             let parent = graph.input(target, 0);
             let old = parent.map(|from| Link {
@@ -575,7 +599,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
     let id = s.doc.graph.next_id();
     let position = if matches!(
         kind,
-        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::KinematicOutput
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_) | NodeKind::KinematicOutput
     ) {
         [at[0], at[1] - (H + 30.0)]
     } else {
@@ -1343,9 +1367,12 @@ fn drawing_attachment_input(
             .count()
             == 1;
         if !private
-            || !graph
-                .node(parent)
-                .is_some_and(|node| matches!(node.kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_)))
+            || !graph.node(parent).is_some_and(|node| {
+                matches!(
+                    node.kind,
+                    NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_)
+                )
+            })
         {
             break;
         }
@@ -1780,6 +1807,73 @@ fn bone_batch_form(ui: &mut egui::Ui, s: &mut Session, ids: &[NodeId]) {
     }
 }
 
+/// A Curve or Envelope node's properties.
+fn curve_properties(ui: &mut egui::Ui, frame: u32, c: &mut CurveDeformer) {
+    egui::ComboBox::from_label("Deformation Quality")
+        .selected_text(c.quality.title())
+        .show_ui(ui, |ui| {
+            for q in symphony_core::warp::WarpQuality::ALL {
+                ui.selectable_value(&mut c.quality, q, q.title());
+            }
+        });
+    let n = c.points.len();
+    ui.label(format!("{n} point{}", if n == 1 { "" } else { "s" }));
+    ui.label(if c.closed {
+        "In the Camera view (Transform tool), press to place each point of the loop and drag \
+         to pull out its handles; click the first point to close it."
+    } else {
+        "In the Camera view (Transform tool), press to place each point from the root out and \
+         drag to pull out its handles."
+    });
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Reset to rest"))
+            .on_hover_text("Put the points back in their rest pose on this frame.")
+            .clicked()
+        {
+            reset_to_rest(c, frame);
+        }
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Clear points"))
+            .on_hover_text("Remove every point, with its keys.")
+            .clicked()
+        {
+            c.points.clear();
+            c.root = Default::default();
+        }
+    });
+}
+
+/// Put a Curve's animated pose back to its rest pose on `frame`: keyed
+/// values get a key there, plain ones change for every frame.
+fn reset_to_rest(c: &mut CurveDeformer, frame: u32) {
+    use symphony_core::anim::Value;
+    let set = |value: &mut Value, to: f32| match value {
+        Value::Constant(v) => *v = to,
+        _ => value.set_key(frame, to),
+    };
+    for (value, to) in [&mut c.root.x, &mut c.root.y, &mut c.root.angle]
+        .into_iter()
+        .zip([0.0; 3])
+    {
+        set(value, to);
+    }
+    for p in &mut c.points {
+        let r = p.rest;
+        let rest = [
+            r.pos[0],
+            r.pos[1],
+            r.in_angle,
+            r.in_length,
+            r.out_angle,
+            r.out_length,
+        ];
+        for (value, to) in p.anim.values_mut().into_iter().zip(rest) {
+            set(value, to);
+        }
+    }
+}
+
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
     let mut build_mesh_now = false;
     ui.add_sized(
@@ -2150,6 +2244,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 }
             }
         }
+        NodeKind::Curve(c) => curve_properties(ui, s.frame, c),
         NodeKind::Drawing { column } => {
             if let Some(source) = s.doc.xsheet.column(*column) {
                 property_heading(ui, "Exposure");
@@ -2335,7 +2430,11 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     // the node itself is what changes. One drag is one undo step.
     if matches!(
         draft.node.kind,
-        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_)
+        NodeKind::Peg(_)
+            | NodeKind::Skeleton(_)
+            | NodeKind::Bone(_)
+            | NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
     ) && draft.node.kind != draft.initial.kind
         && draft.node.enabled == draft.initial.enabled
     {
@@ -2400,7 +2499,11 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     let keyed = s.doc.graph.has_key(draft.id, s.frame);
     let has_staged_controls = !matches!(
         draft.node.kind,
-        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_)
+        NodeKind::Peg(_)
+            | NodeKind::Skeleton(_)
+            | NodeKind::Bone(_)
+            | NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
     );
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
@@ -2543,6 +2646,21 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                 }
             }
             after.kind = NodeKind::MeshWarp(warp);
+        }
+        if let NodeKind::Curve(curve) = if delete {
+            &before.kind
+        } else {
+            &draft.node.kind
+        } {
+            let mut curve = curve.clone();
+            for value in curve.values_mut() {
+                if delete {
+                    value.remove_key(s.frame);
+                } else {
+                    value.set_key(s.frame, value.at(s.frame));
+                }
+            }
+            after.kind = NodeKind::Curve(curve);
         }
     }
     if let Some(fov) = draft.fov {
@@ -2945,6 +3063,7 @@ fn arrange_band(kind: &NodeKind) -> usize {
         | NodeKind::Skeleton(_)
         | NodeKind::Bone(_)
         | NodeKind::MeshWarp(_)
+        | NodeKind::Curve(_)
         | NodeKind::KinematicOutput => 0,
         NodeKind::Drawing { .. } | NodeKind::Gradient(_) => 1,
         NodeKind::Effect(_) => 2,
@@ -4394,6 +4513,14 @@ fn library_details(kind: &NodeKind) -> (&'static str, &'static str) {
         NodeKind::MeshWarp(_) => (
             "Rigging",
             "Deforms artwork with a grid or points placed on the drawing.",
+        ),
+        NodeKind::Curve(c) if c.closed => (
+            "Rigging",
+            "Deforms artwork inside a closed loop of Bezier points that each move on their own.",
+        ),
+        NodeKind::Curve(_) => (
+            "Rigging",
+            "Bends artwork along a chain of Bezier points, like a flexible spine.",
         ),
         NodeKind::KinematicOutput => (
             "Rigging",
