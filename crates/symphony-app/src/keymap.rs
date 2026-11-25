@@ -9,12 +9,12 @@
 use eframe::egui::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
-use crate::workspace::View;
+use crate::views::timing::TimelineAction;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Profile {
-    #[default]
     Harmony,
+    #[default]
     Symphony,
 }
 
@@ -29,7 +29,7 @@ impl Profile {
     pub fn blurb(self) -> &'static str {
         match self {
             Profile::Harmony => "Shortcuts and workflow as in the latest Harmony.",
-            Profile::Symphony => "Harmony's base plus Symphony's improvements.",
+            Profile::Symphony => "Contextual shortcuts with plain-letter tool keys.",
         }
     }
 }
@@ -61,6 +61,8 @@ pub enum Action {
     EnableSoundScrubbing,
     IncreaseExposure,
     DecreaseExposure,
+    IncreaseBrushSize,
+    DecreaseBrushSize,
     CreateEmptyDrawing,
     AddLayer,
     ToggleLock,
@@ -120,50 +122,20 @@ pub enum Action {
     ToolLineEditor,
     ToolHand,
     ToolZoom,
-    /// Timeline only: key the selected layer or node here.
-    SetKeyframe,
-}
-
-/// Where a shortcut works. A key that works in a view wins there over the
-/// same key everywhere else (Show Strokes is K, but K in the Timeline sets
-/// a keyframe). Keep keys the same across views where possible.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Scope {
-    Everywhere,
-    /// Only while the pointer is over (or focus is in) one of these views.
-    Views(&'static [View]),
-}
-
-impl Scope {
-    pub fn covers(self, view: Option<View>) -> bool {
-        match self {
-            Scope::Everywhere => true,
-            Scope::Views(vs) => view.is_some_and(|v| vs.contains(&v)),
-        }
-    }
-
-    /// Two commands with these scopes can't share a key. A view key on top
-    /// of an everywhere key is allowed: the view key wins in its view.
-    pub fn overlaps(self, other: Scope) -> bool {
-        match (self, other) {
-            (Scope::Everywhere, Scope::Everywhere) => true,
-            (Scope::Views(a), Scope::Views(b)) => a.iter().any(|v| b.contains(v)),
-            _ => false,
-        }
-    }
+    SelectCutter,
+    ToggleSelectedPoints,
+    ArrangeNodes,
+    ShowNodeProperties,
+    RenderNodePreview,
+    ResetNodeView,
+    ToggleCameraEffects,
+    ToggleAutoKey,
+    ToggleLayerVisible,
+    Timeline(TimelineAction),
 }
 
 impl Action {
-    pub fn scope(self) -> Scope {
-        match self {
-            Action::SetKeyframe => Scope::Views(&[View::Timeline]),
-            _ => Scope::Everywhere,
-        }
-    }
-}
-
-impl Action {
-    pub const ALL: [Action; 82] = [
+    pub const ALL: [Action; 101] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -188,6 +160,8 @@ impl Action {
         Action::EnableSoundScrubbing,
         Action::IncreaseExposure,
         Action::DecreaseExposure,
+        Action::IncreaseBrushSize,
+        Action::DecreaseBrushSize,
         Action::CreateEmptyDrawing,
         Action::AddLayer,
         Action::ToggleLock,
@@ -245,7 +219,24 @@ impl Action {
         Action::ToolLineEditor,
         Action::ToolHand,
         Action::ToolZoom,
-        Action::SetKeyframe,
+        Action::SelectCutter,
+        Action::ToggleSelectedPoints,
+        Action::ArrangeNodes,
+        Action::ShowNodeProperties,
+        Action::RenderNodePreview,
+        Action::ResetNodeView,
+        Action::ToggleCameraEffects,
+        Action::ToggleAutoKey,
+        Action::ToggleLayerVisible,
+        Action::Timeline(TimelineAction::SetKey),
+        Action::Timeline(TimelineAction::DeleteKey),
+        Action::Timeline(TimelineAction::InsertNew),
+        Action::Timeline(TimelineAction::Duplicate),
+        Action::Timeline(TimelineAction::CopyDrawing),
+        Action::Timeline(TimelineAction::PasteDrawing),
+        Action::Timeline(TimelineAction::CloneDrawing),
+        Action::Timeline(TimelineAction::InsertInbetween),
+        Action::Timeline(TimelineAction::DeleteLayer),
     ];
 
     /// Stable ID, used for settings and scripting.
@@ -275,6 +266,8 @@ impl Action {
             Action::EnableSoundScrubbing => "playback.enable_sound_scrubbing",
             Action::IncreaseExposure => "timing.increase_exposure",
             Action::DecreaseExposure => "timing.decrease_exposure",
+            Action::IncreaseBrushSize => "drawing.increase_brush_size",
+            Action::DecreaseBrushSize => "drawing.decrease_brush_size",
             Action::CreateEmptyDrawing => "drawing.create_empty",
             Action::AddLayer => "layer.add",
             Action::ToggleLock => "layer.lock",
@@ -332,7 +325,16 @@ impl Action {
             Action::ToolLineEditor => "tool.line_editor",
             Action::ToolHand => "tool.hand",
             Action::ToolZoom => "tool.zoom",
-            Action::SetKeyframe => "timeline.set_keyframe",
+            Action::SelectCutter => "drawing.cutter",
+            Action::ToggleSelectedPoints => "drawing.show-points",
+            Action::ArrangeNodes => "node.arrange",
+            Action::ShowNodeProperties => "node.properties",
+            Action::RenderNodePreview => "node.preview",
+            Action::ResetNodeView => "node.reset",
+            Action::ToggleCameraEffects => "camera.effects",
+            Action::ToggleAutoKey => "timing.animate",
+            Action::ToggleLayerVisible => "layer.visible",
+            Action::Timeline(action) => action.id(),
         }
     }
 
@@ -362,6 +364,8 @@ impl Action {
             Action::EnableSoundScrubbing => "Enable Sound Scrubbing",
             Action::IncreaseExposure => "Increase exposure",
             Action::DecreaseExposure => "Decrease exposure",
+            Action::IncreaseBrushSize => "Increase brush size",
+            Action::DecreaseBrushSize => "Decrease brush size",
             Action::CreateEmptyDrawing => "Create empty drawing",
             Action::AddLayer => "Add drawing layer",
             Action::ToggleLock => "Lock layer",
@@ -419,7 +423,16 @@ impl Action {
             Action::ToolLineEditor => "Line Editor",
             Action::ToolHand => "Hand",
             Action::ToolZoom => "Zoom",
-            Action::SetKeyframe => "Set Keyframe",
+            Action::SelectCutter => "Cutter",
+            Action::ToggleSelectedPoints => "Show selected points",
+            Action::ArrangeNodes => "Arrange nodes",
+            Action::ShowNodeProperties => "Open Node Properties",
+            Action::RenderNodePreview => "Render node preview",
+            Action::ResetNodeView => "Reset Node view",
+            Action::ToggleCameraEffects => "Toggle camera effects",
+            Action::ToggleAutoKey => "Toggle auto-key",
+            Action::ToggleLayerVisible => "Hide or show the selected layer",
+            Action::Timeline(action) => action.label(),
         }
     }
 }
@@ -490,6 +503,7 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::EnableSound | Action::EnableSoundScrubbing => None,
         Action::IncreaseExposure => b(Key::Plus, NONE),
         Action::DecreaseExposure => b(Key::Minus, NONE),
+        Action::IncreaseBrushSize | Action::DecreaseBrushSize => None,
         Action::CreateEmptyDrawing => b(Key::R, ALT_SHIFT),
         Action::AddLayer => b(Key::R, CMD),
         // Harmony 27: Animation > Lock > Lock. Here one switch locks and
@@ -556,28 +570,154 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::ToolLineEditor => None,
         Action::ToolHand => None,
         Action::ToolZoom => b(Key::Z, ALT),
-        // Not Harmony's key (Harmony 27 sets a motion keyframe with
-        // Ctrl+K); kept from before shortcuts had views.
-        Action::SetKeyframe => Some(Binding {
-            key: Key::K,
-            mods: NONE,
-            verified: false,
-        }),
+        Action::Timeline(TimelineAction::SetKey) => b(Key::K, NONE),
+        Action::Timeline(TimelineAction::CopyDrawing) => b(Key::C, CMD),
+        Action::Timeline(TimelineAction::PasteDrawing) => b(Key::V, CMD),
+        Action::Timeline(_)
+        | Action::SelectCutter
+        | Action::ToggleSelectedPoints
+        | Action::ArrangeNodes
+        | Action::ShowNodeProperties
+        | Action::RenderNodePreview
+        | Action::ResetNodeView
+        | Action::ToggleCameraEffects
+        | Action::ToggleAutoKey
+        | Action::ToggleLayerVisible => None,
     }
 }
 
-/// Symphony profile: Harmony's bindings unless an improvement is logged
-/// in DESIGN.md §11.1.
+/// Symphony uses mnemonic tool keys and scopes them to the workspace under the pointer.
 fn symphony(action: Action) -> Option<Binding> {
     match action {
-        // Mac-standard Redo (DESIGN §11.1).
         Action::Redo => b(Key::Z, CMD_SHIFT),
-        // Mark in and out, as in video editors (DESIGN §11.1). Harmony
-        // has no playback range keys.
-        Action::SetPlayStart => b(Key::I, NONE),
-        Action::SetPlayEnd => b(Key::O, NONE),
+        // Mark in and out, as in video editors (DESIGN §11.1), with
+        // Shift: plain I and O have other jobs here. Harmony has no
+        // playback range keys.
+        Action::SetPlayStart => b(Key::I, SHIFT),
+        Action::SetPlayEnd => b(Key::O, SHIFT),
+        Action::ZoomIn => b(Key::Num1, NONE),
+        Action::ZoomOut => b(Key::Num2, NONE),
+        Action::IncreaseBrushSize => b(Key::Plus, NONE),
+        Action::DecreaseBrushSize => b(Key::Minus, NONE),
+        Action::ToolSelect => b(Key::S, NONE),
+        Action::ToolTransform => b(Key::X, NONE),
+        Action::ToolBrush => b(Key::B, NONE),
+        Action::ToolLine => b(Key::L, NONE),
+        Action::ToolText => b(Key::T, NONE),
+        Action::ToolPencil => None,
+        Action::ToolEraser => b(Key::E, NONE),
+        Action::ToolPaint => b(Key::P, NONE),
+        Action::ToolCloseGap => b(Key::G, NONE),
+        Action::ToolDropper => b(Key::D, NONE),
+        Action::ToolLineEditor => b(Key::N, NONE),
+        Action::ToolHand => b(Key::H, NONE),
+        Action::ToolZoom => b(Key::Z, NONE),
+        Action::SelectCutter => b(Key::C, NONE),
+        Action::ToggleSelectedPoints => b(Key::I, NONE),
+        Action::ArrangeNodes => b(Key::A, NONE),
+        Action::ShowNodeProperties => b(Key::P, NONE),
+        Action::RenderNodePreview => b(Key::V, NONE),
+        Action::ResetNodeView => b(Key::R, NONE),
+        Action::ToggleCameraEffects => b(Key::R, SHIFT),
+        Action::ToggleAutoKey => b(Key::A, NONE),
+        Action::ToggleLayerVisible => b(Key::V, NONE),
+        Action::ToolRepaint => b(Key::R, NONE),
+        Action::ToolUnpaint => b(Key::U, NONE),
+        Action::ToolPaintUnpainted => b(Key::Y, NONE),
+        Action::ToggleOnionSkin => b(Key::O, NONE),
+        Action::MirrorView => b(Key::M, NONE),
+        Action::AddLayer => b(Key::L, NONE),
+        Action::Timeline(TimelineAction::DeleteKey) => b(Key::K, SHIFT),
+        Action::Timeline(TimelineAction::InsertNew) => b(Key::N, NONE),
+        Action::Timeline(TimelineAction::Duplicate) => b(Key::D, NONE),
+        Action::Timeline(TimelineAction::CloneDrawing) => b(Key::C, NONE),
+        Action::Timeline(TimelineAction::InsertInbetween) => b(Key::I, NONE),
+        Action::SwitchLineColourArt => b(Key::L, SHIFT),
+        Action::PreviewArtLayers => b(Key::V, NONE),
         _ => harmony(action),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Global,
+    OutsideTiming,
+    OutsideTimeline,
+    Canvas,
+    Camera,
+    Node,
+    Timing,
+    Timeline,
+    Viewport,
+}
+
+pub fn scope(profile: Profile, action: Action) -> Scope {
+    use Action::*;
+    match action {
+        IncreaseBrushSize | DecreaseBrushSize | SelectCutter | ToggleSelectedPoints => {
+            Scope::Canvas
+        }
+        ArrangeNodes | ShowNodeProperties | RenderNodePreview | ResetNodeView => Scope::Node,
+        ToggleCameraEffects => Scope::Camera,
+        Timeline(TimelineAction::SetKey) if profile == Profile::Harmony => Scope::Timeline,
+        Timeline(_) | ToggleAutoKey | ToggleLayerVisible => Scope::Timing,
+        Copy | Paste if profile == Profile::Harmony => Scope::OutsideTiming,
+        ShowStrokes if profile == Profile::Harmony => Scope::OutsideTimeline,
+        _ if profile == Profile::Harmony => Scope::Global,
+        ToolSelect
+        | ToolTransform
+        | ToolBrush
+        | ToolLine
+        | ToolText
+        | ToolPencil
+        | ToolEraser
+        | ToolPaint
+        | ToolPaintUnpainted
+        | ToolRepaint
+        | ToolUnpaint
+        | ToolCloseGap
+        | ToolDropper
+        | ToolLineEditor
+        | ToolHand
+        | ToolZoom
+        | ShowStrokes
+        | RespectProtectedColours
+        | SwitchLineColourArt
+        | SwitchOverlayUnderlay
+        | PreviewArtLayers
+        | CreateColourArt
+        | FlipHorizontal
+        | ToggleOnionSkin
+        | MirrorView
+        | FlipVertical
+        | SelectAll
+        | DeselectAll
+        | Delete
+        | Cut
+        | Copy
+        | Paste => Scope::Canvas,
+        AddLayer | IncreaseExposure | DecreaseExposure | SubstituteNext | SubstitutePrevious
+        | GoToNextDrawing | GoToPreviousDrawing => Scope::Timing,
+        ZoomIn | ZoomOut => Scope::Viewport,
+        _ => Scope::Global,
+    }
+}
+
+fn scopes_overlap(profile: Profile, a: Action, b: Action) -> bool {
+    fn mask(scope: Scope) -> u8 {
+        match scope {
+            Scope::Global => 0b11111,
+            Scope::OutsideTiming => 0b00111,
+            Scope::OutsideTimeline => 0b10111,
+            Scope::Canvas => 0b0011,
+            Scope::Camera => 0b0010,
+            Scope::Node => 0b0100,
+            Scope::Timing => 0b11000,
+            Scope::Timeline => 0b01000,
+            Scope::Viewport => 0b0111,
+        }
+    }
+    mask(scope(profile, a)) & mask(scope(profile, b)) != 0
 }
 
 pub fn binding(profile: Profile, action: Action) -> Option<Binding> {
@@ -701,7 +841,7 @@ pub fn clashes(profile: Profile, action: Action, key: Key, mods: Modifiers) -> V
     let wanted = (key, Mods::of(mods));
     Action::ALL
         .into_iter()
-        .filter(|a| *a != action && a.scope().overlaps(action.scope()))
+        .filter(|a| *a != action && scopes_overlap(profile, action, *a))
         .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
         .collect()
 }
@@ -731,12 +871,7 @@ pub fn combo_label(key: Key, mods: Modifiers) -> String {
 /// Give `action` the shortcut `key` + `mods` in `profile`. Any other action
 /// using that shortcut loses it, and is returned so the caller can say so.
 pub fn remap(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec<Action> {
-    let wanted = (key, Mods::of(mods));
-    let taken: Vec<Action> = Action::ALL
-        .into_iter()
-        .filter(|a| *a != action && a.scope().overlaps(action.scope()))
-        .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
-        .collect();
+    let taken = clashes(profile, action, key, mods);
     for other in &taken {
         put(profile, *other, None);
     }
@@ -758,18 +893,6 @@ pub fn reset(profile: Profile, action: Action) {
     if let Ok(mut r) = REMAPS.write() {
         r.retain(|x| !(x.profile == profile && x.action == action.id()));
     }
-}
-
-/// [`pressed`], and if so take the key press so no other shortcut sees it
-/// this frame (a view's key over the same key everywhere).
-pub fn consume(ctx: &egui::Context, profile: Profile, action: Action) -> bool {
-    if !pressed(ctx, profile, action) {
-        return false;
-    }
-    if let Some(b) = binding(profile, action) {
-        ctx.input_mut(|i| i.consume_key(b.mods, b.key));
-    }
-    true
 }
 
 /// Did the user just trigger `action`? Modifiers must match exactly, so
@@ -839,15 +962,25 @@ pub fn label(profile: Profile, action: Action) -> String {
 }
 
 /// The shortcut with the views it works in, for lists that show every
-/// command: "K in Timeline". Same as [`label`] for an everywhere key.
+/// command: "K in Timeline". Same as [`label`] for a key that works
+/// everywhere.
 pub fn label_where(profile: Profile, action: Action) -> String {
     let l = label(profile, action);
-    match action.scope() {
-        Scope::Views(vs) if !l.is_empty() => {
-            let names: Vec<&str> = vs.iter().map(|v| v.title()).collect();
-            format!("{l} in {}", names.join(", "))
-        }
-        _ => l,
+    let place = match scope(profile, action) {
+        Scope::Global => return l,
+        Scope::OutsideTiming => "outside Timeline and Xsheet",
+        Scope::OutsideTimeline => "outside Timeline",
+        Scope::Canvas => "in Drawing and Camera",
+        Scope::Camera => "in Camera",
+        Scope::Node => "in Node",
+        Scope::Timing => "in Timeline and Xsheet",
+        Scope::Timeline => "in Timeline",
+        Scope::Viewport => "in Drawing, Camera and Node",
+    };
+    if l.is_empty() {
+        l
+    } else {
+        format!("{l} {place}")
     }
 }
 
@@ -863,107 +996,96 @@ pub fn tooltip(profile: Profile, action: Action) -> String {
 mod tests {
     use super::*;
 
-    /// E11.3: no two actions share a binding where their views overlap.
+    /// Bindings may be shared by views that cannot both handle them.
     #[test]
-    fn no_duplicate_bindings() {
+    fn no_overlapping_bindings() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
-            let mut seen: Vec<(Key, Modifiers, Action)> = Vec::new();
-            for a in Action::ALL {
-                if let Some(bind) = binding(profile, a) {
-                    for (k, m, other) in &seen {
-                        assert!(
-                            !(*k == bind.key
-                                && *m == bind.mods
-                                && other.scope().overlaps(a.scope())),
-                            "{profile:?}: {} clashes with {}",
-                            a.id(),
-                            other.id()
-                        );
-                    }
-                    seen.push((bind.key, bind.mods, a));
-                }
-            }
-        }
-    }
-
-    /// Keep keys consistent across views: a view key may cover an
-    /// everywhere key only where this list says so.
-    #[test]
-    fn view_keys_cover_only_the_listed_everywhere_keys() {
-        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
-        let allowed = [(Action::SetKeyframe, Action::ShowStrokes)];
-        for profile in [Profile::Harmony, Profile::Symphony] {
-            for a in Action::ALL
-                .into_iter()
-                .filter(|a| a.scope() != Scope::Everywhere)
-            {
-                let Some(bind) = binding(profile, a) else {
-                    continue;
-                };
-                for other in clashes_everywhere(profile, bind) {
+            for action in Action::ALL {
+                if let Some(bind) = binding(profile, action) {
                     assert!(
-                        allowed.contains(&(a, other)),
-                        "{profile:?}: {} covers {}",
-                        a.id(),
-                        other.id()
+                        clashes(profile, action, bind.key, bind.mods).is_empty(),
+                        "{profile:?}: {} clashes",
+                        action.id()
                     );
                 }
             }
         }
     }
 
-    fn clashes_everywhere(profile: Profile, bind: Binding) -> Vec<Action> {
-        Action::ALL
-            .into_iter()
-            .filter(|o| o.scope() == Scope::Everywhere)
-            .filter(|o| {
-                binding(profile, *o).is_some_and(|b| b.key == bind.key && b.mods == bind.mods)
-            })
-            .collect()
+    #[test]
+    fn symphony_uses_mnemonics_and_reuses_exposure_keys_on_canvas() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = Profile::Symphony;
+        assert_eq!(fired(profile, Key::E, NONE), [Action::ToolEraser]);
+        assert_eq!(fired(profile, Key::Num1, NONE), [Action::ZoomIn]);
+        assert_eq!(fired(profile, Key::Num2, NONE), [Action::ZoomOut]);
+        assert_eq!(fired(profile, Key::Tab, NONE), [Action::Search]);
+        assert_eq!(scope(profile, Action::ToolEraser), Scope::Canvas);
+        for (key, exposure, brush) in [
+            (
+                Key::Plus,
+                Action::IncreaseExposure,
+                Action::IncreaseBrushSize,
+            ),
+            (
+                Key::Minus,
+                Action::DecreaseExposure,
+                Action::DecreaseBrushSize,
+            ),
+        ] {
+            assert_eq!(fired(profile, key, NONE), [exposure, brush]);
+            assert_eq!(scope(profile, exposure), Scope::Timing);
+            assert_eq!(scope(profile, brush), Scope::Canvas);
+        }
     }
 
-    /// K sets a keyframe in the Timeline and shows strokes elsewhere.
     #[test]
-    fn a_view_key_wins_in_its_view() {
+    fn letter_shortcuts_can_be_reused_across_panels() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
-        reset(Profile::Harmony, Action::SetKeyframe);
-        reset(Profile::Harmony, Action::ShowStrokes);
-        let fire = |here: Option<View>| {
-            let ctx = egui::Context::default();
-            let mut got = Vec::new();
-            let input = egui::RawInput {
-                events: vec![egui::Event::Key {
-                    key: Key::K,
-                    physical_key: Some(Key::K),
-                    pressed: true,
-                    repeat: false,
-                    modifiers: NONE,
-                }],
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(input, |ui| {
-                // The order main.rs uses: view keys first, then the rest.
-                for a in Action::ALL {
-                    if a.scope() != Scope::Everywhere
-                        && a.scope().covers(here)
-                        && consume(ui.ctx(), Profile::Harmony, a)
-                    {
-                        got.push(a);
-                    }
-                }
-                for a in Action::ALL {
-                    if a.scope() == Scope::Everywhere && pressed(ui.ctx(), Profile::Harmony, a) {
-                        got.push(a);
-                    }
-                }
-            });
-            out.textures_delta.clear();
-            got
-        };
-        assert_eq!(fire(Some(View::Timeline)), vec![Action::SetKeyframe]);
-        assert_eq!(fire(Some(View::Camera)), vec![Action::ShowStrokes]);
-        assert_eq!(fire(None), vec![Action::ShowStrokes]);
+        let profile = Profile::Symphony;
+        for (key, actions) in [
+            (
+                Key::A,
+                &[
+                    (Action::ArrangeNodes, Scope::Node),
+                    (Action::ToggleAutoKey, Scope::Timing),
+                ][..],
+            ),
+            (
+                Key::C,
+                &[
+                    (Action::SelectCutter, Scope::Canvas),
+                    (
+                        Action::Timeline(TimelineAction::CloneDrawing),
+                        Scope::Timing,
+                    ),
+                ],
+            ),
+            (
+                Key::D,
+                &[
+                    (Action::ToolDropper, Scope::Canvas),
+                    (Action::Timeline(TimelineAction::Duplicate), Scope::Timing),
+                ],
+            ),
+            (
+                Key::V,
+                &[
+                    (Action::PreviewArtLayers, Scope::Canvas),
+                    (Action::RenderNodePreview, Scope::Node),
+                    (Action::ToggleLayerVisible, Scope::Timing),
+                ],
+            ),
+        ] {
+            let fired = fired(profile, key, NONE);
+            assert_eq!(fired.len(), actions.len());
+            for &(action, context) in actions {
+                assert!(fired.contains(&action));
+                assert_eq!(scope(profile, action), context);
+                assert!(clashes(profile, action, key, NONE).is_empty());
+            }
+        }
     }
 
     /// Which actions fire for one key press with `mods`.
@@ -1007,18 +1129,18 @@ mod tests {
         }
     }
 
-    /// DESIGN §11.1: I and O mark the playback range in the Symphony
-    /// profile only; Harmony has no keys for it.
+    /// DESIGN §11.1: Shift+I and Shift+O mark the playback range in the
+    /// Symphony profile only; Harmony has no keys for it.
     #[test]
-    fn i_and_o_mark_the_playback_range_in_the_symphony_profile() {
+    fn shift_i_and_o_mark_the_playback_range_in_the_symphony_profile() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         reset(Profile::Symphony, Action::SetPlayStart);
         reset(Profile::Symphony, Action::SetPlayEnd);
         let s = Profile::Symphony;
-        assert_eq!(fired(s, Key::I, NONE), vec![Action::SetPlayStart]);
-        assert_eq!(fired(s, Key::O, NONE), vec![Action::SetPlayEnd]);
-        assert!(fired(Profile::Harmony, Key::I, NONE).is_empty());
-        assert!(fired(Profile::Harmony, Key::O, NONE).is_empty());
+        assert_eq!(fired(s, Key::I, SHIFT), vec![Action::SetPlayStart]);
+        assert_eq!(fired(s, Key::O, SHIFT), vec![Action::SetPlayEnd]);
+        assert!(fired(Profile::Harmony, Key::I, SHIFT).is_empty());
+        assert!(fired(Profile::Harmony, Key::O, SHIFT).is_empty());
     }
 
     #[test]

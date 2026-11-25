@@ -131,6 +131,42 @@ Spend boldness in one place (P5). Symphony's signature is **time**:
   neutral shadow, on the grey surround. This is the one docked thing that
   casts a shadow (an exception to D6.4).
 
+### 3.3 Tool Properties and Node Properties
+
+- **D3.11 Shared layout.** Use the same form components, typography, and
+  spacing in both views and in floating properties windows. Show the active
+  tool or selected node name at the top, followed by its settings. Use 12 px
+  panel padding, a 4 px gap between related rows, and 8 px between sections.
+  Use short section headings and whitespace to group fields on the panel's
+  continuous glass surface.
+- **D3.12 Predictable rows.** Align labels and controls to shared columns.
+  Give X/Y pairs and related values matching widths. Use the shared control
+  styles from D6.7. Use checkboxes for independent settings, segmented
+  controls for a short set of mutually exclusive modes, and menus for longer
+  lists. Keep units next to values, and make numeric values scrubbable and
+  editable as in D8.8. Align keyframe controls at the trailing edge and keep
+  their space reserved when their state changes.
+- **D3.13 Order by what the artist is doing.** In Tool Properties, put
+  frequent adjustments for the current tool and mode first, such as brush
+  size and opacity. In Node Properties, start with the settings and assignments
+  that define the selected node. A Bone starts with its drawing preview and
+  attachment controls, then shows posing settings. Keep related actions next
+  to the data they affect. Collapse infrequent tuning under a named section
+  such as Pressure or Stretch limits. When a mode reveals extra fields, place
+  them directly below that mode and keep unrelated rows in order.
+- **D3.14 Keep the dock usable at narrow widths.** Stack labels above
+  controls when the columns no longer fit. Keep control targets at least
+  24 px and allow vertical scrolling. Wrap essential instructions and
+  preserve access to full names when labels truncate. Use a short empty
+  state when the selection is empty or a relevant assignment is missing,
+  with the action beside it when one is available.
+- **D3.15 Make state and feedback consistent.** A properties edit applies
+  to the tool or node identified in the header. Reuse the same actions in
+  docked and floating forms. Keep hover, focus, disabled, and keyed states
+  distinct. Group a continuous drag into one undo step where the setting
+  supports undo. Use a clear unavailable state with a brief reason when
+  an otherwise relevant setting depends on another option.
+
 ## 4. Colour
 
 ### 4.1 Tokens
@@ -269,6 +305,32 @@ and animation state.
   states and accessibility labels are consistent. Review new controls in the
   running app at 1280×800 and 1024×640, including a keyboard pass.
 
+- **D6.8 A control’s appearance tells you what clicking it does.** Use the
+  same role, shape, and resting cues everywhere that kind of control
+  appears. Choose an existing shared widget and theme tokens. Add shared
+  variants when a new role is needed.
+
+  | Role | Appearance and behaviour |
+  |---|---|
+  | Primary action | Filled cel blue button for the main action in the current panel or dialog. |
+  | Secondary action | Neutral button for other commands. |
+  | Destructive action | Shared button or menu style with a clear verb and the destructive token. |
+  | Icon action | Standard icon and hit area, with a tooltip and an accessible name. |
+  | Menu trigger | A dropdown cue for contextual triggers. The menu bar uses its shared menu-label style. |
+  | Tab or selectable row | Shared tab or row style with a persistent selected state. |
+  | Toggle or choice | Checkbox, radio, or toolbar toggle with a visible on or selected state. |
+  | Link | Link styling with a visible underline at rest. Activates a destination. |
+  | Plain text | Label or body styling for information. |
+
+- **D6.9 Make states recognisable.** Enabled controls have a resting cue
+  that works with a pen and on touch. Hover, keyboard focus, and press give
+  distinct feedback. Focus uses a visible outline, and selection or an on
+  state persists after the pointer leaves. Disabled controls retain their
+  shape, use the disabled token, and cannot be activated. Use a check,
+  underline, fill, or outline alongside colour so states remain distinct
+  without relying on hue alone. Preserve the hit area and layout as visual
+  states change.
+
 ---
 
 ## 7. Icons
@@ -323,6 +385,9 @@ and animation state.
   anything destructive.
 - **D8.7 Discoverable.** Every action is in a menu, and the menu shows its
   shortcut. Shortcuts are speed-ups, never the only way.
+- **D8.7a Small sets of modes.** Use the shared sliding selector for up to
+  four choices. Stack the segments in a narrow panel. Put sibling actions
+  such as Attach drawing and New drawing on the same row when they fit.
 - **D8.8 Scrubbable numbers.** Every numeric field can be dragged to
   change it, typed into, and reset (double-click or a reset button).
 - **D8.9 Selection is consistent.**
@@ -355,8 +420,12 @@ and animation state.
 
 ## 9. Motion
 
-- **D9.1 No decorative animation.** Motion only answers an action, such as
-  a panel opening or a drop target appearing, and lasts 240 ms or less.
+- **D9.1 Make the interface feel interactive.** Use small animations
+  to give actions a satisfying response. A node connector can follow
+  a drag, acknowledge a valid connection, and settle when it snaps
+  into place. Tabs, toggles, and docking targets can respond just as
+  deliberately. Keep motion close to the interaction and let it settle
+  when the action ends. Brief transitions last 240 ms or less.
 - **D9.4 One motion per kind of action** (`symphony_ui::motion`), never
   written ad hoc, so the same action always moves the same way:
   - **Appear** (140 ms, ease-out): something opening. A plain fade: it
@@ -371,8 +440,11 @@ and animation state.
     in place, like a docked view, a snapped divider or a dropped item.
 - **D9.2 Motion never delays input.** An animation in progress never
   holds back a click or a stroke.
-- **D9.3** Respect the OS "reduce motion" setting, which turns all UI
-  motion off.
+- **D9.3 Make interface motion optional.** Respect Preferences →
+  Interface → Interface effects, the interface animation setting, and
+  the OS reduce-motion setting. When motion is off, show the same
+  feedback and final state immediately using static cues. An active
+  connector or valid drop target remains identifiable without animation.
 
 ---
 
@@ -397,10 +469,10 @@ and animation state.
 
 ## 11. Profiles: Harmony and Symphony
 
-- **D11.1** Two profiles, chosen at first launch and changeable in
+- **D11.1** Two profiles, with Symphony selected for new installs and both available in
   *Preferences → Workflow*:
   - **Harmony**: shortcuts and workflows as the latest Harmony does them.
-  - **Symphony**: our improvements.
+  - **Symphony**: plain-letter tools with shortcuts scoped to the view under the pointer.
 - **D11.2** Both profiles are always complete and fully working. A
   Symphony improvement never removes the Harmony way.
 - **D11.3** Every Symphony-only difference is listed in §11.1 below, with
@@ -416,7 +488,15 @@ and animation state.
 | Area | Harmony profile | Symphony profile | Why |
 |---|---|---|---|
 | Redo on macOS | Control+Shift+Z (as Harmony 27 documents) | Cmd+Shift+Z | Matches every other Mac app |
-| Playback range start and end | No key (Harmony 27 lists none) | I and O | Mark in and out as video editors do |
+| Tool keys | Harmony bindings | S Select, B Brush, E Eraser, L Line, T Text, P Paint, C Cutter, G Close Gap, D Dropper, N Line Editor, X Transform, H Hand, Z Zoom | Use mnemonic keys in Drawing and Camera |
+| Zoom | Harmony bindings | 1 zooms in and 2 zooms out in Drawing, Camera, and Node | Use the same gesture across viewports |
+| Plus and minus | Change exposure | Resize the brush in Drawing and Camera, change exposure in Timeline and Xsheet | Apply the adjustment to the view under the pointer |
+| Playback range start and end | No key (Harmony 27 lists none) | Shift+I and Shift+O | Mark in and out as video editors do; plain I and O have other jobs |
+| Search | Tab | Tab | Open Search from the workspace |
+| Drawing and Camera | Harmony bindings | R Repaint, U Unpaint, Y Paint Unpainted, O Onion Skin, M Mirror, I Show selected points, V Preview art layers. Camera also uses Shift+R to toggle rendered effects. | Keep common drawing and preview actions near their names |
+| Timeline and Xsheet | Harmony bindings | A Auto-key, C Clone, D Duplicate, I Insert in-between, K Set key, Shift+K Delete key, L Add layer, N New drawing frame, V Layer visibility | Reuse letters in the timing context |
+| Node | Menus and Search | A Arrange, P Properties, R Reset view, V Render preview | Keep graph editing shortcuts inside the graph |
+
 
 ---
 
@@ -458,6 +538,30 @@ Speed is part of the design (P1). Budgets are in
 [ENGINEERING.md](ENGINEERING.md) E6. A feature that breaks a budget isn't
 finished.
 
+- **D14.1 Give the artist’s current action priority.** Show fresh ink,
+  the result of a handle drag, or the pose at the new playhead before
+  rendering nearby frames or refreshing thumbnails. Let background jobs
+  yield when drawing, dragging, or scrubbing needs the same resources.
+- **D14.2 Update the part that changed.** Reuse valid render results and
+  recompute only affected regions and their dependencies. Account for
+  effects that extend or move pixels beyond the original edit, including
+  blur and distortion. Prioritize the visible Camera area and the active
+  drawing, handle, or matte.
+- **D14.3 Adapt preview quality during interaction.** A cheaper pass is
+  useful for expensive effects during a drag or scrub when it preserves
+  the cues the artist needs, such as a matte edge they are placing.
+  Give visually important changes priority over refinement. Settle
+  paused previews at full quality and keep them consistent with export.
+- **D14.4 Match work to the hardware.** Keep input and immediate feedback
+  on a short path. Move downloads, disk reads, and decoding off that path.
+  Use the GPU for parallel pixel work where profiling shows an advantage
+  after transfers. Size background work to leave resources for interaction.
+- **D14.5 Review slow cases as well as typical ones.** Measure cold launch
+  to a usable Welcome screen, pen-to-visible-ink latency, and scrub-to-pose
+  latency in a busy shot. Repeat while downloading or exporting to catch
+  hitches that average frame rate can hide.
+
+
 ---
 
 ## 15. Review checklist (every UI change)
@@ -466,6 +570,8 @@ finished.
 - [ ] Any new colour pairing is contrast-checked (D4.4).
 - [ ] Sizes are on the 4 px grid and use the standard sizes (D6).
 - [ ] Areas separated by tone, not boxes (D3.7, D3.8). No new chrome buttons.
+- [ ] Properties forms use shared rows and section order, and stay usable
+      when docked narrow, floated, and scaled (§3.3).
 - [ ] Looks the same on all three OSes, or the difference is listed in D12.2.
 - [ ] Icons are from our set, on the grid and tooltipped. No emoji (D7).
 - [ ] Works with the pen alone. Nothing is hover-only (D8.1).
@@ -473,7 +579,12 @@ finished.
 - [ ] The action is in a menu, with its shortcut shown (D8.7).
 - [ ] Shortcuts are defined for both profiles. Any Symphony difference is
       logged in §11.1.
+- [ ] Clickable controls reuse the shared style for their role. Check that
+      labels, links, selection, keyboard focus, and disabled controls are
+      distinguishable (D6.8–D6.9).
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
+- [ ] Small animations respond to interactions. Check the same feedback
+      with Interface effects and motion disabled (D9.1–D9.3).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
 - [ ] Waits follow §17: acknowledged at once, spinner past 150 ms, words and progress past 1 s, Cancel past 3 s.
 - [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§16).
@@ -495,7 +606,7 @@ happening and roughly how long is left.
 | > 150 ms | An activity indicator **where the work was triggered**: a spinner on the button, in the view, or in the status bar. Never earlier, so fast actions don't flicker (E5.4). |
 | > 1 s | **What** is happening, in words ("Opening Walk", "Rendering frame 12 of 48"), and determinate progress whenever the work can be counted. |
 | > 3 s | A **Cancel** button, and elapsed time or time remaining. |
-| Startup | The window shows something within 200 ms. A launch that will take longer shows a loading screen with its current step. Never a blank or frozen window. |
+| Startup | Aim to show a usable Welcome screen within 200 ms. If essential work delays it, show the current startup step. |
 
 ### 17.2 Rules
 - **D17.1 Never freeze.** The UI keeps answering while work runs. Slow
@@ -529,8 +640,19 @@ happening and roughly how long is left.
   become a static "Working" label with pulsing removed. Progress bars
   still fill (D9.3).
 - **D17.10 Motion here is allowed.** Loading indicators are the one
-  continuous motion in the app (an exception to D9.1), because they
+  continuous motion while waiting, because they
   answer the user's action and show it's still alive.
+- **D17.11 Make startup useful in stages.** Enable Create and Open
+  as soon as the Welcome screen can accept input. Use the time an artist
+  spends in Welcome to warm the renderer and load recent-project previews.
+  On opening a scene, give its current frame priority. Load nearby frames,
+  thumbnails, and other secondary content as resources become available.
+  Run optional downloads in the background when possible, with progress
+  available where the artist requested them.
+- **D17.12 Let visible progress reflect real work.** Reveal usable content
+  as it becomes ready and keep its layout stable. For waits that need a
+  dedicated screen, update the step or count as work completes. Keep the
+  feedback calm, legible, and consistent with reduced-motion settings.
 
 ## 16. AI
 

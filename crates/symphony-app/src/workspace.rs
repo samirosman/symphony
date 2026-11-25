@@ -51,7 +51,7 @@ impl View {
             View::Multiplane => "Multiplane",
             View::ToolProperties => "Tool Properties",
             View::Colour => "Colour",
-            View::LayerProperties => "Layer Properties",
+            View::LayerProperties => "Node Properties",
             View::Function => "Function",
             View::NodeLibrary => "Node Library",
             View::Library => "Library",

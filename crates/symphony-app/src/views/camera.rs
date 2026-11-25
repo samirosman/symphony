@@ -882,13 +882,20 @@ fn art_layer_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
         layers.insert(0, (ArtLayer::Overlay, Icon::ArtOverlay));
         layers.push((ArtLayer::Underlay, Icon::ArtUnderlay));
     }
+    // The Sketch art layer (a Symphony addition): under everything.
+    layers.push((ArtLayer::Sketch, Icon::ArtSketch));
     for (art, icon) in layers {
         let key = match art {
-            ArtLayer::LineArt | ArtLayer::ColourArt => Action::SwitchLineColourArt,
-            _ => Action::SwitchOverlayUnderlay,
+            ArtLayer::LineArt | ArtLayer::ColourArt => Some(Action::SwitchLineColourArt),
+            ArtLayer::Overlay | ArtLayer::Underlay => Some(Action::SwitchOverlayUnderlay),
+            ArtLayer::Sketch => None,
         };
-        let shortcut = keymap::label(profile, key);
-        let tip = if shortcut.is_empty() {
+        let shortcut = key.map(|k| keymap::label(profile, k)).unwrap_or_default();
+        let tip = if art == ArtLayer::Sketch {
+            "Sketch: rough drawing under the other art layers. It shows faintly while you \
+             ink and colour, and is left out of exports unless you include it."
+                .to_owned()
+        } else if shortcut.is_empty() {
             art_name(art).to_owned()
         } else {
             format!("{} ({shortcut} switches)", art_name(art))
@@ -1014,7 +1021,8 @@ pub fn ui(
             i.modifiers.alt,
         )
     });
-    let navigating = space || s.tool == Tool::Hand;
+    let middle = response.dragged_by(egui::PointerButton::Middle);
+    let navigating = space || middle || s.tool == Tool::Hand;
     if response.hovered() || response.dragged() {
         if let Some(p) = response.hover_pos() {
             if zoom_delta != 1.0 {
@@ -1025,28 +1033,24 @@ pub fn ui(
             state.pan += scroll;
         }
     }
-    if response.dragged_by(egui::PointerButton::Middle) {
-        // Middle drag pans in every tool; with Space held, dragging up
-        // zooms in and dragging down zooms out, at the press point.
+    if response.dragged() && navigating {
         let d = response.drag_delta();
-        if space {
-            let at = ui
-                .input(|i| i.pointer.press_origin())
-                .unwrap_or(rect.center());
-            zoom_at(state, rect, at, (-d.y * MIDDLE_ZOOM_RATE).exp());
-        } else {
-            state.pan += d;
-        }
-    } else if response.dragged() && navigating {
-        if space && shift {
+        if (space || middle) && shift {
             // Rotate around the view centre by the angle the pointer swept.
             if let Some(p) = response.interact_pointer_pos() {
                 let c = rect.center() + state.pan;
                 let (a, b) = (p - response.drag_delta() - c, p - c);
                 state.rotate_by((b.y.atan2(b.x) - a.y.atan2(a.x)).to_degrees());
             }
+        } else if middle && space {
+            // Space with a middle drag: up zooms in and down zooms out,
+            // at the press point.
+            let at = ui
+                .input(|i| i.pointer.press_origin())
+                .unwrap_or(rect.center());
+            zoom_at(state, rect, at, (-d.y * MIDDLE_ZOOM_RATE).exp());
         } else {
-            state.pan += response.drag_delta();
+            state.pan += d;
         }
     }
     if s.tool == Tool::Zoom && response.clicked() {
@@ -1277,10 +1281,20 @@ pub fn ui(
                 }
                 None => (original, world),
             };
+            // The sketch always shows (faint unless it's being drawn on).
+            let sketch = s.sketch_opacity();
             for art in ArtLayer::STACK {
-                if drawing_only && !s.art_preview && art != s.art {
+                if drawing_only && !s.art_preview && art != s.art && art != ArtLayer::Sketch {
                     continue;
                 }
+                let colour = |s: &Session, swatch: Id| {
+                    let c = colour(s, swatch);
+                    if art == ArtLayer::Sketch {
+                        c.gamma_multiply(sketch)
+                    } else {
+                        c
+                    }
+                };
                 for f in dr.fills.iter().filter(|f| f.art == art) {
                     // Selected zones follow the Select tool's live preview.
                     let transform = match preview {
@@ -1430,8 +1444,11 @@ pub fn ui(
             }
         }
     }
+    if drawing_only {
+        super::rig_edit::draw_rest_guide(&painter, s, view);
+    }
     state.select.camera_space = !drawing_only;
-    let navigating_now = space || s.tool == Tool::Hand;
+    let navigating_now = navigating || response.drag_stopped_by(egui::PointerButton::Middle);
     let warp_busy = !navigating_now
         && super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view);
     let rig_busy = if !navigating_now && !drawing_only {
@@ -1448,6 +1465,32 @@ pub fn ui(
         select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
     } else {
         state.select.hover = None;
+    }
+    if !navigating_now && matches!(s.tool, Tool::Select | Tool::LineEditor) {
+        let can_reduce = s.can_reduce_points();
+        let has_points = s.tool == Tool::Select && s.has_selected_points();
+        if can_reduce || has_points {
+            response.context_menu(|ui| {
+                if has_points {
+                    ui.checkbox(&mut s.show_selected_points, "Show selected points");
+                }
+                if can_reduce {
+                    ui.menu_button("Reduce stroke points", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.point_reduction)
+                                .range(0.1..=30.0)
+                                .speed(0.1)
+                                .prefix("Tolerance ")
+                                .suffix(" px"),
+                        );
+                        if ui.button("Reduce points").clicked() {
+                            s.reduce_points();
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        }
     }
     if let Some(a) = state
         .active
@@ -1509,7 +1552,16 @@ pub fn ui(
         }
     }
 
-    text_tool(ui, &response, &painter, s, state, view, layer_world, space);
+    text_tool(
+        ui,
+        &response,
+        &painter,
+        s,
+        state,
+        view,
+        layer_world,
+        navigating_now,
+    );
 
     // Pen input.
     let zoom_factor = ui.ctx().zoom_factor();
@@ -1523,7 +1575,7 @@ pub fn ui(
             | Tool::CloseGap
             | Tool::Dropper
             | Tool::LineEditor
-    ) && !space
+    ) && !navigating_now
         && projected_layer.is_some();
     let locked = s.doc.column(s.selected).is_some_and(|c| c.locked);
     for sm in samples {
@@ -1826,7 +1878,7 @@ pub fn ui(
         rect,
         s,
         Mods {
-            space,
+            space: space || middle,
             shift,
             alt,
             pen_eraser,
@@ -2245,6 +2297,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
         Icon::Eraser
     } else {
         match s.tool {
+            Tool::Select if s.cutter_mode => Icon::Cutter,
             Tool::Select => Icon::Select,
             Tool::Transform => Icon::Transform,
             Tool::Pencil => Icon::Pencil,

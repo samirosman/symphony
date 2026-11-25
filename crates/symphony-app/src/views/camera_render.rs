@@ -3,7 +3,7 @@
 use eframe::egui::{self, Color32, Pos2};
 use symphony_core::id::Id;
 use symphony_core::math::Affine;
-use symphony_render::{render_camera, StrokePreview};
+use symphony_render::{render_camera_with, StrokePreview};
 
 use crate::session::{Session, Tool};
 
@@ -17,6 +17,8 @@ struct RenderKey {
     size: [u32; 2],
     selection: Option<(Id, Vec<Id>, Affine)>,
     hidden_text: Option<(Id, Vec<Id>)>,
+    /// Sketch strength, in percent.
+    sketch: u8,
 }
 
 type Rendered = (RenderKey, Option<(u32, u32, Vec<u8>)>);
@@ -89,6 +91,7 @@ impl Cache {
             size,
             selection,
             hidden_text,
+            sketch: (s.sketch_opacity() * 100.0).round() as u8,
         };
         // Collect a finished render.
         if let Some((_, rx)) = &self.job {
@@ -152,7 +155,8 @@ impl Cache {
                         strokes,
                         transform: *transform,
                     });
-                let image = render_camera(&scene, frame, width, height, preview)
+                let sketch = Some(job_key.sketch as f32 / 100.0);
+                let image = render_camera_with(&scene, frame, width, height, preview, sketch)
                     .map(|image| (width, height, image.take()));
                 let _ = tx.send((job_key, image));
                 ctx.request_repaint();
@@ -330,7 +334,8 @@ mod tests {
         let camera_state = &harness.state().1;
         let texture = camera_state.display.texture.as_ref().unwrap().id();
         assert_eq!(camera_state.display.key.as_ref().unwrap().frame, 2);
-        let image = render_camera(&harness.state().0.doc, 2, 100, 64, None).unwrap();
+        let image =
+            symphony_render::render_camera(&harness.state().0.doc, 2, 100, 64, None).unwrap();
         assert_eq!(&image.data()[..4], &[30, 50, 80, 255]);
 
         let draws_camera_texture = |output: &egui::FullOutput| {

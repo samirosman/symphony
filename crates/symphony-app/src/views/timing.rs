@@ -79,34 +79,58 @@ const PARAM_W: f32 = 48.0;
 /// Pixels of drag per drawing when scrubbing the Parameters field.
 const PARAM_STEP: f32 = 12.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TimelineAction {
     SetKey,
     DeleteKey,
     InsertNew,
     Duplicate,
+    CopyDrawing,
+    PasteDrawing,
+    CloneDrawing,
     Extend,
     InsertInbetween,
     DeleteLayer,
 }
 
 impl TimelineAction {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::SetKey,
         Self::DeleteKey,
         Self::InsertNew,
         Self::Duplicate,
+        Self::CopyDrawing,
+        Self::PasteDrawing,
+        Self::CloneDrawing,
         Self::Extend,
         Self::InsertInbetween,
         Self::DeleteLayer,
     ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::SetKey => "timeline.SetKey",
+            Self::DeleteKey => "timeline.DeleteKey",
+            Self::InsertNew => "timeline.InsertNew",
+            Self::Duplicate => "timeline.Duplicate",
+            Self::CopyDrawing => "timeline.CopyDrawing",
+            Self::PasteDrawing => "timeline.PasteDrawing",
+            Self::CloneDrawing => "timeline.CloneDrawing",
+            Self::Extend => "timeline.Extend",
+            Self::InsertInbetween => "timeline.InsertInbetween",
+            Self::DeleteLayer => "timeline.DeleteLayer",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::SetKey => "Set Keyframe",
             Self::DeleteKey => "Delete Keyframe",
             Self::InsertNew => "Insert New Drawing Frame",
-            Self::Duplicate => "Duplicate Drawing Frame",
+            Self::Duplicate => "Duplicate Drawing",
+            Self::CopyDrawing => "Copy Drawing",
+            Self::PasteDrawing => "Paste Drawing",
+            Self::CloneDrawing => "Clone Drawing",
             Self::Extend => "Extend Exposure",
             Self::InsertInbetween => "Insert In-between Frame",
             Self::DeleteLayer => "Delete Layer",
@@ -118,19 +142,24 @@ impl TimelineAction {
             Self::SetKey => "add create key pose animation timeline",
             Self::DeleteKey => "remove key pose animation timeline",
             Self::InsertNew => "add new frame drawing blank empty cel cell",
-            Self::Duplicate => "copy clone duplicate frame exposure independent cel",
+            Self::Duplicate => "duplicate frame exposure independent cel",
+            Self::CopyDrawing => "copy artwork from frame to clipboard",
+            Self::PasteDrawing => "paste independent drawing into current cell",
+            Self::CloneDrawing => "clone linked shared drawing exposure frame",
             Self::Extend => "hold extend increase exposure length one frame",
             Self::InsertInbetween => "insert new frame all layers hold timing scene",
             Self::DeleteLayer => "remove layer timeline",
         }
     }
 
-    fn enabled(self, s: &Session) -> bool {
+    pub(crate) fn enabled(self, s: &Session) -> bool {
         match self {
             Self::SetKey => !s.doc.layers.is_empty() || s.selected_node.is_some(),
             Self::DeleteKey => super::node::selected_has_key(s),
             Self::InsertNew => s.can_insert_exposure(),
-            Self::Duplicate | Self::Extend => {
+            Self::CopyDrawing => s.doc.exposed(s.selected, s.frame).is_some(),
+            Self::PasteDrawing => s.can_paste_drawing(),
+            Self::Duplicate | Self::CloneDrawing | Self::Extend => {
                 s.can_insert_exposure() && s.doc.exposed(s.selected, s.frame).is_some()
             }
             Self::InsertInbetween => s.length() < 100_000,
@@ -144,19 +173,22 @@ impl TimelineAction {
             Self::DeleteKey => super::node::set_selected_key(s, true),
             Self::InsertNew => s.insert_exposure(InsertExposure::New),
             Self::Duplicate => s.insert_exposure(InsertExposure::Duplicate),
+            Self::CopyDrawing => s.copy_exposed_drawing(),
+            Self::PasteDrawing => s.paste_drawing(),
+            Self::CloneDrawing => s.insert_exposure(InsertExposure::Clone),
             Self::Extend => s.change_exposure(1),
             Self::InsertInbetween => s.insert_inbetweens(1),
             Self::DeleteLayer => s.delete_layer(s.selected),
         }
     }
 
-    pub fn menu(self, ui: &mut egui::Ui, s: &mut Session) {
-        let button = egui::Button::new(self.label());
-        let button = if self == Self::SetKey {
-            button.shortcut_text("K in Timeline")
+    pub fn menu(self, ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
+        let action = if self == Self::Extend {
+            Action::IncreaseExposure
         } else {
-            button
+            Action::Timeline(self)
         };
+        let button = egui::Button::new(self.label()).shortcut_text(keymap::label(profile, action));
         if ui.add_enabled(self.enabled(s), button).clicked() {
             self.run(s);
             ui.close();
@@ -164,13 +196,27 @@ impl TimelineAction {
     }
 }
 
-fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
+fn drawing_clipboard_menu(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
+    for action in [
+        TimelineAction::CopyDrawing,
+        TimelineAction::PasteDrawing,
+        TimelineAction::Duplicate,
+        TimelineAction::CloneDrawing,
+    ] {
+        action.menu(ui, s, profile);
+    }
+}
+
+fn frame_menu(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
     for action in [
         TimelineAction::InsertNew,
         TimelineAction::Duplicate,
+        TimelineAction::CloneDrawing,
+        TimelineAction::CopyDrawing,
+        TimelineAction::PasteDrawing,
         TimelineAction::Extend,
     ] {
-        action.menu(ui, s);
+        action.menu(ui, s, profile);
     }
     ui.menu_button("Reuse Existing Drawing", |ui| {
         let drawings = s.element_drawings(s.selected);
@@ -192,8 +238,8 @@ fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
             });
     });
     ui.separator();
-    TimelineAction::InsertInbetween.menu(ui, s);
-    TimelineAction::DeleteKey.menu(ui, s);
+    TimelineAction::InsertInbetween.menu(ui, s, profile);
+    TimelineAction::DeleteKey.menu(ui, s, profile);
     ui.separator();
     if ui
         .button("Clear exposure")
@@ -242,24 +288,17 @@ pub fn header(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
                         .prefix("Frame "),
                 );
                 let keyed = super::node::selected_has_key(s);
-                let (icon, action, tooltip) = if keyed {
-                    (
-                        Icon::RemoveKeyframe,
-                        TimelineAction::DeleteKey,
-                        "Remove keyframe",
-                    )
+                let (icon, action) = if keyed {
+                    (Icon::RemoveKeyframe, TimelineAction::DeleteKey)
                 } else {
-                    (
-                        Icon::AddKeyframe,
-                        TimelineAction::SetKey,
-                        "Set keyframe (K in Timeline)",
-                    )
+                    (Icon::AddKeyframe, TimelineAction::SetKey)
                 };
-                if icons::button(ui, icon, keyed, action.enabled(s), tooltip).clicked() {
+                let tooltip = keymap::tooltip(profile, Action::Timeline(action));
+                if icons::button(ui, icon, keyed, action.enabled(s), &tooltip).clicked() {
                     action.run(s);
                 }
                 ui.menu_button("Frames", |ui| {
-                    frame_menu(ui, s);
+                    frame_menu(ui, s, profile);
                     ui.separator();
                     ui.menu_button("Timing options", |ui| timing_options(ui, s));
                 });
@@ -911,12 +950,12 @@ pub fn timeline(
 
     let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, scroll_viewport| {
             let size = Vec2::new(
                 width.max(ui.available_width()),
                 (RULER + track_count as f32 * rh + 8.0).max(ui.available_height()),
             );
-            let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+            let (resp, viewport_painter) = ui.allocate_painter(size, Sense::click_and_drag());
             // The middle button scrolls the view and never edits it.
             let resp = middle_scrolls(ui, resp);
             let o = resp.rect.min;
@@ -937,8 +976,20 @@ pub fn timeline(
                 ui.ctx().request_repaint();
             }
             // The ruler stays at the top of the view while the rows
-            // scroll under it.
-            let ruler_y = ui.clip_rect().top().max(o.y);
+            // scroll under it, and shares their horizontal scroll origin.
+            let viewport = ui.clip_rect();
+            let ruler_top = o.y + scroll_viewport.top().max(0.0);
+            let ruler_bottom = ruler_top + RULER;
+            let ruler = viewport_painter.with_clip_rect(Rect::from_min_max(
+                Pos2::new(viewport.left(), ruler_top),
+                Pos2::new(viewport.right(), ruler_bottom),
+            ));
+            let track_clip = Rect::from_min_max(
+                Pos2::new(viewport.left(), ruler_bottom.min(viewport.bottom())),
+                viewport.max,
+            );
+            ui.set_clip_rect(track_clip);
+            let painter = viewport_painter.with_clip_rect(track_clip);
 
             // Beats follow the frame rate: the second, its half and a
             // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
@@ -1264,12 +1315,12 @@ pub fn timeline(
                 .input(|i| i.pointer.press_origin())
                 .filter(|_| resp.is_pointer_button_down_on() || resp.drag_stopped());
             let on_block = pressed_on
-                .filter(|p| p.y >= ruler_y + RULER)
+                .filter(|p| p.y >= ruler_bottom)
                 .and_then(hit)
                 .is_some();
             if resp.drag_started() {
                 if let Some((p, (id, part))) = pressed_on
-                    .filter(|p| p.y >= ruler_y + RULER)
+                    .filter(|p| p.y >= ruler_bottom)
                     .and_then(|p| hit(p).map(|h| (p, h)))
                 {
                     if let Some(original) = s.doc.sounds.iter().find(|t| t.id == id).cloned() {
@@ -1352,15 +1403,7 @@ pub fn timeline(
                     ui.ctx().request_repaint();
                 }
             }
-            // The ruler, over the rows that have scrolled under it.
-            painter.rect_filled(
-                Rect::from_min_size(
-                    Pos2::new(ui.clip_rect().left(), ruler_y),
-                    Vec2::new(ui.clip_rect().width(), RULER),
-                ),
-                0.0,
-                theme::BG_PANEL,
-            );
+            // The ruler's ticks and numbers.
             for f in 1..=len {
                 let x = frame_x(f) + cw / 2.0;
                 let level = beat(f);
@@ -1373,16 +1416,16 @@ pub fn timeline(
                     1 => 18.0,
                     _ => 15.0,
                 };
-                painter.line_segment(
+                ruler.line_segment(
                     [
-                        Pos2::new(x, ruler_y + top),
-                        Pos2::new(x, ruler_y + RULER - 2.0),
+                        Pos2::new(x, ruler_top + top),
+                        Pos2::new(x, ruler_bottom - 2.0),
                     ],
                     Stroke::new(1.0, theme::LINE_STRONG),
                 );
                 if f == 1 || f % label_step == 0 {
-                    painter.text(
-                        Pos2::new(x, ruler_y + 4.0),
+                    ruler.text(
+                        Pos2::new(x, ruler_top + 4.0),
                         Align2::CENTER_TOP,
                         f.to_string(),
                         theme::numbers(),
@@ -1398,10 +1441,10 @@ pub fn timeline(
             if let Some((a, b)) = s.play_range {
                 let (a, b) = (a.clamp(1, len), b.clamp(1, len));
                 let band = Rect::from_min_max(
-                    Pos2::new(frame_x(a.min(b)), ruler_y + 2.0),
-                    Pos2::new(frame_x(a.max(b)) + cw, ruler_y + RULER - 2.0),
+                    Pos2::new(frame_x(a.min(b)), ruler_top + 2.0),
+                    Pos2::new(frame_x(a.max(b)) + cw, ruler_bottom - 2.0),
                 );
-                painter.rect_filled(
+                ruler.rect_filled(
                     band,
                     theme::RADIUS_CONTROL,
                     theme::ACCENT_TIME.gamma_multiply(0.16),
@@ -1451,17 +1494,27 @@ pub fn timeline(
                 + cw / 2.0;
             painter.line_segment(
                 [
-                    Pos2::new(cx, ruler_y + RULER - 4.0),
-                    Pos2::new(cx, rows_bottom),
+                    Pos2::new(cx, ruler_bottom),
+                    Pos2::new(cx, rows_bottom.max(ruler_bottom)),
                 ],
                 Stroke::new(1.5, theme::ACCENT_TIME),
             );
-            frame_tag(&painter, Pos2::new(cx, ruler_y + RULER - 12.0), s.frame);
+            ruler.line_segment(
+                [
+                    Pos2::new(cx, ruler_bottom - 4.0),
+                    Pos2::new(cx, ruler_bottom),
+                ],
+                Stroke::new(1.5, theme::ACCENT_TIME),
+            );
+            frame_tag(&ruler, Pos2::new(cx, ruler_bottom - 12.0), s.frame);
 
             let slot_at = |p: Pos2| -> Option<Slot> {
+                if p.y < ruler_bottom {
+                    return None;
+                }
                 let r = ((p.y - o.y - RULER) / rh).floor();
                 // Not a row where the ruler covers it.
-                (r >= 0.0 && p.y >= ruler_y + RULER)
+                (r >= 0.0 && p.y >= ruler_bottom)
                     .then(|| layout.get(r as usize).map(|&(row, _)| row))
                     .flatten()
             };
@@ -1551,6 +1604,9 @@ pub fn timeline(
                 match resp.interact_pointer_pos().and_then(slot_at) {
                     Some(Slot::Layer(r)) => {
                         t.menu_row = Some(r);
+                        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.x >= o.x + HEAD) {
+                            s.frame = (((p.x - o.x - HEAD) / cw) as u32 + 1).clamp(1, len);
+                        }
                         t.menu_node = Some(s.doc.layers[r].node);
                     }
                     Some(Slot::Node(j)) => t.menu_node = Some(node_tracks[j].0),
@@ -1569,6 +1625,8 @@ pub fn timeline(
                         add_node_menu(ui, s, node);
                     }
                     if let Some(row) = t.menu_row {
+                        ui.separator();
+                        drawing_clipboard_menu(ui, s, profile);
                         ui.separator();
                         layer_menu(ui, s, t, row);
                     } else if let Some(node) = t.menu_node {
@@ -1616,6 +1674,7 @@ pub fn timeline(
                     ),
                 );
             }
+            ui.set_clip_rect(viewport);
         });
     // More tracks below (or above): a soft fade at that edge says so.
     let view = out.inner_rect;
@@ -1787,11 +1846,18 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
             if resp.secondary_clicked() {
                 t.menu_row = resp.interact_pointer_pos().and_then(col_at);
                 if let Some(c) = t.menu_row {
+                    if let Some(p) = resp.interact_pointer_pos().filter(|p| p.y >= o.y + HEAD) {
+                        s.frame = (((p.y - o.y - HEAD) / rh) as u32 + 1).clamp(1, len);
+                    }
                     s.select_graph_node(s.doc.layers[c].node, false);
                 }
             }
             if let Some(c) = t.menu_row {
-                resp.context_menu(|ui| layer_menu(ui, s, t, c));
+                resp.context_menu(|ui| {
+                    drawing_clipboard_menu(ui, s, profile);
+                    ui.separator();
+                    layer_menu(ui, s, t, c);
+                });
             }
             if let Some((c, _)) = t.renaming {
                 let x = o.x + NUM + c as f32 * CW;
@@ -1926,6 +1992,56 @@ mod hierarchy_tests {
         // Below the ruler, a click picks the row there.
         click(&mut harness, Pos2::new(400.0, top + 28.0 + 30.0));
         assert_ne!(harness.state().0.selected, selected);
+    }
+
+    #[test]
+    fn timeline_ruler_stays_above_scrolling_tracks() {
+        let mut session = Session::new_scene();
+        for _ in 0..12 {
+            session.add_layer();
+        }
+        let track = session.layer_name(3).to_owned();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (session, TimingState::default()),
+            );
+        let text_y = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos.y),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing timeline label {label}"))
+        };
+        harness.run_steps(3);
+        let ruler_before = text_y(harness.output(), "6");
+        let track_before = text_y(harness.output(), &track);
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(Pos2::new(320.0, 220.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -56.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+                source: egui::MouseWheelSource::Unknown,
+            },
+        ]);
+        harness.run_steps(12);
+        assert!((text_y(harness.output(), "6") - ruler_before).abs() < 0.1);
+        assert!(text_y(harness.output(), &track) < track_before - 10.0);
     }
 
     #[test]

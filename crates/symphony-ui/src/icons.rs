@@ -11,6 +11,7 @@ use crate::theme;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Select,
+    Cutter,
     Transform,
     Brush,
     /// Vector lines (the Brush tool in vector mode).
@@ -53,11 +54,14 @@ pub enum Icon {
     ArtLine,
     ArtColour,
     ArtUnderlay,
+    /// The Sketch art layer: a loose scribble.
+    ArtSketch,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 40] = [
+    pub const ALL: [Icon; 42] = [
         Icon::Select,
+        Icon::Cutter,
         Icon::Transform,
         Icon::Brush,
         Icon::Pen,
@@ -97,6 +101,7 @@ impl Icon {
         Icon::ArtLine,
         Icon::ArtColour,
         Icon::ArtUnderlay,
+        Icon::ArtSketch,
     ];
 }
 
@@ -187,6 +192,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                 (12.5, 9.2),
             ],
         ),
+        Icon::Cutter => {
+            g.closed(p, &[(3.0, 10.5), (10.5, 3.0), (13.0, 5.5), (5.5, 13.0)]);
+            g.line(p, &[(8.5, 5.0), (11.0, 7.5)]);
+            g.line(p, &[(10.5, 3.0), (12.0, 1.5), (14.5, 4.0), (13.0, 5.5)]);
+        }
         Icon::Transform => {
             g.closed(p, &[(4.0, 4.0), (12.0, 4.0), (12.0, 12.0), (4.0, 12.0)]);
             for (x, y) in [(4.0, 4.0), (12.0, 4.0), (12.0, 12.0), (4.0, 12.0)] {
@@ -480,6 +490,20 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         }
         // Line Art: an outline. Colour Art: the paint inside it.
         Icon::ArtLine => g.circle(p, 8.0, 8.0, 5.0),
+        Icon::ArtSketch => {
+            // A loose looping scribble.
+            g.line(
+                p,
+                &[
+                    (2.5, 11.5),
+                    (5.0, 5.5),
+                    (7.0, 10.5),
+                    (9.0, 4.5),
+                    (11.0, 10.0),
+                    (13.5, 6.0),
+                ],
+            );
+        }
         Icon::ArtColour => {
             g.dot(p, 8.0, 8.0, 5.0);
         }

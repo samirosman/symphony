@@ -26,7 +26,7 @@ const ROTATE_ZONE: f32 = 24.0;
 /// Pick tolerance in screen points.
 const PICK: f32 = 5.0;
 const LASSO_THRESHOLD: f32 = 8.0;
-const CLOSE_RADIUS: f32 = 9.0;
+const CLOSE_RADIUS: f32 = 16.0;
 
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -229,9 +229,18 @@ fn drag_transform(d: &Drag, now: Pos2, uniform: bool) -> Option<Affine> {
     })
 }
 
-fn draw_box(painter: &egui::Painter, lo: [f32; 2], hi: [f32; 2], m: Affine) {
+fn draw_box(
+    painter: &egui::Painter,
+    lo: [f32; 2],
+    hi: [f32; 2],
+    m: Affine,
+    cut: Option<&[[f32; 2]]>,
+) {
     let pts = corners(lo, hi).map(|c| pos(m.apply(c.0, c.1)));
-    let outline = vec![pts[0], pts[1], pts[2], pts[3]];
+    let outline = cut.map_or_else(
+        || pts.to_vec(),
+        |points| points.iter().map(|&[x, y]| pos(m.apply(x, y))).collect(),
+    );
     painter.add(egui::Shape::closed_line(
         outline,
         EStroke::new(1.0, theme::ACCENT_SELECT),
@@ -293,6 +302,7 @@ pub fn ui(
         None
     };
     let box_layers = boxed.as_ref().map(|b| b.layers.clone()).unwrap_or_default();
+    let cutter = !transform_tool && s.cutter_mode;
 
     // The box we're working with: drawing-local bounds and local -> screen.
     let target: Option<([f32; 2], [f32; 2], Affine)> = if transform_tool {
@@ -317,6 +327,10 @@ pub fn ui(
         },
         _ => None,
     };
+
+    if cutter {
+        st.hover = Some(Icon::Cutter);
+    }
 
     let drawing = s.selection.drawing;
     let has_polygon = |st: &SelectState| !st.polygon.is_empty() || st.polygon_drag.is_some();
@@ -385,10 +399,11 @@ pub fn ui(
             } else if let Some((kind, lo, hi, m)) = on_box.filter(|(k, ..)| {
                 // A handle always scales or rotates, so Shift can keep the
                 // proportions from the press; elsewhere Shift and Ctrl pick.
-                *k != Kind::Move
-                    || (!shift
-                        && !ctrl
-                        && (s.easy_drag || hit_selection(s, p, view, items, transform_tool)))
+                !cutter
+                    && (*k != Kind::Move
+                        || (!shift
+                            && !ctrl
+                            && (s.easy_drag || hit_selection(s, p, view, items, transform_tool))))
             }) {
                 st.drag = Some(start_drag(kind, lo, hi, m, &box_layers, s));
             } else if transform_tool && layer_at(s, p, view, items).is_some() {
@@ -409,6 +424,7 @@ pub fn ui(
                     transform_click(s, p, view, items, shift, ctrl);
                 }
             } else if !transform_tool
+                && !cutter
                 && !shift
                 && !ctrl
                 && pick(s, p, view, items, false, false).is_some()
@@ -507,7 +523,7 @@ pub fn ui(
             if let Some(at) = st.lasso.first().copied() {
                 if transform_tool {
                     transform_click(s, at, view, items, shift, ctrl);
-                } else if pick(s, at, view, items, shift, ctrl).is_none() {
+                } else if cutter || pick(s, at, view, items, shift, ctrl).is_none() {
                     st.polygon.push(Anchor {
                         at,
                         handle: Vec2::ZERO,
@@ -526,13 +542,18 @@ pub fn ui(
         }
     }
 
-    if response.clicked() {
+    if response.clicked_by(egui::PointerButton::Primary) {
         if let Some(p) = response.interact_pointer_pos() {
             if transform_tool {
                 transform_click(s, p, view, items, shift, ctrl);
-            } else if st.polygon.len() >= 3 && p.distance(st.polygon[0].at) <= CLOSE_RADIUS {
+            } else if st.polygon.len() >= 3
+                && (p.distance(st.polygon[0].at) <= CLOSE_RADIUS || response.double_clicked())
+            {
                 finish_polygon = true;
-            } else if !st.polygon.is_empty() || pick(s, p, view, items, shift, ctrl).is_none() {
+            } else if cutter
+                || !st.polygon.is_empty()
+                || pick(s, p, view, items, shift, ctrl).is_none()
+            {
                 st.polygon.push(Anchor {
                     at: p,
                     handle: Vec2::ZERO,
@@ -571,6 +592,15 @@ pub fn ui(
                 EStroke::new(1.2, theme::ACCENT_SELECT),
             ));
         }
+        if st.polygon.len() >= 3 {
+            let start = st.polygon[0].at;
+            let active = pointer.is_some_and(|p| p.distance(start) <= CLOSE_RADIUS);
+            painter.circle_stroke(
+                start,
+                if active { CLOSE_RADIUS } else { 6.0 },
+                EStroke::new(1.0, theme::ACCENT_SELECT),
+            );
+        }
         for anchor in &st.polygon {
             painter.circle_filled(anchor.at, 3.5, theme::ACCENT_SELECT);
         }
@@ -601,7 +631,42 @@ pub fn ui(
     }
     if let Some((lo, hi, m)) = target {
         let m = st.preview.map_or(m, |l| m.compose(l));
-        draw_box(painter, lo, hi, m);
+        let cut = if transform_tool {
+            None
+        } else {
+            s.selection_cut_outline()
+        };
+        draw_box(painter, lo, hi, m, cut);
+        if s.show_selected_points && !transform_tool {
+            let mark = |x, y| {
+                let at = pos(m.apply(x, y));
+                if painter.clip_rect().contains(at) {
+                    painter.circle(
+                        at,
+                        3.0,
+                        theme::BG_BASE,
+                        EStroke::new(1.0, theme::ACCENT_SELECT),
+                    );
+                }
+            };
+            for stroke in s.selected_strokes() {
+                if stroke.shape.is_empty() {
+                    for point in &stroke.points {
+                        mark(point.x, point.y);
+                    }
+                } else {
+                    for &[x, y] in stroke.shape.iter().flatten() {
+                        mark(x, y);
+                    }
+                }
+            }
+            for fill in s.selected_fills() {
+                for &[x, y] in fill.contours.iter().flatten() {
+                    mark(x, y);
+                }
+            }
+        }
+
         if let (true, [layer]) = (transform_tool, box_layers.as_slice()) {
             if let Some(p) = s.transform_peg(*layer) {
                 // The pivot is amber, because it belongs to animation (DESIGN §4.3).
@@ -1021,6 +1086,20 @@ fn select_area(
     let Some(d) = s.selection.drawing else { return };
     let world = world_of(s, items);
     let m = view.compose(world);
+    if s.cutter_mode {
+        if let Some(local) = m.inverse() {
+            let polygon = poly
+                .iter()
+                .map(|&[x, y]| {
+                    let (x, y) = local.apply(x, y);
+                    [x, y]
+                })
+                .collect();
+            s.cut_area(d, polygon, add, remove);
+            s.cutter_mode = false;
+        }
+        return;
+    }
     let Some(dr) = s.doc.drawings.get(&d) else {
         return;
     };

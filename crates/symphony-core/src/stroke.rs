@@ -86,11 +86,16 @@ pub enum ArtLayer {
     LineArt,
     ColourArt,
     Underlay,
+    /// Rough drawing under everything else (a Symphony addition): shown
+    /// faintly while inking and colouring, left out of exports unless
+    /// asked for.
+    Sketch,
 }
 
 impl ArtLayer {
     /// Back to front.
-    pub const STACK: [ArtLayer; 4] = [
+    pub const STACK: [ArtLayer; 5] = [
+        ArtLayer::Sketch,
         ArtLayer::Underlay,
         ArtLayer::ColourArt,
         ArtLayer::LineArt,

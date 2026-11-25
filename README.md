@@ -8,16 +8,21 @@ node-based compositing.
 
 ![An empty Symphony scene with the Camera view, drawing tools, colour palette, and Timeline](docs/presentation/workspace.png)
 
-## Key features on the development branch
+## Key features
 
-- **Turn brush tips into editable vectors.** Bring in brushes from Photoshop, Krita, Procreate, and more. Trace imported brush tips into editable outlines you can reshape and recolour. Editable strokes retain supported pen input, including pressure, tilt, and barrel rotation.
+- **Turn brush tips into editable vectors.** Bring in brushes from Photoshop, Krita, Procreate, and more. Trace imported brush tips into editable outlines you can reshape and recolour. The presentation compares Bitmap and editable Vector strokes rendered in Symphony with Ramón Miranda’s [Sketch V2 for Krita 5](https://krita-artists.org/t/updated-to-include-v3-sketch-v2-sk2-pleasure-to-draw-including-colored-pencils-and-blenders/59552).
+- **Build and pose smart rigs.** Assign drawings to bones in Node Properties. Lock anchor points to keep hands or feet planted, use Aim targets to guide the pose, and tune spring stiffness or stretch on several bones at once.
+- **Sketch in each drawing.** Rough construction stays on a separate art layer and can be included in an export when needed.
+- **Cut along a lasso.** Split strokes or fills along a freehand or point-by-point boundary and move the selected pieces with the traced outline still visible.
+- **Reuse shortcuts across panels.** In the Symphony preset, `D` picks the Dropper over Drawing and duplicates a drawing over the Timeline. Tab Search shows the shortcuts and lets you remap them.
+- **Clone or duplicate a drawing.** Clone to share future edits, or duplicate to create an independent version. Frame numbers stay visible while the Timeline tracks scroll.
 - **Bend a line as you draw.** Hold Alt while drawing with the Line tool to bend the stroke between its endpoints. Hold Shift to snap the angle in 22.5° steps.
 - **Recolour drawings from one swatch.** Edit a scene palette colour once and every stroke or fill linked to it updates together.
 - **Stage a multiplane camera move.** Set depth on drawing pegs and animate the camera for parallax. Maintain Size keeps the drawing in place while you set its depth.
 - **Position artwork with effects paused.** Switch off Render effects while positioning artwork in Camera. Turn off Bars to see artwork outside the frame while keeping exports framed.
 - **Resume an interrupted export.** Restart the same export to reuse finished frames after a crash or cancellation. This works for movies, GIFs, and image sequences.
 - **Untangle a node graph.** Arrange Nodes lays out the graph by signal flow. Select a node to highlight its cables and ports, or drag it to make nearby cards slide out of the way.
-- **Make room for in-betweens.** Insert frames after the playhead. Current exposures hold through the gap, and later exposures and peg keys shift together.
+- **Make room for in-betweens.** Insert frames after the playhead. Current exposures hold through the gap, and later exposures and animation keys shift together.
 - **Choose a separate movie frame rate.** Animate at your scene’s frame rate and choose a different rate for the movie export. Symphony resamples the timing to keep the shot’s duration.
 - **Turn a drawing into an editable matte.** Switch a drawing to a mask and back while keeping its artwork, exposures, and node connections.
 - **Find actions with Tab Search.** Type what you want to do. Results prioritize the panel you’re working in, from adding an effect to running a timing command.
