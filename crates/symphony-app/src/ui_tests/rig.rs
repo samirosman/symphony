@@ -195,3 +195,12 @@ fn a_locked_first_bone_pins_the_skeleton_base() {
     drag(&mut h, (0.0, 0.0), (50.0, 40.0), Modifiers::NONE);
     assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
 }
+
+#[test]
+fn a_click_on_empty_space_drops_the_bone_selection() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    super::deformers::click(&mut h, 100.0, 0.0);
+    assert_eq!(h.state().s.selected_node, Some(bone));
+    super::deformers::click(&mut h, 100.0, 250.0);
+    assert_ne!(h.state().s.selected_node, Some(bone));
+}

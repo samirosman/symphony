@@ -71,7 +71,7 @@ pub(super) fn drag(
     mouse(h, &super::line(from, to, 8), mods);
 }
 
-fn click(h: &mut Harness<'static, Rig>, x: f32, y: f32) {
+pub(super) fn click(h: &mut Harness<'static, Rig>, x: f32, y: f32) {
     mouse(h, &[(x, y), (x, y)], Modifiers::NONE);
 }
 

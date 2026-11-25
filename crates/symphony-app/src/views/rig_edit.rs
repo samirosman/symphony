@@ -363,12 +363,17 @@ pub fn ui(
         }
     }
     if response.clicked_by(egui::PointerButton::Primary) {
-        if let Some(id) = response.interact_pointer_pos().and_then(|p| {
-            nearest(p, true)
-                .or_else(|| nearest(p, false))
-                .or_else(|| bone_at(p))
-        }) {
-            s.select_graph_node(id, true);
+        let p = response.interact_pointer_pos().unwrap_or_default();
+        let hit = nearest(p, true)
+            .or_else(|| nearest(p, false))
+            .or_else(|| bone_at(p));
+        match hit {
+            Some(id) => s.select_graph_node(id, true),
+            // A click on empty space drops the bone selection (Harmony:
+            // click the negative space to discard the selection), which
+            // brings the drawing tools back.
+            None if nearest_anchor(p).is_none() => s.selected_node = None,
+            None => {}
         }
     }
     if let Some(drag) = state.drag {
