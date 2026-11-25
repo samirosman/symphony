@@ -1,11 +1,12 @@
 //! Function view (Harmony's curve editor): the selected layer's peg
-//! functions as curves over time. Zoom and pan, box select and drag
+//! functions, or the selected bone's angle, as curves over time. Zoom and pan, box select and drag
 //! keys, shape Bézier segments with handles, and add or delete keys. The
 //! selected keys' settings show in Layer Properties (`key_properties`).
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_core::anim::{Continuity, Interp, Value};
-use symphony_core::graph::PegParams;
+use symphony_core::graph::{NodeId, NodeKind, PegParams};
+use symphony_core::history::Edit;
 use symphony_ui::{theme, widgets};
 
 use crate::session::Session;
@@ -153,6 +154,8 @@ enum Drag {
 
 pub struct FunctionState {
     shown: [bool; 5],
+    /// The functions the shown node has (a bone has only its angle).
+    params: &'static [Param],
     /// Selected keys.
     selected: Vec<KeyId>,
     /// The key whose handles show: the last one picked.
@@ -166,6 +169,7 @@ impl Default for FunctionState {
     fn default() -> Self {
         FunctionState {
             shown: [true; 5],
+            params: &Param::ALL,
             selected: Vec::new(),
             active: None,
             drag: None,
@@ -180,14 +184,73 @@ const HANDLE_R: f32 = 3.5;
 /// The frame scale above the graph, where the Timeline has its ruler.
 const SCALE_H: f32 = 18.0;
 
-pub fn ui(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
+/// Whose functions the view shows: the selected bone's, or else the
+/// selected layer's peg.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Source {
+    Layer(usize),
+    Bone(NodeId),
+}
+
+impl Source {
+    fn params(self) -> &'static [Param] {
+        match self {
+            Source::Layer(_) => &Param::ALL,
+            Source::Bone(_) => &[Param::Rotation],
+        }
+    }
+}
+
+/// The functions to show, as peg values: a bone's angle goes in
+/// `rotation`, and the rest stay unused.
+fn source(s: &Session) -> Option<(Source, PegParams)> {
+    if let Some((id, bone)) = s
+        .selected_node
+        .and_then(|id| Some((id, s.doc.graph.bone(id)?)))
+    {
+        let values = PegParams {
+            rotation: bone.rotation.clone(),
+            ..PegParams::default()
+        };
+        return Some((Source::Bone(id), values));
+    }
     let layer = s.selected;
-    let Some(peg) = s.doc.peg(layer).cloned() else {
+    Some((Source::Layer(layer), s.doc.peg(layer)?.clone()))
+}
+
+/// Write edited functions back to where they came from.
+fn store(s: &mut Session, source: Source, values: PegParams) {
+    match source {
+        Source::Layer(layer) => s.set_peg(layer, values),
+        Source::Bone(id) => {
+            let Some(before) = s.doc.graph.node(id).cloned() else {
+                return;
+            };
+            let mut after = before.clone();
+            let NodeKind::Bone(bone) = &mut after.kind else {
+                return;
+            };
+            bone.rotation = values.rotation;
+            if after != before {
+                s.history.apply_merged(
+                    &mut s.doc,
+                    "Animate bone",
+                    &format!("bone-{}", id.0),
+                    Edit::SetNodeProperties { id, before, after },
+                );
+            }
+        }
+    }
+}
+
+pub fn ui(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
+    let Some((source, peg)) = source(s) else {
         ui.centered_and_justified(|ui| {
             ui.label("Select a layer to see its functions.");
         });
         return;
     };
+    st.params = source.params();
     forget_missing_keys(st, &peg);
     toolbar(ui, s, st, &peg);
     ui.separator();
@@ -252,8 +315,7 @@ fn move_keys(start: &PegParams, keys: &[KeyId], df: i64, dv: f32) -> Option<PegP
 /// The keys' info and segment settings, for the Layer Properties panel.
 /// Shows nothing while no key is selected in the Function view.
 pub fn key_properties(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
-    let layer = s.selected;
-    let Some(peg) = s.doc.peg(layer).cloned() else {
+    let Some((layer, peg)) = source(s) else {
         return;
     };
     forget_missing_keys(st, &peg);
@@ -327,7 +389,7 @@ pub fn key_properties(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState
                                 km.continuity = cont;
                             }
                         }
-                        s.set_peg(layer, p);
+                        store(s, layer, p);
                         s.end_gesture();
                     }
                     let Some((param, f)) = one else { return };
@@ -344,7 +406,7 @@ pub fn key_properties(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState
                         if param.get_mut(&mut p).move_key(f, kf as u32, kv) {
                             st.selected = vec![(param, kf as u32)];
                             st.active = Some((param, kf as u32));
-                            s.set_peg(layer, p);
+                            store(s, layer, p);
                         }
                     }
                     if fr.drag_stopped() || vr.drag_stopped() || fr.lost_focus() || vr.lost_focus()
@@ -356,7 +418,9 @@ pub fn key_properties(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState
 }
 
 fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegParams) {
-    let layer = s.selected;
+    let Some((layer, _)) = source(s) else {
+        return;
+    };
     let frame = s.frame;
     ui.horizontal(|ui| {
         if ui
@@ -371,8 +435,10 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &Peg
             let mut targets: Vec<Param> = st.selected.iter().map(|(q, _)| *q).collect();
             targets.dedup();
             if targets.is_empty() {
-                targets = Param::ALL
-                    .into_iter()
+                targets = st
+                    .params
+                    .iter()
+                    .copied()
                     .filter(|f| st.shown[*f as usize])
                     .collect();
             }
@@ -380,7 +446,7 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &Peg
                 let v = param.get(&p).map_or(param.rest(), |v| v.at(frame));
                 param.get_mut(&mut p).set_key(frame, v);
             }
-            s.set_peg(layer, p);
+            store(s, layer, p);
             s.end_gesture();
         }
         if ui
@@ -392,7 +458,7 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &Peg
             for &(param, f) in &st.selected {
                 param.get_mut(&mut p).remove_key(f);
             }
-            s.set_peg(layer, p);
+            store(s, layer, p);
             s.end_gesture();
             st.selected.clear();
             st.active = None;
@@ -421,7 +487,7 @@ fn function_list(ui: &mut egui::Ui, st: &mut FunctionState, peg: &PegParams) {
         .id_salt("function-list")
         .show(ui, |ui| {
             ui.add_space(4.0);
-            for param in Param::ALL {
+            for &param in st.params {
                 let i = param as usize;
                 let keys = param.get(peg).map_or(0, |v| v.keys().len());
                 ui.horizontal(|ui| {
@@ -553,7 +619,9 @@ fn navigate(
 }
 
 fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegParams) {
-    let layer = s.selected;
+    let Some((layer, _)) = source(s) else {
+        return;
+    };
     let size = ui.available_size().max(Vec2::new(120.0, 80.0));
     let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
     let (resp, pan) = widgets::middle_pan(ui, resp);
@@ -564,8 +632,10 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
         full.max - Vec2::new(14.0, 10.0),
     );
     let len = s.length().max(2) as f32;
-    let shown: Vec<Param> = Param::ALL
-        .into_iter()
+    let shown: Vec<Param> = st
+        .params
+        .iter()
+        .copied()
         .filter(|p| st.shown[*p as usize])
         .collect();
     let mut span = st.view.unwrap_or_else(|| fit(peg, &shown, len));
@@ -660,7 +730,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
                         .active
                         .and_then(|a| keys.iter().position(|k| *k == a))
                         .map(|i| moved(keys[i]));
-                    s.set_peg(layer, p);
+                    store(s, layer, p);
                 }
             }
             Some(Drag::Handle((p, f), grab)) => {
@@ -668,7 +738,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
                 if let Some(k) = p.get_mut(&mut np).key_mut(*f) {
                     drag_handle(k, *grab, &map, pos);
                 }
-                s.set_peg(layer, np);
+                store(s, layer, np);
             }
             Some(Drag::Box(from)) => {
                 let r = Rect::from_two_pos(*from, pos);
@@ -909,7 +979,9 @@ fn add_key_on_nearest_curve(
     if let Some((_, p, value)) = near {
         let mut np = peg.clone();
         p.get_mut(&mut np).set_key(f, value);
-        s.set_peg(s.selected, np);
+        if let Some((source, _)) = source(s) {
+            store(s, source, np);
+        }
         s.end_gesture();
         st.selected = vec![(p, f)];
         st.active = Some((p, f));
@@ -975,6 +1047,33 @@ mod tests {
 
     fn frames(v: &Value) -> Vec<(u32, f32)> {
         v.keys().iter().map(|k| (k.frame, k.value)).collect()
+    }
+
+    /// A selected bone shows its angle, and edits go back to the bone as
+    /// one undo step.
+    #[test]
+    fn a_selected_bone_shows_and_takes_its_angle() {
+        let mut s = Session::new_scene();
+        let bone = s
+            .doc
+            .graph
+            .add("Bone", NodeKind::Bone(symphony_core::rig::Bone::default()));
+        s.selected_node = Some(bone);
+        let (source, mut values) = source(&s).unwrap();
+        assert_eq!(source, Source::Bone(bone));
+        assert_eq!(source.params(), &[Param::Rotation]);
+        values.rotation.set_key(1, 0.0);
+        values.rotation.set_key(12, 45.0);
+        store(&mut s, source, values);
+        let angle = |s: &Session| s.doc.graph.bone(bone).unwrap().rotation.at(12);
+        assert_eq!(angle(&s), 45.0);
+        assert_eq!(source_values(&s).rotation.keys().len(), 2);
+        s.undo();
+        assert_eq!(angle(&s), 0.0);
+    }
+
+    fn source_values(s: &Session) -> PegParams {
+        source(s).unwrap().1
     }
 
     #[test]
