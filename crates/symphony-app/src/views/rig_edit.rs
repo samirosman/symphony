@@ -126,6 +126,18 @@ fn paint_bone(painter: &egui::Painter, start: Pos2, tip: Pos2, ink: egui::Color3
     }
 }
 
+/// The skeleton's base handle. It sits on the first bone, so a locked
+/// first bone pins it, and it shows faded.
+fn paint_base(painter: &egui::Painter, origin: Pos2, locked: bool) {
+    let ink = if locked {
+        theme::ACCENT_SELECT.gamma_multiply(0.4)
+    } else {
+        theme::ACCENT_SELECT
+    };
+    painter.circle_filled(origin, 7.0, theme::BG_BASE);
+    painter.circle_stroke(origin, 5.0, Stroke::new(2.0, ink));
+}
+
 pub fn ui(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -234,13 +246,21 @@ pub fn ui(
         let NodeKind::Skeleton(peg) = &node.kind else {
             return None;
         };
-        let (_, origin, _, _, _) = handles.iter().find(|(_, _, _, connected, _)| !connected)?;
-        Some((*origin, [peg.x.at(s.frame), peg.y.at(s.frame)]))
+        let (first, origin, _, _, _) = handles.iter().find(|(_, _, _, connected, _)| !connected)?;
+        Some((
+            *origin,
+            [peg.x.at(s.frame), peg.y.at(s.frame)],
+            locked(*first),
+        ))
     });
-    if let Some((origin, _)) = skeleton {
-        painter.circle_filled(origin, 7.0, theme::BG_BASE);
-        painter.circle_stroke(origin, 5.0, Stroke::new(2.0, theme::ACCENT_SELECT));
+    if let Some((origin, _, base_locked)) = skeleton {
+        paint_base(painter, origin, base_locked);
     }
+    // A locked first bone keeps the base still: the press falls through
+    // to the bone, which takes no drag either.
+    let skeleton = skeleton
+        .filter(|&(_, _, base_locked)| !base_locked)
+        .map(|(origin, start, _)| (origin, start));
     // Anchors: a pin (Locked) or a ring (Aim) on their targets, tied to
     // the joint they hold.
     let mut anchors: Vec<(NodeId, Pos2)> = Vec::new();

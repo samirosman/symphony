@@ -167,3 +167,15 @@ fn a_locked_bone_takes_no_drag() {
     drag(&mut h, (200.0, 0.0), (0.0, 200.0), Modifiers::NONE);
     assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
 }
+
+#[test]
+fn a_locked_first_bone_pins_the_skeleton_base() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    let graph = &mut h.state_mut().s.doc.graph;
+    if let Some(NodeKind::Bone(b)) = graph.node_mut(bone).map(|n| &mut n.kind) {
+        b.locked = true;
+    }
+    h.run_steps(1);
+    drag(&mut h, (0.0, 0.0), (50.0, 40.0), Modifiers::NONE);
+    assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
+}
