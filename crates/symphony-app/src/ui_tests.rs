@@ -1069,6 +1069,7 @@ fn imported_video_becomes_a_frame_sequence() {
         &codec,
         &movie,
         &ck,
+        None,
         1,
         30,
         320,
@@ -1561,6 +1562,7 @@ fn real_scene_export_cost() {
             scale: 1.0,
             codec: None,
             movie_fps: None,
+            include_sketch: false,
         };
         let start = std::time::Instant::now();
         symphony_render::export(
@@ -1616,6 +1618,7 @@ fn export_after_a_crash() {
         scale: 1.0,
         codec: None,
         movie_fps: None,
+        include_sketch: false,
     };
     let done = symphony_render::export(
         &scene,
@@ -2312,4 +2315,78 @@ fn nodes_cells_and_sounds_can_be_deleted_and_undone() {
     assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len - 1);
     s.undo();
     assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len);
+}
+
+/// The Sketch art layer: drawn on like any other, faint while inking
+/// (full while sketching), left out of renders and exports unless asked
+/// for, and faded as a whole (two overlapping rough lines don't build up
+/// darker where they cross).
+#[test]
+fn sketches_stay_out_of_exports_unless_included() {
+    use symphony_core::stroke::{ArtLayer, Point, Stroke};
+    let mut s = crate::session::Session::new_scene();
+    s.set_art(ArtLayer::Sketch);
+    assert_eq!(s.sketch_opacity(), 1.0, "full while sketching");
+    let line = |s: &mut crate::session::Session, a: (f32, f32), b: (f32, f32)| {
+        let p = |(x, y): (f32, f32)| Point {
+            x,
+            y,
+            pressure: 1.0,
+            pen: Default::default(),
+        };
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: ArtLayer::Sketch,
+            swatch: s.doc.palette.swatches[0].id,
+            min_width: 40.0,
+            max_width: 40.0,
+            points: vec![p(a), p(b)],
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        let layer = s.selected;
+        s.commit_stroke(layer, 1, st);
+    };
+    line(&mut s, (-300.0, 0.0), (300.0, 0.0));
+    line(&mut s, (0.0, -300.0), (0.0, 300.0));
+    s.set_art(ArtLayer::LineArt);
+    assert!(s.sketch_opacity() < 0.5, "faint while inking");
+    let dark = |img: &image::RgbaImage, x: u32, y: u32| img.get_pixel(x, y).0[0];
+    let plain = symphony_render::render_frame(&s.doc, 1, 960, 540).unwrap();
+    assert!(dark(&plain, 480 + 100, 270) > 240, "left out by default");
+    let with = symphony_render::render_frame_with(&s.doc, 1, 960, 540, Some(0.4)).unwrap();
+    let (one, both) = (dark(&with, 480 + 100, 270), dark(&with, 480, 270));
+    assert!(one < 240, "drawn when asked for: {one}");
+    assert!(
+        (one as i32 - both as i32).abs() <= 2,
+        "faded as a whole: {one} on one line, {both} where they cross"
+    );
+    // Export: only with Include Sketch.
+    let dir = std::env::temp_dir().join(format!("symphony-sketch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut job = symphony_render::ExportJob {
+        format: symphony_render::Format::PngSequence,
+        path: dir.join("f.png"),
+        first: 1,
+        last: 1,
+        scale: 0.5,
+        codec: None,
+        movie_fps: None,
+        include_sketch: false,
+    };
+    let go = std::sync::atomic::AtomicBool::new(false);
+    symphony_render::export(&s.doc, &job, &go, &|_, _| {}).unwrap();
+    let out = image::open(dir.join("f_0001.png")).unwrap().to_rgba8();
+    assert!(dark(&out, 480 + 50, 270) > 240);
+    job.include_sketch = true;
+    symphony_render::export(&s.doc, &job, &go, &|_, _| {}).unwrap();
+    let out = image::open(dir.join("f_0001.png")).unwrap().to_rgba8();
+    assert!(
+        dark(&out, 480 + 50, 270) < 128,
+        "included: {}",
+        dark(&out, 530, 270)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

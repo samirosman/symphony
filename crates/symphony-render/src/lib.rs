@@ -22,7 +22,19 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Transform};
 /// Render `frame` at `width` x `height` pixels (the scene's aspect is
 /// kept; the stage fills the image). Background is white paper.
 pub fn render_frame(scene: &Scene, frame: u32, width: u32, height: u32) -> Option<RgbaImage> {
-    let mut pixmap = render_display(scene, frame, width, height, true, None)?;
+    render_frame_with(scene, frame, width, height, None)
+}
+
+/// [`render_frame`], with the Sketch art layer drawn at `sketch` opacity
+/// (None leaves sketches out, as exports do by default).
+pub fn render_frame_with(
+    scene: &Scene,
+    frame: u32,
+    width: u32,
+    height: u32,
+    sketch: Option<f32>,
+) -> Option<RgbaImage> {
+    let mut pixmap = render_display(scene, frame, width, height, true, None, sketch)?;
     paint_bars(&mut pixmap, &scene.settings);
     RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
 }
@@ -87,7 +99,7 @@ pub fn render_drawing_thumbnail(
         matte_pass: false,
         warp: None,
     };
-    paint_drawing(&mut pix, scene, frame, view, item, None);
+    paint_drawing(&mut pix, scene, frame, view, item, None, None);
     Some(pix)
 }
 
@@ -99,7 +111,19 @@ pub fn render_camera(
     height: u32,
     preview: Option<StrokePreview<'_>>,
 ) -> Option<Pixmap> {
-    let mut pix = render_display(scene, frame, width, height, false, preview)?;
+    render_camera_with(scene, frame, width, height, preview, None)
+}
+
+/// [`render_camera`], with the Sketch art layer at `sketch` opacity.
+pub fn render_camera_with(
+    scene: &Scene,
+    frame: u32,
+    width: u32,
+    height: u32,
+    preview: Option<StrokePreview<'_>>,
+    sketch: Option<f32>,
+) -> Option<Pixmap> {
+    let mut pix = render_display(scene, frame, width, height, false, preview, sketch)?;
     paint_bars(&mut pix, &scene.settings);
     Some(pix)
 }
@@ -147,6 +171,7 @@ fn render_display(
     height: u32,
     white_paper: bool,
     preview: Option<StrokePreview<'_>>,
+    sketch: Option<f32>,
 ) -> Option<Pixmap> {
     let (width, height) = (width.max(1), height.max(1));
     let mut paper = Pixmap::new(width, height)?;
@@ -166,7 +191,7 @@ fn render_display(
         let current = layers.last_mut()?;
         match command {
             RenderCommand::Drawing(item) => {
-                paint_drawing(current, scene, frame, view, item, preview)
+                paint_drawing(current, scene, frame, view, item, preview, sketch)
             }
             RenderCommand::Gradient(gradient) => effects::gradient(current, gradient),
             RenderCommand::BeginEffect => {
@@ -278,6 +303,7 @@ fn paint_drawing(
     view: Affine,
     item: RenderItem,
     preview: Option<StrokePreview<'_>>,
+    sketch: Option<f32>,
 ) {
     let Some(d) = scene.drawings.get(&item.drawing) else {
         return;
@@ -307,6 +333,24 @@ fn paint_drawing(
     // Art layers back to front; within each, paint under ink.
     let moving = preview.filter(|p| p.drawing == item.drawing);
     for art in ArtLayer::STACK {
+        // The sketch: left out, or drawn on its own and laid down faded
+        // as a whole (overlapping rough lines don't build up darker).
+        let mut sketch_layer: Option<Pixmap> = None;
+        if art == ArtLayer::Sketch {
+            let has_sketch =
+                d.strokes.iter().any(|st| st.art == art) || d.fills.iter().any(|f| f.art == art);
+            if sketch.is_none() || !has_sketch {
+                continue;
+            }
+            sketch_layer = Pixmap::new(pix.width(), pix.height());
+            if sketch_layer.is_none() {
+                continue;
+            }
+        }
+        let target: &mut Pixmap = match sketch_layer.as_mut() {
+            Some(layer) => layer,
+            None => &mut *pix,
+        };
         for fill in d.fills.iter().filter(|f| f.art == art) {
             // Selected zones follow the Select tool's live preview.
             let m = match moving {
@@ -330,7 +374,7 @@ fn paint_drawing(
             let mut paint = Paint::default();
             paint.set_color_rgba8(r, g, b, alpha);
             paint.anti_alias = true;
-            pix.fill_path(
+            target.fill_path(
                 &path,
                 &paint,
                 FillRule::EvenOdd,
@@ -339,13 +383,20 @@ fn paint_drawing(
             );
         }
         paint_strokes(
-            pix,
+            target,
             scene,
             d,
             art,
             m,
             preview.filter(|p| p.drawing == item.drawing),
         );
+        if let Some(layer) = sketch_layer {
+            let paint = PixmapPaint {
+                opacity: sketch.unwrap_or(1.0).clamp(0.0, 1.0),
+                ..Default::default()
+            };
+            pix.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+        }
     }
 }
 
@@ -524,6 +575,8 @@ pub struct ExportJob {
     pub codec: Option<PathBuf>,
     /// MP4 rate override. Resamples the scene in time when set.
     pub movie_fps: Option<f32>,
+    /// Draw the Sketch art layer too (left out by default).
+    pub include_sketch: bool,
 }
 
 /// How an export went.
@@ -552,9 +605,13 @@ pub fn export(
     );
     let (first, last) = (job.first.max(1), job.last.max(job.first.max(1)));
     let total = last - first + 1;
+    // Sketches show at full strength when included (frames made with and
+    // without them are told apart when resuming).
+    let sketch = job.include_sketch.then_some(1.0);
+    let sketch_tag = if job.include_sketch { " | sketch" } else { "" };
     match job.format {
         Format::PngSequence => {
-            let key = checkpoint::fingerprint(scene, w, h);
+            let key = checkpoint::fingerprint(scene, w, h) + sketch_tag;
             let ck = checkpoint::Checkpoint::sequence(&job.path, &key, w, h)?;
             let frames: Vec<u32> = (first..=last).collect();
             // The frames are the output: they're written (and compressed)
@@ -565,6 +622,7 @@ pub fn export(
                 &frames,
                 w,
                 h,
+                sketch,
                 &ck,
                 cancel,
                 |_| (),
@@ -582,7 +640,7 @@ pub fn export(
             )?;
             // 4:2:0 video needs even sizes.
             let (w, h) = ((w & !1).max(2), (h & !1).max(2));
-            let key = checkpoint::fingerprint(scene, w, h);
+            let key = checkpoint::fingerprint(scene, w, h) + sketch_tag;
             let ck = checkpoint::Checkpoint::folder(&job.path, &key, w, h)?;
             let part = checkpoint::with_suffix(&job.path, ".part");
             let reused = movie::export_mp4(
@@ -590,6 +648,7 @@ pub fn export(
                 codec,
                 &part,
                 &ck,
+                sketch,
                 first,
                 last,
                 w,
@@ -607,7 +666,7 @@ pub fn export(
                 u16::try_from(w).map_err(|_| "GIFs can be at most 65535 pixels wide.")?,
                 u16::try_from(h).map_err(|_| "GIFs can be at most 65535 pixels tall.")?,
             );
-            let key = checkpoint::fingerprint(scene, w, h);
+            let key = checkpoint::fingerprint(scene, w, h) + sketch_tag;
             let ck = checkpoint::Checkpoint::folder(&job.path, &key, w, h)?;
             let part = checkpoint::with_suffix(&job.path, ".part");
             let file = std::fs::File::create(&part)
@@ -628,12 +687,22 @@ pub fn export(
                 frame.make_lzw_pre_encoded();
                 frame
             };
-            let reused = in_order(scene, &frames, w, h, &ck, cancel, prepare, |i, _, frame| {
-                enc.write_lzw_pre_encoded_frame(&frame)
-                    .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
-                progress(i as u32 + 1, total);
-                Ok(())
-            })?;
+            let reused = in_order(
+                scene,
+                &frames,
+                w,
+                h,
+                sketch,
+                &ck,
+                cancel,
+                prepare,
+                |i, _, frame| {
+                    enc.write_lzw_pre_encoded_frame(&frame)
+                        .map_err(|e| format!("Couldn't write the GIF ({e})."))?;
+                    progress(i as u32 + 1, total);
+                    Ok(())
+                },
+            )?;
             let unfinished = |e: String| format!("Couldn't finish the GIF ({e}).");
             let file: std::fs::File = enc
                 .into_inner()
@@ -684,6 +753,7 @@ pub(crate) fn in_order<T: Send>(
     frames: &[u32],
     w: u32,
     h: u32,
+    sketch: Option<f32>,
     ck: &checkpoint::Checkpoint,
     cancel: &AtomicBool,
     prepare: impl Fn(RgbaImage) -> T + Sync,
@@ -701,7 +771,7 @@ pub(crate) fn in_order<T: Send>(
             kept.fetch_add(1, Ordering::Relaxed);
             return Ok(img);
         }
-        let img = render_frame(scene, f, w, h).ok_or("Couldn't render a frame.")?;
+        let img = render_frame_with(scene, f, w, h, sketch).ok_or("Couldn't render a frame.")?;
         ck.save(f, &img)?;
         kept.fetch_add(1, Ordering::Relaxed);
         Ok(img)
@@ -1152,6 +1222,7 @@ mod tests {
             scale: 0.5,
             codec: None,
             movie_fps: None,
+            include_sketch: false,
         };
         export(&s, &gif, &cancel, &|_, _| {}).unwrap();
         assert!(std::fs::metadata(dir.join("a.gif")).unwrap().len() > 0);
@@ -1163,6 +1234,7 @@ mod tests {
             scale: 1.0,
             codec: None,
             movie_fps: None,
+            include_sketch: false,
         };
         export(&s, &png, &cancel, &|_, _| {}).unwrap();
         assert!(dir.join("shot_0002.png").is_file() && dir.join("shot_0003.png").is_file());
@@ -1177,6 +1249,7 @@ mod tests {
                 scale: 1.0,
                 codec: Some(codec.into()),
                 movie_fps: Some(48.0),
+                include_sketch: false,
             };
             export(&s, &mp4, &cancel, &|_, _| {}).unwrap();
             let bytes = std::fs::read(dir.join("m.mp4")).unwrap();
@@ -1229,6 +1302,7 @@ mod tests {
                 scale: 0.5,
                 codec: None,
                 movie_fps: None,
+                include_sketch: false,
             };
             let cancel = AtomicBool::new(false);
             let stop = |_: u32, _: u32| cancel.store(true, Ordering::SeqCst);
@@ -1263,6 +1337,7 @@ mod tests {
             scale: 0.5,
             codec: None,
             movie_fps: None,
+            include_sketch: false,
         };
         let cancel = AtomicBool::new(false);
         let _ = export(&s, &png, &cancel, &|_, _| {

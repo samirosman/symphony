@@ -34,6 +34,8 @@ pub struct ExportDialog {
     last: u32,
     scale: f32,
     movie_fps: Option<f32>,
+    /// Draw the Sketch art layer too (off by default).
+    include_sketch: bool,
     running: Option<Running>,
     /// The output and how many frames came from an unfinished export.
     result: Option<Result<(PathBuf, u32), String>>,
@@ -51,6 +53,7 @@ impl Default for ExportDialog {
             last: 1,
             scale: 1.0,
             movie_fps: None,
+            include_sketch: false,
             running: None,
             export_when_ready: false,
             result: None,
@@ -132,6 +135,7 @@ impl ExportDialog {
             scale: self.scale,
             codec,
             movie_fps: self.movie_fps,
+            include_sketch: self.include_sketch,
         };
         let scene = s.doc.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -260,6 +264,8 @@ impl ExportDialog {
                                 ui.selectable_value(&mut self.scale, k, scale_label(k, w, h));
                             }
                         });
+                    widgets::checkbox(ui, &mut self.include_sketch, "Include Sketch")
+                        .on_hover_text("Also draw the Sketch art layer (it's left out by default).");
                 });
                 ui.add_space(10.0);
                 if let Some(r) = &self.running {

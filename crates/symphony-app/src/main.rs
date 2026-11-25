@@ -2780,6 +2780,7 @@ impl SymphonyApp {
             arts.push((ArtLayer::Overlay, "Overlay Art"));
             arts.push((ArtLayer::Underlay, "Underlay Art"));
         }
+        arts.push((ArtLayer::Sketch, "Sketch"));
         for (art, name) in arts {
             out.push(
                 Entry::new(

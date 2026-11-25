@@ -65,6 +65,7 @@ pub fn export_mp4(
     codec: &Path,
     out: &Path,
     ck: &crate::checkpoint::Checkpoint,
+    sketch: Option<f32>,
     first: u32,
     last: u32,
     w: u32,
@@ -119,70 +120,81 @@ pub fn export_mp4(
     let to_yuv = |img: image::RgbaImage| {
         YUVBuffer::from_rgb_source(RgbaSliceU8::new(img.as_raw(), (w as usize, h as usize)))
     };
-    let reused = crate::in_order(scene, &frames, w, h, ck, cancel, to_yuv, |i, f, yuv| {
-        let i = i as u32;
-        let stream = encoder
-            .encode(&yuv)
-            .map_err(|e| format!("Couldn't encode frame {f} ({e})."))?
-            .to_vec();
+    let reused = crate::in_order(
+        scene,
+        &frames,
+        w,
+        h,
+        sketch,
+        ck,
+        cancel,
+        to_yuv,
+        |i, f, yuv| {
+            let i = i as u32;
+            let stream = encoder
+                .encode(&yuv)
+                .map_err(|e| format!("Couldn't encode frame {f} ({e})."))?
+                .to_vec();
 
-        let (mut sps, mut pps, mut sample, mut key) = (None, None, Vec::new(), false);
-        for nal in split_annex_b(&stream) {
-            match nal[0] & 0x1f {
-                NAL_SPS => sps = Some(nal.to_vec()),
-                NAL_PPS => pps = Some(nal.to_vec()),
-                t => {
-                    key |= t == NAL_IDR;
-                    sample.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-                    sample.extend_from_slice(nal);
+            let (mut sps, mut pps, mut sample, mut key) = (None, None, Vec::new(), false);
+            for nal in split_annex_b(&stream) {
+                match nal[0] & 0x1f {
+                    NAL_SPS => sps = Some(nal.to_vec()),
+                    NAL_PPS => pps = Some(nal.to_vec()),
+                    t => {
+                        key |= t == NAL_IDR;
+                        sample.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+                        sample.extend_from_slice(nal);
+                    }
                 }
             }
-        }
-        if writer.is_none() {
-            let (Some(sps), Some(pps)) = (sps, pps) else {
-                return Err("The codec didn't start the video properly.".into());
-            };
-            let config = Mp4Config {
-                major_brand: FourCC::from(*b"isom"),
-                minor_version: 512,
-                compatible_brands: [b"isom", b"iso2", b"avc1", b"mp41"]
-                    .iter()
-                    .map(|b| FourCC::from(**b))
-                    .collect(),
-                timescale: 1000,
-            };
-            let mut wr = Mp4Writer::write_start(file.take().expect("file is used once"), &config)
-                .map_err(|e| format!("Couldn't start the movie file ({e})."))?;
-            wr.add_track(&TrackConfig {
-                track_type: TrackType::Video,
-                timescale,
-                language: "und".into(),
-                media_conf: MediaConfig::AvcConfig(AvcConfig {
-                    width: w as u16,
-                    height: h as u16,
-                    seq_param_set: sps,
-                    pic_param_set: pps,
-                }),
-            })
-            .map_err(|e| format!("Couldn't add the video track ({e})."))?;
-            writer = Some(wr);
-        }
-        if !sample.is_empty() {
-            let s = Mp4Sample {
-                start_time: i as u64 * per_frame as u64,
-                duration: per_frame,
-                rendering_offset: 0,
-                is_sync: key,
-                bytes: sample.into(),
-            };
-            if let Some(wr) = writer.as_mut() {
-                wr.write_sample(1, &s)
-                    .map_err(|e| format!("Couldn't write frame {f} ({e})."))?;
+            if writer.is_none() {
+                let (Some(sps), Some(pps)) = (sps, pps) else {
+                    return Err("The codec didn't start the video properly.".into());
+                };
+                let config = Mp4Config {
+                    major_brand: FourCC::from(*b"isom"),
+                    minor_version: 512,
+                    compatible_brands: [b"isom", b"iso2", b"avc1", b"mp41"]
+                        .iter()
+                        .map(|b| FourCC::from(**b))
+                        .collect(),
+                    timescale: 1000,
+                };
+                let mut wr =
+                    Mp4Writer::write_start(file.take().expect("file is used once"), &config)
+                        .map_err(|e| format!("Couldn't start the movie file ({e})."))?;
+                wr.add_track(&TrackConfig {
+                    track_type: TrackType::Video,
+                    timescale,
+                    language: "und".into(),
+                    media_conf: MediaConfig::AvcConfig(AvcConfig {
+                        width: w as u16,
+                        height: h as u16,
+                        seq_param_set: sps,
+                        pic_param_set: pps,
+                    }),
+                })
+                .map_err(|e| format!("Couldn't add the video track ({e})."))?;
+                writer = Some(wr);
             }
-        }
-        progress(i + 1, total);
-        Ok(())
-    })?;
+            if !sample.is_empty() {
+                let s = Mp4Sample {
+                    start_time: i as u64 * per_frame as u64,
+                    duration: per_frame,
+                    rendering_offset: 0,
+                    is_sync: key,
+                    bytes: sample.into(),
+                };
+                if let Some(wr) = writer.as_mut() {
+                    wr.write_sample(1, &s)
+                        .map_err(|e| format!("Couldn't write frame {f} ({e})."))?;
+                }
+            }
+            progress(i + 1, total);
+            Ok(())
+        },
+    )?;
     if let Some(mut wr) = writer {
         wr.write_end()
             .map_err(|e| format!("Couldn't finish the movie file ({e})."))?;

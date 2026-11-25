@@ -842,13 +842,20 @@ fn art_layer_toolbar(ui: &mut egui::Ui, s: &mut Session, profile: Profile) {
         layers.insert(0, (ArtLayer::Overlay, Icon::ArtOverlay));
         layers.push((ArtLayer::Underlay, Icon::ArtUnderlay));
     }
+    // The Sketch art layer (a Symphony addition): under everything.
+    layers.push((ArtLayer::Sketch, Icon::ArtSketch));
     for (art, icon) in layers {
         let key = match art {
-            ArtLayer::LineArt | ArtLayer::ColourArt => Action::SwitchLineColourArt,
-            _ => Action::SwitchOverlayUnderlay,
+            ArtLayer::LineArt | ArtLayer::ColourArt => Some(Action::SwitchLineColourArt),
+            ArtLayer::Overlay | ArtLayer::Underlay => Some(Action::SwitchOverlayUnderlay),
+            ArtLayer::Sketch => None,
         };
-        let shortcut = keymap::label(profile, key);
-        let tip = if shortcut.is_empty() {
+        let shortcut = key.map(|k| keymap::label(profile, k)).unwrap_or_default();
+        let tip = if art == ArtLayer::Sketch {
+            "Sketch: rough drawing under the other art layers. It shows faintly while you \
+             ink and colour, and is left out of exports unless you include it."
+                .to_owned()
+        } else if shortcut.is_empty() {
             art_name(art).to_owned()
         } else {
             format!("{} ({shortcut} switches)", art_name(art))
@@ -1221,10 +1228,20 @@ pub fn ui(
                 }
                 None => (original, world),
             };
+            // The sketch always shows (faint unless it's being drawn on).
+            let sketch = s.sketch_opacity();
             for art in ArtLayer::STACK {
-                if drawing_only && !s.art_preview && art != s.art {
+                if drawing_only && !s.art_preview && art != s.art && art != ArtLayer::Sketch {
                     continue;
                 }
+                let colour = |s: &Session, swatch: Id| {
+                    let c = colour(s, swatch);
+                    if art == ArtLayer::Sketch {
+                        c.gamma_multiply(sketch)
+                    } else {
+                        c
+                    }
+                };
                 for f in dr.fills.iter().filter(|f| f.art == art) {
                     // Selected zones follow the Select tool's live preview.
                     let transform = match preview {

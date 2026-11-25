@@ -51,10 +51,12 @@ pub enum Icon {
     ArtLine,
     ArtColour,
     ArtUnderlay,
+    /// The Sketch art layer: a loose scribble.
+    ArtSketch,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 38] = [
+    pub const ALL: [Icon; 39] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
@@ -93,6 +95,7 @@ impl Icon {
         Icon::ArtLine,
         Icon::ArtColour,
         Icon::ArtUnderlay,
+        Icon::ArtSketch,
     ];
 }
 
@@ -459,6 +462,20 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         }
         // Line Art: an outline. Colour Art: the paint inside it.
         Icon::ArtLine => g.circle(p, 8.0, 8.0, 5.0),
+        Icon::ArtSketch => {
+            // A loose looping scribble.
+            g.line(
+                p,
+                &[
+                    (2.5, 11.5),
+                    (5.0, 5.5),
+                    (7.0, 10.5),
+                    (9.0, 4.5),
+                    (11.0, 10.0),
+                    (13.5, 6.0),
+                ],
+            );
+        }
         Icon::ArtColour => {
             g.dot(p, 8.0, 8.0, 5.0);
         }

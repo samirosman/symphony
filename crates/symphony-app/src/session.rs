@@ -227,12 +227,16 @@ impl CanvasColours {
 }
 
 /// Harmony's names for the art layers.
+/// The Sketch art layer's strength while inking or colouring over it.
+pub const SKETCH_BEHIND: f32 = 0.35;
+
 pub fn art_name(art: ArtLayer) -> &'static str {
     match art {
         ArtLayer::Overlay => "Overlay Art",
         ArtLayer::LineArt => "Line Art",
         ArtLayer::ColourArt => "Colour Art",
         ArtLayer::Underlay => "Underlay Art",
+        ArtLayer::Sketch => "Sketch",
     }
 }
 
@@ -3014,6 +3018,16 @@ impl Session {
         if self.art != art {
             self.art = art;
             self.after_art_change();
+        }
+    }
+
+    /// How strongly the Sketch art layer shows while drawing on another
+    /// art layer (full while drawing on it).
+    pub fn sketch_opacity(&self) -> f32 {
+        if self.art == ArtLayer::Sketch {
+            1.0
+        } else {
+            SKETCH_BEHIND
         }
     }
 

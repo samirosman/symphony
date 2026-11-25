@@ -187,10 +187,11 @@ continues.
 - ⬜ Auto close gap
 - ⬜ Snap to contour, snap to grid, snap to alignment guides
 - ✅ Art layers: Overlay, Line Art, Colour Art, Underlay (toolbar, L, :, P, preference)
-- ⬜ **Sketch art layer** on each Drawing node. Edit sketches in their own
+- ✅ **Sketch art layer** on each Drawing node. Edit sketches in their own
   mode. Show them at reduced opacity while working in Line Art or Colour
   Art. Exclude them from exports by default and provide an explicit
-  **Include Sketch** export option.
+  **Include Sketch** export option. (Under the other art layers; faded as
+  a whole in renders.)
 - ⬜ Art Layer Manager (25.2) *(verify)*
 - ✅ Create Colour Art from Line Art (*)
 - ✅ Onion skin (previous and next drawings, colours, opacity, range)
