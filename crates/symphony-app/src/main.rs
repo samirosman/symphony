@@ -717,16 +717,6 @@ impl SymphonyApp {
         if let Some(c) = colours {
             s.colours = c;
         }
-        // SYMPHONY_PERF_VIEW: bring a view to the front for measuring it.
-        if let Ok(name) = std::env::var("SYMPHONY_PERF_VIEW") {
-            if let Some(view) = View::ALL.into_iter().find(|view| view.title() == name) {
-                for (_, dock) in layouts.iter_mut() {
-                    if let Some(found) = dock.find_tab(&view) {
-                        let _ = dock.set_active_tab(found);
-                    }
-                }
-            }
-        }
         // Screenshots use fresh presets, so design reviews are repeatable.
         if shot.is_some() {
             layouts = Workspace::ALL.iter().map(|w| (*w, w.preset())).collect();
@@ -838,6 +828,17 @@ impl SymphonyApp {
                 s.tool = Tool::Paint;
                 if let Some(id) = s.doc.palette.swatches.get(1).map(|sw| sw.id) {
                     s.toggle_protect_swatch(id);
+                }
+            }
+        }
+        // SYMPHONY_PERF_VIEW: bring a view to the front (for measuring it,
+        // or a screenshot of it).
+        if let Ok(name) = std::env::var("SYMPHONY_PERF_VIEW") {
+            if let Some(view) = View::ALL.into_iter().find(|view| view.title() == name) {
+                for (_, dock) in layouts.iter_mut() {
+                    if let Some(found) = dock.find_tab(&view) {
+                        let _ = dock.set_active_tab(found);
+                    }
                 }
             }
         }
@@ -4007,6 +4008,41 @@ impl SymphonyApp {
         // SYMPHONY_SHOT_GRID: show presets as a grid in screenshot runs.
         if self.shot.is_some() && std::env::var_os("SYMPHONY_SHOT_GRID").is_some() {
             self.presets.grid = true;
+        }
+        // SYMPHONY_SHOT_SKELETON: a three-bone rig carrying the selected
+        // layer's drawing, open in the Skeleton setup view.
+        if self.shot.is_some()
+            && std::env::var_os("SYMPHONY_SHOT_SKELETON").is_some()
+            && self.node_view.setup.open.is_none()
+        {
+            use symphony_core::graph::{NodeKind, PegParams};
+            use symphony_core::rig::Bone;
+            let g = &mut self.s.doc.graph;
+            let skeleton = g.add("Arm rig", NodeKind::Skeleton(PegParams::default()));
+            let mut up = skeleton;
+            for (name, length, angle) in [
+                ("Shoulder", 180.0, 20.0),
+                ("Elbow", 150.0, -35.0),
+                ("Hand", 70.0, 10.0),
+            ] {
+                let b = g.add(
+                    name,
+                    NodeKind::Bone(Bone {
+                        length,
+                        rest_angle: angle,
+                        origin: [-200.0, -60.0],
+                        ..Bone::default()
+                    }),
+                );
+                g.connect(up, b, 0);
+                up = b;
+            }
+            if let Some(layer) = self.s.doc.layers.get(self.s.selected).map(|l| l.node) {
+                if let Some(elbow) = self.s.doc.graph.input(up, 0) {
+                    self.s.doc.graph.connect(elbow, layer, 0);
+                }
+            }
+            self.node_view.setup.open = Some(skeleton);
         }
         // SYMPHONY_SHOT_IMPORT=<file>: import any file as if dropped.
         if let (Some(_), Some(p)) = (&self.shot, std::env::var_os("SYMPHONY_SHOT_IMPORT")) {

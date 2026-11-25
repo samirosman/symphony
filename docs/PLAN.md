@@ -249,7 +249,13 @@ continues.
 - ⬜ Show/hide manipulators and control points
 
 ### 4.6 Rigging and node view
-- ⬜ **Skeleton setup view**. Open the Skeleton node in the Node View panel
+- 🟡 **Skeleton setup view** (✅ double-click a Skeleton (or right-click,
+  Open skeleton setup): rest-pose diamonds, drag a base or tip, hold an
+  endpoint then drag to grow a bone, a thumbnail of each bone's drawing,
+  Back; Layer Properties is now Node Properties. Still to do: thumbnails
+  in Node Properties, connecting new artwork straight to its bone from the
+  view, showing the posed rig in Camera when an attached drawing is
+  selected). Open the Skeleton node in the Node View panel
   and use Back to return to the graph. Show diamond-shaped bones in their
   rest pose. Drag a base or tip to reshape the rig, keep shared endpoints
   together, and hold an endpoint to grow a new bone from it. Rename Layer

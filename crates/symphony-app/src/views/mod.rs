@@ -9,6 +9,7 @@ pub mod panels;
 pub mod rig_edit;
 mod rope;
 pub mod select;
+pub mod skeleton_setup;
 pub mod textured;
 pub mod timing;
 pub mod vector_cache;

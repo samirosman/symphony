@@ -68,6 +68,8 @@ pub struct NodeViewState {
         Option<egui::TextureHandle>,
     )>,
     thumb_at: Option<(Rect, String)>,
+    /// The Skeleton setup view, when a skeleton is open in the panel.
+    pub setup: super::skeleton_setup::SetupState,
 }
 
 #[derive(Clone)]
@@ -596,6 +598,59 @@ fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
     s.select_graph_node(id, true);
 }
 
+/// Add `bone` under `parent` (a Skeleton or a bone), connected, as one
+/// undo step; it's selected. For growing bones in the setup view.
+pub fn add_bone_under(
+    s: &mut Session,
+    parent: NodeId,
+    bone: symphony_core::rig::Bone,
+) -> Option<NodeId> {
+    if !matches!(
+        s.doc.graph.node(parent).map(|n| &n.kind),
+        Some(NodeKind::Skeleton(_) | NodeKind::Bone(_))
+    ) {
+        return None;
+    }
+    let id = s.doc.graph.next_id();
+    let near = s
+        .doc
+        .node_positions
+        .get(&parent)
+        .copied()
+        .unwrap_or([0.0, 0.0]);
+    let position = free_spot(s, [near[0], near[1] + H + 28.0], W);
+    let before = s.doc.graph.links().to_vec();
+    let mut after = before.clone();
+    after.push(Link {
+        from: parent,
+        to: id,
+        port: 0,
+    });
+    let was_custom = s.doc.custom_wiring;
+    s.history.apply(
+        &mut s.doc,
+        "Grow bone",
+        vec![
+            Edit::AddNode {
+                id,
+                node: Node {
+                    name: "Bone".into(),
+                    kind: NodeKind::Bone(bone),
+                    enabled: true,
+                },
+                position,
+            },
+            Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            },
+        ],
+    );
+    s.select_graph_node(id, true);
+    Some(id)
+}
+
 fn add_rig_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
     let parent = selected_node(s).filter(|&id| {
         matches!(kind, NodeKind::Bone(_))
@@ -1051,6 +1106,10 @@ fn nearby_wiring(
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
+    // A skeleton open for setup takes the panel until Back.
+    if state.setup.open.is_some() && super::skeleton_setup::ui(ui, s, &mut state.setup) {
+        return;
+    }
     let mut add = None;
     ui.horizontal_wrapped(|ui| {
         ui.menu_button("Add node", |ui| {
@@ -2976,7 +3035,16 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             select_in_graph(s, state, id, extend);
             ui.ctx().request_repaint();
             if resp.double_clicked() {
-                open_properties(s, state, id);
+                // A Skeleton opens in its setup view; other nodes show
+                // their properties.
+                if matches!(
+                    s.doc.graph.node(id).map(|n| &n.kind),
+                    Some(NodeKind::Skeleton(_))
+                ) {
+                    state.setup.open = Some(id);
+                } else {
+                    open_properties(s, state, id);
+                }
             }
         }
     }
@@ -3289,6 +3357,7 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     let mut smart_joint = None;
     let mut delete: Option<Vec<NodeId>> = None;
     let mut unlink = None;
+    let mut open_setup = None;
     if let Some((input, node)) =
         ui.data(|data| data.get_temp::<(Option<Input>, Option<NodeId>)>(menu_id))
     {
@@ -3323,6 +3392,17 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                             convert = Some(id);
                             ui.close();
                         }
+                    }
+                }
+                if let Some(id) = node.filter(|&id| {
+                    matches!(
+                        s.doc.graph.node(id).map(|n| &n.kind),
+                        Some(NodeKind::Skeleton(_))
+                    )
+                }) {
+                    if ui.button("Open skeleton setup").clicked() {
+                        open_setup = Some(id);
+                        ui.close();
                     }
                 }
                 if let Some(id) = node {
@@ -3364,6 +3444,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 }
             });
         }
+    }
+    if let Some(id) = open_setup {
+        state.setup.open = Some(id);
     }
     if let Some(ids) = delete {
         if delete_nodes(s, &ids) > 0 {
