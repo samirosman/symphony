@@ -879,10 +879,7 @@ pub fn timeline(
                 }
             }
             NodeKind::MeshWarp(warp) => {
-                for value in [&warp.x, &warp.y, &warp.width, &warp.height]
-                    .into_iter()
-                    .chain(warp.points.iter().flatten())
-                {
+                for value in warp.grid_values() {
                     frames.extend(value.keys().iter().map(|key| key.frame));
                 }
             }

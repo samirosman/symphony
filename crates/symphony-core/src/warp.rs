@@ -11,6 +11,12 @@
 //! grid, so the warp passes through every point with no kinks). Outside
 //! the grid, artwork follows the nearest edge of the grid, so nothing
 //! tears at the border.
+//!
+//! Each grid point also has four Bezier handles, one toward each
+//! neighbour (Harmony's "move the Bezier handles to deform the grid").
+//! The smooth blend above puts them where it would bend anyway; a moved
+//! handle adds a Bezier patch on top, so a grid with no moved handles
+//! bends exactly as one without handles.
 
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +122,54 @@ pub struct MeshWarp {
     /// Points mode: about how big the mesh's triangles are.
     #[serde(default = "default_density")]
     pub density: f32,
+    /// How far each grid point's Bezier handles have moved from where
+    /// the smooth grid puts them, in the order of `points`, indexed by
+    /// [`Handle`]. Empty: no handle has moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<[[Value; 2]; 4]>,
+}
+
+/// One of a grid point's four Bezier handles, named by the neighbour it
+/// points at (rows count from the top of the grid, columns from the left).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handle {
+    PrevColumn = 0,
+    NextColumn = 1,
+    PrevRow = 2,
+    NextRow = 3,
+}
+
+impl Handle {
+    pub const ALL: [Handle; 4] = [
+        Handle::PrevColumn,
+        Handle::NextColumn,
+        Handle::PrevRow,
+        Handle::NextRow,
+    ];
+
+    /// The handle on the other side of the point.
+    pub fn opposite(self) -> Handle {
+        match self {
+            Handle::PrevColumn => Handle::NextColumn,
+            Handle::NextColumn => Handle::PrevColumn,
+            Handle::PrevRow => Handle::NextRow,
+            Handle::NextRow => Handle::PrevRow,
+        }
+    }
+
+    /// (rows, columns) to the neighbour it points at.
+    fn step(self) -> (i64, i64) {
+        match self {
+            Handle::PrevColumn => (0, -1),
+            Handle::NextColumn => (0, 1),
+            Handle::PrevRow => (-1, 0),
+            Handle::NextRow => (1, 0),
+        }
+    }
+}
+
+fn flat_handles() -> [[Value; 2]; 4] {
+    std::array::from_fn(|_| [Value::Constant(0.0), Value::Constant(0.0)])
 }
 
 fn default_density() -> f32 {
@@ -144,7 +198,35 @@ impl MeshWarp {
             pin_moves: Vec::new(),
             mesh: None,
             density: default_density(),
+            handles: Vec::new(),
         }
+    }
+
+    /// The grid's animatable values: position, size, points, handles.
+    pub fn grid_values(&self) -> impl Iterator<Item = &Value> {
+        [&self.x, &self.y, &self.width, &self.height]
+            .into_iter()
+            .chain(self.points.iter().flatten())
+            .chain(self.handles.iter().flatten().flatten())
+    }
+
+    /// [`MeshWarp::grid_values`], to change.
+    pub fn grid_values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        [&mut self.x, &mut self.y, &mut self.width, &mut self.height]
+            .into_iter()
+            .chain(self.points.iter_mut().flatten())
+            .chain(self.handles.iter_mut().flatten().flatten())
+    }
+
+    /// Grid point `i`'s handle, to change (made on first use).
+    pub fn handle_mut(&mut self, i: usize, h: Handle) -> Option<&mut [Value; 2]> {
+        if i >= self.points.len() {
+            return None;
+        }
+        if self.handles.len() < self.points.len() {
+            self.handles.resize(self.points.len(), flat_handles());
+        }
+        self.handles.get_mut(i).map(|hs| &mut hs[h as usize])
     }
 
     /// Change the grid's resolution. Offsets are kept where the old grid
@@ -157,6 +239,11 @@ impl MeshWarp {
         }
         let mut points =
             vec![[Value::Constant(0.0), Value::Constant(0.0)]; point_count(rows, columns)];
+        let mut handles = if self.handles.is_empty() {
+            Vec::new()
+        } else {
+            vec![flat_handles(); point_count(rows, columns)]
+        };
         for r in 0..=rows {
             for c in 0..=columns {
                 // The same spot on the old grid, if a point is there.
@@ -166,8 +253,12 @@ impl MeshWarp {
                 );
                 if or.fract() == 0.0 && oc.fract() == 0.0 {
                     let old = or as usize * (self.columns as usize + 1) + oc as usize;
+                    let new = r as usize * (columns as usize + 1) + c as usize;
                     if let Some(p) = self.points.get(old) {
-                        points[r as usize * (columns as usize + 1) + c as usize] = p.clone();
+                        points[new] = p.clone();
+                    }
+                    if let (Some(h), Some(slot)) = (self.handles.get(old), handles.get_mut(new)) {
+                        *slot = h.clone();
                     }
                 }
             }
@@ -175,13 +266,12 @@ impl MeshWarp {
         self.rows = rows;
         self.columns = columns;
         self.points = points;
+        self.handles = handles;
     }
 
     /// Does any parameter have a key on `frame`?
     pub fn has_key(&self, frame: u32) -> bool {
-        [&self.x, &self.y, &self.width, &self.height]
-            .into_iter()
-            .chain(self.points.iter().flatten())
+        self.grid_values()
             .chain(self.pin_moves.iter().flatten())
             .any(|v| v.has_key(frame))
     }
@@ -223,6 +313,16 @@ impl MeshWarp {
             .map(|[x, y]| [x.at(frame), y.at(frame)])
             .collect();
         offsets.resize(n, [0.0, 0.0]);
+        let mut handles: Vec<[[f32; 2]; 4]> = self
+            .handles
+            .iter()
+            .map(|hs| hs.each_ref().map(|[x, y]| [x.at(frame), y.at(frame)]))
+            .collect();
+        if handles.iter().flatten().all(|d| *d == [0.0, 0.0]) {
+            handles.clear();
+        } else {
+            handles.resize(n, [[0.0, 0.0]; 4]);
+        }
         WarpGrid {
             rows: self.rows.max(1),
             columns: self.columns.max(1),
@@ -232,6 +332,7 @@ impl MeshWarp {
                 self.height.at(frame).max(1e-3),
             ],
             offsets,
+            handles,
             quality: self.quality,
         }
     }
@@ -250,6 +351,9 @@ pub struct WarpGrid {
     pub size: [f32; 2],
     /// Offset of each grid point from its rest place.
     pub offsets: Vec<[f32; 2]>,
+    /// How far each point's handles moved (see [`MeshWarp::handles`]);
+    /// empty when none did.
+    pub handles: Vec<[[f32; 2]; 4]>,
     pub quality: WarpQuality,
 }
 
@@ -279,9 +383,46 @@ impl WarpGrid {
             .unwrap_or([0.0, 0.0])
     }
 
+    /// How far handle `h` of point (row, column) moved.
+    fn moved(&self, row: i64, column: i64, h: Handle) -> [f32; 2] {
+        self.handles
+            .get(row as usize * (self.columns as usize + 1) + column as usize)
+            .map_or([0.0, 0.0], |hs| hs[h as usize])
+    }
+
+    /// Where handle `h` of point (row, column) would be had it not moved
+    /// (a third of the way to the neighbour, along the smooth grid). None
+    /// at the border, where there is no neighbour that way.
+    pub fn handle_rest(&self, row: u32, column: u32, h: Handle) -> Option<[f32; 2]> {
+        let (dr, dc) = h.step();
+        let (nr, nc) = (row as i64 + dr, column as i64 + dc);
+        if nr < 0 || nc < 0 || nr > self.rows as i64 || nc > self.columns as i64 {
+            return None;
+        }
+        let p = self.point(row, column);
+        let (a, b) = (self.rest(row, column), self.rest(nr as u32, nc as u32));
+        // The Catmull-Rom tangent through the point, as a Bezier handle.
+        let (r, c) = (row as i64, column as i64);
+        let (ahead, behind) = (self.offset(r + dr, c + dc), self.offset(r - dr, c - dc));
+        Some([
+            p[0] + (b[0] - a[0]) / 3.0 + (ahead[0] - behind[0]) / 6.0,
+            p[1] + (b[1] - a[1]) / 3.0 + (ahead[1] - behind[1]) / 6.0,
+        ])
+    }
+
+    /// Where handle `h` of point (row, column) is now.
+    pub fn handle(&self, row: u32, column: u32, h: Handle) -> Option<[f32; 2]> {
+        let rest = self.handle_rest(row, column, h)?;
+        let d = self.moved(row as i64, column as i64, h);
+        Some([rest[0] + d[0], rest[1] + d[1]])
+    }
+
     /// Is the grid flat (nothing moved)?
     pub fn is_flat(&self) -> bool {
-        self.offsets.iter().all(|o| o[0] == 0.0 && o[1] == 0.0)
+        self.offsets
+            .iter()
+            .chain(self.handles.iter().flatten())
+            .all(|o| o[0] == 0.0 && o[1] == 0.0)
     }
 
     /// The longest straight piece that still bends smoothly, in the
@@ -316,8 +457,58 @@ impl WarpGrid {
                 d[1] += wx * wy * o[1];
             }
         }
+        if !self.handles.is_empty() {
+            let h = self.handle_patch(r0, c0, tu, tv);
+            d = [d[0] + h[0], d[1] + h[1]];
+        }
         [p[0] + d[0], p[1] + d[1]]
     }
+
+    /// What the moved handles add inside cell (r0, c0) at (tu, tv): a
+    /// bicubic Bezier patch whose control points are the handles' moves.
+    /// The corners add nothing (the grid still passes through its
+    /// points); each inner control point takes both handles next to it,
+    /// so a pair of opposite handles moved as mirrors keeps the grid
+    /// smooth across the point.
+    fn handle_patch(&self, r0: i64, c0: i64, tu: f32, tv: f32) -> [f32; 2] {
+        use Handle::{NextColumn, NextRow, PrevColumn, PrevRow};
+        let (r1, c1) = (r0 + 1, c0 + 1);
+        let m = |r, c, h| self.moved(r, c, h);
+        let add = |a: [f32; 2], b: [f32; 2]| [a[0] + b[0], a[1] + b[1]];
+        let zero = [0.0, 0.0];
+        // control[j][i]: j down the rows, i across the columns.
+        let control = [
+            [zero, m(r0, c0, NextColumn), m(r0, c1, PrevColumn), zero],
+            [
+                m(r0, c0, NextRow),
+                add(m(r0, c0, NextColumn), m(r0, c0, NextRow)),
+                add(m(r0, c1, PrevColumn), m(r0, c1, NextRow)),
+                m(r0, c1, NextRow),
+            ],
+            [
+                m(r1, c0, PrevRow),
+                add(m(r1, c0, NextColumn), m(r1, c0, PrevRow)),
+                add(m(r1, c1, PrevColumn), m(r1, c1, PrevRow)),
+                m(r1, c1, PrevRow),
+            ],
+            [zero, m(r1, c0, NextColumn), m(r1, c1, PrevColumn), zero],
+        ];
+        let (bu, bv) = (bernstein(tu), bernstein(tv));
+        let mut d = [0.0f32; 2];
+        for (row, wy) in control.iter().zip(bv) {
+            for (o, wx) in row.iter().zip(bu) {
+                d[0] += wx * wy * o[0];
+                d[1] += wx * wy * o[1];
+            }
+        }
+        d
+    }
+}
+
+/// Cubic Bezier (Bernstein) weights at `t`.
+fn bernstein(t: f32) -> [f32; 4] {
+    let s = 1.0 - t;
+    [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t]
 }
 
 /// Catmull-Rom weights for the four points around `t` (0..1 between the
@@ -412,6 +603,7 @@ impl Warp {
                         .iter()
                         .chain(&g.size)
                         .chain(g.offsets.iter().flatten())
+                        .chain(g.handles.iter().flatten().flatten())
                     {
                         v.to_bits().hash(&mut h);
                     }
@@ -562,6 +754,124 @@ mod tests {
         let b = warp.bend([1.0, 0.0]);
         assert!((b[0] - 17.0).abs() < 1e-4 && b[1].abs() < 1e-4, "{b:?}");
         assert_eq!(warp.outer(), Affine::translate(1000.0, 0.0));
+    }
+
+    #[test]
+    fn handles_rest_a_third_of_the_way_to_the_neighbour() {
+        let w = MeshWarp::new(2, 2, 0.0, 0.0, 120.0, 60.0);
+        let g = w.grid_at(1);
+        // Point (1, 1) rests at (0, 0); cells are 60 x 30.
+        assert_eq!(g.handle(1, 1, Handle::NextColumn), Some([20.0, 0.0]));
+        assert_eq!(g.handle(1, 1, Handle::PrevRow), Some([0.0, -10.0]));
+        assert_eq!(g.handle(0, 0, Handle::PrevColumn), None, "the border");
+    }
+
+    #[test]
+    fn unmoved_handles_bend_as_no_handles() {
+        let mut w = MeshWarp::new(3, 3, 0.0, 0.0, 90.0, 90.0);
+        w.points[5] = [Value::Constant(7.0), Value::Constant(-3.0)];
+        w.points[10] = [Value::Constant(-4.0), Value::Constant(9.0)];
+        let plain = w.grid_at(1);
+        w.handle_mut(5, Handle::NextRow).unwrap()[0].set_key(1, 0.0);
+        let keyed = w.grid_at(1);
+        assert!(keyed.handles.is_empty(), "all handles at rest");
+        for p in [[0.0, 0.0], [12.0, -31.0], [44.0, 44.0], [-80.0, 5.0]] {
+            assert_eq!(plain.apply(p), keyed.apply(p));
+        }
+    }
+
+    #[test]
+    fn the_smooth_handles_lie_on_the_bent_grid_line() {
+        // With handles at rest, the grid line between two points is the
+        // Bezier curve their handles describe.
+        let mut w = MeshWarp::new(1, 3, 0.0, 0.0, 90.0, 30.0);
+        w.points[1] = [Value::Constant(0.0), Value::Constant(12.0)];
+        w.points[2] = [Value::Constant(5.0), Value::Constant(-6.0)];
+        let g = w.grid_at(1);
+        let p0 = g.point(0, 1);
+        let p1 = g.handle(0, 1, Handle::NextColumn).unwrap();
+        let p2 = g.handle(0, 2, Handle::PrevColumn).unwrap();
+        let p3 = g.point(0, 2);
+        for t in [0.25f32, 0.5, 0.8] {
+            let b = bernstein(t);
+            let want = [
+                b[0] * p0[0] + b[1] * p1[0] + b[2] * p2[0] + b[3] * p3[0],
+                b[0] * p0[1] + b[1] * p1[1] + b[2] * p2[1] + b[3] * p3[1],
+            ];
+            let rest = g.rest(0, 1);
+            let got = g.apply([rest[0] + 30.0 * t, rest[1]]);
+            assert!(
+                (got[0] - want[0]).abs() < 1e-3 && (got[1] - want[1]).abs() < 1e-3,
+                "t {t}: {got:?} vs {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_moved_handle_bends_its_edge_but_not_the_points() {
+        let mut w = MeshWarp::new(2, 2, 0.0, 0.0, 120.0, 120.0);
+        // The centre point's handle toward the next column, pulled up.
+        let h = w.handle_mut(4, Handle::NextColumn).unwrap();
+        h[1] = Value::Constant(-30.0);
+        let g = w.grid_at(1);
+        assert!(!g.is_flat());
+        assert_eq!(g.handle(1, 1, Handle::NextColumn), Some([20.0, -30.0]));
+        for (r, c) in [(1, 1), (1, 2), (0, 0)] {
+            let rest = g.rest(r, c);
+            let at = g.apply(rest);
+            assert!(
+                (at[0] - rest[0]).abs() < 1e-4 && (at[1] - rest[1]).abs() < 1e-4,
+                "({r}, {c}) moved to {at:?}"
+            );
+        }
+        // A third of the way along the edge: 4/9 of the pull.
+        let at = g.apply([20.0, 0.0]);
+        assert!((at[1] + 30.0 * 4.0 / 9.0).abs() < 1e-3, "{at:?}");
+        // The other side of the point does not move.
+        assert_eq!(g.apply([-20.0, 0.0]), [-20.0, 0.0]);
+    }
+
+    #[test]
+    fn mirrored_handles_keep_the_grid_smooth_through_the_point() {
+        let mut w = MeshWarp::new(2, 2, 0.0, 0.0, 120.0, 120.0);
+        w.handle_mut(4, Handle::NextColumn).unwrap()[1] = Value::Constant(-20.0);
+        w.handle_mut(4, Handle::PrevColumn).unwrap()[1] = Value::Constant(20.0);
+        let g = w.grid_at(1);
+        // Slope of the bent centre line just left and right of the point,
+        // and of a line above it (across the cells' shared edge).
+        let slope = |y: f32, x: f32| {
+            let (a, b) = (g.apply([x - 0.01, y]), g.apply([x + 0.01, y]));
+            (b[1] - a[1]) / (b[0] - a[0])
+        };
+        assert!((slope(0.0, -0.02) - slope(0.0, 0.02)).abs() < 1e-2);
+        let down = |x: f32, y: f32| {
+            let (a, b) = (g.apply([x, y - 0.01]), g.apply([x, y + 0.01]));
+            [(b[0] - a[0]) / 0.02, (b[1] - a[1]) / 0.02]
+        };
+        let (above, below) = (down(20.0, -0.02), down(20.0, 0.02));
+        assert!(
+            (above[0] - below[0]).abs() < 1e-2 && (above[1] - below[1]).abs() < 1e-2,
+            "{above:?} {below:?}"
+        );
+    }
+
+    #[test]
+    fn resizing_keeps_handles_and_keys_find_them() {
+        let mut w = MeshWarp::new(2, 2, 0.0, 0.0, 10.0, 10.0);
+        w.handle_mut(8, Handle::PrevRow).unwrap()[0].set_key(4, 3.0);
+        assert!(w.has_key(4));
+        w.resize(4, 4);
+        assert_eq!(w.handles.len(), 25);
+        assert_eq!(w.handles[24][Handle::PrevRow as usize][0].at(4), 3.0);
+    }
+
+    #[test]
+    fn files_without_handles_still_load() {
+        let w = MeshWarp::new(1, 1, 0.0, 0.0, 10.0, 10.0);
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(!json.contains("handles"), "nothing saved when unused");
+        let back: MeshWarp = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
     }
 
     #[test]

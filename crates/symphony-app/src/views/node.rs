@@ -2081,17 +2081,21 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         });
                     ui.label(
                         "Drag the grid's points in the Camera view (Transform tool) to bend the \
-                         artwork under it.",
+                         artwork under it. Click a point to show its Bezier handles; Alt-drag \
+                         a handle to move it without its opposite.",
                     );
                     if ui
                         .button("Reset points")
-                        .on_hover_text("Flatten the grid (removes the points' keys too).")
+                        .on_hover_text(
+                            "Flatten the grid (removes the points' and handles' keys too).",
+                        )
                         .clicked()
                     {
                         warp.points.fill([
                             symphony_core::anim::Value::Constant(0.0),
                             symphony_core::anim::Value::Constant(0.0),
                         ]);
+                        warp.handles.clear();
                     }
                 }
                 WarpKind::Points => {
@@ -2530,10 +2534,7 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
             &draft.node.kind
         } {
             let mut warp = warp.clone();
-            for value in [&mut warp.x, &mut warp.y, &mut warp.width, &mut warp.height]
-                .into_iter()
-                .chain(warp.points.iter_mut().flatten())
-            {
+            for value in warp.grid_values_mut() {
                 if delete {
                     value.remove_key(s.frame);
                 } else {
