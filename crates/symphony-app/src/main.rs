@@ -700,11 +700,10 @@ impl SymphonyApp {
             ),
         };
         // Screenshot runs can pick a profile: SYMPHONY_SHOT_PROFILE=Symphony.
-        let profile = match std::env::var("SYMPHONY_SHOT_PROFILE").as_deref() {
-            Ok("Symphony") => Profile::Symphony,
-            Ok("Harmony") => Profile::Harmony,
-            _ => profile,
-        };
+        let profile = std::env::var("SYMPHONY_SHOT_PROFILE")
+            .ok()
+            .and_then(|name| Profile::ALL.into_iter().find(|p| p.title() == name))
+            .unwrap_or(profile);
         for ws in Workspace::ALL {
             if !layouts.iter().any(|(w, _)| *w == ws) {
                 layouts.push((ws, ws.preset()));
@@ -1618,7 +1617,8 @@ impl SymphonyApp {
             return;
         }
         let hovered = self.hovered_view;
-        let symphony = self.profile == Profile::Symphony;
+        // Symphony's view-under-the-pointer keys (Profile::contextual).
+        let symphony = self.profile.contextual();
         let here = if symphony {
             hovered
         } else {
@@ -2935,7 +2935,7 @@ impl SymphonyApp {
             .words("sound audio wav music dialogue"),
         );
         // Settings.
-        let settings: [(&str, Setting, &str); 10] = [
+        let settings: [(&str, Setting, &str); 8] = [
             (
                 "Brush size cursor",
                 Setting::BrushSizeCursor,
@@ -2963,16 +2963,6 @@ impl SymphonyApp {
             ),
             ("Use no AI", Setting::UseNoAi, "ai machine learning assist"),
             (
-                "Harmony shortcut profile",
-                Setting::ProfileHarmony,
-                "keys keyboard toon boom",
-            ),
-            (
-                "Symphony shortcut profile",
-                Setting::ProfileSymphony,
-                "keys keyboard",
-            ),
-            (
                 "Stroke detail (points kept per line)",
                 Setting::StrokeDetail,
                 "smooth points curve optimise jaggy wobbly",
@@ -2992,6 +2982,22 @@ impl SymphonyApp {
                     &format!("setting.{s:?}"),
                 )
                 .words(w),
+            );
+        }
+        for p in Profile::ALL {
+            let words = match p {
+                Profile::Harmony => "keys keyboard toon boom",
+                Profile::Symphony | Profile::Studio => "keys keyboard",
+            };
+            out.push(
+                Entry::new(
+                    &format!("{} shortcut profile", p.title()),
+                    Kind::Setting,
+                    Command::Setting(Setting::Profile(p)),
+                    // The ids from before profiles were listed in a loop.
+                    &format!("setting.Profile{p:?}"),
+                )
+                .words(words),
             );
         }
         out.push(
@@ -3176,8 +3182,7 @@ impl SymphonyApp {
                         theme::set_motion(ctx, self.interface_animations && self.interface_effects);
                     }
                     Setting::UseNoAi => self.use_no_ai = !self.use_no_ai,
-                    Setting::ProfileHarmony => self.profile = Profile::Harmony,
-                    Setting::ProfileSymphony => self.profile = Profile::Symphony,
+                    Setting::Profile(p) => self.profile = p,
                     Setting::StrokeDetail => {
                         self.prefs_page = PrefsPage::Drawing;
                         self.show_preferences = true;
@@ -4456,7 +4461,7 @@ impl SymphonyApp {
         perf_span("wallpaper", perf_t);
         let top_background = chrome.add(egui::Shape::Noop);
         // The Symphony profile merges Brush and Pencil into one Pen tool.
-        self.s.pen_modes = self.profile == keymap::Profile::Symphony;
+        self.s.pen_modes = self.profile.pen_modes();
         if matches!(self.s.tool, Tool::Brush | Tool::Pencil) {
             self.s.last_pen = self.s.tool;
         }

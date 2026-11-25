@@ -1163,7 +1163,7 @@ pub fn prefs_canvas(ui: &mut egui::Ui, s: &mut Session) {
 /// Preferences > Workflow and shortcuts. The list can be filtered.
 pub fn prefs_workflow(ui: &mut egui::Ui, profile: &mut Profile) {
     section(ui, "Shortcut profile");
-    for p in [Profile::Harmony, Profile::Symphony] {
+    for p in Profile::ALL {
         widgets::radio_value(ui, profile, p, p.title());
         hint(ui, p.blurb());
         ui.add_space(4.0);

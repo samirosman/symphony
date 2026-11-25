@@ -3,8 +3,12 @@
 //! nowhere else.
 //!
 //! Harmony-profile bindings are checked against Harmony 27's published
-//! default shortcuts, kept as facts in docs/reference/harmony-27-shortcuts.tsv (E4.4). The Symphony profile starts as a
-//! copy of Harmony; any difference must be logged in DESIGN.md §11.1.
+//! default shortcuts, kept as facts in docs/reference/harmony-27-shortcuts.tsv (E4.4). The Symphony and Studio
+//! profiles start as a copy of Harmony; any difference must be logged in
+//! DESIGN.md §11.1 (Symphony) or §11.2 (Studio).
+//!
+//! To add a profile: add a variant to [`Profile`] and to [`Profile::ALL`],
+//! then give it an arm in each `match` the compiler points at.
 
 use eframe::egui::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
@@ -16,13 +20,18 @@ pub enum Profile {
     Harmony,
     #[default]
     Symphony,
+    /// Harmony's keys with our own additions (DESIGN.md §11.2).
+    Studio,
 }
 
 impl Profile {
+    pub const ALL: [Profile; 3] = [Profile::Harmony, Profile::Symphony, Profile::Studio];
+
     pub fn title(self) -> &'static str {
         match self {
             Profile::Harmony => "Harmony",
             Profile::Symphony => "Symphony",
+            Profile::Studio => "Studio",
         }
     }
 
@@ -30,6 +39,27 @@ impl Profile {
         match self {
             Profile::Harmony => "Shortcuts and workflow as in the latest Harmony.",
             Profile::Symphony => "Contextual shortcuts with plain-letter tool keys.",
+            Profile::Studio => {
+                "Harmony's shortcuts with a few additions, such as I and O for the playback range."
+            }
+        }
+    }
+
+    /// Keys work in the view under the pointer, plain letters pick
+    /// tools, and a tool that doesn't fit the view can't be picked.
+    /// Otherwise keys follow Harmony: the focused view counts too.
+    pub fn contextual(self) -> bool {
+        match self {
+            Profile::Symphony => true,
+            Profile::Harmony | Profile::Studio => false,
+        }
+    }
+
+    /// The pen's side buttons switch Brush and Pencil modes.
+    pub fn pen_modes(self) -> bool {
+        match self {
+            Profile::Symphony | Profile::Studio => true,
+            Profile::Harmony => false,
         }
     }
 }
@@ -586,15 +616,23 @@ fn harmony(action: Action) -> Option<Binding> {
     }
 }
 
+/// Studio: Harmony's bindings plus ours (DESIGN.md §11.2).
+fn studio(action: Action) -> Option<Binding> {
+    match action {
+        // Mac-standard Redo.
+        Action::Redo => b(Key::Z, CMD_SHIFT),
+        // Mark in and out, as in video editors. Harmony has no playback
+        // range keys.
+        Action::SetPlayStart => b(Key::I, NONE),
+        Action::SetPlayEnd => b(Key::O, NONE),
+        _ => harmony(action),
+    }
+}
+
 /// Symphony uses mnemonic tool keys and scopes them to the workspace under the pointer.
 fn symphony(action: Action) -> Option<Binding> {
     match action {
         Action::Redo => b(Key::Z, CMD_SHIFT),
-        // Mark in and out, as in video editors (DESIGN §11.1), with
-        // Shift: plain I and O have other jobs here. Harmony has no
-        // playback range keys.
-        Action::SetPlayStart => b(Key::I, SHIFT),
-        Action::SetPlayEnd => b(Key::O, SHIFT),
         Action::ZoomIn => b(Key::Num1, NONE),
         Action::ZoomOut => b(Key::Num2, NONE),
         Action::IncreaseBrushSize => b(Key::Plus, NONE),
@@ -659,11 +697,11 @@ pub fn scope(profile: Profile, action: Action) -> Scope {
         }
         ArrangeNodes | ShowNodeProperties | RenderNodePreview | ResetNodeView => Scope::Node,
         ToggleCameraEffects => Scope::Camera,
-        Timeline(TimelineAction::SetKey) if profile == Profile::Harmony => Scope::Timeline,
+        Timeline(TimelineAction::SetKey) if !profile.contextual() => Scope::Timeline,
         Timeline(_) | ToggleAutoKey | ToggleLayerVisible => Scope::Timing,
-        Copy | Paste if profile == Profile::Harmony => Scope::OutsideTiming,
-        ShowStrokes if profile == Profile::Harmony => Scope::OutsideTimeline,
-        _ if profile == Profile::Harmony => Scope::Global,
+        Copy | Paste if !profile.contextual() => Scope::OutsideTiming,
+        ShowStrokes if !profile.contextual() => Scope::OutsideTimeline,
+        _ if !profile.contextual() => Scope::Global,
         ToolSelect
         | ToolTransform
         | ToolBrush
@@ -732,6 +770,7 @@ pub fn default_binding(profile: Profile, action: Action) -> Option<Binding> {
     match profile {
         Profile::Harmony => harmony(action),
         Profile::Symphony => symphony(action),
+        Profile::Studio => studio(action),
     }
 }
 
@@ -1000,7 +1039,7 @@ mod tests {
     #[test]
     fn no_overlapping_bindings() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
-        for profile in [Profile::Harmony, Profile::Symphony] {
+        for profile in Profile::ALL {
             for action in Action::ALL {
                 if let Some(bind) = binding(profile, action) {
                     assert!(
@@ -1119,7 +1158,7 @@ mod tests {
     #[test]
     fn redo_fires_from_its_shortcut_in_both_profiles() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
-        for profile in [Profile::Harmony, Profile::Symphony] {
+        for profile in Profile::ALL {
             let bind = binding(profile, Action::Redo).unwrap();
             assert_eq!(
                 fired(profile, bind.key, bind.mods),
@@ -1129,18 +1168,40 @@ mod tests {
         }
     }
 
-    /// DESIGN §11.1: Shift+I and Shift+O mark the playback range in the
-    /// Symphony profile only; Harmony has no keys for it.
+    /// DESIGN §11.2: I and O mark the playback range in the Studio
+    /// profile; Harmony has no keys for it.
     #[test]
-    fn shift_i_and_o_mark_the_playback_range_in_the_symphony_profile() {
+    fn i_and_o_mark_the_playback_range_in_the_studio_profile() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
-        reset(Profile::Symphony, Action::SetPlayStart);
-        reset(Profile::Symphony, Action::SetPlayEnd);
-        let s = Profile::Symphony;
-        assert_eq!(fired(s, Key::I, SHIFT), vec![Action::SetPlayStart]);
-        assert_eq!(fired(s, Key::O, SHIFT), vec![Action::SetPlayEnd]);
-        assert!(fired(Profile::Harmony, Key::I, SHIFT).is_empty());
-        assert!(fired(Profile::Harmony, Key::O, SHIFT).is_empty());
+        for a in [Action::SetPlayStart, Action::SetPlayEnd] {
+            for p in Profile::ALL {
+                reset(p, a);
+            }
+        }
+        let s = Profile::Studio;
+        assert_eq!(fired(s, Key::I, NONE), vec![Action::SetPlayStart]);
+        assert_eq!(fired(s, Key::O, NONE), vec![Action::SetPlayEnd]);
+        assert_eq!(scope(s, Action::SetPlayStart), Scope::Global);
+        for p in [Profile::Harmony, Profile::Symphony] {
+            assert_eq!(default_binding(p, Action::SetPlayStart), None);
+            assert_eq!(default_binding(p, Action::SetPlayEnd), None);
+        }
+    }
+
+    /// Studio is Harmony with additions: every Harmony key it doesn't
+    /// replace stays, with the same scope.
+    #[test]
+    fn studio_keeps_every_other_harmony_key() {
+        let changed = [Action::Redo, Action::SetPlayStart, Action::SetPlayEnd];
+        for a in Action::ALL.into_iter().filter(|a| !changed.contains(a)) {
+            assert_eq!(
+                default_binding(Profile::Studio, a),
+                default_binding(Profile::Harmony, a),
+                "{}",
+                a.id()
+            );
+            assert_eq!(scope(Profile::Studio, a), scope(Profile::Harmony, a));
+        }
     }
 
     #[test]

@@ -469,15 +469,18 @@ and animation state.
 
 ## 11. Profiles: Harmony and Symphony
 
-- **D11.1** Two profiles, with Symphony selected for new installs and both available in
+- **D11.1** Three profiles, with Symphony selected for new installs and all available in
   *Preferences → Workflow*:
   - **Harmony**: shortcuts and workflows as the latest Harmony does them.
   - **Symphony**: plain-letter tools with shortcuts scoped to the view under the pointer.
+  - **Studio**: Harmony's shortcuts and key handling, with the additions in §11.2.
+
+  More profiles can be added; `keymap::Profile` says how.
 - **D11.2** Both profiles are always complete and fully working. A
   Symphony improvement never removes the Harmony way.
-- **D11.3** Every Symphony-only difference is listed in §11.1 below, with
-  its reason, so there's one place that shows how the two profiles
-  differ.
+- **D11.3** Every Symphony-only difference is listed in §11.1 below, and
+  every Studio difference in §11.2, with its reason, so there's one place
+  that shows how the profiles differ.
 - **D11.4** The profile affects **behaviour** (shortcuts, gestures, tool
   defaults, workflows). It never changes **how the app looks**, so both
   profiles share one visual identity.
@@ -491,12 +494,21 @@ and animation state.
 | Tool keys | Harmony bindings | S Select, B Brush, E Eraser, L Line, T Text, P Paint, C Cutter, G Close Gap, D Dropper, N Line Editor, X Transform, H Hand, Z Zoom | Use mnemonic keys in Drawing and Camera |
 | Zoom | Harmony bindings | 1 zooms in and 2 zooms out in Drawing, Camera, and Node | Use the same gesture across viewports |
 | Plus and minus | Change exposure | Resize the brush in Drawing and Camera, change exposure in Timeline and Xsheet | Apply the adjustment to the view under the pointer |
-| Playback range start and end | No key (Harmony 27 lists none) | Shift+I and Shift+O | Mark in and out as video editors do; plain I and O have other jobs |
 | Search | Tab | Tab | Open Search from the workspace |
 | Drawing and Camera | Harmony bindings | R Repaint, U Unpaint, Y Paint Unpainted, O Onion Skin, M Mirror, I Show selected points, V Preview art layers. Camera also uses Shift+R to toggle rendered effects. | Keep common drawing and preview actions near their names |
 | Timeline and Xsheet | Harmony bindings | A Auto-key, C Clone, D Duplicate, I Insert in-between, K Set key, Shift+K Delete key, L Add layer, N New drawing frame, V Layer visibility | Reuse letters in the timing context |
 | Node | Menus and Search | A Arrange, P Properties, R Reset view, V Render preview | Keep graph editing shortcuts inside the graph |
 
+
+### 11.2 Studio profile differences
+Studio keeps Harmony's key handling: a key works in the view under the
+pointer or, failing that, the focused view. The pen's side buttons switch
+Brush and Pencil modes, as in Symphony.
+
+| Area | Harmony profile | Studio profile | Why |
+|---|---|---|---|
+| Redo on macOS | Control+Shift+Z (as Harmony 27 documents) | Cmd+Shift+Z | Matches every other Mac app |
+| Playback range start and end | No key (Harmony 27 lists none) | I and O | Mark in and out as video editors do |
 
 ---
 
