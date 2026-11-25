@@ -104,12 +104,22 @@ fn paint_bone(painter: &egui::Painter, start: Pos2, tip: Pos2, ink: egui::Color3
         let across = egui::vec2(-along.y, along.x) * 4.0;
         let shoulder = start + along * 7.0;
         let outline = vec![start, shoulder + across, tip, shoulder - across];
-        painter.add(egui::Shape::closed_line(outline.clone(), edge));
+        // Each side as its own segment: a closed line joins the sides
+        // with a miter, and the sharp tip makes a spike.
+        let sides: Vec<[Pos2; 2]> = (0..outline.len())
+            .map(|i| [outline[i], outline[(i + 1) % outline.len()]])
+            .collect();
+        for &side in &sides {
+            painter.line_segment(side, edge);
+        }
         painter.add(egui::Shape::convex_polygon(
             outline,
             ink.gamma_multiply(0.28),
-            Stroke::new(1.0, ink),
+            Stroke::NONE,
         ));
+        for &side in &sides {
+            painter.line_segment(side, Stroke::new(1.0, ink));
+        }
     } else {
         painter.line_segment([start, tip], edge);
         painter.line_segment([start, tip], Stroke::new(1.0, ink));
