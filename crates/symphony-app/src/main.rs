@@ -1000,7 +1000,7 @@ impl SymphonyApp {
             return;
         };
         let Some(i) = self.s.doc.layer_of(column) else {
-            self.s.confirm_delete = None;
+            self.s.answer_delete_question();
             return;
         };
         let name = self.s.layer_name(i).to_owned();
@@ -1034,10 +1034,10 @@ impl SymphonyApp {
         }
         match choice {
             Some(true) => {
-                self.s.confirm_delete = None;
+                self.s.answer_delete_question();
                 self.s.delete_layer_now(i);
             }
-            Some(false) => self.s.confirm_delete = None,
+            Some(false) => self.s.answer_delete_question(),
             None => {}
         }
     }

@@ -168,8 +168,9 @@ pub fn undeletable(s: &Session, id: NodeId) -> Option<&'static str> {
 
 /// Delete nodes, as one undo step. Pegs, Mesh Warps and effects are
 /// pulled out of their chains, which close up behind them; a Drawing
-/// node takes its layer with it. Returns how many were deleted (a note
-/// says why any couldn't be).
+/// node takes its layer with it. A layer with work on it stays until
+/// "Delete layer?" is answered, as when the layer itself is deleted.
+/// Returns how many were deleted now (a note says why any couldn't be).
 pub fn delete_nodes(s: &mut Session, ids: &[NodeId]) -> usize {
     let mut why = None;
     let mut ids: Vec<NodeId> = ids
@@ -195,6 +196,20 @@ pub fn delete_nodes(s: &mut Session, ids: &[NodeId]) -> usize {
         ids.retain(|&id| s.doc.layers.get(keep).is_none_or(|l| l.node != id));
         why = Some("A scene needs at least one layer");
     }
+    // Layers with work on them ask first; everything else goes now.
+    let asking: Vec<symphony_core::id::Id> = ids
+        .iter()
+        .filter_map(|&id| s.doc.layers.iter().position(|l| l.node == id))
+        .filter(|&i| s.drawings_with_work(i) > 0)
+        .filter_map(|i| s.doc.column(i).map(|c| c.id))
+        .collect();
+    ids.retain(|&id| {
+        s.doc
+            .layers
+            .iter()
+            .find(|l| l.node == id)
+            .is_none_or(|l| !asking.contains(&l.column))
+    });
     let mut edits = Vec::new();
     // The other nodes: pulled out of a scratch copy one by one, so their
     // chains heal around each other.
@@ -252,6 +267,7 @@ pub fn delete_nodes(s: &mut Session, ids: &[NodeId]) -> usize {
     if let Some(why) = why {
         s.note(why);
     }
+    s.ask_delete_layers(asking);
     n
 }
 
