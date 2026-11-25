@@ -984,6 +984,7 @@ impl Graph {
                 length: bone.length(),
                 radius: bone.bend_radius,
                 bias: bone.bias,
+                fold: bone.fold,
             };
             rest.push(pose);
             posed.push(Pose {
@@ -1189,9 +1190,10 @@ mod tests {
             };
             let warp = item.warp.unwrap();
             assert_eq!(warp.bend([50.0, 0.0]), [50.0, 0.0]);
+            // In the joint zone the art takes the arc inside the corner.
             let near_joint = warp.bend([114.0, 0.0]);
-            assert!(near_joint[0] > 100.0 && near_joint[0] < 114.0);
-            assert!(near_joint[1] > 0.0 && near_joint[1] < 14.0);
+            assert!(near_joint[0] > 86.0 && near_joint[0] < 114.0);
+            assert!(near_joint[1] > 0.0 && near_joint[1] < 28.0);
             let tip = warp.bend([160.0, 0.0]);
             assert!((tip[0] - 100.0).abs() < 0.001 && (tip[1] - 60.0).abs() < 0.001);
             assert_eq!(warp.outer().tx, 30.0);
@@ -1231,10 +1233,10 @@ mod tests {
         assert!(close(warp.bend([50.0, 5.0]), [50.0, 5.0]));
         assert!(close(warp.bend([150.0, 5.0]), [95.0, 50.0]));
         assert!(close(warp.bend([250.0, 5.0]), [150.0, 105.0]));
-        // In a joint zone the art keeps its distance to the joint.
-        let folded = warp.bend([110.0, 0.0]);
-        assert!(((folded[0] - 100.0).hypot(folded[1]) - 10.0).abs() < 0.001);
-        assert!(folded[0] > 100.0 && folded[1] > 0.0);
+        // In a joint zone the art bends and keeps its width.
+        let (a, b) = (warp.bend([110.0, -5.0]), warp.bend([110.0, 5.0]));
+        assert!(((a[0] - b[0]).hypot(a[1] - b[1]) - 10.0).abs() < 0.001);
+        assert!(!close(a, [110.0, -5.0]) && a[1] > 0.0);
 
         // A bone saved before the bias existed gets the default fold.
         let mut saved = serde_json::to_value(Bone::default()).unwrap();

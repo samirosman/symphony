@@ -1204,6 +1204,16 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                         .suffix("°"),
                 );
                 if parent.is_some() {
+                    egui::ComboBox::from_label("Bend")
+                        .selected_text(bone.fold.title())
+                        .show_ui(ui, |ui| {
+                            for fold in symphony_core::deform::Fold::ALL {
+                                ui.selectable_value(&mut bone.fold, fold, fold.title())
+                                    .on_hover_text(fold.hint());
+                            }
+                        })
+                        .response
+                        .on_hover_text(bone.fold.hint());
                     ui.add(
                         egui::DragValue::new(&mut bone.bend_radius)
                             .range(0.0..=100_000.0)
@@ -1215,7 +1225,9 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                             .speed(0.01)
                             .prefix("Bias "),
                     )
-                    .on_hover_text("0 gives a smooth fold. A larger bias gives a sharper fold.");
+                    .on_hover_text(
+                        "0 gives the smoothest bend. A larger bias gives a sharper elbow.",
+                    );
                 }
             });
         }

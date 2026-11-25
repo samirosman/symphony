@@ -14,13 +14,12 @@ pub struct Bone {
     pub bend_radius: f32,
     /// Shape of the fold at this bone's joint: 0 is smooth,
     /// [`crate::deform::MAX_BIAS`] is sharp.
-    #[serde(default = "default_bias")]
+    #[serde(default)]
     pub bias: f32,
+    /// How this bone's joint bends the art.
+    #[serde(default)]
+    pub fold: crate::deform::Fold,
     pub smart: Option<SmartJoint>,
-}
-
-fn default_bias() -> f32 {
-    crate::deform::DEFAULT_BIAS
 }
 
 impl Default for Bone {
@@ -31,7 +30,8 @@ impl Default for Bone {
             rest_angle: 0.0,
             rotation: Value::default(),
             bend_radius: 28.0,
-            bias: default_bias(),
+            bias: 0.0,
+            fold: Default::default(),
             smart: None,
         }
     }
