@@ -1,4 +1,5 @@
 //! Rest-pose bone bindings and analytic two-bone inverse kinematics.
+//! The bend itself is [`crate::deform::ChainPose`].
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,15 @@ pub struct Bone {
     pub rest_angle: f32,
     pub rotation: Value,
     pub bend_radius: f32,
+    /// Shape of the fold at this bone's joint: 0 is smooth,
+    /// [`crate::deform::MAX_BIAS`] is sharp.
+    #[serde(default = "default_bias")]
+    pub bias: f32,
     pub smart: Option<SmartJoint>,
+}
+
+fn default_bias() -> f32 {
+    crate::deform::DEFAULT_BIAS
 }
 
 impl Default for Bone {
@@ -22,6 +31,7 @@ impl Default for Bone {
             rest_angle: 0.0,
             rotation: Value::default(),
             bend_radius: 28.0,
+            bias: default_bias(),
             smart: None,
         }
     }
@@ -95,29 +105,5 @@ impl BonePose {
             self.posed
                 .compose(self.rest.inverse().unwrap_or(Affine::IDENTITY))
         }
-    }
-}
-
-/// Two rigid transformations blended around the selected bone's rest joint.
-/// Away from this band each side follows its own bone at full weight.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BoneField {
-    pub rest_inverse: Affine,
-    pub parent: Affine,
-    pub child: Affine,
-    pub radius: f32,
-}
-
-impl BoneField {
-    pub fn apply(&self, p: [f32; 2]) -> [f32; 2] {
-        let (x, _) = self.rest_inverse.apply(p[0], p[1]);
-        let (cx, cy) = self.child.apply(p[0], p[1]);
-        if self.radius <= 0.0 || x >= self.radius {
-            return [cx, cy];
-        }
-        let t = (0.5 + x / (2.0 * self.radius)).clamp(0.0, 1.0);
-        let w = t * t * (3.0 - 2.0 * t);
-        let (px, py) = self.parent.apply(p[0], p[1]);
-        [px + (cx - px) * w, py + (cy - py) * w]
     }
 }

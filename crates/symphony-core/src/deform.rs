@@ -199,7 +199,7 @@ fn dir(deg: f32) -> V {
 }
 
 /// A solved bone: start, unit direction, length and absolute angle.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Frame {
     p: V,
     u: V,
@@ -242,7 +242,7 @@ fn solve(poses: &[BonePose]) -> Vec<Frame> {
 }
 
 /// The joint at the start of bone `j` (j >= 1), in the rest pose.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Joint {
     at: V,
     /// Bisector normal: points towards bone `j`.
@@ -281,7 +281,7 @@ pub fn child_weight(sigma: f32, radius: f32, bias: f32) -> f32 {
 
 /// A chain solved for one frame. Building it allocates; [`Self::map`]
 /// does not.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChainPose {
     rest: Vec<Frame>,
     anim: Vec<Frame>,
@@ -413,6 +413,26 @@ impl ChainPose {
     /// influence and for an empty chain, not for an unmoved chain.
     pub fn moves_nothing(&self) -> bool {
         self.influence == Influence::Zero || self.rest.is_empty()
+    }
+
+    /// Is the animated pose the rest pose, so that nothing bends?
+    pub fn at_rest(&self) -> bool {
+        self.moves_nothing() || self.rest == self.anim
+    }
+
+    /// Everything that shapes the bend, for a cache key.
+    pub fn hash_into(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        (self.influence as u8).hash(h);
+        for f in self.rest.iter().chain(&self.anim) {
+            for v in [f.p[0], f.p[1], f.len, f.angle] {
+                v.to_bits().hash(h);
+            }
+        }
+        for j in &self.joints {
+            j.radius.to_bits().hash(h);
+            j.core.to_bits().hash(h);
+        }
     }
 
     /// The smallest joint radius above zero, after clamping. Art must be

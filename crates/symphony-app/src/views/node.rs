@@ -1207,6 +1207,13 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                             .range(0.0..=100_000.0)
                             .prefix("Bend radius "),
                     );
+                    ui.add(
+                        egui::DragValue::new(&mut bone.bias)
+                            .range(0.0..=symphony_core::deform::MAX_BIAS)
+                            .speed(0.01)
+                            .prefix("Bias "),
+                    )
+                    .on_hover_text("0 gives a smooth fold. A larger bias gives a sharper fold.");
                 }
             });
         }

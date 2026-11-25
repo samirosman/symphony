@@ -337,7 +337,9 @@ fn catmull_weights(t: f32) -> [f32; 4] {
 pub enum WarpField {
     Grid(WarpGrid),
     Points(std::sync::Arc<crate::puppet::PuppetField>),
-    Bone(Box<crate::rig::BoneField>),
+    /// A chain of bones, root first, down to the bone the artwork hangs
+    /// from.
+    Bone(Box<crate::deform::ChainPose>),
 }
 
 impl WarpField {
@@ -345,7 +347,7 @@ impl WarpField {
         match self {
             WarpField::Grid(g) => g.apply(p),
             WarpField::Points(f) => f.apply(p),
-            WarpField::Bone(f) => f.apply(p),
+            WarpField::Bone(f) => f.map(p),
         }
     }
 
@@ -353,9 +355,7 @@ impl WarpField {
         match self {
             WarpField::Grid(g) => g.is_flat(),
             WarpField::Points(f) => f.is_flat(),
-            WarpField::Bone(f) => {
-                f.child == Affine::IDENTITY && (f.radius <= 0.0 || f.parent == Affine::IDENTITY)
-            }
+            WarpField::Bone(f) => f.at_rest(),
         }
     }
 
@@ -364,13 +364,9 @@ impl WarpField {
         match self {
             WarpField::Grid(g) => g.piece(),
             WarpField::Points(f) => f.cell() / 4.0,
-            WarpField::Bone(f) => {
-                if f.radius > 0.0 {
-                    (f.radius / 4.0).max(1.0)
-                } else {
-                    f32::MAX
-                }
-            }
+            WarpField::Bone(f) => f
+                .smallest_radius()
+                .map_or(f32::MAX, |radius| (radius / 4.0).max(1.0)),
         }
     }
 }
@@ -421,12 +417,7 @@ impl Warp {
                     }
                 }
                 WarpField::Points(f) => f.key().hash(&mut h),
-                WarpField::Bone(f) => {
-                    affine(f.rest_inverse, &mut h);
-                    affine(f.parent, &mut h);
-                    affine(f.child, &mut h);
-                    f.radius.to_bits().hash(&mut h);
-                }
+                WarpField::Bone(f) => f.hash_into(&mut h),
             }
         }
         h.finish()
