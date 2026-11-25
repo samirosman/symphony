@@ -35,6 +35,62 @@ pub const DEFAULT_BIAS: f32 = 0.125 / 0.3;
 /// The largest bias. A core of the whole zone would be a hard hinge.
 pub const MAX_BIAS: f32 = 0.95;
 
+/// How the art in a joint's zone gets from one bone to the next. No one
+/// method suits every drawing, so each joint chooses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Fold {
+    /// The zone follows a circular arc that touches both bones, and every
+    /// cross-section stays straight (Barr's bend, SIGGRAPH 1984). The limb
+    /// keeps its width. Bias shortens the arc for a sharper elbow.
+    #[default]
+    Arc,
+    /// Each point turns about the joint by a share of the bend that rises
+    /// smoothly across the zone (what dual quaternion skinning does in
+    /// 2D). The outer side bulges.
+    Rotation,
+    /// The same turn with envelope weights: both bones weigh the same in
+    /// the core that Bias sets, as in Blender's Grease Pencil rigging.
+    RotationEnvelope,
+    /// A straight blend of where each bone puts the point (linear blend
+    /// skinning). The joint thins as it bends.
+    Linear,
+    /// Rigid moving least squares with the bones as handles (Schaefer,
+    /// McPhail and Warren, SIGGRAPH 2006). Soft all over: the bones are
+    /// not solid, and the whole chain uses it when one bone asks for it.
+    MovingLeastSquares,
+}
+
+impl Fold {
+    pub const ALL: [Fold; 5] = [
+        Fold::Arc,
+        Fold::Rotation,
+        Fold::RotationEnvelope,
+        Fold::Linear,
+        Fold::MovingLeastSquares,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Fold::Arc => "Circular arc",
+            Fold::Rotation => "Rotation blend",
+            Fold::RotationEnvelope => "Rotation blend, flat core",
+            Fold::Linear => "Linear blend",
+            Fold::MovingLeastSquares => "Moving least squares",
+        }
+    }
+
+    /// What the method does to the art, for a hint.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Fold::Arc => "The joint follows an arc and the limb keeps its width.",
+            Fold::Rotation => "Art turns about the joint. The outer side bulges.",
+            Fold::RotationEnvelope => "Art turns about the joint; Bias sets a flat core.",
+            Fold::Linear => "A straight blend. The joint thins as it bends.",
+            Fold::MovingLeastSquares => "Soft all over. The whole chain bends as one.",
+        }
+    }
+}
+
 /// One bone's parameters at one moment: the rest pose, or the animated
 /// pose at a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,6 +108,9 @@ pub struct BonePose {
     pub radius: f32,
     /// Shape of that joint's fold, 0 (smooth) to [`MAX_BIAS`] (sharp).
     pub bias: f32,
+    /// How that joint bends the art.
+    #[serde(default)]
+    pub fold: Fold,
 }
 
 impl BonePose {
@@ -64,6 +123,7 @@ impl BonePose {
             length,
             radius: DEFAULT_RADIUS_SHARE * length.min(parent_length),
             bias: DEFAULT_BIAS,
+            fold: Fold::default(),
         }
     }
 }
@@ -100,6 +160,7 @@ impl BoneParams {
             length: self.length.at(frame),
             radius: self.radius.at(frame),
             bias: self.bias.at(frame),
+            fold: Fold::default(),
         }
     }
 }
@@ -168,7 +229,14 @@ impl BoneChain {
     /// Both poses solved for `frame`, ready to move points.
     pub fn pose_at(&self, frame: u32) -> ChainPose {
         let rest: Vec<BonePose> = self.bones.iter().map(|b| b.rest).collect();
-        let anim: Vec<BonePose> = self.bones.iter().map(|b| b.anim.at(frame)).collect();
+        let anim: Vec<BonePose> = self
+            .bones
+            .iter()
+            .map(|b| BonePose {
+                fold: b.rest.fold,
+                ..b.anim.at(frame)
+            })
+            .collect();
         ChainPose::new(&rest, &anim, self.influence)
     }
 }
@@ -249,7 +317,23 @@ struct Joint {
     m: V,
     radius: f32,
     core: f32,
+    fold: Fold,
 }
+
+/// A smooth step from 0 at the parent's edge of a joint zone to 1 at the
+/// child's edge.
+fn smooth_weight(sigma: f32, radius: f32) -> f32 {
+    let t = (0.5 + sigma / (2.0 * radius)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn turn(v: V, radians: f32) -> V {
+    let (s, c) = radians.sin_cos();
+    [c * v[0] - s * v[1], s * v[0] + c * v[1]]
+}
+
+/// Handles along each bone for [`Fold::MovingLeastSquares`].
+const MLS_SAMPLES: usize = 16;
 
 /// Weight of the far bone at distance `d` from the joint's bisector, as an
 /// envelope falloff: 1 inside the core, then down to 0 at `radius`.
@@ -287,6 +371,9 @@ pub struct ChainPose {
     anim: Vec<Frame>,
     joints: Vec<Joint>,
     influence: Influence,
+    /// Rest and animated handle points, when the chain bends by moving
+    /// least squares.
+    handles: Vec<(V, V)>,
 }
 
 impl ChainPose {
@@ -326,14 +413,31 @@ impl ChainPose {
                     m,
                     radius,
                     core,
+                    fold: anim[j].fold,
                 }
             })
             .collect();
+        let soft = anim[..n].iter().any(|b| b.fold == Fold::MovingLeastSquares);
+        let handles = if soft {
+            rest_f
+                .iter()
+                .zip(&anim_f)
+                .flat_map(|(r, a)| {
+                    (0..=MLS_SAMPLES).map(move |k| {
+                        let t = k as f32 / MLS_SAMPLES as f32;
+                        (add(r.p, mul(r.u, r.len * t)), add(a.p, mul(a.u, a.len * t)))
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         ChainPose {
             rest: rest_f,
             anim: anim_f,
             joints,
             influence,
+            handles,
         }
     }
 
@@ -341,6 +445,9 @@ impl ChainPose {
     pub fn map(&self, p: V) -> V {
         if self.moves_nothing() {
             return p;
+        }
+        if !self.handles.is_empty() {
+            return self.least_squares(p);
         }
         // The bone that owns `p`: walk the joints from the root while the
         // point is past each bisector.
@@ -360,11 +467,101 @@ impl ChainPose {
             let joint = &self.joints[j - 1];
             let sigma = dot(sub(p, joint.at), joint.m);
             if sigma.abs() < joint.radius {
-                let w = child_weight(sigma, joint.radius, joint.core);
-                return self.blend(p, j, w);
+                return match joint.fold {
+                    Fold::Arc | Fold::MovingLeastSquares => self.arc(p, j, sigma),
+                    Fold::Rotation => self.blend(p, j, smooth_weight(sigma, joint.radius)),
+                    Fold::RotationEnvelope => {
+                        self.blend(p, j, child_weight(sigma, joint.radius, joint.core))
+                    }
+                    Fold::Linear => {
+                        let w = smooth_weight(sigma, joint.radius);
+                        let (a, b) = (self.bone_map(j - 1, p), self.bone_map(j, p));
+                        add(a, mul(sub(b, a), w))
+                    }
+                };
             }
         }
         self.bone_map(i, p)
+    }
+
+    /// Bend the zone of joint `j` along a circular arc that touches both
+    /// bones. `sigma` is the point's distance from the joint's bisector.
+    ///
+    /// Seen from the parent bone, the child turns by `delta` about the
+    /// joint. The art from `-d` to `d` along the bisector's normal goes
+    /// onto an arc of radius `d / tan(delta / 2)`: it leaves the parent's
+    /// side straight on and meets the child's side straight on. A
+    /// cross-section stays a straight line through the arc's centre. Art
+    /// further inside than the centre comes out on its far side: it
+    /// overlaps, as a sleeve does in a deep bend. (Stopping it at the
+    /// centre would tear it from the rigid art at the zone's edges.)
+    /// Bias shortens `d`, for a tighter arc.
+    fn arc(&self, p: V, j: usize, sigma: f32) -> V {
+        let joint = &self.joints[j - 1];
+        let (r0, r1) = (self.rest[j - 1], self.rest[j]);
+        let (a0, a1) = (self.anim[j - 1], self.anim[j]);
+        let pivot = a1.p;
+        // Rigid about the joint with each bone, without their stretch.
+        let with_parent = (a0.angle - r0.angle).to_radians();
+        let with_child = (a1.angle - r1.angle).to_radians();
+        let local = sub(p, joint.at);
+        let on_parent = add(pivot, turn(local, with_parent));
+        let on_child = add(pivot, turn(local, with_child));
+        let mut delta = with_child - with_parent;
+        delta =
+            (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let d = joint.radius * (1.0 - joint.core);
+        let bent = if sigma <= -d {
+            on_parent
+        } else if sigma >= d {
+            on_child
+        } else if delta.abs() < 1e-5 || d < 1e-6 {
+            on_parent
+        } else {
+            let side = delta.signum();
+            let radius = d / (delta.abs() / 2.0).tan();
+            // Across the limb, positive towards the inside of the bend.
+            let across = dot(local, perp(joint.m)) * side;
+            let reach = radius - across;
+            let phi = side * (0.5 + sigma / (2.0 * d)) * delta.abs();
+            // In the joint's axes: x along the bisector's normal.
+            let x = -d + reach * phi.sin() * side;
+            let y = (radius - reach * phi.cos()) * side;
+            let m = turn(joint.m, with_parent);
+            add(pivot, add(mul(m, x), mul(perp(m), y)))
+        };
+        // A stretched bone moves its own side of the zone; fade that in
+        // towards each edge so the map stays whole there.
+        let t = (0.5 + sigma / (2.0 * joint.radius)).clamp(0.0, 1.0);
+        let pull_parent = sub(self.bone_map(j - 1, p), on_parent);
+        let pull_child = sub(self.bone_map(j, p), on_child);
+        add(bent, add(mul(pull_parent, 1.0 - t), mul(pull_child, t)))
+    }
+
+    /// Rigid moving least squares: the rotation and shift that best take
+    /// the rest handles to the animated ones, weighted towards the
+    /// handles near `p`.
+    fn least_squares(&self, p: V) -> V {
+        let weight = |h: &(V, V)| {
+            let d = sub(h.0, p);
+            1.0 / (dot(d, d) + 1e-6)
+        };
+        let (mut total, mut from, mut to) = (0.0, [0.0; 2], [0.0; 2]);
+        for h in &self.handles {
+            let w = weight(h);
+            total += w;
+            from = add(from, mul(h.0, w));
+            to = add(to, mul(h.1, w));
+        }
+        let (from, to) = (mul(from, 1.0 / total), mul(to, 1.0 / total));
+        let (mut cross, mut along) = (0.0, 0.0);
+        for h in &self.handles {
+            let w = weight(h);
+            let (a, b) = (sub(h.0, from), sub(h.1, to));
+            cross += w * (a[0] * b[1] - a[1] * b[0]);
+            along += w * dot(a, b);
+        }
+        add(to, turn(sub(p, from), cross.atan2(along)))
     }
 
     /// Blend the maps of bones `j - 1` and `j` in polar form around the
@@ -432,16 +629,35 @@ impl ChainPose {
         for j in &self.joints {
             j.radius.to_bits().hash(h);
             j.core.to_bits().hash(h);
+            j.fold.hash(h);
         }
+        self.handles.len().hash(h);
     }
 
     /// The smallest joint radius above zero, after clamping. Art must be
     /// sampled finer than this to bend smoothly at the joints. None when
     /// no joint blends (one bone, or hard hinges only).
     pub fn smallest_radius(&self) -> Option<f32> {
+        if !self.handles.is_empty() {
+            // Soft everywhere: sample as for a joint a quarter of the
+            // shortest bone wide.
+            return self
+                .rest
+                .iter()
+                .map(|f| f.len / 4.0)
+                .filter(|r| *r > 0.0)
+                .reduce(f32::min);
+        }
         self.joints
             .iter()
-            .map(|j| j.radius)
+            .map(|j| {
+                j.radius
+                    * if j.fold == Fold::Arc {
+                        1.0 - j.core
+                    } else {
+                        1.0
+                    }
+            })
             .filter(|r| *r > 0.0)
             .reduce(f32::min)
     }
@@ -474,9 +690,14 @@ mod tests {
     }
 
     fn bent(l: f32, deg: f32) -> ChainPose {
+        bent_by(l, deg, Fold::default())
+    }
+
+    fn bent_by(l: f32, deg: f32, fold: Fold) -> ChainPose {
         let rest = arm(l);
         let mut anim = rest.clone();
         anim[1].orientation = deg;
+        anim[1].fold = fold;
         ChainPose::new(&rest, &anim, Influence::Infinite)
     }
 
@@ -523,8 +744,8 @@ mod tests {
     }
 
     #[test]
-    fn the_fold_is_continuous_and_keeps_distance_to_the_joint() {
-        let pose = bent(1.0, 90.0);
+    fn the_rotation_fold_is_continuous_and_keeps_distance_to_the_joint() {
+        let pose = bent_by(1.0, 90.0, Fold::RotationEnvelope);
         let mut last = pose.map([0.5, 0.0]);
         for i in 1..=400 {
             let x = 0.5 + i as f32 / 400.0;
@@ -542,24 +763,81 @@ mod tests {
     }
 
     #[test]
-    fn the_fold_does_not_tear_off_the_bone_axis() {
+    fn no_fold_tears_the_art_off_the_bone_axis() {
         // Continuous means neighbours move apart by at most a fixed
-        // multiple of the step. The steepest place is the zone edge: weight
-        // slope 2 / 0.175 = 11.4, times 150 degrees (2.62 rad), times the
-        // largest distance to the joint here (0.58), is about 17.
+        // multiple of the step. The steepest is the envelope's zone edge:
+        // weight slope 2 / 0.175 = 11.4, times 150 degrees (2.62 rad),
+        // times the largest distance to the joint here (0.58), is about 17.
         let h = 0.0025;
-        for deg in [30.0, 90.0, 150.0, -120.0] {
-            let pose = bent(1.0, deg);
+        for (deg, fold) in [30.0, 90.0, 150.0, -120.0]
+            .into_iter()
+            .flat_map(|deg| Fold::ALL.map(|fold| (deg, fold)))
+        {
+            let pose = bent_by(1.0, deg, fold);
             let at = |i: i32, k: i32| pose.map([0.5 + i as f32 * h, k as f32 * h]);
             for i in 0..400 {
                 for k in -120..120 {
                     let q = at(i, k);
                     for n in [at(i + 1, k), at(i, k + 1)] {
-                        assert!(len(sub(n, q)) < 20.0 * h, "{deg} deg at ({i}, {k})");
+                        assert!(
+                            len(sub(n, q)) < 20.0 * h,
+                            "{fold:?}, {deg} deg at ({i}, {k})"
+                        );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_arc_keeps_the_limb_as_wide_as_drawn_and_meets_both_bones() {
+        for deg in [20.0_f32, 90.0, -135.0] {
+            let pose = bent(1.0, deg);
+            // Default joint: radius 0.3, less the default bias.
+            let d = 0.3 * (1.0 - DEFAULT_BIAS);
+            let radius = d / (deg.abs().to_radians() / 2.0).tan();
+            for i in 0..=40 {
+                let x = 1.0 - d + 2.0 * d * i as f32 / 40.0;
+                let (a, b) = (pose.map([x, -0.04]), pose.map([x, 0.04]));
+                assert!((len(sub(a, b)) - 0.08).abs() < 1e-4, "{deg} deg, x = {x}");
+                // The centre line is on the arc.
+                let centre = [1.0 - d, radius * deg.signum()];
+                let on_axis = pose.map([x, 0.0]);
+                assert!((len(sub(on_axis, centre)) - radius).abs() < 1e-3);
+            }
+            // Art outside the zone is solid on its bone.
+            assert!(close(pose.map([0.8, 0.1]), [0.8, 0.1], 1e-5));
+            let (s, c) = deg.to_radians().sin_cos();
+            let far = [1.0 + 0.3 * c - 0.1 * s, 0.3 * s + 0.1 * c];
+            assert!(close(pose.map([1.3, 0.1]), far, 1e-4));
+        }
+    }
+
+    #[test]
+    fn bias_tightens_the_arc() {
+        let turn = |bias: f32| {
+            let rest = arm(1.0);
+            let mut anim = rest.clone();
+            anim[1].orientation = 90.0;
+            anim[1].bias = bias;
+            let pose = ChainPose::new(&rest, &anim, Influence::Infinite);
+            // How far the joint itself moves: the arc cuts the corner.
+            len(sub(pose.map([1.0, 0.0]), [1.0, 0.0]))
+        };
+        assert!(turn(0.0) > turn(0.5) && turn(0.5) > turn(0.9));
+        assert!(turn(0.9) < 0.02);
+    }
+
+    #[test]
+    fn moving_least_squares_follows_the_bones_and_is_soft_between() {
+        let pose = bent_by(1.0, 90.0, Fold::MovingLeastSquares);
+        // Points on the bones go where the bones go.
+        assert!(close(pose.map([0.5, 0.0]), [0.5, 0.0], 0.01));
+        assert!(close(pose.map([1.5, 0.0]), [1.0, 0.5], 0.01));
+        // Off the bones the art gives a little everywhere.
+        let off = pose.map([0.3, 0.2]);
+        assert!(len(sub(off, [0.3, 0.2])) > 1e-3);
+        assert!(off[0].is_finite() && off[1].is_finite());
     }
 
     #[test]
