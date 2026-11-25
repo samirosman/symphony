@@ -61,6 +61,14 @@ pub struct CanvasState {
     /// a render that has them lands (it renders in the background).
     settling: Vec<Settling>,
     pub render_effects: bool,
+    /// The selected Mesh Warp's grid, being edited.
+    warp_edit: super::warp_edit::WarpEdit,
+    rig_edit: super::rig_edit::RigEdit,
+    /// Text being typed with the Text tool.
+    text: Option<TextDraft>,
+    /// Drawings bent by Mesh Warps, by drawing: rebuilt only when the
+    /// drawing or the warp changes (key), never every frame.
+    bent: std::collections::HashMap<Id, (u64, std::sync::Arc<symphony_core::stroke::Drawing>)>,
 }
 
 impl Default for CanvasState {
@@ -82,6 +90,10 @@ impl Default for CanvasState {
             display: Default::default(),
             settling: Vec::new(),
             render_effects: true,
+            warp_edit: Default::default(),
+            rig_edit: Default::default(),
+            text: None,
+            bent: Default::default(),
         }
     }
 }
@@ -341,6 +353,255 @@ fn view_transform(state: &CanvasState, rect: Rect) -> Affine {
 
 fn to_pos((x, y): (f32, f32)) -> Pos2 {
     Pos2::new(x, y)
+}
+
+/// Text being typed: where (drawing space of `layer` at `frame`), what,
+/// and its letters' triangles for the live preview (by text and style).
+struct TextDraft {
+    layer: usize,
+    frame: u32,
+    transform: Affine,
+    editing: Option<symphony_core::stroke::TextObject>,
+    text: String,
+    focus: bool,
+    preview: Option<(
+        String,
+        crate::vector_import::TextStyle,
+        std::sync::Arc<symphony_vector::Mesh>,
+    )>,
+}
+
+/// Put the typed text in the drawing (nothing if it's empty).
+fn commit_text(s: &mut Session, draft: TextDraft) {
+    s.write_text(
+        draft.layer,
+        draft.frame,
+        draft.transform,
+        &draft.text,
+        draft.editing.map(|object| object.id),
+    );
+}
+
+/// The Text tool: a click starts text there; the letters show as they'll
+/// be while you type in a small field beside them. Cmd+Enter or a click
+/// elsewhere puts them in the drawing (one undo step); Esc cancels.
+/// Switching tools, layers or frames finishes the text too.
+#[allow(clippy::too_many_arguments)]
+fn text_tool(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    s: &mut Session,
+    state: &mut CanvasState,
+    view: Affine,
+    layer_world: Affine,
+    space: bool,
+) {
+    let elsewhere = state
+        .text
+        .as_ref()
+        .is_some_and(|d| s.tool != Tool::Text || d.layer != s.selected || d.frame != s.frame);
+    if elsewhere {
+        if let Some(d) = state.text.take() {
+            commit_text(s, d);
+        }
+    }
+    if s.tool != Tool::Text {
+        return;
+    }
+    let to_screen = view.compose(layer_world);
+    if response.clicked() && !space {
+        if let Some(d) = state.text.take() {
+            commit_text(s, d);
+        } else if let (Some(p), Some(back)) = (response.interact_pointer_pos(), to_screen.inverse())
+        {
+            let (x, y) = back.apply(p.x, p.y);
+            let hit = s
+                .doc
+                .exposed(s.selected, s.frame)
+                .and_then(|id| s.doc.drawings.get(&id))
+                .and_then(|drawing| {
+                    drawing
+                        .text
+                        .iter()
+                        .rev()
+                        .find(|object| {
+                            let glyphs: Vec<_> = drawing
+                                .strokes
+                                .iter()
+                                .filter(|stroke| {
+                                    stroke.art == s.art && object.glyphs.contains(&stroke.id)
+                                })
+                                .collect();
+                            if glyphs.len() != object.glyphs.len() {
+                                return false;
+                            }
+                            symphony_vector::bounds_of(glyphs).is_some_and(|(lo, hi)| {
+                                let margin = 5.0 / scale_of(to_screen).max(0.01);
+                                x >= lo[0] - margin
+                                    && x <= hi[0] + margin
+                                    && y >= lo[1] - margin
+                                    && y <= hi[1] + margin
+                            })
+                        })
+                        .cloned()
+                });
+            if let Some(object) = &hit {
+                s.text_style = object.style.clone();
+            }
+            state.text = Some(TextDraft {
+                layer: s.selected,
+                frame: s.frame,
+                transform: hit
+                    .as_ref()
+                    .map_or(Affine::translate(x, y), |object| object.transform),
+                text: hit
+                    .as_ref()
+                    .map_or_else(String::new, |object| object.text.clone()),
+                editing: hit,
+                focus: true,
+                preview: None,
+            });
+        }
+    }
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    let Some(draft) = state.text.as_mut() else {
+        return;
+    };
+    // The letters, as they'll be (rebuilt only when the text or style
+    // changes).
+    let stale = draft
+        .preview
+        .as_ref()
+        .is_none_or(|(t, st, _)| *t != draft.text || *st != s.text_style);
+    if stale {
+        let mut mesh = symphony_vector::Mesh::default();
+        for shape in crate::vector_import::text_shapes(&draft.text, &s.text_style) {
+            let part = symphony_vector::fill::fill_mesh(&shape, Affine::IDENTITY);
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.extend(part.vertices);
+            mesh.indices.extend(part.indices.iter().map(|i| i + base));
+        }
+        draft.preview = Some((
+            draft.text.clone(),
+            s.text_style.clone(),
+            std::sync::Arc::new(mesh),
+        ));
+    }
+    let m = to_screen.compose(draft.transform);
+    let ink = {
+        let swatch = draft
+            .editing
+            .as_ref()
+            .and_then(|object| {
+                let drawing = s.doc.exposed(draft.layer, draft.frame)?;
+                let glyph = s
+                    .doc
+                    .drawings
+                    .get(&drawing)?
+                    .strokes
+                    .iter()
+                    .find(|stroke| object.glyphs.contains(&stroke.id))?;
+                Some(glyph.swatch)
+            })
+            .unwrap_or(s.swatch);
+        let [r, g, b, a] = s.doc.swatch_rgba(swatch);
+        Color32::from_rgba_unmultiplied(r, g, b, a)
+    };
+    if let Some((_, _, mesh)) = &draft.preview {
+        let mut out = egui::Mesh::default();
+        for &[x, y] in &mesh.vertices {
+            out.colored_vertex(to_pos(m.apply(x, y)), ink);
+        }
+        out.indices = mesh.indices.clone();
+        painter.add(egui::Shape::mesh(out));
+    }
+    // Where the text starts.
+    let anchor = to_pos(m.apply(0.0, 0.0));
+    let line_h = (s.text_style.size * scale_of(m)).max(8.0);
+    painter.line_segment(
+        [anchor, anchor + Vec2::new(0.0, line_h)],
+        EStroke::new(1.5, theme::ACCENT_SELECT),
+    );
+    // The typing field, just below the first line.
+    let mut done = false;
+    let mut cancel = false;
+    egui::Area::new(egui::Id::unique("text-tool-field"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor + Vec2::new(0.0, line_h + 6.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                // Taken before the field sees them (it would type a
+                // newline for Cmd+Enter).
+                ui.input_mut(|i| {
+                    done = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
+                    cancel = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                });
+                let field = ui.add(
+                    egui::TextEdit::multiline(&mut draft.text)
+                        .desired_width(240.0)
+                        .desired_rows(2)
+                        .hint_text("Type text"),
+                );
+                if draft.focus {
+                    field.request_focus();
+                    draft.focus = false;
+                }
+                ui.label(
+                    egui::RichText::new(if cfg!(target_os = "macos") {
+                        "Cmd+Enter to finish, Esc to cancel"
+                    } else {
+                        "Ctrl+Enter to finish, Esc to cancel"
+                    })
+                    .font(theme::dense())
+                    .color(theme::TEXT_SECONDARY),
+                );
+            });
+        });
+    if cancel {
+        state.text = None;
+    } else if done {
+        if let Some(d) = state.text.take() {
+            commit_text(s, d);
+        }
+    }
+}
+
+/// A drawing bent by its Mesh Warps, rebuilt only when the drawing (the
+/// scene version) or the warp changed. Bent strokes get their own ids per
+/// warp, so the line caches keep the unbent and bent shapes apart.
+fn bent_drawing(
+    cache: &mut std::collections::HashMap<
+        Id,
+        (u64, std::sync::Arc<symphony_core::stroke::Drawing>),
+    >,
+    version: u64,
+    d: &symphony_core::stroke::Drawing,
+    warp: &symphony_core::warp::Warp,
+) -> std::sync::Arc<symphony_core::stroke::Drawing> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    version.hash(&mut h);
+    warp.key().hash(&mut h);
+    let key = h.finish();
+    if let Some((k, bent)) = cache.get(&d.id) {
+        if *k == key {
+            return bent.clone();
+        }
+    }
+    let mut bent = symphony_vector::bend::drawing(d, warp);
+    let tag = (key >> 1) | (1 << 63);
+    for st in &mut bent.strokes {
+        st.id = Id(st.id.0 ^ tag);
+    }
+    for f in &mut bent.fills {
+        f.id = Id(f.id.0 ^ tag);
+    }
+    let bent = std::sync::Arc::new(bent);
+    cache.insert(d.id, (key, bent.clone()));
+    bent
 }
 
 fn paint_stroke(
@@ -937,6 +1198,9 @@ pub fn ui(
             .render_commands(s.doc.display, &s.doc.xsheet, s.frame)
             .ok()
     };
+    // Drawings bent by Mesh Warps: (drawing, its warp).
+    // (drawing, its warp, projection for both vector and raster artwork)
+    let mut warps: Vec<(Id, std::sync::Arc<symphony_core::warp::Warp>, Affine)> = Vec::new();
     let items: Vec<select::Item> = if drawing_only {
         s.doc
             .exposed(s.selected, s.frame)
@@ -954,10 +1218,11 @@ pub fn ui(
                     return None;
                 }
                 let layer = s.doc.layers.iter().position(|l| l.node == item.node)?;
-                let transform = s
-                    .doc
-                    .project_plane(s.frame, item.depth)?
-                    .compose(item.transform);
+                let plane = s.doc.project_plane(s.frame, item.depth)?;
+                let transform = plane.compose(item.transform);
+                if let Some(w) = &item.warp {
+                    warps.push((item.drawing, w.clone(), plane));
+                }
                 Some((layer, item.drawing, transform))
             })
             .collect()
@@ -974,27 +1239,64 @@ pub fn ui(
         });
     let raw_art = raw_only || show_surround;
     if raw_art {
+        state
+            .bent
+            .retain(|d, _| warps.iter().any(|(w, _, _)| w == d));
         for (_, d, m) in &items {
-            let Some(dr) = s.doc.drawings.get(d) else {
+            let Some(original) = s.doc.drawings.get(d) else {
                 continue;
             };
             let world = view.compose(*m);
             // An imported image sits under all of the drawing's art layers.
-            paint_image(&painter, images, dr, world);
+            let image_world = warps
+                .iter()
+                .find(|(w, _, _)| w == d)
+                .and_then(|(_, warp, stage)| {
+                    Some(view.compose(*stage).compose(warp.raster_transform()?))
+                })
+                .unwrap_or(world);
+            paint_image(&painter, images, original, image_world);
+            // Under a Mesh Warp: the bent copy, drawn with the warp's
+            // outer transform (on the same plane).
+            let bent_copy;
+            let (dr, world) = match warps.iter().find(|(w, _, _)| w == d) {
+                Some((_, warp, stage)) => {
+                    bent_copy = bent_drawing(&mut state.bent, s.doc.version, original, warp);
+                    (&*bent_copy, view.compose(*stage).compose(warp.outer()))
+                }
+                None => (original, world),
+            };
             for art in ArtLayer::STACK {
                 if drawing_only && !s.art_preview && art != s.art {
                     continue;
                 }
                 for f in dr.fills.iter().filter(|f| f.art == art) {
+                    // Selected zones follow the Select tool's live preview.
+                    let transform = match preview {
+                        Some(l)
+                            if s.selection.drawing == Some(*d)
+                                && s.selection.strokes.contains(&f.id) =>
+                        {
+                            world.compose(l)
+                        }
+                        _ => world,
+                    };
                     state
                         .strokes
                         .vectors
-                        .paint_fill(&painter, f, colour(s, f.swatch), world);
+                        .paint_fill(&painter, f, colour(s, f.swatch), transform);
                 }
                 for st in dr
                     .strokes
                     .iter()
                     .filter(|st| st.art == art && st.kind != StrokeKind::Invisible)
+                    .filter(|st| {
+                        !state
+                            .text
+                            .as_ref()
+                            .and_then(|draft| draft.editing.as_ref())
+                            .is_some_and(|object| object.glyphs.contains(&st.id))
+                    })
                 {
                     let transform = match preview {
                         Some(l)
@@ -1027,7 +1329,15 @@ pub fn ui(
                 EStroke::NONE,
             ));
         }
-        if !state.display.paint(&painter, s, corners, preview) {
+        let hidden_text = state.text.as_ref().and_then(|draft| {
+            let drawing = s.doc.exposed(draft.layer, draft.frame)?;
+            let object = draft.editing.as_ref()?;
+            Some((drawing, object.glyphs.clone()))
+        });
+        if !state
+            .display
+            .paint(&painter, s, corners, preview, hidden_text)
+        {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -1111,7 +1421,19 @@ pub fn ui(
     }
     state.select.camera_space = !drawing_only;
     let navigating_now = space || s.tool == Tool::Hand;
-    if matches!(s.tool, Tool::Select | Tool::Transform) && !navigating_now {
+    let warp_busy = !navigating_now
+        && super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view);
+    let rig_busy = if !navigating_now && !drawing_only {
+        super::rig_edit::ui(ui, &response, &painter, s, &mut state.rig_edit, view)
+    } else {
+        super::rig_edit::finish(s, &mut state.rig_edit);
+        false
+    };
+    if matches!(s.tool, Tool::Select | Tool::Transform)
+        && !navigating_now
+        && !warp_busy
+        && !rig_busy
+    {
         select::ui(ui, &response, &painter, s, &mut state.select, view, &items);
     } else {
         state.select.hover = None;
@@ -1175,6 +1497,8 @@ pub fn ui(
             }));
         }
     }
+
+    text_tool(ui, &response, &painter, s, state, view, layer_world, space);
 
     // Pen input.
     let zoom_factor = ui.ctx().zoom_factor();
@@ -1380,6 +1704,7 @@ pub fn ui(
                         }
                         // A click without dragging clears the point selection.
                         LineMode::MoveSelected if !le.moved => s.line_points.clear(),
+                        LineMode::MoveSelected => s.line_edit_finish(le.drawing, 0.0),
                         _ => s.end_gesture(),
                     }
                 }
@@ -1851,6 +2176,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
             Tool::CloseGap => Icon::CloseGap,
             Tool::Dropper => Icon::Dropper,
             Tool::LineEditor => Icon::LineEdit,
+            Tool::Text => Icon::Text,
             _ => Icon::Brush,
         }
     };

@@ -118,7 +118,7 @@ impl LinkAnim {
 fn passes_through(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Peg(_) | NodeKind::Effect(_) | NodeKind::Composite
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Effect(_) | NodeKind::Composite
     )
 }
 
@@ -144,6 +144,115 @@ fn detached_links(graph: &symphony_core::graph::Graph, id: NodeId) -> Vec<Link> 
         }
     }
     after
+}
+
+/// Why a node can't be deleted, if it can't.
+pub fn undeletable(s: &Session, id: NodeId) -> Option<&'static str> {
+    if id == s.doc.display {
+        return Some("The Camera node shows the scene; it can't be deleted");
+    }
+    if s.doc.layers.iter().any(|l| l.peg == id) {
+        return Some(
+            "This is a layer's own peg: delete the layer to remove it, or add another peg",
+        );
+    }
+    if matches!(
+        s.doc.graph.node(id).map(|n| &n.kind),
+        Some(NodeKind::Drawing { .. })
+    ) && s.layer_count() <= 1
+    {
+        return Some("A scene needs at least one layer");
+    }
+    None
+}
+
+/// Delete nodes, as one undo step. Pegs, Mesh Warps and effects are
+/// pulled out of their chains, which close up behind them; a Drawing
+/// node takes its layer with it. Returns how many were deleted (a note
+/// says why any couldn't be).
+pub fn delete_nodes(s: &mut Session, ids: &[NodeId]) -> usize {
+    let mut why = None;
+    let mut ids: Vec<NodeId> = ids
+        .iter()
+        .copied()
+        .filter(|&id| match undeletable(s, id) {
+            Some(reason) => {
+                why = Some(reason);
+                false
+            }
+            None => s.doc.graph.node(id).is_some(),
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    // Keep at least one layer.
+    let mut layers: Vec<usize> = ids
+        .iter()
+        .filter_map(|&id| s.doc.layers.iter().position(|l| l.node == id))
+        .collect();
+    while !layers.is_empty() && layers.len() >= s.layer_count() {
+        let keep = layers.pop().unwrap_or(0);
+        ids.retain(|&id| s.doc.layers.get(keep).is_none_or(|l| l.node != id));
+        why = Some("A scene needs at least one layer");
+    }
+    let mut edits = Vec::new();
+    // The other nodes: pulled out of a scratch copy one by one, so their
+    // chains heal around each other.
+    let mut scratch = s.doc.graph.clone();
+    let others: Vec<NodeId> = ids
+        .iter()
+        .copied()
+        .filter(|id| !s.doc.layers.iter().any(|l| l.node == *id))
+        .collect();
+    for &id in &others {
+        let after = detached_links(&scratch, id);
+        scratch.replace_links(after);
+        scratch.remove(id);
+    }
+    if !others.is_empty() {
+        edits.push(Edit::RewireNodes {
+            before: s.doc.graph.links().to_vec(),
+            after: scratch.links().to_vec(),
+            was_custom: s.doc.custom_wiring,
+        });
+        for &id in &others {
+            if let Some(node) = s.doc.graph.node(id).cloned() {
+                edits.push(Edit::RemoveNode {
+                    id,
+                    node,
+                    position: s.doc.node_positions.get(&id).copied().unwrap_or([0.0, 0.0]),
+                });
+            }
+        }
+    }
+    let mut layers: Vec<usize> = ids
+        .iter()
+        .filter_map(|&id| s.doc.layers.iter().position(|l| l.node == id))
+        .collect();
+    layers.sort_unstable();
+    for &i in layers.iter().rev() {
+        if let Some(snap) = s.doc.snapshot_layer(i) {
+            edits.push(Edit::RemoveLayer(Box::new(snap)));
+        }
+    }
+    let n = others.len() + layers.len();
+    if n > 0 {
+        let name = if n == 1 {
+            "Delete node"
+        } else {
+            "Delete nodes"
+        };
+        s.history.apply(&mut s.doc, name, edits);
+        if s.selected_node.is_some_and(|id| ids.contains(&id)) {
+            s.selected_node = None;
+        }
+        s.clamp_selection();
+        s.fit_tool_to_context();
+    }
+    if let Some(why) = why {
+        s.note(why);
+    }
+    n
 }
 
 struct PropertyDraft {
@@ -188,6 +297,9 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::Drawing { .. } => "Drawing",
         NodeKind::Peg(_) => "Peg",
+        NodeKind::Skeleton(_) => "Skeleton",
+        NodeKind::Bone(_) => "Bone",
+        NodeKind::MeshWarp(_) => "Mesh Warp",
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
@@ -221,9 +333,30 @@ fn effect_nodes() -> [NodeKind; 6] {
 }
 
 pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
-    [NodeKind::Peg(Default::default()), NodeKind::Composite]
-        .into_iter()
-        .chain(effect_nodes())
+    [
+        NodeKind::Peg(Default::default()),
+        NodeKind::Skeleton(Default::default()),
+        NodeKind::Bone(Default::default()),
+        mesh_warp(1920, 1080),
+        NodeKind::Composite,
+    ]
+    .into_iter()
+    .chain(effect_nodes())
+}
+
+/// A new Mesh Warp: a 4 x 4 grid over the whole stage (`w` x `h`).
+pub fn mesh_warp(w: u32, h: u32) -> NodeKind {
+    NodeKind::MeshWarp(Box::new(symphony_core::warp::MeshWarp::new(
+        4, 4, 0.0, 0.0, w as f32, h as f32,
+    )))
+}
+
+/// A Mesh Warp from search or a menu, sized to this scene's stage.
+fn fit_to_stage(s: &Session, kind: NodeKind) -> NodeKind {
+    match kind {
+        NodeKind::MeshWarp(_) => mesh_warp(s.doc.settings.width, s.doc.settings.height),
+        other => other,
+    }
 }
 
 pub(super) fn node_name(node: &Node) -> &str {
@@ -235,6 +368,14 @@ pub(super) fn node_name(node: &Node) -> &str {
 }
 
 pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKind) {
+    let kind = fit_to_stage(s, kind);
+    // A Mesh Warp found by search bends the selected layer straight away.
+    if matches!(kind, NodeKind::MeshWarp(_)) {
+        if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
+            insert_near(s, node, kind);
+            return;
+        }
+    }
     // An effect found by search applies to the selected layer straight
     // away: it goes between that layer's drawing node and where its image
     // went, so typing "subtract" is enough.
@@ -338,10 +479,10 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         .unwrap_or([0.0, 0.0]);
     // (link to replace, its source, its destination) for the new node.
     let splice: Option<(Option<Link>, Option<NodeId>, Input)> = match &kind {
-        NodeKind::Peg(_)
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_)
             if matches!(
                 kind_of(target),
-                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_))
+                Some(NodeKind::Drawing { .. } | NodeKind::Peg(_) | NodeKind::MeshWarp(_))
             ) =>
         {
             let parent = graph.input(target, 0);
@@ -377,7 +518,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         return;
     };
     let id = s.doc.graph.next_id();
-    let position = if matches!(kind, NodeKind::Peg(_)) {
+    let position = if matches!(kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_)) {
         [at[0], at[1] - (H + 30.0)]
     } else {
         [at[0], at[1] + H + 30.0]
@@ -427,6 +568,10 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
 }
 
 fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
+    if matches!(kind, NodeKind::Skeleton(_) | NodeKind::Bone(_)) {
+        add_rig_node(s, kind, position);
+        return;
+    }
     // Placed clear of the others from the start (one undo step).
     let position = free_spot(s, position, W);
     let id = s.doc.graph.next_id();
@@ -442,6 +587,124 @@ fn add_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
             },
             position,
         }],
+    );
+    s.select_graph_node(id, true);
+}
+
+fn add_rig_node(s: &mut Session, kind: NodeKind, position: [f32; 2]) {
+    let parent = selected_node(s).filter(|&id| {
+        matches!(kind, NodeKind::Bone(_))
+            && s.doc
+                .graph
+                .node(id)
+                .is_some_and(|node| matches!(node.kind, NodeKind::Skeleton(_) | NodeKind::Bone(_)))
+    });
+    let first = s.doc.graph.next_id();
+    let position = free_spot(s, position, W);
+    let mut edits = Vec::new();
+    let make_node = |id, kind: NodeKind, position| Edit::AddNode {
+        id,
+        node: Node {
+            name: kind_label(&kind).into(),
+            kind,
+            enabled: true,
+        },
+        position,
+    };
+    let (parent, bone) = if let Some(parent) = parent {
+        (parent, first)
+    } else {
+        edits.push(make_node(
+            first,
+            NodeKind::Skeleton(Default::default()),
+            position,
+        ));
+        (first, NodeId(first.0 + 1))
+    };
+    let bone_at = if first == bone {
+        position
+    } else {
+        free_spot_with(
+            s,
+            [position[0], position[1] + H + 28.0],
+            W,
+            Some((first, position)),
+        )
+    };
+    edits.push(make_node(bone, NodeKind::Bone(Default::default()), bone_at));
+    let before = s.doc.graph.links().to_vec();
+    let mut after = before.clone();
+    after.push(Link {
+        from: parent,
+        to: bone,
+        port: 0,
+    });
+    edits.push(Edit::RewireNodes {
+        before,
+        after,
+        was_custom: s.doc.custom_wiring,
+    });
+    s.history.apply(
+        &mut s.doc,
+        if first == bone {
+            "Add bone"
+        } else {
+            "Add skeleton"
+        },
+        edits,
+    );
+    s.select_graph_node(bone, true);
+}
+
+pub fn smart_joint_label(s: &Session, id: NodeId) -> Option<&'static str> {
+    let bone = s.doc.graph.bone(id)?;
+    if s.doc.graph.parent_bone(id).is_some() && bone.smart.is_some() {
+        Some("Remove smart joint")
+    } else if s.doc.graph.can_make_smart(id) {
+        Some("Make smart joint")
+    } else {
+        None
+    }
+}
+
+pub fn toggle_smart_joint(s: &mut Session, id: NodeId) {
+    use symphony_core::{anim::Value, rig::SmartJoint};
+    let Some(label) = smart_joint_label(s, id) else {
+        return;
+    };
+    let Some(before) = s.doc.graph.node(id).cloned() else {
+        return;
+    };
+    let mut after = before.clone();
+    let NodeKind::Bone(bone) = &mut after.kind else {
+        return;
+    };
+    if bone.smart.is_some() {
+        bone.smart = None;
+    } else {
+        let Some(pose) = s.doc.graph.bone_pose(id, s.frame) else {
+            return;
+        };
+        let Some(basis) = s
+            .doc
+            .graph
+            .smart_target_basis(id, s.frame)
+            .and_then(|m| m.inverse())
+        else {
+            return;
+        };
+        let (x, y) = pose.tip();
+        let (x, y) = basis.apply(x, y);
+        let angle = bone.rest_angle + bone.rotation.at(s.frame);
+        bone.smart = Some(SmartJoint {
+            target: [Value::Constant(x), Value::Constant(y)],
+            flip: angle.to_radians().sin() < 0.0,
+        });
+    }
+    s.history.apply(
+        &mut s.doc,
+        label,
+        vec![Edit::SetNodeProperties { id, before, after }],
     );
     s.select_graph_node(id, true);
 }
@@ -793,7 +1056,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
                 }
                 ui.close();
             }
-            for kind in [NodeKind::Peg(Default::default()), NodeKind::Composite] {
+            for kind in [
+                NodeKind::Peg(Default::default()),
+                NodeKind::Skeleton(Default::default()),
+                NodeKind::Bone(Default::default()),
+                mesh_warp(s.doc.settings.width, s.doc.settings.height),
+                NodeKind::Composite,
+            ] {
                 if ui.button(kind_label(&kind)).clicked() {
                     add = Some(kind);
                     ui.close();
@@ -844,6 +1113,7 @@ fn properties(ctx: &egui::Context, s: &mut Session, state: &mut NodeViewState) {
 }
 
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
+    let mut build_mesh_now = false;
     ui.horizontal(|ui| {
         ui.label("Name");
         ui.text_edit_singleline(&mut draft.node.name);
@@ -851,7 +1121,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     ui.checkbox(&mut draft.node.enabled, "Enabled");
     ui.separator();
     match &mut draft.node.kind {
-        NodeKind::Peg(peg) => {
+        NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => {
             peg_value(ui, "Position X", &mut peg.x, s.frame, s.animate);
             peg_value(ui, "Position Y", &mut peg.y, s.frame, s.animate);
             peg_value(ui, "Rotation", &mut peg.rotation, s.frame, s.animate);
@@ -873,6 +1143,184 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                     ui.add(egui::DragValue::new(&mut peg.pivot.1).prefix("Y "));
                 });
             });
+        }
+        NodeKind::Bone(bone) => {
+            let parent = s.doc.graph.parent_bone(draft.id);
+            let controller = s.doc.graph.smart_controller(draft.id, s.frame);
+            if let Some(joint) = bone.smart.as_mut().filter(|_| parent.is_some()) {
+                peg_value(ui, "Target X", &mut joint.target[0], s.frame, s.animate);
+                peg_value(ui, "Target Y", &mut joint.target[1], s.frame, s.animate);
+                ui.checkbox(&mut joint.flip, "Flip bend");
+            } else if let Some(owner) = controller.filter(|&id| id != draft.id) {
+                if ui.button("Select smart joint target").clicked() {
+                    s.select_graph_node(owner, true);
+                }
+            } else {
+                peg_value(ui, "Rotation", &mut bone.rotation, s.frame, s.animate);
+            }
+            if let Some(label) = smart_joint_label(s, draft.id) {
+                if ui.button(label).clicked() {
+                    toggle_smart_joint(s, draft.id);
+                    if let Some(current) = PropertyDraft::new(s, draft.id) {
+                        *draft = current;
+                    }
+                    return;
+                }
+            }
+            ui.collapsing("Rest pose and deformation", |ui| {
+                if parent.is_none() {
+                    ui.horizontal(|ui| {
+                        ui.label("Root origin");
+                        ui.add(egui::DragValue::new(&mut bone.origin[0]).prefix("X "));
+                        ui.add(egui::DragValue::new(&mut bone.origin[1]).prefix("Y "));
+                    });
+                }
+                ui.add(
+                    egui::DragValue::new(&mut bone.length)
+                        .range(1.0..=100_000.0)
+                        .prefix("Length "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut bone.rest_angle)
+                        .prefix("Rest angle ")
+                        .suffix("°"),
+                );
+                if parent.is_some() {
+                    ui.add(
+                        egui::DragValue::new(&mut bone.bend_radius)
+                            .range(0.0..=100_000.0)
+                            .prefix("Bend radius "),
+                    );
+                }
+            });
+        }
+        NodeKind::MeshWarp(warp) => {
+            use symphony_core::warp::{WarpKind, WarpLines};
+            ui.label("Kind");
+            widgets::segmented(
+                ui,
+                "warp-kind",
+                &mut warp.kind,
+                &[(WarpKind::Grid, "Grid"), (WarpKind::Points, "Points")],
+                false,
+            );
+            ui.label("Lines");
+            widgets::segmented(
+                ui,
+                "warp-lines",
+                &mut warp.lines,
+                &[
+                    (WarpLines::Paths, "Paths"),
+                    (WarpLines::Shape, "Whole shape"),
+                ],
+                false,
+            );
+            ui.label(
+                egui::RichText::new(match warp.lines {
+                    WarpLines::Paths => "Lines bend but keep their thickness.",
+                    WarpLines::Shape => {
+                        "Lines thicken where the warp stretches and thin where it squeezes, \
+                         as if seen in perspective."
+                    }
+                })
+                .font(theme::dense())
+                .color(theme::TEXT_SECONDARY),
+            );
+            ui.add_space(6.0);
+            match warp.kind {
+                WarpKind::Grid => {
+                    let (mut rows, mut columns) = (warp.rows, warp.columns);
+                    ui.horizontal(|ui| {
+                        ui.label("Rows");
+                        ui.add(
+                            egui::DragValue::new(&mut rows)
+                                .range(1..=symphony_core::warp::MAX_CELLS),
+                        );
+                        ui.label("Columns");
+                        ui.add(
+                            egui::DragValue::new(&mut columns)
+                                .range(1..=symphony_core::warp::MAX_CELLS),
+                        );
+                    });
+                    if (rows, columns) != (warp.rows, warp.columns) {
+                        warp.resize(rows, columns);
+                    }
+                    peg_value(ui, "(x) Axis", &mut warp.x, s.frame, s.animate);
+                    peg_value(ui, "(y) Axis", &mut warp.y, s.frame, s.animate);
+                    peg_value(ui, "Width", &mut warp.width, s.frame, s.animate);
+                    peg_value(ui, "Height", &mut warp.height, s.frame, s.animate);
+                    egui::ComboBox::from_label("Deformation Quality")
+                        .selected_text(warp.quality.title())
+                        .show_ui(ui, |ui| {
+                            for q in symphony_core::warp::WarpQuality::ALL {
+                                ui.selectable_value(&mut warp.quality, q, q.title());
+                            }
+                        });
+                    ui.label(
+                        "Drag the grid's points in the Camera view (Transform tool) to bend the \
+                         artwork under it.",
+                    );
+                    if ui
+                        .button("Reset points")
+                        .on_hover_text("Flatten the grid (removes the points' keys too).")
+                        .clicked()
+                    {
+                        warp.points.fill([
+                            symphony_core::anim::Value::Constant(0.0),
+                            symphony_core::anim::Value::Constant(0.0),
+                        ]);
+                    }
+                }
+                WarpKind::Points => {
+                    ui.label(format!(
+                        "{} point{}{}",
+                        warp.pins.len(),
+                        if warp.pins.len() == 1 { "" } else { "s" },
+                        if warp.mesh.is_some() {
+                            ", mesh built"
+                        } else {
+                            ""
+                        }
+                    ));
+                    ui.add_enabled_ui(warp.mesh.is_none(), |ui| {
+                        widgets::precise_slider(
+                            ui,
+                            egui::Slider::new(&mut warp.density, 6.0..=120.0)
+                                .text("Mesh detail")
+                                .suffix(" px"),
+                        )
+                        .on_hover_text("Smaller triangles bend more finely.");
+                    });
+                    ui.label(if warp.mesh.is_none() {
+                        "In the Camera view (Transform tool), click the artwork to place points \
+                         at the joints and ends you'll move; Alt-click removes one. Then build \
+                         the mesh."
+                    } else {
+                        "Drag the points in the Camera view: the artwork bends as rigidly as it \
+                         can, and only what's connected to a point follows it."
+                    });
+                    ui.horizontal(|ui| {
+                        if warp.mesh.is_none() {
+                            if ui
+                                .add_enabled(!warp.pins.is_empty(), egui::Button::new("Build mesh"))
+                                .clicked()
+                            {
+                                build_mesh_now = true;
+                            }
+                        } else if ui.button("Edit points").clicked() {
+                            warp.mesh = None;
+                        }
+                        if ui
+                            .add_enabled(!warp.pins.is_empty(), egui::Button::new("Clear points"))
+                            .clicked()
+                        {
+                            warp.pins.clear();
+                            warp.pin_moves.clear();
+                            warp.mesh = None;
+                        }
+                    });
+                }
+            }
         }
         NodeKind::Drawing { column } => {
             if let Some(source) = s.doc.xsheet.column(*column) {
@@ -1050,8 +1498,10 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
     // Pegs apply live, so the drawing moves as you drag a value: their
     // values carry their own keys (Auto-key writes them as you edit), so
     // the node itself is what changes. One drag is one undo step.
-    if matches!(draft.node.kind, NodeKind::Peg(_))
-        && draft.node.kind != draft.initial.kind
+    if matches!(
+        draft.node.kind,
+        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_)
+    ) && draft.node.kind != draft.initial.kind
         && draft.node.enabled == draft.initial.enabled
     {
         if let Some(before) = s.doc.graph.node(draft.id).cloned() {
@@ -1059,7 +1509,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             after.kind = draft.node.kind.clone();
             s.history.apply_merged(
                 &mut s.doc,
-                "Change peg",
+                "Change transform",
                 &format!("node-props-{}", draft.id.0),
                 Edit::SetNodeProperties {
                     id: draft.id,
@@ -1070,11 +1520,25 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             draft.initial.kind = draft.node.kind.clone();
         }
     }
+    // Building a mesh needs the artwork under the node: done on the
+    // scene, then the form catches up.
+    if build_mesh_now {
+        if let Err(e) = super::warp_edit::build_mesh(s, draft.id) {
+            s.note(e);
+        }
+        if let Some(current) = PropertyDraft::new(s, draft.id) {
+            *draft = current;
+        }
+        return;
+    }
     let camera_changed = draft.fov != draft.initial_fov || draft.motion != draft.initial_motion;
     let changed =
         (draft.node != draft.initial || camera_changed) && !draft.node.name.trim().is_empty();
     let keyed = s.doc.graph.has_key(draft.id, s.frame);
-    let has_staged_controls = !matches!(draft.node.kind, NodeKind::Peg(_));
+    let has_staged_controls = !matches!(
+        draft.node.kind,
+        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_)
+    );
     ui.horizontal_wrapped(|ui| {
         if (has_staged_controls || changed)
             && ui
@@ -1160,7 +1624,7 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                 after: after_keys,
             });
         }
-        if let NodeKind::Peg(peg) = if delete {
+        if let NodeKind::Peg(peg) | NodeKind::Skeleton(peg) = if delete {
             &before.kind
         } else {
             &draft.node.kind
@@ -1182,7 +1646,44 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                     value.set_key(s.frame, value.at(s.frame));
                 }
             }
-            after.kind = NodeKind::Peg(peg);
+            after.kind = if matches!(before.kind, NodeKind::Skeleton(_)) {
+                NodeKind::Skeleton(peg)
+            } else {
+                NodeKind::Peg(peg)
+            };
+        }
+        if let NodeKind::Bone(bone) = if delete {
+            &before.kind
+        } else {
+            &draft.node.kind
+        } {
+            let mut bone = bone.clone();
+            for value in bone.values_mut() {
+                if delete {
+                    value.remove_key(s.frame);
+                } else {
+                    value.set_key(s.frame, value.at(s.frame));
+                }
+            }
+            after.kind = NodeKind::Bone(bone);
+        }
+        if let NodeKind::MeshWarp(warp) = if delete {
+            &before.kind
+        } else {
+            &draft.node.kind
+        } {
+            let mut warp = warp.clone();
+            for value in [&mut warp.x, &mut warp.y, &mut warp.width, &mut warp.height]
+                .into_iter()
+                .chain(warp.points.iter_mut().flatten())
+            {
+                if delete {
+                    value.remove_key(s.frame);
+                } else {
+                    value.set_key(s.frame, value.at(s.frame));
+                }
+            }
+            after.kind = NodeKind::MeshWarp(warp);
         }
     }
     if let Some(fov) = draft.fov {
@@ -1447,6 +1948,15 @@ fn make_room(
 /// The nearest place to `at` where a new card of `width` overlaps none
 /// of the existing ones (it moves; they don't).
 fn free_spot(s: &Session, at: [f32; 2], width: f32) -> [f32; 2] {
+    free_spot_with(s, at, width, None)
+}
+
+fn free_spot_with(
+    s: &Session,
+    at: [f32; 2],
+    width: f32,
+    pending: Option<(NodeId, [f32; 2])>,
+) -> [f32; 2] {
     let defaults = default_positions(s);
     let mut positions: BTreeMap<NodeId, Vec2> = s
         .doc
@@ -1454,6 +1964,9 @@ fn free_spot(s: &Session, at: [f32; 2], width: f32) -> [f32; 2] {
         .nodes()
         .map(|(id, _)| (id, node_position(s, id, &defaults)))
         .collect();
+    if let Some((id, [x, y])) = pending {
+        positions.insert(id, Vec2::new(x, y));
+    }
     let fixed: BTreeSet<NodeId> = positions.keys().copied().collect();
     let new = NodeId(usize::MAX);
     positions.insert(new, Vec2::new(at[0], at[1]));
@@ -1637,9 +2150,12 @@ fn card_width(graph: &symphony_core::graph::Graph, id: NodeId) -> f32 {
 /// (danger) are kept for their meanings. Types beyond the table reuse a
 /// table colour shifted lighter or darker, so they read as related.
 pub fn kind_colour(kind: &NodeKind) -> egui::Color32 {
-    const TABLE: [(&str, (u8, u8, u8)); 10] = [
+    const TABLE: [(&str, (u8, u8, u8)); 13] = [
         ("Drawing", (111, 194, 168)),
         ("Peg", (186, 150, 222)),
+        ("Skeleton", (181, 139, 196)),
+        ("Bone", (215, 180, 215)),
+        ("Mesh Warp", (214, 168, 232)),
         ("Composite", (128, 182, 214)),
         ("Camera", (214, 214, 220)),
         ("Write", (168, 172, 180)),
@@ -1751,6 +2267,19 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         }
     }
     let origin = anchor + state.pan;
+    if let Some(item) = resp.dnd_release_payload::<LibraryItem>() {
+        if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+            let at = (pointer - origin) / zoom;
+            add_library_item(s, state, &item, Some([at.x, at.y]));
+        }
+    } else if resp.dnd_hover_payload::<LibraryItem>().is_some() {
+        painter.rect_stroke(
+            viewport.shrink(2.0),
+            theme::RADIUS_CONTROL,
+            Stroke::new(1.5, theme::ACCENT_SELECT),
+            StrokeKind::Inside,
+        );
+    }
     let grid = GRID * zoom * if zoom < 0.5 { 2.0 } else { 1.0 };
     let grid_origin = viewport.min
         + Vec2::new(
@@ -1798,8 +2327,13 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         relax(&mut placed, |id| card_width(&s.doc.graph, id), &held);
     }
     for (id, position) in placed.iter_mut() {
-        if !held.contains(id) {
-            let key = resp.id.with(("node-glide", *id));
+        let key = resp.id.with(("node-glide", *id));
+        if held.contains(id) {
+            // Carried by the pointer: its glide stays where it is, so on
+            // release it doesn't swoop in from where the drag began.
+            symphony_ui::motion::jump(ui.ctx(), key.with(0), position.x);
+            symphony_ui::motion::jump(ui.ctx(), key.with(1), position.y);
+        } else {
             *position = Vec2::new(
                 symphony_ui::motion::value(
                     ui.ctx(),
@@ -2000,6 +2534,22 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.drag = None;
+    }
+    // Delete or Backspace over the Node view deletes the selected nodes.
+    let delete_key = resp.hovered()
+        && state.drag.is_none()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+    if delete_key {
+        let chosen: Vec<NodeId> = state
+            .selection
+            .iter()
+            .copied()
+            .chain(s.selected_node)
+            .collect();
+        if delete_nodes(s, &chosen) > 0 {
+            state.selection.clear();
+        }
     }
     let mut auto_wire = match state.drag {
         Some(Drag::Node(id, delta))
@@ -2481,6 +3031,9 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
     }
     let mut disconnect = None;
     let mut convert = None;
+    let mut smart_joint = None;
+    let mut delete: Option<Vec<NodeId>> = None;
+    let mut unlink = None;
     if let Some((input, node)) =
         ui.data(|data| data.get_temp::<(Option<Input>, Option<NodeId>)>(menu_id))
     {
@@ -2491,11 +3044,21 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 .node(id)
                 .is_some_and(|node| matches!(node.kind, NodeKind::Drawing { .. }))
         });
-        if input.is_some() || drawing.is_some() {
+        let joint = node
+            .or(input.map(|(id, _)| id))
+            .and_then(|id| smart_joint_label(s, id).map(|label| (id, label)));
+        let node = node.filter(|&id| s.doc.graph.node(id).is_some());
+        if input.is_some() || node.is_some() || joint.is_some() {
             resp.context_menu(|ui| {
                 if let Some(input) = input {
                     if ui.button("Disconnect input").clicked() {
                         disconnect = Some(input);
+                        ui.close();
+                    }
+                }
+                if let Some((id, label)) = joint {
+                    if ui.button(label).clicked() {
+                        smart_joint = Some(id);
                         ui.close();
                     }
                 }
@@ -2507,11 +3070,74 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                         }
                     }
                 }
+                if let Some(id) = node {
+                    let linked = s
+                        .doc
+                        .graph
+                        .links()
+                        .iter()
+                        .any(|l| l.from == id || l.to == id);
+                    if ui
+                        .add_enabled(linked, egui::Button::new("Disconnect all"))
+                        .clicked()
+                    {
+                        unlink = Some(id);
+                        ui.close();
+                    }
+                    ui.separator();
+                    // The whole selection when the node is part of it.
+                    let group: Vec<NodeId> = if state.selection.contains(&id) {
+                        state.selection.iter().copied().collect()
+                    } else {
+                        vec![id]
+                    };
+                    let label = if group.len() > 1 {
+                        format!("Delete {} nodes", group.len())
+                    } else {
+                        "Delete node".to_owned()
+                    };
+                    let why = (group.len() == 1).then(|| undeletable(s, id)).flatten();
+                    let button = ui.add_enabled(why.is_none(), egui::Button::new(label));
+                    let button = match why {
+                        Some(why) => button.on_disabled_hover_text(why),
+                        None => button,
+                    };
+                    if button.clicked() {
+                        delete = Some(group);
+                        ui.close();
+                    }
+                }
             });
         }
     }
+    if let Some(ids) = delete {
+        if delete_nodes(s, &ids) > 0 {
+            state.selection.clear();
+        }
+    }
+    if let Some(id) = unlink {
+        let before = s.doc.graph.links().to_vec();
+        let after: Vec<Link> = before
+            .iter()
+            .copied()
+            .filter(|l| l.from != id && l.to != id)
+            .collect();
+        let was_custom = s.doc.custom_wiring;
+        s.history.apply(
+            &mut s.doc,
+            "Disconnect node",
+            vec![Edit::RewireNodes {
+                before,
+                after,
+                was_custom,
+            }],
+        );
+    }
     if let Some(input) = disconnect {
         edit_link(s, None, input, None);
+    }
+    if let Some(id) = smart_joint {
+        toggle_smart_joint(s, id);
     }
     if let Some(id) = convert {
         convert_drawing(s, id);
@@ -2531,8 +3157,15 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
                 theme::TEXT_SECONDARY,
             );
         }
-        let transform =
-            node.is_some_and(|n| matches!(n.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }));
+        let transform = node.is_some_and(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Peg(_)
+                    | NodeKind::Drawing { .. }
+                    | NodeKind::Skeleton(_)
+                    | NodeKind::Bone(_)
+            )
+        });
         let compatible = match state.drag {
             Some(Drag::Cable { source, .. }) => {
                 s.doc.graph.can_connect_to(source, input.0, input.1)
@@ -2560,11 +3193,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
         socket(&painter, point, transform, filled, highlighted, ink, zoom);
     }
     for (id, point) in outputs {
-        let transform = s
-            .doc
-            .graph
-            .node(id)
-            .is_some_and(|n| matches!(n.kind, NodeKind::Peg(_)));
+        let transform = s.doc.graph.node(id).is_some_and(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_)
+            )
+        });
         let highlighted = hover.is_some_and(|p| p.distance(point) <= hit_radius)
             || state.selection.contains(&id)
             || selected_outputs.contains(&id);
@@ -2708,55 +3342,196 @@ fn socket(
     }
 }
 
-/// Documented names and links come from the Harmony 27 Premium reference index.
-pub fn library(ui: &mut egui::Ui, s: &Session, state: &mut NodeViewState) {
-    egui::Frame::new().inner_margin(egui::Margin::same(theme::CARD_PAD)).show(ui, |ui| {
-        ui.add(egui::TextEdit::singleline(&mut state.library_search).hint_text("Find a node"));
-        let query = state.library_search.trim().to_lowercase();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if !s.doc.harmony_nodes.is_empty() {
-                ui.heading("Imported scene");
-                ui.label("Layers and exposure timing are editable. Cells have no artwork. Source wiring and attributes are retained. Effects and rigs still need conversion.");
-                for (name, count) in &s.doc.harmony_nodes {
-                    if name.to_lowercase().contains(&query) { ui.label(format!("{name} × {count}")); }
-                }
+#[derive(Clone)]
+enum LibraryItem {
+    Drawing,
+    Node(NodeKind),
+}
+
+fn add_library_item(
+    s: &mut Session,
+    state: &mut NodeViewState,
+    item: &LibraryItem,
+    at: Option<[f32; 2]>,
+) {
+    match item {
+        LibraryItem::Drawing => {
+            let at = at.map(|at| free_spot(s, at, W));
+            s.add_layer_at(at);
+            if let Some(id) = s.doc.layers.get(s.selected).map(|layer| layer.node) {
+                s.select_graph_node(id, true);
             }
-            if !s.doc.harmony_connections.is_empty() {
-                ui.collapsing("Source connections", |ui| {
-                    for link in &s.doc.harmony_connections {
-                        if [link.group.as_str(), link.from.as_str(), link.to.as_str()].iter().any(|name| name.to_lowercase().contains(&query)) {
-                            ui.label(format!("{} [{}] → {} [{}]", link.from, link.output, link.to, link.input))
-                                .on_hover_text(&link.group);
+        }
+        LibraryItem::Node(kind) => match at {
+            Some(at) => add_node(s, fit_to_stage(s, kind.clone()), at),
+            None => add_from_search(s, state, kind.clone()),
+        },
+    }
+}
+
+fn library_details(kind: &NodeKind) -> (&'static str, &'static str) {
+    match kind {
+        NodeKind::Drawing { .. } => (
+            "Artwork",
+            "Exposes a drawing from the Timeline and sends it into the composite.",
+        ),
+        NodeKind::Peg(_) => (
+            "Rigging",
+            "Moves, rotates, scales, or changes the depth of connected artwork.",
+        ),
+        NodeKind::Skeleton(_) => (
+            "Rigging",
+            "Moves the whole bone rig. A new skeleton starts with a connected bone.",
+        ),
+        NodeKind::Bone(_) => (
+            "Rigging",
+            "Poses attached drawings and bends vector artwork around a joint.",
+        ),
+        NodeKind::MeshWarp(_) => (
+            "Rigging",
+            "Deforms artwork with a grid or points placed on the drawing.",
+        ),
+        NodeKind::Composite => (
+            "Compositing",
+            "Stacks image inputs in port order. The leftmost input renders in front.",
+        ),
+        NodeKind::Effect(Effect::Mask { .. }) => (
+            "Compositing",
+            "Uses a matte to reveal or hide parts of an image.",
+        ),
+        NodeKind::Effect(Effect::Blend { .. }) => {
+            ("Compositing", "Blends an image with the artwork behind it.")
+        }
+        NodeKind::Effect(Effect::Opacity { .. }) => (
+            "Compositing",
+            "Adjusts the transparency of the input image.",
+        ),
+        NodeKind::Gradient(_) => (
+            "Artwork",
+            "Generates a two-colour gradient for a background or effect.",
+        ),
+        NodeKind::Effect(Effect::Blur { .. }) => (
+            "Effects",
+            "Softens an image with box, Gaussian, motion or radial blur.",
+        ),
+        NodeKind::Effect(Effect::Grain { .. }) => (
+            "Effects",
+            "Adds an adjustable grain texture to the input image.",
+        ),
+        NodeKind::Display => (
+            "Output",
+            "Shows the final composite in Camera. Every scene starts with one.",
+        ),
+        NodeKind::Write => (
+            "Output",
+            "Marks an output in the node graph. Export is available from the File menu.",
+        ),
+    }
+}
+
+pub fn library(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState) {
+    let mut add = None;
+    egui::Frame::new()
+        .inner_margin(egui::Margin::same(theme::CARD_PAD))
+        .show(ui, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut state.library_search).hint_text("Find a node"));
+            let query = state.library_search.trim().to_lowercase();
+            let drawing = NodeKind::Drawing {
+                column: symphony_core::id::Id(0),
+            };
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for group in ["Artwork", "Rigging", "Compositing", "Effects", "Output"] {
+                    let items: Vec<_> = std::iter::once(drawing.clone())
+                        .chain(addable_nodes())
+                        .chain([NodeKind::Display, NodeKind::Write])
+                        .filter(|kind| {
+                            let (category, description) = library_details(kind);
+                            category == group
+                                && [kind_label(kind), category, description]
+                                    .iter()
+                                    .any(|text| text.to_lowercase().contains(&query))
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        continue;
+                    }
+                    ui.heading(group);
+                    for kind in items {
+                        let title = kind_label(&kind);
+                        let (_, description) = library_details(&kind);
+                        let item = match kind {
+                            NodeKind::Drawing { .. } => Some(LibraryItem::Drawing),
+                            NodeKind::Display | NodeKind::Write => None,
+                            _ => Some(LibraryItem::Node(kind)),
+                        };
+                        ui.horizontal(|ui| {
+                            let sense = if item.is_some() {
+                                Sense::drag()
+                            } else {
+                                Sense::hover()
+                            };
+                            let name = ui.add(egui::Label::new(title).sense(sense));
+                            if let Some(item) = item {
+                                name.dnd_set_drag_payload(item.clone());
+                                if ui
+                                    .small_button("Add")
+                                    .on_hover_text(format!("Add {title}"))
+                                    .clicked()
+                                {
+                                    add = Some(item);
+                                }
+                            }
+                        });
+                        ui.label(egui::RichText::new(description).color(theme::TEXT_SECONDARY));
+                        ui.add_space(5.0);
+                    }
+                }
+                if !s.doc.harmony_nodes.is_empty() {
+                    ui.collapsing("Imported scene", |ui| {
+                        for (name, count) in &s.doc.harmony_nodes {
+                            if name.to_lowercase().contains(&query) {
+                                ui.label(format!("{name} × {count}"));
+                            }
+                        }
+                        for link in &s.doc.harmony_connections {
+                            if [link.group.as_str(), link.from.as_str(), link.to.as_str()]
+                                .iter()
+                                .any(|name| name.to_lowercase().contains(&query))
+                            {
+                                ui.label(format!(
+                                    "{} [{}] → {} [{}]",
+                                    link.from, link.output, link.to, link.input
+                                ));
+                            }
+                        }
+                    });
+                }
+                ui.collapsing("Harmony reference", |ui| {
+                    for row in
+                        include_str!("../../../../docs/reference/harmony-27-nodes.tsv").lines()
+                    {
+                        let mut fields = row.split('\t');
+                        let (Some(category), Some(name), Some(path)) =
+                            (fields.next(), fields.next(), fields.next())
+                        else {
+                            continue;
+                        };
+                        if category.to_lowercase().contains(&query)
+                            || name.to_lowercase().contains(&query)
+                        {
+                            ui.hyperlink_to(
+                                name,
+                                format!("https://docs.toonboom.com/help/harmony-27/premium/{path}"),
+                            )
+                            .on_hover_text(category);
                         }
                     }
                 });
-            }
-            ui.heading("Symphony nodes");
-            for &(id, name) in symphony_io::harmony::NODE_LIBRARY {
-                if name.to_lowercase().contains(&query) || id.to_lowercase().contains(&query) {
-                    let name = if name == "Display" { "Camera" } else { name };
-                    ui.label(format!("{name} ({id})"));
-                }
-            }
-            for kind in effect_nodes() {
-                let name = kind_label(&kind);
-                if name.to_lowercase().contains(&query) {
-                    ui.label(name);
-                }
-            }
-            ui.heading("Harmony reference");
-            let mut matches = 0;
-            for row in include_str!("../../../../docs/reference/harmony-27-nodes.tsv").lines() {
-                let mut fields = row.split('\t');
-                let (Some(category), Some(name), Some(path)) = (fields.next(), fields.next(), fields.next()) else {continue};
-                if category.contains(&query) || name.to_lowercase().contains(&query) {
-                    ui.hyperlink_to(name, format!("https://docs.toonboom.com/help/harmony-27/premium/{path}")).on_hover_text(category);
-                    matches += 1;
-                }
-            }
-            if matches == 0 { ui.label("No matching reference entries."); }
+            });
         });
-    });
+    if let Some(item) = add {
+        add_library_item(s, state, &item, None);
+    }
 }
 
 pub fn drawing_conversion_label(s: &Session, id: NodeId) -> Option<&'static str> {
@@ -2876,6 +3651,44 @@ mod tests {
         let p = node_position(&s, peg, &default_positions(&s));
         add_node(&mut s, NodeKind::Composite, [p.x, p.y]);
         assert!(overlapping(&s).is_empty(), "{:?}", overlapping(&s));
+    }
+
+    #[test]
+    fn adding_either_rig_node_starts_a_pair_and_adding_bone_extends_it() {
+        for kind in [
+            NodeKind::Skeleton(Default::default()),
+            NodeKind::Bone(Default::default()),
+        ] {
+            let mut s = Session::new_scene();
+            let root = s.doc.graph.next_id();
+            add_node(&mut s, kind, [0.0, 40.0]);
+            let upper = s.selected_node.unwrap();
+            assert!(matches!(
+                s.doc.graph.node(root).unwrap().kind,
+                NodeKind::Skeleton(_)
+            ));
+            assert_eq!(s.doc.graph.input(upper, 0), Some(root));
+            assert!(overlapping(&s).is_empty());
+            add_node(&mut s, NodeKind::Bone(Default::default()), [0.0, 40.0]);
+            let lower = s.selected_node.unwrap();
+            assert_eq!(s.doc.graph.input(lower, 0), Some(upper));
+            assert_eq!(smart_joint_label(&s, lower), Some("Make smart joint"));
+            toggle_smart_joint(&mut s, lower);
+            assert_eq!(smart_joint_label(&s, lower), Some("Remove smart joint"));
+            s.frame = 4;
+            set_selected_key(&mut s, false);
+            assert!(s.doc.graph.bone(lower).unwrap().has_key(4));
+            set_selected_key(&mut s, true);
+            assert!(!s.doc.graph.bone(lower).unwrap().has_key(4));
+            s.undo();
+            s.undo();
+            s.undo();
+            assert_eq!(smart_joint_label(&s, lower), Some("Make smart joint"));
+            s.undo();
+            assert!(s.doc.graph.node(lower).is_none());
+            s.undo();
+            assert!(s.doc.graph.node(upper).is_none() && s.doc.graph.node(root).is_none());
+        }
     }
 
     #[test]

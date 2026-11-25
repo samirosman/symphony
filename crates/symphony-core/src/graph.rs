@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::anim::Value;
 use crate::id::Id;
 use crate::math::Affine;
+use crate::rig::{Bone, BoneField, BonePose};
 use crate::xsheet::Xsheet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -66,6 +67,12 @@ pub enum NodeKind {
         column: Id,
     },
     Peg(PegParams),
+    Skeleton(PegParams),
+    Bone(Bone),
+    /// Bends the artwork under it with a grid of points (Harmony's Mesh
+    /// Warp). A position node, like a peg.
+    /// Boxed: it's much bigger than the other kinds.
+    MeshWarp(Box<crate::warp::MeshWarp>),
     /// Stacks its inputs. Port 0 (leftmost) is in front.
     Composite,
     Effect(Effect),
@@ -397,9 +404,13 @@ pub struct RenderItem {
     pub node: NodeId,
     pub column: Id,
     pub drawing: Id,
+    /// The pegs' transform (Mesh Warps count as no change here: tools
+    /// work on the drawing as drawn).
     pub transform: Affine,
     pub depth: f32,
     pub matte_pass: bool,
+    /// Mesh Warps above the drawing that bend it, if any.
+    pub warp: Option<std::sync::Arc<crate::warp::Warp>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -431,9 +442,12 @@ impl Graph {
 
     pub fn has_key(&self, id: NodeId, frame: u32) -> bool {
         self.keys(id).is_some_and(|keys| keys.contains_key(&frame))
-            || self
-                .node(id)
-                .is_some_and(|node| matches!(&node.kind, NodeKind::Peg(peg) if peg.has_key(frame)))
+            || self.node(id).is_some_and(|node| match &node.kind {
+                NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => peg.has_key(frame),
+                NodeKind::Bone(bone) => bone.has_key(frame),
+                NodeKind::MeshWarp(warp) => warp.has_key(frame),
+                _ => false,
+            })
     }
 
     pub(crate) fn set_keys(&mut self, id: NodeId, keys: BTreeMap<u32, NodeKey>) {
@@ -501,7 +515,7 @@ impl Graph {
         NodeId(self.nodes.len())
     }
 
-    pub(crate) fn replace_links(&mut self, links: Vec<Link>) {
+    pub fn replace_links(&mut self, links: Vec<Link>) {
         self.links = links;
     }
 
@@ -538,7 +552,21 @@ impl Graph {
             return false;
         };
         let valid = match source.kind {
-            NodeKind::Peg(_) => matches!(target.kind, NodeKind::Peg(_) | NodeKind::Drawing { .. }),
+            NodeKind::Peg(_) | NodeKind::MeshWarp(_) => matches!(
+                target.kind,
+                NodeKind::Peg(_)
+                    | NodeKind::MeshWarp(_)
+                    | NodeKind::Skeleton(_)
+                    | NodeKind::Drawing { .. }
+            ),
+            NodeKind::Skeleton(_) => matches!(target.kind, NodeKind::Bone(_)),
+            NodeKind::Bone(_) => matches!(
+                target.kind,
+                NodeKind::Bone(_)
+                    | NodeKind::Peg(_)
+                    | NodeKind::MeshWarp(_)
+                    | NodeKind::Drawing { .. }
+            ),
             NodeKind::Composite
             | NodeKind::Drawing { .. }
             | NodeKind::Effect(_)
@@ -549,6 +577,13 @@ impl Graph {
             NodeKind::Display | NodeKind::Write => false,
         };
         if !valid {
+            return false;
+        }
+        if self.bone(to).is_some_and(|bone| bone.smart.is_some())
+            && self.bone(from).is_some_and(|bone| {
+                bone.smart.is_some() || self.smart_child(from).is_some_and(|other| other != to)
+            })
+        {
             return false;
         }
         let mut pending = vec![to];
@@ -721,6 +756,10 @@ impl Graph {
                         Some(p) => self.eval_transform(p, frame, depth + 1)?,
                         None => StagePose::default(),
                     };
+                    let warp = match self.input(id, 0) {
+                        Some(p) => self.warp_chain(p, frame, depth + 1)?,
+                        None => None,
+                    };
                     out.push(RenderCommand::Drawing(RenderItem {
                         node: id,
                         column: *column,
@@ -728,12 +767,232 @@ impl Graph {
                         transform: pose.transform,
                         depth: pose.depth,
                         matte_pass,
+                        warp,
                     }));
                 }
             }
-            NodeKind::Peg(_) => {} // a peg carries no image
+            NodeKind::Peg(_)
+            | NodeKind::MeshWarp(_)
+            | NodeKind::Skeleton(_)
+            | NodeKind::Bone(_) => {}
         }
         Ok(())
+    }
+
+    /// The Mesh Warps between a drawing and the stage, from the position
+    /// node `id` above it upward; None when none of them bends anything.
+    fn warp_chain(
+        &self,
+        id: NodeId,
+        frame: u32,
+        depth: usize,
+    ) -> Result<Option<std::sync::Arc<crate::warp::Warp>>, EvalError> {
+        // The chain from the nearest node up to the root.
+        let mut chain = Vec::new();
+        let mut at = Some(id);
+        while let Some(n) = at {
+            if chain.len() + depth > MAX_DEPTH {
+                return Err(EvalError::Cycle(n));
+            }
+            chain.push(n);
+            at = self.input(n, 0);
+        }
+        let bound_bone = chain
+            .iter()
+            .copied()
+            .find(|&id| self.bone(id).is_some() && self.enabled_at(id, frame));
+        let mut steps = Vec::new();
+        let mut outer = Affine::IDENTITY;
+        let mut lines = crate::warp::WarpLines::Paths;
+        for &n in chain.iter().rev() {
+            let node = self.get(n, depth)?;
+            let enabled = self
+                .sample_key(n, frame)
+                .map_or(node.enabled, |key| key.enabled);
+            if !enabled {
+                continue;
+            }
+            match &node.kind {
+                NodeKind::Peg(p) | NodeKind::Skeleton(p) => {
+                    outer = outer.compose(p.transform_at(frame))
+                }
+                NodeKind::Bone(bone) if bound_bone == Some(n) => {
+                    let pose = self.bone_pose_inner(n, frame, depth)?;
+                    let radius = self
+                        .parent_bone(n)
+                        .map_or(0.0, |_| bone.bend_radius.clamp(0.0, pose.length));
+                    let field = BoneField {
+                        rest_inverse: pose.rest.inverse().unwrap_or(Affine::IDENTITY),
+                        parent: pose.parent_skin,
+                        child: pose.skin(),
+                        radius,
+                    };
+                    steps.push(crate::warp::WarpStep {
+                        outer,
+                        field: crate::warp::WarpField::Bone(Box::new(field)),
+                    });
+                    outer = Affine::IDENTITY;
+                }
+                NodeKind::MeshWarp(w) => {
+                    if let Some(field) = w.field_at(frame) {
+                        steps.push(crate::warp::WarpStep { outer, field });
+                        if w.lines == crate::warp::WarpLines::Shape {
+                            lines = w.lines;
+                        }
+                        outer = Affine::IDENTITY;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let warp = crate::warp::Warp {
+            steps,
+            inner: outer,
+            lines,
+        };
+        Ok((!warp.steps.is_empty() && !warp.is_flat()).then(|| std::sync::Arc::new(warp)))
+    }
+
+    pub fn bone(&self, id: NodeId) -> Option<&Bone> {
+        match &self.node(id)?.kind {
+            NodeKind::Bone(bone) => Some(bone),
+            _ => None,
+        }
+    }
+
+    pub fn parent_bone(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.input(id, 0)?;
+        self.bone(parent).map(|_| parent)
+    }
+
+    fn enabled_at(&self, id: NodeId, frame: u32) -> bool {
+        self.node(id).is_some_and(|node| {
+            self.sample_key(id, frame)
+                .map_or(node.enabled, |key| key.enabled)
+        })
+    }
+
+    fn smart_child(&self, upper: NodeId) -> Option<NodeId> {
+        self.links
+            .iter()
+            .filter(|link| link.from == upper && link.port == 0)
+            .map(|link| link.to)
+            .filter(|&id| self.bone(id).is_some_and(|b| b.smart.is_some()))
+            .min()
+    }
+
+    /// The lower bone storing the active IK target for either member of the pair.
+    pub fn smart_controller(&self, id: NodeId, frame: u32) -> Option<NodeId> {
+        if !self.enabled_at(id, frame) {
+            return None;
+        }
+        if self.parent_bone(id).is_some_and(|parent| {
+            self.enabled_at(parent, frame) && self.smart_child(parent) == Some(id)
+        }) {
+            return Some(id);
+        }
+        self.smart_child(id)
+            .filter(|&child| self.enabled_at(child, frame))
+    }
+
+    /// A smart joint owns two bones, so another solver cannot drive either one.
+    pub fn can_make_smart(&self, lower: NodeId) -> bool {
+        let Some(upper) = self.parent_bone(lower) else {
+            return false;
+        };
+        self.bone(lower).is_some_and(|b| b.smart.is_none())
+            && self.bone(upper).is_some_and(|b| b.smart.is_none())
+            && self.smart_child(upper).is_none()
+            && self.smart_child(lower).is_none()
+    }
+
+    /// Position of the bone relative to its skeleton, before Camera projection.
+    pub fn bone_pose(&self, id: NodeId, frame: u32) -> Option<BonePose> {
+        self.bone(id)?;
+        self.bone_pose_inner(id, frame, 0).ok()
+    }
+
+    fn bone_pose_inner(&self, id: NodeId, frame: u32, depth: usize) -> Result<BonePose, EvalError> {
+        self.get(id, depth)?;
+        let bone = self.bone(id).ok_or(EvalError::UnknownNode(id))?;
+        let parent = self.parent_bone(id);
+        let (rest_base, posed_base, parent_skin) = if let Some(parent) = parent {
+            let parent = self.bone_pose_inner(parent, frame, depth + 1)?;
+            let end = Affine::translate(parent.length, 0.0);
+            (
+                parent.rest.compose(end),
+                parent.posed.compose(end),
+                parent.skin(),
+            )
+        } else {
+            let origin = Affine::translate(bone.origin[0], bone.origin[1]);
+            (origin, origin, Affine::IDENTITY)
+        };
+        let rest_turn = Affine::rotate_deg(bone.rest_angle);
+        let mut turn = bone.rest_angle;
+        if self.enabled_at(id, frame) {
+            turn += bone.rotation.at(frame);
+            if let Some(lower) = self.smart_controller(id, frame) {
+                if let Some((upper, lower_bone)) = self
+                    .parent_bone(lower)
+                    .and_then(|upper| self.bone(upper))
+                    .zip(self.bone(lower))
+                {
+                    if let Some(joint) = &lower_bone.smart {
+                        let [aim, bend] = joint.solve(frame, upper.length(), lower_bone.length());
+                        turn = if lower == id {
+                            bend
+                        } else {
+                            bone.rest_angle + aim
+                        };
+                    }
+                }
+            }
+        }
+        Ok(BonePose {
+            rest: rest_base.compose(rest_turn),
+            posed: posed_base.compose(Affine::rotate_deg(turn)),
+            parent_skin,
+            length: bone.length(),
+        })
+    }
+
+    /// The skeleton that owns this bone, or the disconnected chain's root bone.
+    pub fn rig_root(&self, mut id: NodeId) -> NodeId {
+        for _ in 0..MAX_DEPTH {
+            if self.bone(id).is_none() {
+                break;
+            }
+            let Some(parent) = self.input(id, 0) else {
+                break;
+            };
+            id = parent;
+        }
+        id
+    }
+
+    /// Scene-space peg above the bone chain.
+    pub fn rig_stage_pose(&self, mut id: NodeId, frame: u32) -> Option<StagePose> {
+        for _ in 0..MAX_DEPTH {
+            match self.parent_bone(id) {
+                Some(parent) => id = parent,
+                None => return self.world_pose(id, frame).ok(),
+            }
+        }
+        None
+    }
+
+    /// The IK target axes relative to the skeleton peg.
+    pub fn smart_target_basis(&self, lower: NodeId, frame: u32) -> Option<Affine> {
+        let upper = self.parent_bone(lower)?;
+        let bone = self.bone(upper)?;
+        let base = if let Some(parent) = self.parent_bone(upper) {
+            let pose = self.bone_pose(parent, frame)?;
+            pose.posed.compose(Affine::translate(pose.length, 0.0))
+        } else {
+            Affine::translate(bone.origin[0], bone.origin[1])
+        };
+        Some(base.compose(Affine::rotate_deg(bone.rest_angle)))
     }
 
     fn eval_transform(&self, id: NodeId, frame: u32, depth: usize) -> Result<StagePose, EvalError> {
@@ -743,7 +1002,7 @@ impl Graph {
             None => StagePose::default(),
         };
         Ok(match &node.kind {
-            NodeKind::Peg(p)
+            NodeKind::Peg(p) | NodeKind::Skeleton(p)
                 if self
                     .sample_key(id, frame)
                     .map_or(node.enabled, |key| key.enabled) =>
@@ -845,6 +1104,112 @@ mod tests {
             g.evaluate(display, &xs, 1),
             Err(EvalError::Cycle(_))
         ));
+    }
+
+    #[test]
+    fn a_bone_deforms_multiple_drawings_and_emits_no_artwork_of_its_own() {
+        let (mut graph, xs, display, _) = scene();
+        let drawings: Vec<_> = graph
+            .nodes()
+            .filter_map(|(id, node)| matches!(node.kind, NodeKind::Drawing { .. }).then_some(id))
+            .collect();
+        let skeleton = graph.add(
+            "Skeleton",
+            NodeKind::Skeleton(PegParams {
+                x: Value::Constant(30.0),
+                ..PegParams::default()
+            }),
+        );
+        let upper = graph.add(
+            "Upper",
+            NodeKind::Bone(Bone {
+                length: 100.0,
+                ..Bone::default()
+            }),
+        );
+        let lower = graph.add(
+            "Lower",
+            NodeKind::Bone(Bone {
+                rotation: Value::Constant(90.0),
+                ..Bone::default()
+            }),
+        );
+        assert!(graph.can_connect(skeleton, upper));
+        assert!(graph.can_connect(upper, lower));
+        assert!(!graph.can_connect(lower, display));
+        graph.connect(skeleton, upper, 0);
+        graph.connect(upper, lower, 0);
+        for id in drawings {
+            assert!(graph.can_connect(lower, id));
+            graph.connect(lower, id, 0);
+        }
+
+        let commands = graph.render_commands(display, &xs, 1).unwrap();
+        assert_eq!(commands.len(), 2);
+        for command in commands {
+            let RenderCommand::Drawing(item) = command else {
+                panic!("expected drawing")
+            };
+            let warp = item.warp.unwrap();
+            assert_eq!(warp.bend([50.0, 0.0]), [50.0, 0.0]);
+            let near_joint = warp.bend([114.0, 0.0]);
+            assert!(near_joint[0] > 100.0 && near_joint[0] < 114.0);
+            assert!(near_joint[1] > 0.0 && near_joint[1] < 14.0);
+            let tip = warp.bend([160.0, 0.0]);
+            assert!((tip[0] - 100.0).abs() < 0.001 && (tip[1] - 60.0).abs() < 0.001);
+            assert_eq!(warp.outer().tx, 30.0);
+            let raster = warp.raster_transform().unwrap().apply(160.0, 0.0);
+            assert!((raster.0 - 130.0).abs() < 0.001 && (raster.1 - 60.0).abs() < 0.001);
+        }
+        assert!(graph.render_commands(lower, &xs, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn smart_joint_reaches_an_animated_target_and_holds_bone_lengths() {
+        use crate::rig::SmartJoint;
+        let mut graph = Graph::default();
+        let upper = graph.add(
+            "Upper",
+            NodeKind::Bone(Bone {
+                length: 100.0,
+                ..Bone::default()
+            }),
+        );
+        let lower = graph.add(
+            "Lower",
+            NodeKind::Bone(Bone {
+                length: 80.0,
+                ..Bone::default()
+            }),
+        );
+        graph.connect(upper, lower, 0);
+        assert!(graph.can_make_smart(lower));
+        let mut x = Value::Constant(100.0);
+        x.set_key(1, 100.0);
+        x.set_key(3, 140.0);
+        let NodeKind::Bone(bone) = &mut graph.node_mut(lower).unwrap().kind else {
+            unreachable!()
+        };
+        bone.smart = Some(SmartJoint {
+            target: [x, Value::Constant(60.0)],
+            flip: false,
+        });
+        let branch = graph.add("Branch", NodeKind::Bone(Bone::default()));
+        graph.connect(upper, branch, 0);
+        assert!(!graph.can_make_smart(branch));
+        let below = graph.add("Below", NodeKind::Bone(Bone::default()));
+        graph.connect(lower, below, 0);
+        assert!(!graph.can_make_smart(below));
+        assert!(graph.has_key(lower, 3));
+
+        let pose = graph.bone_pose(lower, 2).unwrap();
+        let (x, y) = pose.tip();
+        assert!((x - 120.0).abs() < 0.001 && (y - 60.0).abs() < 0.001);
+        assert!((pose.posed.tx.hypot(pose.posed.ty) - 100.0).abs() < 0.001);
+        assert!(((x - pose.posed.tx).hypot(y - pose.posed.ty) - 80.0).abs() < 0.001);
+        let saved = serde_json::to_vec(&graph).unwrap();
+        let loaded: Graph = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.bone_pose(lower, 2), Some(pose));
     }
 
     #[test]

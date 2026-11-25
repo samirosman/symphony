@@ -139,6 +139,7 @@ fn arm_scene() -> (Scene, Id) {
         id: s.ids.fresh(),
         swatch: skin,
         art: Default::default(),
+        linked: None,
         contours: vec![outline.clone()],
     });
     let mut ring = outline;

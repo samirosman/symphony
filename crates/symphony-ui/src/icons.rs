@@ -17,6 +17,8 @@ pub enum Icon {
     Pen,
     /// The Line tool: a straight line between two dots.
     Line,
+    /// The Text tool: a capital T.
+    Text,
     Pencil,
     Eraser,
     Paint,
@@ -54,12 +56,13 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 39] = [
+    pub const ALL: [Icon; 40] = [
         Icon::Select,
         Icon::Transform,
         Icon::Brush,
         Icon::Pen,
         Icon::Line,
+        Icon::Text,
         Icon::Pencil,
         Icon::Eraser,
         Icon::Paint,
@@ -223,6 +226,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                     (5.4, 8.7),
                 ],
             );
+        }
+        Icon::Text => {
+            // A capital T with small serifs.
+            g.line(p, &[(3.5, 4.5), (3.5, 3.5), (12.5, 3.5), (12.5, 4.5)]);
+            g.line(p, &[(8.0, 3.5), (8.0, 12.5)]);
+            g.line(p, &[(6.2, 12.5), (9.8, 12.5)]);
         }
         Icon::Line => {
             g.line(p, &[(3.5, 12.5), (12.5, 3.5)]);

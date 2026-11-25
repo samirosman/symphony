@@ -51,6 +51,7 @@ pub fn deform_drawing(d: &Drawing, pose: &ChainPose) -> Drawing {
                 id: f.id,
                 swatch: f.swatch,
                 art: f.art,
+                linked: f.linked.clone(),
                 contours: f
                     .contours
                     .iter()
@@ -58,6 +59,8 @@ pub fn deform_drawing(d: &Drawing, pose: &ChainPose) -> Drawing {
                     .collect(),
             })
             .collect(),
+        // Only the shapes are drawn; the text source rides along as it is.
+        text: d.text.clone(),
     }
 }
 
@@ -260,6 +263,7 @@ mod tests {
             image: None,
             strokes,
             fills,
+            text: Vec::new(),
         }
     }
 
@@ -359,6 +363,7 @@ mod tests {
             id: Id(2),
             swatch: Id(3),
             art: Default::default(),
+            linked: None,
             contours: vec![zone],
         };
         let out = deform_drawing(&drawing(Vec::new(), vec![fill.clone()]), &pose);

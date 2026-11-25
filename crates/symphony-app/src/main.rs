@@ -11,9 +11,13 @@ mod crash;
 mod images;
 mod import;
 mod keymap;
+mod layered;
+mod paint_links;
 mod perf;
 mod presets;
 mod save_dialog;
+#[cfg(target_os = "macos")]
+mod screen_colour;
 mod search;
 mod session;
 mod shot;
@@ -21,6 +25,7 @@ mod sound;
 #[cfg(test)]
 mod ui_tests;
 mod update;
+mod vector_import;
 mod video;
 mod views;
 mod wallpaper;
@@ -141,6 +146,9 @@ impl ToolDock {
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
+    /// How pictures were last imported (Picture or Vector drawing).
+    #[serde(default)]
+    import_options: Option<import::ImportOptions>,
     #[serde(default)]
     tool_dock: ToolDock,
     #[serde(default)]
@@ -329,6 +337,10 @@ struct SymphonyApp {
     brush_import: Option<brush_import::BrushImport>,
     /// Images being read and copied in the background.
     image_import: Option<import::ImageImport>,
+    /// Pictures waiting for the Import Images question.
+    image_import_asking: Option<Vec<PathBuf>>,
+    /// How pictures were last imported (remembered).
+    import_options: import::ImportOptions,
     sound_import: Option<import::SoundImport>,
     video_import: Option<video::VideoImport>,
     /// The scene's sound, in step with the playhead.
@@ -558,6 +570,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Transform => Icon::Transform,
         Tool::Brush => Icon::Brush,
         Tool::Line => Icon::Line,
+        Tool::Text => Icon::Text,
         Tool::Pencil => Icon::Pencil,
         Tool::Eraser => Icon::Eraser,
         Tool::Paint => Icon::Paint,
@@ -575,6 +588,7 @@ fn tool_action(t: Tool) -> Action {
         Tool::Transform => Action::ToolTransform,
         Tool::Brush => Action::ToolBrush,
         Tool::Line => Action::ToolLine,
+        Tool::Text => Action::ToolText,
         Tool::Pencil => Action::ToolPencil,
         Tool::Eraser => Action::ToolEraser,
         Tool::Paint => Action::ToolPaint,
@@ -664,6 +678,10 @@ impl SymphonyApp {
         let tool_dock = saved
             .as_ref()
             .map_or(ToolDock::Left, |saved| saved.tool_dock);
+        let import_options = saved
+            .as_ref()
+            .and_then(|s| s.import_options)
+            .unwrap_or_default();
         keymap::set_remaps(saved.as_ref().map(|s| s.remaps.clone()).unwrap_or_default());
         let (mut workspace, mut layouts, profile, use_no_ai, gamma) = match saved {
             Some(s) => (
@@ -770,7 +788,66 @@ impl SymphonyApp {
                 Ok("Brush") => s.tool = Tool::Brush,
                 Ok("Pencil") => s.tool = Tool::Pencil,
                 Ok("Eraser") => s.tool = Tool::Eraser,
+                Ok("Text") => s.tool = Tool::Text,
                 _ => {}
+            }
+            // SYMPHONY_SHOT_TEXT=<words>: type them with the Text tool.
+            if let Ok(words) = std::env::var("SYMPHONY_SHOT_TEXT") {
+                s.text_style.size = 140.0;
+                s.text_style.bold = true;
+                let (layer, frame) = (s.selected, s.frame);
+                s.add_text(layer, frame, [-520.0, -380.0], &words);
+            }
+            // SYMPHONY_SHOT_WARP: a Mesh Warp on the selected layer with
+            // its middle pulled, selected for editing.
+            if std::env::var_os("SYMPHONY_SHOT_WARP").is_some() {
+                if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
+                    let (w, h) = (s.doc.settings.width, s.doc.settings.height);
+                    views::node::insert_near(&mut s, node, views::node::mesh_warp(w, h));
+                    let points = std::env::var("SYMPHONY_SHOT_WARP").is_ok_and(|v| v == "points");
+                    // The artwork's box, for placing points on it.
+                    let bounds = s
+                        .doc
+                        .exposed(s.selected, s.frame)
+                        .and_then(|d| s.doc.drawings.get(&d))
+                        .and_then(|d| symphony_vector::bounds_of(&d.strokes));
+                    if let Some(id) = s.doc.graph.input(node, 0) {
+                        if let Some(n) = s.doc.graph.node_mut(id) {
+                            if let symphony_core::graph::NodeKind::MeshWarp(m) = &mut n.kind {
+                                if let (true, Some((lo, hi))) = (points, bounds) {
+                                    let cx = (lo[0] + hi[0]) / 2.0;
+                                    m.kind = symphony_core::warp::WarpKind::Points;
+                                    m.lines = symphony_core::warp::WarpLines::Shape;
+                                    m.pins = vec![[cx, hi[1] - 4.0], [cx, lo[1] + 4.0]];
+                                    m.pin_moves = vec![
+                                        [
+                                            symphony_core::anim::Value::Constant(0.0),
+                                            symphony_core::anim::Value::Constant(0.0),
+                                        ];
+                                        2
+                                    ];
+                                } else {
+                                    m.points[12] = [
+                                        symphony_core::anim::Value::Constant(90.0),
+                                        symphony_core::anim::Value::Constant(-120.0),
+                                    ];
+                                }
+                            }
+                        }
+                        s.select_graph_node(id, false);
+                        s.fit_tool_to_context();
+                        if points && views::warp_edit::build_mesh(&mut s, id).is_ok() {
+                            if let Some(n) = s.doc.graph.node_mut(id) {
+                                if let symphony_core::graph::NodeKind::MeshWarp(m) = &mut n.kind {
+                                    m.pin_moves[1] = [
+                                        symphony_core::anim::Value::Constant(140.0),
+                                        symphony_core::anim::Value::Constant(30.0),
+                                    ];
+                                }
+                            }
+                        }
+                    }
+                }
             }
             if std::env::var_os("SYMPHONY_SHOT_PAINT").is_some() {
                 s.tool = Tool::Paint;
@@ -880,6 +957,8 @@ impl SymphonyApp {
             codec_download: None,
             brush_import: None,
             image_import: None,
+            image_import_asking: None,
+            import_options,
             sound_import: None,
             video_import: None,
             shot_imported: false,
@@ -2093,11 +2172,12 @@ impl SymphonyApp {
     }
 
     fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        const TOOLS: [Tool; 11] = [
+        const TOOLS: [Tool; 12] = [
             Tool::Select,
             Tool::Transform,
             Tool::Brush,
             Tool::Line,
+            Tool::Text,
             Tool::Eraser,
             Tool::LineEditor,
             Tool::Paint,
@@ -2375,6 +2455,34 @@ impl SymphonyApp {
         use symphony_core::stroke::ArtLayer;
         let canvas = [View::Camera, View::Drawing];
         let mut out: Vec<Entry> = Vec::new();
+        #[cfg(target_os = "macos")]
+        out.push(
+            Entry::new(
+                "Pick colour from screen",
+                Kind::Action,
+                Command::PickScreenColour,
+                "colour.pick-screen",
+            )
+            .words("eyedropper sample pixel desktop monitor color")
+            .ctx(&[
+                View::Colour,
+                View::Camera,
+                View::Drawing,
+                View::ToolProperties,
+            ]),
+        );
+        if self.s.can_reduce_points() {
+            out.push(
+                Entry::new(
+                    "Reduce stroke points",
+                    Kind::Action,
+                    Command::ReduceStrokePoints,
+                    "drawing.reduce-points",
+                )
+                .words("simplify vector line remove control points")
+                .ctx(&[View::Drawing, View::Camera, View::ToolProperties]),
+            );
+        }
         let node_views = vec![View::Node, View::NodeLibrary];
         out.push(
             Entry::new(
@@ -2387,6 +2495,18 @@ impl SymphonyApp {
             .ctx(&node_views),
         );
         if let Some(id) = views::node::selected_node(&self.s) {
+            if let Some(label) = views::node::smart_joint_label(&self.s, id) {
+                out.push(
+                    Entry::new(
+                        label,
+                        Kind::Node,
+                        Command::ToggleSmartJoint(id),
+                        "node.smart-joint",
+                    )
+                    .words("inverse kinematics ik bone rig elbow knee")
+                    .ctx(&node_views),
+                );
+            }
             if let Some(label) = views::node::drawing_conversion_label(&self.s, id) {
                 out.push(
                     Entry::new(
@@ -2402,13 +2522,13 @@ impl SymphonyApp {
         }
         for kind in views::node::addable_nodes() {
             let name = views::node::kind_label(&kind);
-            let aliases = if matches!(
-                kind,
-                symphony_core::graph::NodeKind::Effect(symphony_core::graph::Effect::Blur { .. })
-            ) {
-                "node create insert effect box gaussian motion directional radial spin zoom blur"
-            } else {
-                "node create insert effect"
+            use symphony_core::graph::{Effect, NodeKind};
+            let aliases = match kind {
+                NodeKind::Skeleton(_) => "node create start rig skeleton puppet",
+                NodeKind::Bone(_) => "node create extend rig bone limb joint",
+                NodeKind::Effect(Effect::Blur { .. }) =>
+                    "node create insert effect box gaussian motion directional radial spin zoom blur",
+                _ => "node create insert effect",
             };
             let mut entry = Entry::new(
                 &format!("Add {name}"),
@@ -2877,6 +2997,9 @@ impl SymphonyApp {
                     }
                 }
             }
+            Command::ReduceStrokePoints => self.s.reduce_points(),
+            #[cfg(target_os = "macos")]
+            Command::PickScreenColour => screen_colour::pick(ctx, self.s.key.clone()),
             Command::GoToFrame(f) => self.s.frame = f.clamp(1, self.s.length()),
             Command::SetZoom(z) => {
                 self.camera.set_zoom(z);
@@ -2939,6 +3062,7 @@ impl SymphonyApp {
             Command::SetArt(a) => self.s.set_art(a),
             Command::ArrangeNodes => views::node::arrange(&mut self.s, &mut self.node_view),
             Command::ConvertDrawing(id) => views::node::convert_drawing(&mut self.s, id),
+            Command::ToggleSmartJoint(id) => views::node::toggle_smart_joint(&mut self.s, id),
             Command::AddDrawingNode => {
                 self.s.add_layer();
                 if let Some(layer) = self.s.doc.layers.get(self.s.selected) {
@@ -3003,14 +3127,41 @@ impl SymphonyApp {
         for (slot, paths) in by_kind {
             match slot {
                 0 => {
-                    if self.image_import.is_some() {
+                    let only_svg = paths
+                        .iter()
+                        .all(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")));
+                    if self.image_import.is_some() || self.image_import_asking.is_some() {
                         notes.push(
                             "Still importing the last images. Try these again in a moment.".into(),
                         );
-                    } else if self.shot.is_some() {
-                        self.image_import = Some(import::ImageImport::finished(paths));
+                    } else if self.shot.is_some()
+                        && std::env::var_os("SYMPHONY_SHOT_IMPORT_ASK").is_none()
+                    {
+                        self.image_import = Some(import::ImageImport::finished(
+                            paths,
+                            import::ImportOptions {
+                                fps: self.s.doc.settings.fps,
+                                ..Default::default()
+                            },
+                        ));
+                    } else if only_svg {
+                        // Nothing to ask: SVG is always a vector drawing.
+                        let opts = import::ImportOptions {
+                            fps: self.s.doc.settings.fps,
+                            ..self.import_options
+                        };
+                        self.image_import = Some(import::ImageImport::start(paths, opts, ctx));
                     } else {
-                        self.image_import = Some(import::ImageImport::start(paths, ctx));
+                        // SYMPHONY_SHOT_IMPORT_ASK=colour shows the question
+                        // in a screenshot run, set to Vector drawing.
+                        if let Ok(how) = std::env::var("SYMPHONY_SHOT_IMPORT_ASK") {
+                            self.import_options.as_vectors = true;
+                            if how == "colour" {
+                                self.import_options.vectorize =
+                                    vector_import::Vectorize::Colour { colours: 8 };
+                            }
+                        }
+                        self.image_import_asking = Some(paths);
                     }
                 }
                 1 => {
@@ -3149,11 +3300,27 @@ impl SymphonyApp {
                 }
             }
         }
+        // Pictures waiting on the Import Images question.
+        if let Some(paths) = &self.image_import_asking {
+            match import::options_ui(ctx, paths, &mut self.import_options) {
+                Some(true) => {
+                    let paths = self.image_import_asking.take().unwrap_or_default();
+                    let opts = import::ImportOptions {
+                        fps: self.s.doc.settings.fps,
+                        ..self.import_options
+                    };
+                    self.image_import = Some(import::ImageImport::start(paths, opts, ctx));
+                }
+                Some(false) => self.image_import_asking = None,
+                None => {}
+            }
+        }
         // Images finished reading in the background: place them.
         if let Some(job) = &self.image_import {
             if let Some(done) = job.poll() {
                 self.image_import = None;
-                let placed = self.s.import_images(done.groups);
+                let placed =
+                    self.s.import_images(done.groups) + self.s.import_vectors(done.vectors);
                 let mut text = match placed {
                     0 => String::new(),
                     1 => "Imported an image.".to_owned(),
@@ -3815,6 +3982,10 @@ impl eframe::App for SymphonyApp {
             }
         }
         let start = std::time::Instant::now();
+        #[cfg(target_os = "macos")]
+        if let Some(rgb) = screen_colour::take(ui.ctx(), &self.s.key) {
+            self.s.use_screen_colour(rgb);
+        }
         self.frame_ui(ui, frame);
         perf_log(start.elapsed());
         eframe::egui_wgpu::perf_ui_end();
@@ -3855,6 +4026,7 @@ impl eframe::App for SymphonyApp {
             presets: Some(self.presets.clone()),
             search_uses: self.search_uses.clone(),
             hide_pegs: self.timing.hide_pegs,
+            import_options: Some(self.import_options),
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);
     }

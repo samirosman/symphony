@@ -18,11 +18,15 @@ symphony-audio = { path = "../symphony-audio" }
 symphony-brushes = { path = "../symphony-brushes" }
 eframe = { version = "0.37", features = ["persistence"] }
 egui_dock = { version = "0.22", features = ["serde"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif", "tga", "exr"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif", "tga", "dds", "exr", "ff", "hdr", "ico", "pnm", "qoi"] }
+# Photoshop files: each layer comes in as a layer.
+psd = "0.3"
+# OpenRaster (.ora) and Krita (.kra) files are zip archives.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
 mp4 = "0.14"
 # SVG import: drawn to a picture (MPL-2.0).
-resvg = { version = "0.45", default-features = false, features = ["text"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
 rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,8 +41,9 @@ symphony-vector = { path = "../symphony-vector" }
 ureq = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
 objc2-foundation = { version = "0.3", features = ["NSData"] }
 
 [dev-dependencies]

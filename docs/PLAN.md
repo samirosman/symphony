@@ -163,7 +163,9 @@ continues.
   Existing vector imports stay editable.
 - 🟡 Eraser (vector and bitmap): brush strokes and paint lose exactly the eraser's shape (outlines, polygon difference); pencil lines cut along the centreline with Round/Flat tips; pressure size; options for all art layers, all Timeline layers and all frames (done). Still to do: Bevel tip, eraser presets, bitmap.
 - ⬜ Line, Rectangle, Ellipse and Polyline tools
-- ⬜ Text tool
+- 🟡 Text tool (✅ type in the Camera view; font, size, bold, italic and
+  alignment; the letters become vector shapes, like Harmony's text after
+  Break Apart. Still to do: re-editing committed text, Justify.)
 - 🟡 Stroke tool (invisible lines used for painting zones): invisible strokes exist (Close Gap makes them); the drawing tool is next
 - ⬜ Contour Editor (edit vector points and Béziers)
 - ⬜ Centerline Editor
@@ -255,10 +257,16 @@ continues.
 - ⬜ Backdrops in the Node view
 
 ### 4.7 Deformation
-- ⬜ **Mesh Warp**. Add a non-destructive grid for a drawing or group. Show
-  draggable points in Camera view when the node is selected, with keyframes
-  for point positions. Start with a simple grid and tuck resolution controls
-  into Node Properties.
+- 🟡 **Mesh Warp**. Non-destructive deformation for a drawing or group (✅
+  node in the peg chain; points dragged in the Camera view with the
+  Transform tool, keyed in Animate mode; bends in the canvas and renders).
+  Kinds: ✅ Grid (Rows, Columns, (x)/(y) Axis, Width, Height, Deformation
+  Quality) and ✅ Points (Harmony 24 Shape-Aware style: place points on the
+  art, Build mesh over its shape, as-rigid-as-possible bending, only
+  connected art follows). Lines: ✅ Paths (keep thickness) or ✅ Whole shape
+  (thickness follows the warp). Still to do: rotating/scaling single points,
+  bones and cages, per-point Weight, rigidity maps, Bézier handles on grid
+  points, bending imported pictures.
 - ⬜ Bone deformer (bias, regions of influence, chains)
 - ⬜ Game Bone deformer (game export, no bias or regions)
 - ⬜ Curve deformer (Bézier chain)
@@ -311,11 +319,15 @@ Every effect is a node in the graph.
 - ⬜ Game engine export (Unity / Godot)
 
 ### 4.11 Import and export
-- ⬜ Import bitmaps (as bitmaps, or vectorised)
-- ⬜ PSD import as separate layers, PSD export
-- ⬜ Import AI, PDF and SVG. Export SVG.
+- 🟡 Import bitmaps (as bitmaps, or vectorised) (picture ✅, vector
+  drawing ✅ (Line art / Colour), editable bitmap drawing ⬜). Formats: PNG,
+  JPEG, WebP, BMP, TIFF, GIF, TGA, EXR, HDR, ICO, QOI, PBM/PGM/PPM, DDS,
+  Farbfeld ✅; animated GIF/PNG/WebP as timed sequences ✅
+- 🟡 PSD import as separate layers ✅ (also OpenRaster layers, Krita
+  flattened), PSD export ⬜
+- 🟡 Import AI, PDF and SVG (SVG as an editable vector drawing ✅). Export SVG.
 - ⬜ Import sound (WAV, MP3, AIFF) and video
-- ⬜ Vectorise (pix2vec-style line extraction)
+- 🟡 Vectorise (pix2vec-style line extraction) (on import ✅)
 - ⬜ Library audio bin with detail view (27.1)
 - ⬜ Templates: save and load (`.tpl`-style folders, our own format)
 - ⬜ Harmony interop: read `.xstage` scenes from user-made files (clean-room),

@@ -42,6 +42,7 @@ pub struct TimingState {
     pub sound_editor: Option<SoundEditor>,
     /// A layer being dragged to a new place in the stack (its row).
     layer_drag: Option<usize>,
+    scrubbing: bool,
     /// Layer order last frame (columns), and layers that just arrived or
     /// moved with when, so their row glows briefly.
     last_order: Vec<symphony_core::id::Id>,
@@ -190,6 +191,23 @@ fn frame_menu(ui: &mut egui::Ui, s: &mut Session) {
     ui.separator();
     TimelineAction::InsertInbetween.menu(ui, s);
     TimelineAction::DeleteKey.menu(ui, s);
+    ui.separator();
+    if ui
+        .button("Clear exposure")
+        .on_hover_text("Empty this cell; the drawing stays in the layer's drawings.")
+        .clicked()
+    {
+        s.clear_cell();
+        ui.close();
+    }
+    if ui
+        .button("Remove frame")
+        .on_hover_text("Take out this cell and pull the rest of the layer one frame earlier.")
+        .clicked()
+    {
+        s.remove_frame();
+        ui.close();
+    }
 }
 
 /// View header: transport, timing fields and layer buttons (D3.2).
@@ -396,7 +414,16 @@ fn layer_chain(s: &Session, layer: usize) -> (Vec<NodeId>, Vec<NodeId>) {
     let mut pegs = Vec::new();
     let mut cur = node;
     while let Some(up) = graph.input(cur, 0) {
-        if matches!(kind_of(s, up), Some(NodeKind::Peg(_))) && !pegs.contains(&up) {
+        if matches!(
+            kind_of(s, up),
+            Some(
+                NodeKind::Peg(_)
+                    | NodeKind::MeshWarp(_)
+                    | NodeKind::Skeleton(_)
+                    | NodeKind::Bone(_)
+            )
+        ) && !pegs.contains(&up)
+        {
             pegs.push(up);
             cur = up;
         } else {
@@ -780,11 +807,24 @@ pub fn timeline(
                 .flat_map(|keys| keys.keys().copied()),
         );
         match &node.kind {
-            NodeKind::Peg(peg) => {
+            NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => {
                 for value in [&peg.x, &peg.y, &peg.z, &peg.rotation]
                     .into_iter()
                     .chain(peg.scale_x.iter())
                     .chain(peg.scale_y.iter())
+                {
+                    frames.extend(value.keys().iter().map(|key| key.frame));
+                }
+            }
+            NodeKind::Bone(bone) => {
+                for value in bone.values() {
+                    frames.extend(value.keys().iter().map(|key| key.frame));
+                }
+            }
+            NodeKind::MeshWarp(warp) => {
+                for value in [&warp.x, &warp.y, &warp.width, &warp.height]
+                    .into_iter()
+                    .chain(warp.points.iter().flatten())
                 {
                     frames.extend(value.keys().iter().map(|key| key.frame));
                 }
@@ -1303,13 +1343,34 @@ pub fn timeline(
                     theme::ACCENT_TIME.gamma_multiply(0.16),
                 );
             }
+            // Determine the gesture from the press, even when its current
+            // pointer has crossed into the headers or past the last frame.
+            // A drag that starts on a sound block moves or trims the sound,
+            // so it never scrubs.
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                t.scrubbing = !on_block
+                    && ui
+                        .input(|i| i.pointer.press_origin())
+                        .is_some_and(|p| p.x >= o.x + HEAD && p.y >= o.y);
+            }
+            let scrub = t.scrubbing && (resp.dragged() || resp.drag_stopped());
+            if let Some(p) = resp.interact_pointer_pos().filter(|p| {
+                scrub || (resp.clicked_by(egui::PointerButton::Primary) && p.x >= o.x + HEAD)
+            }) {
+                let frame =
+                    (((p.x - o.x - HEAD) / cw).floor() as i64 + 1).clamp(1, i64::from(len)) as u32;
+                s.frame = frame;
+            }
+            if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+                t.scrubbing = false;
+            }
             // A click jumps straight to the frame (only that frame is ever
             // shown or rendered); just the line glides there (Select
             // motion). Dragging and playing keep it exactly on the frame:
             // scrubbing must feel snappy, not trail the mouse.
             let target = s.frame.min(len) as f32;
             let playhead = egui::Id::unique("timeline-playhead");
-            let shown = if s.playing || resp.dragged() || resp.drag_stopped() {
+            let shown = if s.playing || scrub || s.frame == 1 {
                 symphony_ui::motion::start(ui.ctx(), playhead, target);
                 target
             } else {
@@ -1344,11 +1405,9 @@ pub fn timeline(
             };
             // Drag a layer by its name to move it in the stack; a line
             // shows where it will land.
-            if resp.drag_started() {
-                if let (Some(p), Some(row)) = (
-                    resp.interact_pointer_pos(),
-                    resp.interact_pointer_pos().and_then(row_at),
-                ) {
+            if resp.drag_started_by(egui::PointerButton::Primary) && !t.scrubbing {
+                let origin = ui.input(|i| i.pointer.press_origin());
+                if let (Some(p), Some(row)) = (origin, origin.and_then(row_at)) {
                     let x = p.x - o.x;
                     // Layer rows only: sound rows sit below the layers.
                     if row < layers && (32.0..LOCK.start).contains(&x) {
@@ -1382,14 +1441,11 @@ pub fn timeline(
             if !resp.dragged() && !resp.drag_stopped() {
                 t.layer_drag = None;
             }
-            // A press on a sound block leaves the playhead alone until it
-            // turns out to be a click, so a drag never moves it.
-            let scrub = !dragging_sound && (!on_block || resp.clicked()) && t.layer_drag.is_none();
-            if let Some(p) = resp.interact_pointer_pos().filter(|_| scrub) {
+            // A press on a sound block picks nothing until it turns out to
+            // be a click.
+            let picks = !dragging_sound && (!on_block || resp.clicked()) && t.layer_drag.is_none();
+            if let Some(p) = resp.interact_pointer_pos().filter(|_| picks) {
                 let rel = p - o;
-                if rel.x >= HEAD {
-                    s.frame = (((rel.x - HEAD) / cw) as u32 + 1).clamp(1, len);
-                }
                 if let Some(Slot::Sound(j)) = slot_at(p) {
                     let id = s.doc.sounds[j].id;
                     if rel.x < 32.0 && resp.clicked() {
@@ -1447,6 +1503,19 @@ pub fn timeline(
                     if let Some(row) = t.menu_row {
                         ui.separator();
                         layer_menu(ui, s, t, row);
+                    } else if let Some(node) = t.menu_node {
+                        // A peg, Mesh Warp or effect row.
+                        ui.separator();
+                        let why = super::node::undeletable(s, node);
+                        let b = ui.add_enabled(why.is_none(), egui::Button::new("Delete node"));
+                        let b = match why {
+                            Some(w) => b.on_disabled_hover_text(w),
+                            None => b,
+                        };
+                        if b.clicked() {
+                            super::node::delete_nodes(s, &[node]);
+                            ui.close();
+                        }
                     }
                 });
             }
@@ -1672,6 +1741,51 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
 #[cfg(test)]
 mod hierarchy_tests {
     use super::*;
+
+    #[test]
+    fn timeline_scrub_can_cross_into_headers_and_reach_frame_one() {
+        let mut session = Session::new_scene();
+        session.frame = 6;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (session, TimingState::default()),
+            );
+        harness.run_steps(3);
+        let press = Pos2::new(320.0, 96.0);
+        let moved = Pos2::new(144.0, 96.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        harness
+            .input_mut()
+            .events
+            .extend([egui::Event::PointerMoved(press), button(press, true)]);
+        harness.run_steps(1);
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(moved));
+        harness.run_steps(1);
+        assert_eq!(harness.state().0.frame, 1);
+        harness.input_mut().events.push(button(moved, false));
+        harness.run_steps(1);
+        assert_eq!(harness.state().0.frame, 1);
+        assert!(!harness.state().1.scrubbing);
+    }
 
     #[test]
     fn ruler_beats_follow_the_frame_rate() {

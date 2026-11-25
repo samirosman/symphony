@@ -774,6 +774,7 @@ fn erase_cost() {
             -400.0 + (i / 20) as f32 * 80.0,
         );
         let fill = Fill {
+            linked: None,
             id: s.doc.ids.fresh(),
             swatch,
             art: Default::default(),
@@ -846,6 +847,7 @@ fn busy_frame_cost() {
                 -500.0 + (i / 10) as f32 * 100.0,
             );
             let fill = Fill {
+                linked: None,
                 id: s.doc.ids.fresh(),
                 swatch,
                 art: Default::default(),
@@ -1293,12 +1295,16 @@ fn tga_and_svg_import() {
     .unwrap();
     let out = crate::import::stage_images_into(&[tga, svg], &cache);
     assert!(out.problems.is_empty(), "{:?}", out.problems);
+    // The TGA is a picture; the SVG is a vector drawing (editable).
     let frames: Vec<_> = out.groups.iter().flat_map(|g| g.frames.iter()).collect();
-    assert_eq!(frames.len(), 2);
-    let svg_frame = frames.iter().find(|f| f.name == "logo").unwrap();
-    assert_eq!(svg_frame.size, [4096, 2048], "drawn sharp, same shape");
-    let px = image::open(cache.join(&svg_frame.file)).unwrap().to_rgba8();
-    assert_eq!(px.get_pixel(100, 100).0, [224, 48, 32, 255]);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].name, "bg");
+    assert_eq!(out.vectors.len(), 1);
+    assert_eq!(out.vectors[0].name, "logo");
+    let art = &out.vectors[0].frames[0];
+    assert_eq!(art.size, [100.0, 50.0]);
+    assert_eq!(art.pieces.len(), 1);
+    assert_eq!(art.pieces[0].rgba, [224, 48, 32, 255]);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1686,4 +1692,691 @@ fn export_after_a_crash() {
     )
     .unwrap();
     println!("export finished, {} frames reused", done.reused);
+}
+
+/// SVG files and vectorized pictures come in as drawings the tools work
+/// on: lines on Line Art and colour zones on Colour Art, in palette
+/// colours. The eraser cuts both, the Paint tool repaints a zone, and one
+/// undo takes the whole import back.
+#[test]
+fn imported_svg_and_traced_pictures_are_editable() {
+    use crate::import::{stage_into, ImportOptions};
+    use crate::vector_import::Vectorize;
+    use symphony_core::stroke::ArtLayer;
+    let dir = std::env::temp_dir().join(format!("symphony-vec-import-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let svg = dir.join("badge.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90">
+            <rect x="20" y="15" width="120" height="60" fill="#3366cc"/>
+            <path d="M 20 45 L 140 45" stroke="#111111" stroke-width="6"/>
+        </svg>"##,
+    )
+    .unwrap();
+    // Line art on paper, as a scan would be.
+    let png = dir.join("sketch.png");
+    let mut img = image::RgbaImage::from_pixel(160, 90, image::Rgba([250, 248, 240, 255]));
+    for x in 10..150 {
+        for y in 60..64 {
+            img.put_pixel(x, y, image::Rgba([15, 15, 15, 255]));
+        }
+    }
+    img.save(&png).unwrap();
+
+    let mut s = crate::session::Session::new_scene();
+    let swatches = s.doc.palette.swatches.len();
+    let opts = ImportOptions {
+        as_vectors: true,
+        vectorize: Vectorize::LineArt { threshold: 0.5 },
+        fps: 24.0,
+    };
+    let out = stage_into(&[svg, png], &cache, opts);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert!(out.groups.is_empty(), "nothing came in as a locked picture");
+    assert_eq!(out.vectors.len(), 2);
+    let layers = s.layer_count();
+    assert_eq!(s.import_vectors(out.vectors), 2);
+    assert_eq!(s.layer_count(), layers + 2);
+    assert!(
+        s.doc.palette.swatches.len() > swatches,
+        "imported colours joined the palette"
+    );
+
+    // The SVG's drawing: one zone, one line, placed in the scene.
+    let svg_layer = (0..s.layer_count())
+        .find(|&l| {
+            s.doc
+                .exposed(l, 1)
+                .and_then(|d| s.doc.drawings.get(&d))
+                .is_some_and(|d| !d.fills.is_empty())
+        })
+        .expect("the SVG's layer");
+    let d = s.doc.exposed(svg_layer, 1).unwrap();
+    let dr = &s.doc.drawings[&d];
+    assert_eq!(dr.fills.len(), 1);
+    assert_eq!(dr.fills[0].art, ArtLayer::ColourArt);
+    assert_eq!(dr.strokes.len(), 1);
+    assert_eq!(dr.strokes[0].art, ArtLayer::LineArt);
+    assert!(dr.image.is_none());
+    let zone_area = |s: &crate::session::Session| -> f32 {
+        s.doc.drawings[&d]
+            .fills
+            .iter()
+            .map(|f| symphony_vector::shape::shape_area(&f.contours).abs())
+            .sum()
+    };
+    let before = zone_area(&s);
+    // The eraser cuts the line and the zone at the middle.
+    s.art = ArtLayer::LineArt;
+    s.erase(d, &[([0.0, 0.0], 40.0)]);
+    s.end_gesture();
+    let dr = &s.doc.drawings[&d];
+    assert!(dr.strokes.len() >= 2, "the line was cut in two");
+    s.art = ArtLayer::ColourArt;
+    s.erase(d, &[([0.0, 0.0], 40.0)]);
+    s.end_gesture();
+    assert!(
+        zone_area(&s) < before - 3000.0,
+        "the zone lost the eraser's shape"
+    );
+    // The Paint tool repaints the zone.
+    let red = s.doc.palette.swatches[0].id;
+    s.swatch = red;
+    let corner = s.doc.drawings[&d].fills[0].contours[0][0];
+    let inside = [corner[0] * 0.9, corner[1] * 0.9];
+    s.paint_at(svg_layer, 1, inside[0], inside[1], 1.0);
+    assert!(s.doc.drawings[&d].fills.iter().any(|f| f.swatch == red));
+
+    // The traced sketch: lines only, no paper.
+    let sketch = (0..s.layer_count())
+        .find(|&l| {
+            l != svg_layer
+                && s.doc.exposed(l, 1).is_some_and(|d| {
+                    s.doc
+                        .drawings
+                        .get(&d)
+                        .is_some_and(|d| !d.strokes.is_empty())
+                })
+        })
+        .expect("the sketch's layer");
+    let sd = &s.doc.drawings[&s.doc.exposed(sketch, 1).unwrap()];
+    assert!(sd.fills.is_empty());
+    assert!(sd.strokes.iter().all(|st| st.art == ArtLayer::LineArt));
+
+    // Undo the edits: the imported zone renders in its colour; one more
+    // undo takes the whole import back.
+    while s.history.undo_name() != Some("Import as vector drawing") {
+        assert!(
+            s.history.undo_len() > 0,
+            "the import step is in the history"
+        );
+        s.undo();
+    }
+    let img = symphony_render::render_frame(&s.doc, 1, 320, 180).unwrap();
+    assert!(
+        img.pixels().any(|p| p.0[2] > 150 && p.0[0] < 100),
+        "the blue zone shows"
+    );
+    s.undo();
+    assert_eq!(s.layer_count(), layers, "the import is one undo step");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// See how a picture traces: `SYMPHONY_TRACE_IN=<image> SYMPHONY_TRACE_OUT=
+/// <png> [SYMPHONY_TRACE_COLOURS=8] cargo test --release -p symphony-app
+/// trace_a_picture -- --ignored --nocapture`. Prints the time and pieces.
+#[test]
+#[ignore = "needs a picture"]
+fn trace_a_picture() {
+    use crate::vector_import::Vectorize;
+    let (Some(input), Some(out)) = (
+        std::env::var_os("SYMPHONY_TRACE_IN"),
+        std::env::var_os("SYMPHONY_TRACE_OUT"),
+    ) else {
+        return;
+    };
+    let how = match std::env::var("SYMPHONY_TRACE_COLOURS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+    {
+        Some(colours) => Vectorize::Colour { colours },
+        None => Vectorize::LineArt { threshold: 0.5 },
+    };
+    let opts = crate::import::ImportOptions {
+        as_vectors: true,
+        vectorize: how,
+        fps: 24.0,
+    };
+    let dir = std::env::temp_dir().join("symphony-trace-cache");
+    let mut input = std::path::PathBuf::from(input);
+    // An SVG is drawn into a picture first (a stand-in for a scan).
+    if input.extension().is_some_and(|e| e == "svg") {
+        let tree = resvg::usvg::Tree::from_data(
+            &std::fs::read(&input).unwrap(),
+            &resvg::usvg::Options::default(),
+        )
+        .unwrap();
+        let (w, h) = (tree.size().width() as u32, tree.size().height() as u32);
+        let mut pix = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+        pix.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(&tree, Default::default(), &mut pix.as_mut());
+        input = dir.join("drawn.png");
+        std::fs::create_dir_all(&dir).unwrap();
+        pix.save_png(&input).unwrap();
+    }
+    let start = std::time::Instant::now();
+    let got = crate::import::stage_into(&[input], &dir, opts);
+    let traced = start.elapsed();
+    assert!(got.problems.is_empty(), "{:?}", got.problems);
+    let pieces: usize = got
+        .vectors
+        .iter()
+        .flat_map(|g| &g.frames)
+        .map(|a| a.pieces.len())
+        .sum();
+    let mut s = crate::session::Session::new_scene();
+    for l in (0..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    s.import_vectors(got.vectors);
+    let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+    img.save(out).unwrap();
+    println!("traced in {traced:?}: {pieces} pieces");
+}
+
+/// The Select tool works on colour zones too (imported or painted):
+/// clicking one selects it, dragging moves it, Delete removes it, and
+/// select all includes zones on the current art layer.
+#[test]
+fn colour_zones_can_be_selected_moved_and_deleted() {
+    use symphony_core::stroke::{ArtLayer, Fill};
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    // A square zone on Colour Art, through the importer's path.
+    {
+        let s = &mut h.state_mut().s;
+        let col = s.doc.layers[layer].column;
+        let d = s.doc.make_drawing(col);
+        let did = d.id;
+        s.doc.drawings.insert(did, d);
+        s.doc.xsheet.column_mut(col).unwrap().set(1, Some(did));
+        let swatch = s.doc.palette.swatches[1].id;
+        let fill = Fill {
+            linked: None,
+            id: s.doc.ids.fresh(),
+            swatch,
+            art: ArtLayer::ColourArt,
+            contours: vec![vec![
+                [-40.0, -40.0],
+                [40.0, -40.0],
+                [40.0, 40.0],
+                [-40.0, 40.0],
+            ]],
+        };
+        s.doc.drawings.get_mut(&did).unwrap().fills.push(fill);
+        s.art = ArtLayer::ColourArt;
+        s.tool = Tool::Select;
+        s.frame = 1;
+    }
+    h.run_steps(2);
+    let centre = |h: &Harness<'static, Rig>| {
+        let f = &fills(h, layer)[0];
+        let c = &f.contours[0];
+        (
+            c.iter().map(|p| p[0]).sum::<f32>() / c.len() as f32,
+            c.iter().map(|p| p[1]).sum::<f32>() / c.len() as f32,
+        )
+    };
+    let start = centre(&h);
+    // Press inside the zone and drag it 60 units right (the Select tool
+    // follows the pointer's button).
+    let path = line((0.0, 0.0), (60.0, 0.0), 8);
+    for (i, &(x, y)) in path.iter().enumerate() {
+        let pos = h.state().canvas.to_screen(x, y);
+        h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        let press = match i {
+            0 => Some(true),
+            _ if i + 1 == path.len() => Some(false),
+            _ => None,
+        };
+        if let Some(pressed) = press {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(
+        h.state().s.selection.strokes.len(),
+        1,
+        "the zone is selected"
+    );
+    let moved = centre(&h);
+    assert!(
+        (moved.0 - start.0 - 60.0).abs() < 3.0 && (moved.1 - start.1).abs() < 3.0,
+        "{start:?} -> {moved:?}"
+    );
+    // Select all picks it again; Delete removes it.
+    h.state_mut().s.deselect();
+    h.state_mut().s.select_all();
+    assert_eq!(h.state().s.selection.strokes.len(), 1);
+    h.state_mut().s.delete_selection();
+    assert!(fills(&h, layer).is_empty());
+    h.state_mut().s.undo();
+    assert_eq!(fills(&h, layer).len(), 1, "undo brings it back");
+}
+
+/// Layered files keep their stacking in the scene (the top layer is drawn
+/// over the bottom one, even when both fill the frame), and an animated
+/// GIF becomes one layer whose drawings are held as long as its frames.
+#[test]
+fn layered_files_stack_and_animations_keep_their_timing() {
+    use crate::import::{stage_into, ImportOptions};
+    let dir = std::env::temp_dir().join(format!("symphony-layered-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let psd = dir.join("rg.psd");
+    std::fs::write(
+        &psd,
+        include_bytes!("../tests/fixtures/two-layers-red-green-1x1.psd"),
+    )
+    .unwrap();
+    let gif = dir.join("blink.gif");
+    {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame};
+        let mut enc = GifEncoder::new(std::fs::File::create(&gif).unwrap());
+        for (c, ms) in [(0u8, 250u32), (255, 125)] {
+            let img = image::RgbaImage::from_pixel(16, 9, image::Rgba([c, c, c, 255]));
+            enc.encode_frame(Frame::from_parts(
+                img,
+                0,
+                0,
+                Delay::from_numer_denom_ms(ms, 1),
+            ))
+            .unwrap();
+        }
+    }
+    let mut s = crate::session::Session::new_scene();
+    for l in (0..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    let opts = ImportOptions {
+        fps: 24.0,
+        ..Default::default()
+    };
+    let out = stage_into(&[psd], &cache, opts);
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    s.doc.media_dirs = vec![cache.clone()];
+    assert_eq!(s.import_images(out.groups), 2);
+    // Red is the PSD's top layer: it covers the green one.
+    let img = symphony_render::render_frame(&s.doc, 1, 64, 36).unwrap();
+    assert_eq!(img.get_pixel(32, 18).0, [255, 0, 0, 255]);
+
+    let out = stage_into(&[gif], &cache, opts);
+    assert_eq!(out.groups.len(), 1);
+    // 250 ms then 125 ms at 24 fps: 6 frames then 3.
+    assert_eq!(out.groups[0].frames.len(), 9);
+    assert_eq!(out.groups[0].frames[0].key, out.groups[0].frames[5].key);
+    assert_ne!(out.groups[0].frames[5].key, out.groups[0].frames[6].key);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Less common picture formats import too, kept as PNG in the project.
+#[test]
+fn more_picture_formats_import() {
+    let dir = std::env::temp_dir().join(format!("symphony-formats-{}", std::process::id()));
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(12, 6, image::Rgba([40, 90, 200, 255]));
+    let mut paths = Vec::new();
+    for ext in ["qoi", "exr", "ico", "ppm", "ff", "hdr"] {
+        let p = dir.join(format!("swatch-{ext}.{ext}"));
+        let ok = match ext {
+            "ppm" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgb8()
+                .save(&p),
+            "hdr" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgb32f()
+                .save(&p),
+            "exr" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgba32f()
+                .save(&p),
+            "ff" => image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgba16()
+                .save(&p),
+            _ => img.save(&p),
+        };
+        ok.unwrap_or_else(|e| panic!("{ext}: {e}"));
+        paths.push(p);
+    }
+    let out = crate::import::stage_into(&paths, &cache, Default::default());
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    let frames: Vec<_> = out.groups.iter().flat_map(|g| &g.frames).collect();
+    assert_eq!(frames.len(), 6);
+    for f in frames {
+        assert!(f.file.ends_with(".png"), "{}", f.file);
+        assert_eq!(f.size, [12, 6]);
+        let px = image::open(cache.join(&f.file)).unwrap().to_rgba8();
+        let p = px.get_pixel(3, 3).0;
+        assert!(p[2] > 150 && p[0] < 80, "{}: {p:?}", f.name);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Mesh Warp bends the drawing under it in renders: a straight line
+/// with the grid's middle point pulled down comes out curved, its middle
+/// lowered and its ends where they were; the drawing itself is unchanged.
+#[test]
+fn mesh_warp_bends_the_drawing_in_renders() {
+    use symphony_core::graph::NodeKind;
+    use symphony_core::stroke::{Point, Stroke};
+    let mut s = crate::session::Session::new_scene();
+    for l in (1..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    let layer = 0;
+    let p = |x: f32| Point {
+        x,
+        y: 0.0,
+        pressure: 1.0,
+        pen: Default::default(),
+    };
+    // Clear the layer's own drawing, then one straight line across.
+    let col = s.doc.layers[layer].column;
+    let d = s.doc.make_drawing(col);
+    let did = d.id;
+    s.doc.drawings.insert(did, d);
+    s.doc.xsheet.column_mut(col).unwrap().set(1, Some(did));
+    let st = Stroke {
+        id: s.doc.ids.fresh(),
+        kind: StrokeKind::Brush,
+        art: Default::default(),
+        swatch: s.doc.palette.swatches[0].id,
+        min_width: 12.0,
+        max_width: 12.0,
+        points: vec![p(-600.0), p(600.0)],
+        tips: Default::default(),
+        texture: None,
+        shape: Vec::new(),
+    };
+    s.doc.drawings.get_mut(&did).unwrap().strokes.push(st);
+    s.frame = 1;
+    let dark_rows = |s: &crate::session::Session, x: u32| -> Vec<u32> {
+        let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+        (0..1080)
+            .filter(|&y| {
+                let p = img.get_pixel(x, y).0;
+                (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+            })
+            .collect()
+    };
+    let flat = dark_rows(&s, 960);
+    assert!(!flat.is_empty(), "the line shows");
+    let node = s.doc.layers[layer].node;
+    crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(1920, 1080));
+    let warp = s.doc.graph.input(node, 0).unwrap();
+    assert_eq!(dark_rows(&s, 960), flat, "a flat grid changes nothing");
+    // Pull the middle point (row 2, column 2 of the 4 x 4 grid) down.
+    let mut before = s.doc.graph.node(warp).unwrap().clone();
+    if let NodeKind::MeshWarp(w) = &mut before.kind {
+        w.points[2 * 5 + 2][1] = symphony_core::anim::Value::Constant(150.0);
+    }
+    *s.doc.graph.node_mut(warp).unwrap() = before;
+    let bent = dark_rows(&s, 960);
+    let shift = bent[0] as i64 - flat[0] as i64;
+    assert!(
+        (shift - 150).abs() <= 3,
+        "the middle follows the point: {shift}"
+    );
+    // Near the end (x = 400 + 960), the line hardly moves.
+    let end = dark_rows(&s, 960 + 590);
+    assert!(end
+        .first()
+        .is_some_and(|y| (*y as i64 - flat[0] as i64).abs() < 40));
+    // The drawing itself is as drawn.
+    assert_eq!(s.doc.drawings[&did].strokes[0].points.len(), 2);
+}
+
+/// The Text tool: click, type, ⌘↩: the letters land in the drawing as
+/// vector shapes in the current colour, on the current art layer, near
+/// where you clicked, as one undo step. Esc cancels.
+#[test]
+fn the_text_tool_types_vector_letters() {
+    let mut h = rig();
+    h.state_mut().s.add_layer();
+    let layer = h.state().s.selected;
+    h.state_mut().s.tool = Tool::Text;
+    h.run_steps(2);
+    let before = strokes(&h, layer).len();
+    let at = h.state().canvas.to_screen(-200.0, -50.0);
+    let press = |h: &mut Harness<'static, Rig>, pressed: bool| {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    };
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    press(&mut h, true);
+    h.step();
+    press(&mut h, false);
+    h.run_steps(3);
+    h.input_mut().events.push(egui::Event::Text("Hi".into()));
+    h.run_steps(2);
+    h.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.run_steps(3);
+    let after = strokes(&h, layer);
+    if after.len() == before {
+        // No fonts on this machine (headless CI): nothing to type with.
+        assert!(crate::vector_import::text_shapes("Hi", &Default::default()).is_empty());
+        return;
+    }
+    let new: Vec<_> = after[before..].to_vec();
+    assert!(new.len() >= 2, "H and i (with its dot): {}", new.len());
+    let s = &h.state().s;
+    assert!(new
+        .iter()
+        .all(|st| st.swatch == s.swatch && st.art == s.art && !st.shape.is_empty()));
+    // Near the click (the drawing's own space here is scene space).
+    let (lo, _) = symphony_vector::bounds_of(&new).unwrap();
+    assert!(
+        (lo[0] + 200.0).abs() < 30.0 && (lo[1] + 50.0).abs() < 60.0,
+        "{lo:?}"
+    );
+    h.state_mut().s.undo();
+    assert_eq!(strokes(&h, layer).len(), before, "one undo step");
+}
+
+/// Mesh Warp in Points mode, puppet style: points placed on an "arm"
+/// (a thick line), a mesh built over the artwork, the end point lifted:
+/// the arm swings up in renders, its base stays, and a separate shape no
+/// point is on (a "ball" below) doesn't move.
+#[test]
+fn points_warp_bends_only_the_connected_artwork() {
+    use symphony_core::graph::NodeKind;
+    use symphony_core::stroke::{Point, Stroke};
+    use symphony_core::warp::WarpKind;
+    let mut s = crate::session::Session::new_scene();
+    for l in (1..s.layer_count()).rev() {
+        s.delete_layer(l);
+    }
+    let col = s.doc.layers[0].column;
+    let d = s.doc.make_drawing(col);
+    let did = d.id;
+    s.doc.drawings.insert(did, d);
+    s.doc.xsheet.column_mut(col).unwrap().set(1, Some(did));
+    let line = |s: &mut crate::session::Session, a: (f32, f32), b: (f32, f32), w: f32| {
+        let p = |(x, y): (f32, f32)| Point {
+            x,
+            y,
+            pressure: 1.0,
+            pen: Default::default(),
+        };
+        let st = Stroke {
+            id: s.doc.ids.fresh(),
+            kind: StrokeKind::Brush,
+            art: Default::default(),
+            swatch: s.doc.palette.swatches[0].id,
+            min_width: w,
+            max_width: w,
+            points: vec![p(a), p(b)],
+            tips: Default::default(),
+            texture: None,
+            shape: Vec::new(),
+        };
+        s.doc.drawings.get_mut(&did).unwrap().strokes.push(st);
+    };
+    line(&mut s, (-400.0, 0.0), (400.0, 0.0), 40.0); // the arm
+    line(&mut s, (0.0, 300.0), (10.0, 300.0), 60.0); // the ball
+    s.frame = 1;
+    let node = s.doc.layers[0].node;
+    crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(1920, 1080));
+    let warp = s.doc.graph.input(node, 0).unwrap();
+    s.select_graph_node(warp, false);
+    // Points mode: the shoulder held by two points, the hand at the end.
+    if let NodeKind::MeshWarp(w) = &mut s.doc.graph.node_mut(warp).unwrap().kind {
+        w.kind = WarpKind::Points;
+        w.pins = vec![[-400.0, -10.0], [-400.0, 10.0], [400.0, 0.0]];
+        w.pin_moves = vec![
+            [
+                symphony_core::anim::Value::Constant(0.0),
+                symphony_core::anim::Value::Constant(0.0),
+            ];
+            3
+        ];
+    }
+    let ink_at = |s: &crate::session::Session, x: u32, y: u32| {
+        let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+        let p = img.get_pixel(x, y).0;
+        (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+    };
+    // Scene (x, y) is pixel (960 + x, 540 + y) here.
+    assert!(ink_at(&s, 960 + 350, 540), "the arm's end, before");
+    crate::views::warp_edit::build_mesh(&mut s, warp).unwrap();
+    assert!(ink_at(&s, 960 + 350, 540), "building changes nothing yet");
+    // Lift the hand 300 up.
+    if let NodeKind::MeshWarp(w) = &mut s.doc.graph.node_mut(warp).unwrap().kind {
+        w.pin_moves[2][1] = symphony_core::anim::Value::Constant(-300.0);
+    }
+    let img = symphony_render::render_frame(&s.doc, 1, 1920, 1080).unwrap();
+    let ink = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y).0;
+        (p[0] as u32 + p[1] as u32 + p[2] as u32) < 300
+    };
+    assert!(!ink(960 + 390, 540), "the end left its old place");
+    assert!(
+        (180..260).any(|y| ink(960 + 360, y)) || (200..300).any(|y| ink(960 + 300, y)),
+        "the end went up"
+    );
+    assert!(ink(960 - 380, 540), "the shoulder stayed");
+    assert!(ink(965, 840), "the ball (no point on it) didn't move");
+}
+
+/// Deleting from the Node view and Timeline: an added peg or Mesh Warp
+/// goes and its chain closes up (the drawing stays under the layer's
+/// peg); a Drawing node takes its layer; the Camera and a layer's own peg
+/// refuse; one undo brings a whole delete back. Cells and sounds delete
+/// too.
+#[test]
+fn nodes_cells_and_sounds_can_be_deleted_and_undone() {
+    use crate::views::node::{delete_nodes, insert_near, mesh_warp};
+    use symphony_core::graph::NodeKind;
+    let mut s = crate::session::Session::new_scene();
+    let layer = s.doc.layers[0];
+    let before_links = s.doc.graph.links().to_vec();
+    insert_near(&mut s, layer.node, mesh_warp(100, 100));
+    insert_near(&mut s, layer.node, NodeKind::Peg(Default::default()));
+    let peg = s.doc.graph.input(layer.node, 0).unwrap();
+    let warp = s.doc.graph.input(peg, 0).unwrap();
+    assert!(matches!(
+        s.doc.graph.node(warp).unwrap().kind,
+        NodeKind::MeshWarp(_)
+    ));
+    let version = s.history.undo_len();
+    assert_eq!(delete_nodes(&mut s, &[peg, warp]), 2);
+    assert!(s.doc.graph.node(peg).is_none() && s.doc.graph.node(warp).is_none());
+    assert_eq!(
+        s.doc.graph.input(layer.node, 0),
+        Some(layer.peg),
+        "the chain closed up"
+    );
+    let mut now = s.doc.graph.links().to_vec();
+    let mut was = before_links.clone();
+    now.sort_by_key(|l| (l.from, l.to, l.port));
+    was.sort_by_key(|l| (l.from, l.to, l.port));
+    assert_eq!(now, was);
+    assert_eq!(s.history.undo_len(), version + 1, "one undo step");
+    s.undo();
+    assert!(s.doc.graph.node(peg).is_some() && s.doc.graph.node(warp).is_some());
+    assert_eq!(s.doc.graph.input(layer.node, 0), Some(peg));
+    // The Camera and a layer's own peg stay.
+    let display = s.doc.display;
+    assert_eq!(delete_nodes(&mut s, &[display, layer.peg]), 0);
+    // A Drawing node takes its layer.
+    // The only layer can't go; with another one it can.
+    assert_eq!(delete_nodes(&mut s, &[layer.node]), 0);
+    s.add_layer();
+    let layers = s.layer_count();
+    assert_eq!(delete_nodes(&mut s, &[layer.node]), 1);
+    assert_eq!(s.layer_count(), layers - 1);
+    s.undo();
+    assert_eq!(s.layer_count(), layers);
+    // Cells: clear keeps the frame, remove pulls the rest back.
+    s.selected = s
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.node == layer.node)
+        .unwrap();
+    let col = s.doc.layers[s.selected].column;
+    let row = s.selected;
+    s.frame = 1;
+    let st = symphony_core::stroke::Stroke {
+        id: s.doc.ids.fresh(),
+        kind: StrokeKind::Brush,
+        art: Default::default(),
+        swatch: s.swatch,
+        min_width: 2.0,
+        max_width: 2.0,
+        points: vec![
+            symphony_core::stroke::Point {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+                pen: Default::default(),
+            };
+            2
+        ],
+        tips: Default::default(),
+        texture: None,
+        shape: Vec::new(),
+    };
+    s.commit_stroke(row, 1, st);
+    s.change_exposure(1);
+    s.change_exposure(1);
+    let len = s.doc.xsheet.column(col).unwrap().len();
+    assert!(len >= 3, "{len}");
+    s.clear_cell();
+    assert!(s.doc.exposed(row, 1).is_none());
+    assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len);
+    s.undo();
+    s.remove_frame();
+    assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len - 1);
+    s.undo();
+    assert_eq!(s.doc.xsheet.column(col).unwrap().len(), len);
 }

@@ -12,10 +12,28 @@ pub fn dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("Symphony").join("crashes"))
 }
 
+thread_local! {
+    /// Inside [`guarded`]: a panic here is a refused file, not a crash.
+    static GUARDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f`, turning a panic into an error, without a crash report: for
+/// third-party readers that can panic on damaged files (the file is
+/// refused; Symphony carries on).
+pub fn guarded<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Option<R> {
+    let was = GUARDED.with(|g| g.replace(true));
+    let r = std::panic::catch_unwind(f);
+    GUARDED.with(|g| g.set(was));
+    r.ok()
+}
+
 /// Write a report on any panic, then let the default hook print it too.
 pub fn install() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if GUARDED.with(|g| g.get()) {
+            return;
+        }
         let backtrace = std::backtrace::Backtrace::force_capture();
         let thread = std::thread::current();
         let report = format!(
