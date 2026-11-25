@@ -323,9 +323,10 @@ continues.
   Quality) and ✅ Points (Harmony 24 Shape-Aware style: place points on the
   art, Build mesh over its shape, as-rigid-as-possible bending, only
   connected art follows). Lines: ✅ Paths (keep thickness) or ✅ Whole shape
-  (thickness follows the warp). Still to do: rotating/scaling single points,
-  bones and cages, per-point Weight, rigidity maps, Bézier handles on grid
-  points, bending imported pictures.
+  (thickness follows the warp). ✅ Bézier handles on grid points (click a
+  point to show them; the opposite handle mirrors, Alt-drag moves one
+  alone). Still to do: rotating/scaling single points, bones and cages,
+  per-point Weight, rigidity maps, bending imported pictures.
 - ⬜ Bone deformer (bias, regions of influence, chains)
 - ⬜ Game Bone deformer (game export, no bias or regions)
 - ⬜ Curve deformer (Bézier chain)

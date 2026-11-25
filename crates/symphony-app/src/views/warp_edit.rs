@@ -3,7 +3,10 @@
 //! selected and the Transform tool:
 //!
 //! - Grid: the grid shows over the artwork, bent as it bends the art;
-//!   dragging a point bends everything under it.
+//!   dragging a point bends everything under it. A clicked point shows
+//!   its Bezier handles; dragging one bends the grid lines through the
+//!   point, and its opposite handle follows as a mirror (Alt-drag moves
+//!   it alone, and the pair then stays apart).
 //! - Points (like Harmony 24's Shape-Aware Deformation): first place the
 //!   points: click the artwork to add one, drag one to move it, Alt-click
 //!   one to remove it. Then Build mesh: a mesh is made over the artwork's
@@ -19,7 +22,7 @@ use symphony_core::anim::Value;
 use symphony_core::graph::{NodeId, NodeKind};
 use symphony_core::history::Edit;
 use symphony_core::math::Affine;
-use symphony_core::warp::{MeshWarp, WarpField, WarpKind};
+use symphony_core::warp::{Handle, MeshWarp, WarpField, WarpGrid, WarpKind};
 use symphony_ui::{theme, widgets};
 
 use crate::session::{Session, Tool};
@@ -29,9 +32,40 @@ const GRAB: f32 = 10.0;
 
 #[derive(Default)]
 pub struct WarpEdit {
-    /// The point being dragged.
-    dragging: Option<usize>,
-    hover: Option<usize>,
+    /// What is being dragged.
+    dragging: Option<Grab>,
+    hover: Option<Grab>,
+    /// The grid point whose handles show, on which Mesh Warp.
+    selected: Option<(NodeId, usize)>,
+}
+
+/// What a press can take hold of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Grab {
+    Point(usize),
+    /// A grid point's handle, and whether its opposite follows.
+    Handle(usize, Handle, bool),
+}
+
+impl Grab {
+    fn same(self, other: Option<Grab>) -> bool {
+        match (self, other) {
+            (Grab::Point(a), Some(Grab::Point(b))) => a == b,
+            (Grab::Handle(a, h, _), Some(Grab::Handle(b, k, _))) => a == b && h == k,
+            _ => false,
+        }
+    }
+}
+
+/// The handles of grid point `i` that exist (not at the border), with
+/// where each is now.
+fn handles_of(grid: &WarpGrid, i: usize) -> Vec<(Handle, [f32; 2])> {
+    let cols = grid.columns as usize + 1;
+    let (r, c) = ((i / cols) as u32, (i % cols) as u32);
+    Handle::ALL
+        .into_iter()
+        .filter_map(|h| grid.handle(r, c, h).map(|p| (h, p)))
+        .collect()
 }
 
 /// The selected Mesh Warp, and its space -> screen.
@@ -74,90 +108,91 @@ pub fn ui(
         let (x, y) = m.apply(p[0], p[1]);
         Pos2::new(x, y)
     };
-    let line = EStroke::new(1.0, theme::ACCENT_SELECT.gamma_multiply(0.7));
-    // Where the points are on screen, and what each point's "rest" is.
-    let points: Vec<[f32; 2]> = match warp.kind {
-        WarpKind::Grid => {
-            let grid = warp.grid_at(s.frame);
-            let steps = 12;
-            for r in 0..=grid.rows {
-                let pts: Vec<Pos2> = (0..=grid.columns * steps)
-                    .map(|i| {
-                        let t = i as f32 / steps as f32 / grid.columns as f32;
-                        let (a, b) = (grid.rest(r, 0), grid.rest(r, grid.columns));
-                        screen(grid.apply([a[0] + (b[0] - a[0]) * t, a[1]]))
-                    })
-                    .collect();
-                painter.add(egui::Shape::line(pts, line));
-            }
-            for c in 0..=grid.columns {
-                let pts: Vec<Pos2> = (0..=grid.rows * steps)
-                    .map(|i| {
-                        let t = i as f32 / steps as f32 / grid.rows as f32;
-                        let (a, b) = (grid.rest(0, c), grid.rest(grid.rows, c));
-                        screen(grid.apply([a[0], a[1] + (b[1] - a[1]) * t]))
-                    })
-                    .collect();
-                painter.add(egui::Shape::line(pts, line));
-            }
+    let grid = (warp.kind == WarpKind::Grid).then(|| warp.grid_at(s.frame));
+    // Where the points are (the warp's space).
+    let points: Vec<[f32; 2]> = match &grid {
+        Some(grid) => {
+            draw_grid(painter, grid, &screen);
             (0..=grid.rows)
                 .flat_map(|r| (0..=grid.columns).map(move |c| (r, c)))
                 .map(|(r, c)| grid.point(r, c))
                 .collect()
         }
-        WarpKind::Points => {
-            // The mesh, bent, faintly.
-            if let Some(WarpField::Points(f)) = warp.field_at(s.frame) {
-                let faint = EStroke::new(0.75, theme::ACCENT_SELECT.gamma_multiply(0.35));
-                for t in &f.mesh().triangles {
-                    let [a, b, c] = t.map(|i| screen(f.now()[i as usize]));
-                    painter.add(egui::Shape::closed_line(vec![a, b, c], faint));
-                }
-            }
-            if warp.mesh.is_some() {
-                warp.pins_at(s.frame)
-            } else {
-                warp.pins.clone()
-            }
-        }
+        None => points_mode(painter, &warp, s.frame, &screen),
+    };
+    if state
+        .selected
+        .is_some_and(|(n, i)| n != id || i >= points.len() || grid.is_none())
+    {
+        state.selected = None;
+    }
+    let handles = match (&grid, state.selected) {
+        (Some(grid), Some((_, i))) => handles_of(grid, i),
+        _ => Vec::new(),
     };
     let on_screen: Vec<Pos2> = points.iter().map(|&p| screen(p)).collect();
     let pointer = response.hover_pos().or(response.interact_pointer_pos());
-    let nearest = pointer.and_then(|p| {
-        on_screen
-            .iter()
-            .enumerate()
-            .map(|(i, q)| (i, q.distance(p)))
-            .filter(|(_, d)| *d <= GRAB)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
-    });
+    let nearest =
+        pointer.and_then(|p| {
+            let near = |q: Pos2| Some(q.distance(p)).filter(|d| *d <= GRAB);
+            let selected = state.selected.map(|(_, i)| i);
+            on_screen
+                .iter()
+                .enumerate()
+                .filter_map(|(i, q)| near(*q).map(|d| (Grab::Point(i), d)))
+                .chain(handles.iter().filter_map(|&(h, q)| {
+                    Some((Grab::Handle(selected?, h, false), near(screen(q))?))
+                }))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(g, _)| g)
+        });
     state.hover = nearest;
     if response.drag_started() {
-        state.dragging = nearest;
+        let alt = ui.input(|i| i.modifiers.alt);
+        state.dragging = nearest.map(|g| match g {
+            Grab::Handle(i, h, _) => Grab::Handle(i, h, !alt && mirrored(&warp, s.frame, i, h)),
+            g => g,
+        });
+        if let (Some(Grab::Point(i)), Some(_)) = (state.dragging, &grid) {
+            state.selected = Some((id, i));
+        }
     }
     let placing = warp.kind == WarpKind::Points && warp.mesh.is_none();
-    // Placing points: a click adds one; Alt-click removes one.
     if placing && response.clicked() {
-        let alt = ui.input(|i| i.modifiers.alt);
-        match (nearest, alt, pointer.zip(m.inverse())) {
-            (Some(i), true, _) => edit(s, id, "Remove point", None, |w| {
-                if i < w.pins.len() {
-                    w.pins.remove(i);
-                    if i < w.pin_moves.len() {
-                        w.pin_moves.remove(i);
-                    }
-                }
-            }),
-            (None, false, Some((p, back))) => {
-                let (x, y) = back.apply(p.x, p.y);
-                edit(s, id, "Place point", None, |w| {
-                    w.pins.push([x, y]);
-                    w.pin_moves
-                        .push([Value::Constant(0.0), Value::Constant(0.0)]);
-                });
-            }
-            _ => {}
+        place_or_remove(ui, s, id, nearest, pointer.zip(m.inverse()));
+    }
+    // A click on a grid point shows its handles; a click elsewhere hides
+    // them.
+    if grid.is_some() && response.clicked() {
+        match nearest {
+            Some(Grab::Point(i)) => state.selected = Some((id, i)),
+            Some(Grab::Handle(..)) => {}
+            None => state.selected = None,
+        }
+    }
+    let active = |g: Grab| g.same(state.dragging) || g.same(state.hover);
+    if let Some((_, i)) = state.selected {
+        let keyed = |h: Handle| {
+            warp.handles
+                .get(i)
+                .is_some_and(|hs| hs[h as usize].iter().any(|v| v.has_key(s.frame)))
+        };
+        for &(h, q) in &handles {
+            let (p, q) = (on_screen[i], screen(q));
+            painter.line_segment([p, q], EStroke::new(1.0, theme::ACCENT_SELECT));
+            let r = if active(Grab::Handle(i, h, false)) {
+                4.5
+            } else {
+                3.5
+            };
+            let fill = if keyed(h) {
+                theme::ACCENT_TIME
+            } else {
+                theme::ACCENT_SELECT
+            };
+            let square = egui::Rect::from_center_size(q, Vec2::splat(2.0 * r));
+            painter.rect_filled(square.expand(1.5), 0.0, theme::BG_BASE);
+            painter.rect_filled(square, 0.0, fill);
         }
     }
     let keyed = |i: usize| {
@@ -168,8 +203,8 @@ pub fn ui(
         .is_some_and(|p| p.iter().any(|v| v.has_key(s.frame)))
     };
     for (i, p) in on_screen.iter().enumerate() {
-        let active = state.dragging == Some(i) || state.hover == Some(i);
-        let r = if active { 6.0 } else { 4.5 };
+        let big = active(Grab::Point(i)) || state.selected.is_some_and(|(_, j)| j == i);
+        let r = if big { 6.0 } else { 4.5 };
         painter.circle_filled(*p, r + 1.5, theme::BG_BASE);
         // Amber marks a key on this frame (time), as on the Timeline.
         let fill = if keyed(i) {
@@ -186,36 +221,11 @@ pub fn ui(
     if warp.kind == WarpKind::Points {
         mesh_button(ui, response, s, id, &warp);
     }
-    if let Some(i) = state.dragging {
+    if let Some(grab) = state.dragging {
         if response.dragged() {
             if let (Some(p), Some(back)) = (response.interact_pointer_pos(), m.inverse()) {
                 let (x, y) = back.apply(p.x, p.y);
-                match warp.kind {
-                    WarpKind::Grid => {
-                        let cols = warp.columns as usize + 1;
-                        let rest = warp
-                            .grid_at(s.frame)
-                            .rest((i / cols) as u32, (i % cols) as u32);
-                        move_point(s, id, i, [x - rest[0], y - rest[1]]);
-                    }
-                    WarpKind::Points if placing => {
-                        edit(
-                            s,
-                            id,
-                            "Move point",
-                            Some(format!("place-{}-{i}", id.0)),
-                            |w| {
-                                if let Some(p) = w.pins.get_mut(i) {
-                                    *p = [x, y];
-                                }
-                            },
-                        );
-                    }
-                    WarpKind::Points => {
-                        let rest = warp.pins.get(i).copied().unwrap_or([x, y]);
-                        move_point(s, id, i, [x - rest[0], y - rest[1]]);
-                    }
-                }
+                drag(s, id, &warp, grid.as_ref(), grab, [x, y]);
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
@@ -231,6 +241,140 @@ pub fn ui(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     true
+}
+
+/// The grid's lines, bent as the grid bends the art.
+fn draw_grid(painter: &egui::Painter, grid: &WarpGrid, screen: &impl Fn([f32; 2]) -> Pos2) {
+    let line = EStroke::new(1.0, theme::ACCENT_SELECT.gamma_multiply(0.7));
+    let steps = 12;
+    for r in 0..=grid.rows {
+        let pts: Vec<Pos2> = (0..=grid.columns * steps)
+            .map(|i| {
+                let t = i as f32 / steps as f32 / grid.columns as f32;
+                let (a, b) = (grid.rest(r, 0), grid.rest(r, grid.columns));
+                screen(grid.apply([a[0] + (b[0] - a[0]) * t, a[1]]))
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, line));
+    }
+    for c in 0..=grid.columns {
+        let pts: Vec<Pos2> = (0..=grid.rows * steps)
+            .map(|i| {
+                let t = i as f32 / steps as f32 / grid.rows as f32;
+                let (a, b) = (grid.rest(0, c), grid.rest(grid.rows, c));
+                screen(grid.apply([a[0], a[1] + (b[1] - a[1]) * t]))
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, line));
+    }
+}
+
+/// Points mode: the mesh, bent, faintly; returns where the points are.
+fn points_mode(
+    painter: &egui::Painter,
+    warp: &MeshWarp,
+    frame: u32,
+    screen: &impl Fn([f32; 2]) -> Pos2,
+) -> Vec<[f32; 2]> {
+    if let Some(WarpField::Points(f)) = warp.field_at(frame) {
+        let faint = EStroke::new(0.75, theme::ACCENT_SELECT.gamma_multiply(0.35));
+        for t in &f.mesh().triangles {
+            let [a, b, c] = t.map(|i| screen(f.now()[i as usize]));
+            painter.add(egui::Shape::closed_line(vec![a, b, c], faint));
+        }
+    }
+    if warp.mesh.is_some() {
+        warp.pins_at(frame)
+    } else {
+        warp.pins.clone()
+    }
+}
+
+/// Placing points: a click adds one; Alt-click removes one.
+fn place_or_remove(
+    ui: &egui::Ui,
+    s: &mut Session,
+    id: NodeId,
+    nearest: Option<Grab>,
+    at: Option<(Pos2, Affine)>,
+) {
+    let alt = ui.input(|i| i.modifiers.alt);
+    match (nearest, alt, at) {
+        (Some(Grab::Point(i)), true, _) => edit(s, id, "Remove point", None, |w| {
+            if i < w.pins.len() {
+                w.pins.remove(i);
+                if i < w.pin_moves.len() {
+                    w.pin_moves.remove(i);
+                }
+            }
+        }),
+        (None, false, Some((p, back))) => {
+            let (x, y) = back.apply(p.x, p.y);
+            edit(s, id, "Place point", None, |w| {
+                w.pins.push([x, y]);
+                w.pin_moves
+                    .push([Value::Constant(0.0), Value::Constant(0.0)]);
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Do grid point `i`'s handle `h` and its opposite move as mirrors on
+/// `frame` (as they do until one is moved alone)?
+fn mirrored(warp: &MeshWarp, frame: u32, i: usize, h: Handle) -> bool {
+    let Some(hs) = warp.handles.get(i) else {
+        return true;
+    };
+    let at = |h: Handle| hs[h as usize].each_ref().map(|v| v.at(frame));
+    let (a, b) = (at(h), at(h.opposite()));
+    (a[0] + b[0]).abs() < 1e-3 && (a[1] + b[1]).abs() < 1e-3
+}
+
+/// Move what `grab` holds to `to` (the warp's space).
+fn drag(
+    s: &mut Session,
+    id: NodeId,
+    warp: &MeshWarp,
+    grid: Option<&WarpGrid>,
+    grab: Grab,
+    to: [f32; 2],
+) {
+    let [x, y] = to;
+    let placing = warp.kind == WarpKind::Points && warp.mesh.is_none();
+    match (grab, grid) {
+        (Grab::Point(i), Some(grid)) => {
+            let cols = warp.columns as usize + 1;
+            let rest = grid.rest((i / cols) as u32, (i % cols) as u32);
+            move_point(s, id, i, [x - rest[0], y - rest[1]]);
+        }
+        (Grab::Handle(i, h, mirror), Some(grid)) => {
+            let cols = grid.columns as usize + 1;
+            let (r, c) = ((i / cols) as u32, (i % cols) as u32);
+            if let Some(rest) = grid.handle_rest(r, c, h) {
+                let mirror = mirror && grid.handle_rest(r, c, h.opposite()).is_some();
+                move_handle(s, id, i, h, [x - rest[0], y - rest[1]], mirror);
+            }
+        }
+        (Grab::Point(i), None) if placing => {
+            edit(
+                s,
+                id,
+                "Move point",
+                Some(format!("place-{}-{i}", id.0)),
+                |w| {
+                    if let Some(p) = w.pins.get_mut(i) {
+                        *p = [x, y];
+                    }
+                },
+            );
+        }
+        (Grab::Point(i), None) => {
+            let rest = warp.pins.get(i).copied().unwrap_or([x, y]);
+            move_point(s, id, i, [x - rest[0], y - rest[1]]);
+        }
+        (Grab::Handle(..), None) => {}
+    }
 }
 
 /// Points mode's next step, on the canvas: Build mesh once points are
@@ -377,15 +521,45 @@ fn move_point(s: &mut Session, id: NodeId, i: usize, offset: [f32; 2]) {
                 WarpKind::Grid => w.points.get_mut(i),
                 WarpKind::Points => w.pin_moves.get_mut(i),
             };
-            let Some(point) = point else { return };
-            for (value, v) in point.iter_mut().zip(offset) {
-                match value {
-                    Value::Constant(c) if !animate => *c = v,
-                    _ => value.set_key(frame, v),
+            if let Some(point) = point {
+                set_pair(point, offset, animate, frame);
+            }
+        },
+    );
+}
+
+/// Set grid point `i`'s handle `h` to `moved` from its rest place, and
+/// the opposite handle to the mirror of that when `mirror`; keyed as
+/// [`move_point`] keys.
+fn move_handle(s: &mut Session, id: NodeId, i: usize, h: Handle, moved: [f32; 2], mirror: bool) {
+    let (animate, frame) = (s.animate, s.frame);
+    edit(
+        s,
+        id,
+        "Move mesh handle",
+        Some(format!("mesh-handle-{}-{i}", id.0)),
+        |w| {
+            if let Some(pair) = w.handle_mut(i, h) {
+                set_pair(pair, moved, animate, frame);
+            }
+            if mirror {
+                if let Some(pair) = w.handle_mut(i, h.opposite()) {
+                    set_pair(pair, [-moved[0], -moved[1]], animate, frame);
                 }
             }
         },
     );
+}
+
+/// Set an (x, y) pair: keyed on `frame` in Animate mode or when it is
+/// already animated, otherwise for every frame.
+fn set_pair(pair: &mut [Value; 2], to: [f32; 2], animate: bool, frame: u32) {
+    for (value, v) in pair.iter_mut().zip(to) {
+        match value {
+            Value::Constant(c) if !animate => *c = v,
+            _ => value.set_key(frame, v),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -420,5 +594,38 @@ mod tests {
         assert_eq!(points(&s).grid_at(10).offsets[12], [20.0, 0.0]);
         s.undo();
         assert!(!points(&s).has_key(10));
+    }
+
+    /// A handle moves with its opposite as a mirror; once moved alone
+    /// (Alt), the pair stays apart. In Animate mode both are keyed.
+    #[test]
+    fn a_handle_moves_its_opposite_until_broken() {
+        let mut s = Session::new_scene();
+        let node = s.doc.layers[0].node;
+        crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(100, 100));
+        let id = s.doc.graph.input(node, 0).unwrap();
+        let warp = |s: &Session| match &s.doc.graph.node(id).unwrap().kind {
+            NodeKind::MeshWarp(w) => (**w).clone(),
+            _ => unreachable!(),
+        };
+        let at = |w: &MeshWarp, h: Handle| w.grid_at(1).handles[12][h as usize];
+        s.animate = false;
+        assert!(mirrored(&warp(&s), 1, 12, Handle::NextColumn));
+        move_handle(&mut s, id, 12, Handle::NextColumn, [3.0, -8.0], true);
+        s.end_gesture();
+        assert_eq!(at(&warp(&s), Handle::PrevColumn), [-3.0, 8.0]);
+        assert!(mirrored(&warp(&s), 1, 12, Handle::PrevColumn));
+        // Alt-drag: the opposite stays, and the pair is now apart.
+        move_handle(&mut s, id, 12, Handle::NextColumn, [0.0, -20.0], false);
+        s.end_gesture();
+        assert_eq!(at(&warp(&s), Handle::PrevColumn), [-3.0, 8.0]);
+        assert!(!mirrored(&warp(&s), 1, 12, Handle::NextColumn));
+        s.animate = true;
+        s.frame = 7;
+        move_handle(&mut s, id, 12, Handle::PrevRow, [1.0, 1.0], true);
+        s.end_gesture();
+        assert!(warp(&s).has_key(7));
+        s.undo();
+        assert!(!warp(&s).has_key(7));
     }
 }
