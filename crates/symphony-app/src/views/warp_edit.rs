@@ -6,7 +6,10 @@
 //!   dragging a point bends everything under it. A clicked point shows
 //!   its Bezier handles; dragging one bends the grid lines through the
 //!   point, and its opposite handle follows as a mirror (Alt-drag moves
-//!   it alone, and the pair then stays apart).
+//!   it alone, and the pair then stays apart). Dragging an empty space
+//!   inside the grid moves the whole grid (Harmony's "grab the grid in
+//!   the void spaces to pan it"); the squares outside its corners and the
+//!   arrows outside its sides change its width and height.
 //! - Points (like Harmony 24's Shape-Aware Deformation): first place the
 //!   points: click the artwork to add one, drag one to move it, Alt-click
 //!   one to remove it. Then Build mesh: a mesh is made over the artwork's
@@ -37,6 +40,9 @@ pub struct WarpEdit {
     hover: Option<Grab>,
     /// The grid point whose handles show, on which Mesh Warp.
     selected: Option<(NodeId, usize)>,
+    /// Moving or sizing the grid: where the press was (the warp's space)
+    /// and the grid's left, top, right and bottom then.
+    start: Option<([f32; 2], [f32; 4])>,
 }
 
 /// What a press can take hold of.
@@ -45,6 +51,11 @@ enum Grab {
     Point(usize),
     /// A grid point's handle, and whether its opposite follows.
     Handle(usize, Handle, bool),
+    /// The whole grid, by an empty space inside it.
+    Pan,
+    /// A size control: which side moves across the columns (-1 the
+    /// first, 1 the last, 0 none) and down the rows.
+    Size(i8, i8),
 }
 
 impl Grab {
@@ -52,6 +63,8 @@ impl Grab {
         match (self, other) {
             (Grab::Point(a), Some(Grab::Point(b))) => a == b,
             (Grab::Handle(a, h, _), Some(Grab::Handle(b, k, _))) => a == b && h == k,
+            (Grab::Pan, Some(Grab::Pan)) => true,
+            (Grab::Size(a, b), Some(Grab::Size(c, d))) => (a, b) == (c, d),
             _ => false,
         }
     }
@@ -131,6 +144,9 @@ pub fn ui(
         _ => Vec::new(),
     };
     let on_screen: Vec<Pos2> = points.iter().map(|&p| screen(p)).collect();
+    let sizes = grid
+        .as_ref()
+        .map_or_else(Vec::new, |grid| size_controls(grid, &screen));
     let pointer = response.hover_pos().or(response.interact_pointer_pos());
     let nearest =
         pointer.and_then(|p| {
@@ -143,8 +159,13 @@ pub fn ui(
                 .chain(handles.iter().filter_map(|&(h, q)| {
                     Some((Grab::Handle(selected?, h, false), near(screen(q))?))
                 }))
+                .chain(sizes.iter().filter_map(|&(g, q, _)| Some((g, near(q)?))))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(g, _)| g)
+                .or_else(|| {
+                    let grid = grid.as_ref()?;
+                    inside(&outline(grid, &screen), p).then_some(Grab::Pan)
+                })
         });
     state.hover = nearest;
     if response.drag_started() {
@@ -156,6 +177,18 @@ pub fn ui(
         if let (Some(Grab::Point(i)), Some(_)) = (state.dragging, &grid) {
             state.selected = Some((id, i));
         }
+        let origin = ui.input(|i| i.pointer.press_origin());
+        state.start = match (&grid, origin, m.inverse()) {
+            (Some(grid), Some(o), Some(back)) => {
+                let (x, y) = back.apply(o.x, o.y);
+                let ([cx, cy], [w, h]) = (grid.centre, grid.size);
+                Some((
+                    [x, y],
+                    [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0],
+                ))
+            }
+            _ => None,
+        };
     }
     let placing = warp.kind == WarpKind::Points && warp.mesh.is_none();
     if placing && response.clicked() {
@@ -166,45 +199,112 @@ pub fn ui(
     if grid.is_some() && response.clicked() {
         match nearest {
             Some(Grab::Point(i)) => state.selected = Some((id, i)),
-            Some(Grab::Handle(..)) => {}
-            None => state.selected = None,
+            Some(Grab::Handle(..) | Grab::Size(..)) => {}
+            Some(Grab::Pan) | None => state.selected = None,
         }
     }
     let active = |g: Grab| g.same(state.dragging) || g.same(state.hover);
-    if let Some((_, i)) = state.selected {
-        let keyed = |h: Handle| {
-            warp.handles
-                .get(i)
-                .is_some_and(|hs| hs[h as usize].iter().any(|v| v.has_key(s.frame)))
-        };
-        for &(h, q) in &handles {
-            let (p, q) = (on_screen[i], screen(q));
-            painter.line_segment([p, q], EStroke::new(1.0, theme::ACCENT_SELECT));
-            let r = if active(Grab::Handle(i, h, false)) {
-                4.5
-            } else {
-                3.5
-            };
-            let fill = if keyed(h) {
-                theme::ACCENT_TIME
-            } else {
-                theme::ACCENT_SELECT
-            };
-            let square = egui::Rect::from_center_size(q, Vec2::splat(2.0 * r));
-            painter.rect_filled(square.expand(1.5), 0.0, theme::BG_BASE);
-            painter.rect_filled(square, 0.0, fill);
-        }
+    for &(g, q, dir) in &sizes {
+        draw_size_control(
+            painter,
+            q,
+            dir,
+            matches!(g, Grab::Size(x, y) if x != 0 && y != 0),
+            active(g),
+        );
     }
+    if let Some((_, i)) = state.selected {
+        let handles: Vec<(Handle, Pos2)> = handles.iter().map(|&(h, q)| (h, screen(q))).collect();
+        draw_handles(painter, &warp, s.frame, i, on_screen[i], &handles, &active);
+    }
+    draw_points(painter, &warp, s.frame, &on_screen, placing, |i| {
+        active(Grab::Point(i)) || state.selected.is_some_and(|(_, j)| j == i)
+    });
+    if warp.kind == WarpKind::Points {
+        mesh_button(ui, response, s, id, &warp);
+    }
+    if let Some(grab) = state.dragging {
+        if response.dragged() {
+            if let (Some(p), Some(back)) = (response.interact_pointer_pos(), m.inverse()) {
+                let (x, y) = back.apply(p.x, p.y);
+                match (grab, state.start) {
+                    (Grab::Pan | Grab::Size(..), Some((from, rect))) => {
+                        move_frame(s, id, grab, from, rect, [x, y]);
+                    }
+                    _ => drag(s, id, &warp, grid.as_ref(), grab, [x, y]),
+                }
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+        if response.drag_stopped() {
+            state.dragging = None;
+            state.start = None;
+            s.end_gesture();
+        }
+        return true;
+    }
+    if nearest == Some(Grab::Pan) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+    } else if nearest.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    } else if placing && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    true
+}
+
+/// The selected grid point's handles, joined to it by lines.
+fn draw_handles(
+    painter: &egui::Painter,
+    warp: &MeshWarp,
+    frame: u32,
+    i: usize,
+    point: Pos2,
+    handles: &[(Handle, Pos2)],
+    active: &impl Fn(Grab) -> bool,
+) {
+    let keyed = |h: Handle| {
+        warp.handles
+            .get(i)
+            .is_some_and(|hs| hs[h as usize].iter().any(|v| v.has_key(frame)))
+    };
+    for &(h, q) in handles {
+        painter.line_segment([point, q], EStroke::new(1.0, theme::ACCENT_SELECT));
+        let r = if active(Grab::Handle(i, h, false)) {
+            4.5
+        } else {
+            3.5
+        };
+        let fill = if keyed(h) {
+            theme::ACCENT_TIME
+        } else {
+            theme::ACCENT_SELECT
+        };
+        let square = egui::Rect::from_center_size(q, Vec2::splat(2.0 * r));
+        painter.rect_filled(square.expand(1.5), 0.0, theme::BG_BASE);
+        painter.rect_filled(square, 0.0, fill);
+    }
+}
+
+/// The warp's points: hollow while placing them, amber when keyed on
+/// this frame, larger when `big`.
+fn draw_points(
+    painter: &egui::Painter,
+    warp: &MeshWarp,
+    frame: u32,
+    on_screen: &[Pos2],
+    placing: bool,
+    big: impl Fn(usize) -> bool,
+) {
     let keyed = |i: usize| {
         match warp.kind {
             WarpKind::Grid => warp.points.get(i),
             WarpKind::Points => warp.pin_moves.get(i),
         }
-        .is_some_and(|p| p.iter().any(|v| v.has_key(s.frame)))
+        .is_some_and(|p| p.iter().any(|v| v.has_key(frame)))
     };
     for (i, p) in on_screen.iter().enumerate() {
-        let big = active(Grab::Point(i)) || state.selected.is_some_and(|(_, j)| j == i);
-        let r = if big { 6.0 } else { 4.5 };
+        let r = if big(i) { 6.0 } else { 4.5 };
         painter.circle_filled(*p, r + 1.5, theme::BG_BASE);
         // Amber marks a key on this frame (time), as on the Timeline.
         let fill = if keyed(i) {
@@ -218,29 +318,6 @@ pub fn ui(
             painter.circle_filled(*p, r, fill);
         }
     }
-    if warp.kind == WarpKind::Points {
-        mesh_button(ui, response, s, id, &warp);
-    }
-    if let Some(grab) = state.dragging {
-        if response.dragged() {
-            if let (Some(p), Some(back)) = (response.interact_pointer_pos(), m.inverse()) {
-                let (x, y) = back.apply(p.x, p.y);
-                drag(s, id, &warp, grid.as_ref(), grab, [x, y]);
-            }
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        }
-        if response.drag_stopped() {
-            state.dragging = None;
-            s.end_gesture();
-        }
-        return true;
-    }
-    if nearest.is_some() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    } else if placing && response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
-    true
 }
 
 /// The grid's lines, bent as the grid bends the art.
@@ -373,8 +450,140 @@ fn drag(
             let rest = warp.pins.get(i).copied().unwrap_or([x, y]);
             move_point(s, id, i, [x - rest[0], y - rest[1]]);
         }
-        (Grab::Handle(..), None) => {}
+        (Grab::Handle(..) | Grab::Pan | Grab::Size(..), _) => {}
     }
+}
+
+/// The grid's size controls (outside its rest frame, so they never sit
+/// on a point): each with where it is on screen and which way is out.
+fn size_controls(grid: &WarpGrid, screen: &impl Fn([f32; 2]) -> Pos2) -> Vec<(Grab, Pos2, Vec2)> {
+    let ([cx, cy], [w, h]) = (grid.centre, grid.size);
+    let centre = screen(grid.centre);
+    let mut out = Vec::new();
+    for sy in -1i8..=1 {
+        for sx in -1i8..=1 {
+            if (sx, sy) == (0, 0) {
+                continue;
+            }
+            let at = screen([cx + f32::from(sx) * w / 2.0, cy + f32::from(sy) * h / 2.0]);
+            let out_dir = at - centre;
+            let dir = if out_dir.length() > 1e-3 {
+                out_dir.normalized()
+            } else {
+                Vec2::X
+            };
+            out.push((Grab::Size(sx, sy), at + dir * 14.0, dir));
+        }
+    }
+    out
+}
+
+/// A corner's square or a side's arrow, pointing out.
+fn draw_size_control(painter: &egui::Painter, at: Pos2, dir: Vec2, corner: bool, active: bool) {
+    let fill = if active {
+        theme::ACCENT_SELECT
+    } else {
+        theme::BG_BASE
+    };
+    let stroke = EStroke::new(1.5, theme::ACCENT_SELECT);
+    if corner {
+        let r = if active { 5.0 } else { 4.0 };
+        let square = egui::Rect::from_center_size(at, Vec2::splat(2.0 * r));
+        painter.rect(square, 0.0, fill, stroke, egui::StrokeKind::Middle);
+    } else {
+        let k = if active { 1.3 } else { 1.0 };
+        let side = dir.rot90() * 5.0 * k;
+        let arrow = vec![
+            at + dir * 5.0 * k,
+            at - dir * 3.0 * k + side,
+            at - dir * 3.0 * k - side,
+        ];
+        painter.add(egui::Shape::convex_polygon(arrow, fill, stroke));
+    }
+}
+
+/// The grid's border as it is bent, on screen.
+fn outline(grid: &WarpGrid, screen: &impl Fn([f32; 2]) -> Pos2) -> Vec<Pos2> {
+    let steps = 4;
+    let (rows, cols) = (grid.rows * steps, grid.columns * steps);
+    let at = |r: u32, c: u32| {
+        let (a, b) = (grid.rest(0, 0), grid.rest(grid.rows, grid.columns));
+        let (u, v) = (c as f32 / cols as f32, r as f32 / rows as f32);
+        screen(grid.apply([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * v]))
+    };
+    (0..cols)
+        .map(|c| at(0, c))
+        .chain((0..rows).map(|r| at(r, cols)))
+        .chain((1..=cols).rev().map(|c| at(rows, c)))
+        .chain((1..=rows).rev().map(|r| at(r, 0)))
+        .collect()
+}
+
+/// Is `p` inside the closed polygon `border` (even-odd)?
+fn inside(border: &[Pos2], p: Pos2) -> bool {
+    let mut odd = false;
+    for (i, a) in border.iter().enumerate() {
+        let b = border[(i + 1) % border.len()];
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+/// Move the grid (`Pan`) or one or two of its sides (`Size`) by how far
+/// the pointer went since `from`; `rect` is the grid's left, top, right
+/// and bottom at the press. Keyed as [`move_point`] keys; only the
+/// values the control changes are set.
+fn move_frame(
+    s: &mut Session,
+    id: NodeId,
+    grab: Grab,
+    from: [f32; 2],
+    rect: [f32; 4],
+    to: [f32; 2],
+) {
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let [mut l, mut t, mut r, mut b] = rect;
+    let (sx, sy) = match grab {
+        Grab::Pan => {
+            (l, r, t, b) = (l + dx, r + dx, t + dy, b + dy);
+            (0, 0)
+        }
+        Grab::Size(sx, sy) => {
+            match sx.signum() {
+                -1 => l += dx,
+                1 => r += dx,
+                _ => {}
+            }
+            match sy.signum() {
+                -1 => t += dy,
+                1 => b += dy,
+                _ => {}
+            }
+            (sx, sy)
+        }
+        _ => return,
+    };
+    let (animate, frame) = (s.animate, s.frame);
+    let (name, pan) = match grab {
+        Grab::Pan => ("Move grid", true),
+        _ => ("Resize grid", false),
+    };
+    edit(s, id, name, Some(format!("mesh-frame-{}", id.0)), |w| {
+        if pan || sx != 0 {
+            set_value(&mut w.x, (l + r) / 2.0, animate, frame);
+        }
+        if pan || sy != 0 {
+            set_value(&mut w.y, (t + b) / 2.0, animate, frame);
+        }
+        if sx != 0 {
+            set_value(&mut w.width, (r - l).abs().max(1.0), animate, frame);
+        }
+        if sy != 0 {
+            set_value(&mut w.height, (b - t).abs().max(1.0), animate, frame);
+        }
+    });
 }
 
 /// Points mode's next step, on the canvas: Build mesh once points are
@@ -555,10 +764,15 @@ fn move_handle(s: &mut Session, id: NodeId, i: usize, h: Handle, moved: [f32; 2]
 /// already animated, otherwise for every frame.
 fn set_pair(pair: &mut [Value; 2], to: [f32; 2], animate: bool, frame: u32) {
     for (value, v) in pair.iter_mut().zip(to) {
-        match value {
-            Value::Constant(c) if !animate => *c = v,
-            _ => value.set_key(frame, v),
-        }
+        set_value(value, v, animate, frame);
+    }
+}
+
+/// [`set_pair`] for one value.
+fn set_value(value: &mut Value, to: f32, animate: bool, frame: u32) {
+    match value {
+        Value::Constant(c) if !animate => *c = to,
+        _ => value.set_key(frame, to),
     }
 }
 
@@ -627,5 +841,60 @@ mod tests {
         assert!(warp(&s).has_key(7));
         s.undo();
         assert!(!warp(&s).has_key(7));
+    }
+
+    /// Dragging an empty space moves the grid (keyed in Animate mode,
+    /// size untouched); a corner sizes it with the opposite corner
+    /// staying put; a side arrow changes one size only.
+    #[test]
+    fn the_grid_moves_and_sizes_by_its_frame() {
+        let mut s = Session::new_scene();
+        let node = s.doc.layers[0].node;
+        crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(100, 100));
+        let id = s.doc.graph.input(node, 0).unwrap();
+        let warp = |s: &Session| match &s.doc.graph.node(id).unwrap().kind {
+            NodeKind::MeshWarp(w) => (**w).clone(),
+            _ => unreachable!(),
+        };
+        let rect = |w: &MeshWarp| {
+            let g = w.grid_at(1);
+            let ([cx, cy], [sw, sh]) = (g.centre, g.size);
+            [cx - sw / 2.0, cy - sh / 2.0, cx + sw / 2.0, cy + sh / 2.0]
+        };
+        let r0 = rect(&warp(&s));
+        s.animate = true;
+        move_frame(&mut s, id, Grab::Pan, [0.0, 0.0], r0, [10.0, -4.0]);
+        s.end_gesture();
+        let w = warp(&s);
+        assert!(w.x.has_key(1) && w.y.has_key(1));
+        assert!(!w.width.has_key(1) && !w.height.has_key(1));
+        let r1 = rect(&w);
+        assert_eq!(r1, [r0[0] + 10.0, r0[1] - 4.0, r0[2] + 10.0, r0[3] - 4.0]);
+        s.animate = false;
+        move_frame(&mut s, id, Grab::Size(1, 1), [0.0, 0.0], r1, [20.0, 6.0]);
+        s.end_gesture();
+        let r2 = rect(&warp(&s));
+        assert!((r2[0] - r1[0]).abs() < 1e-3 && (r2[1] - r1[1]).abs() < 1e-3);
+        assert!((r2[2] - r1[2] - 20.0).abs() < 1e-3 && (r2[3] - r1[3] - 6.0).abs() < 1e-3);
+        move_frame(&mut s, id, Grab::Size(-1, 0), [0.0, 0.0], r2, [5.0, 50.0]);
+        s.end_gesture();
+        let r3 = rect(&warp(&s));
+        assert!((r3[0] - r2[0] - 5.0).abs() < 1e-3);
+        assert!((r3[1] - r2[1]).abs() < 1e-3 && (r3[3] - r2[3]).abs() < 1e-3);
+        s.undo();
+        assert_eq!(rect(&warp(&s)), r2);
+    }
+
+    #[test]
+    fn an_empty_space_is_inside_the_bent_grid() {
+        let mut w = MeshWarp::new(2, 2, 0.0, 0.0, 100.0, 100.0);
+        w.points[1] = [Value::Constant(0.0), Value::Constant(-30.0)];
+        let g = w.grid_at(1);
+        let screen = |p: [f32; 2]| Pos2::new(p[0], p[1]);
+        let border = outline(&g, &screen);
+        assert!(inside(&border, Pos2::new(10.0, 10.0)));
+        assert!(inside(&border, Pos2::new(0.0, -70.0)), "the bulge");
+        assert!(!inside(&border, Pos2::new(-40.0, -70.0)));
+        assert!(!inside(&border, Pos2::new(80.0, 0.0)));
     }
 }
