@@ -2082,7 +2082,8 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                     ui.label(
                         "Drag the grid's points in the Camera view (Transform tool) to bend the \
                          artwork under it. Click a point to show its Bezier handles; Alt-drag \
-                         a handle to move it without its opposite.",
+                         a handle to move it without its opposite. Drag an empty space inside \
+                         the grid to move it, and the controls outside it to size it.",
                     );
                     if ui
                         .button("Reset points")
