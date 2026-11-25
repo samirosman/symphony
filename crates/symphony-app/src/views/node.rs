@@ -1408,32 +1408,44 @@ fn bone_drawings(
         }
     }
     let mut add = None;
-    if !available.is_empty() {
-        ui.menu_button("Attach drawing", |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(230.0)
-                .show(ui, |ui| {
-                    for (index, layer) in available {
-                        let other = s.doc.graph.drawing_bone(layer.node, s.frame);
-                        let result = ui.button(s.layer_name(index));
-                        let result = if other.is_some() {
-                            result.on_hover_text("Move this drawing from its current bone")
-                        } else {
-                            result
-                        };
-                        if result.clicked() {
-                            add = Some(layer);
-                            ui.close();
-                        }
-                    }
-                });
-        });
-    }
+    let new = ui
+        .horizontal_wrapped(|ui| {
+            if !available.is_empty() {
+                let label = if ui.available_width() < 220.0 {
+                    "Attach…"
+                } else {
+                    "Attach drawing"
+                };
+                ui.menu_button(label, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(230.0)
+                        .show(ui, |ui| {
+                            for (index, layer) in available {
+                                let other = s.doc.graph.drawing_bone(layer.node, s.frame);
+                                let result = ui.button(s.layer_name(index));
+                                let result = if other.is_some() {
+                                    result.on_hover_text("Move this drawing from its current bone")
+                                } else {
+                                    result
+                                };
+                                if result.clicked() {
+                                    add = Some(layer);
+                                    ui.close();
+                                }
+                            }
+                        });
+                })
+                .response
+                .on_hover_text("Attach an existing drawing");
+            }
+            ui.button("New drawing").clicked()
+        })
+        .inner;
     if let Some(layer) = add {
         change_bone_drawing(s, id, layer, true);
         return true;
     }
-    if ui.button("New drawing").clicked() {
+    if new {
         add_bone_drawing(s, id);
         return true;
     }
@@ -1474,16 +1486,29 @@ fn stretch_picker(
 ) -> Option<symphony_core::rig::Stretch> {
     use symphony_core::rig::Stretch;
     let mut value = mode;
-    property_row(ui, "Stretch mode", |ui| {
-        egui::ComboBox::from_id_salt("stretch-mode")
-            .width(ui.available_width().min(148.0))
-            .selected_text(mode.map_or("Mixed", stretch_name))
-            .show_ui(ui, |ui| {
-                for mode in [Stretch::Rigid, Stretch::Simple, Stretch::SquashStretch] {
-                    ui.selectable_value(&mut value, Some(mode), stretch_name(mode));
-                }
-            });
-    });
+    ui.label(
+        egui::RichText::new(if mode.is_some() {
+            "Stretch mode"
+        } else {
+            "Stretch mode · Mixed"
+        })
+        .color(theme::TEXT_SECONDARY),
+    );
+    let vertical = ui.available_width() < 220.0;
+    widgets::segmented(
+        ui,
+        "stretch-mode",
+        &mut value,
+        &[
+            (Some(Stretch::Rigid), stretch_name(Stretch::Rigid)),
+            (Some(Stretch::Simple), stretch_name(Stretch::Simple)),
+            (
+                Some(Stretch::SquashStretch),
+                stretch_name(Stretch::SquashStretch),
+            ),
+        ],
+        vertical,
+    );
     value.filter(|value| Some(*value) != mode)
 }
 
@@ -1596,24 +1621,25 @@ fn bone_batch_form(ui: &mut egui::Ui, s: &mut Session, ids: &[NodeId]) {
         bone.anchor.as_ref().map(|anchor| anchor.kind)
     });
     let mut selected = anchor;
-    property_row(ui, "Anchor", |ui| {
-        egui::ComboBox::from_id_salt("batch-anchor")
-            .selected_text(match anchor {
-                None => "Mixed",
-                Some(None) => "Off",
-                Some(Some(AnchorKind::Locked)) => "Locked",
-                Some(Some(AnchorKind::Aim)) => "Aim",
-            })
-            .show_ui(ui, |ui| {
-                for (value, label) in [
-                    (None, "Off"),
-                    (Some(AnchorKind::Locked), "Locked"),
-                    (Some(AnchorKind::Aim), "Aim"),
-                ] {
-                    ui.selectable_value(&mut selected, Some(value), label);
-                }
-            });
-    });
+    ui.label(
+        egui::RichText::new(if anchor.is_some() {
+            "Anchor"
+        } else {
+            "Anchor · Mixed"
+        })
+        .color(theme::TEXT_SECONDARY),
+    );
+    widgets::segmented(
+        ui,
+        "batch-anchor",
+        &mut selected,
+        &[
+            (Some(None), "Off"),
+            (Some(Some(AnchorKind::Locked)), "Locked"),
+            (Some(Some(AnchorKind::Aim)), "Aim"),
+        ],
+        false,
+    );
     if let Some(mode) = selected.filter(|mode| Some(*mode) != anchor) {
         let tips: BTreeMap<_, _> = ids
             .iter()
@@ -2093,11 +2119,14 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             });
             ui.add_space(8.0);
             if let Some(fov) = &mut draft.fov {
-                ui.horizontal_wrapped(|ui| {
-                    for (title, angle) in [("Tight", 35.0), ("Standard", 60.0), ("Wide", 90.0)] {
-                        ui.selectable_value(fov, angle, title);
-                    }
-                });
+                let vertical = ui.available_width() < 168.0;
+                widgets::segmented(
+                    ui,
+                    "lens-preset",
+                    fov,
+                    &[(35.0, "Tight"), (60.0, "Standard"), (90.0, "Wide")],
+                    vertical,
+                );
                 egui::CollapsingHeader::new(format!("Lens · {:.1}°", *fov))
                     .id_salt("camera-lens")
                     .show(ui, |ui| {
@@ -3317,12 +3346,13 @@ fn canvas(ui: &mut egui::Ui, s: &mut Session, state: &mut NodeViewState, add: Op
             }
         };
     let space = ui.input(|i| i.key_down(egui::Key::Space));
+    let middle = resp.drag_started_by(egui::PointerButton::Middle);
     if space && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    if resp.drag_started_by(egui::PointerButton::Primary) {
+    if middle || resp.drag_started_by(egui::PointerButton::Primary) {
         if let Some(point) = ui.input(|i| i.pointer.press_origin()) {
-            state.drag = if space {
+            state.drag = if space || middle {
                 Some(Drag::Pan)
             } else if let Some(input) = input_at(point).filter(|input| {
                 s.doc
@@ -4947,6 +4977,7 @@ mod tests {
         harness: &mut Harness<'_, S>,
         positions: [Pos2; 3],
         modifiers: egui::Modifiers,
+        button: egui::PointerButton,
     ) {
         for (pos, pressed) in positions.into_iter().zip([Some(true), None, Some(false)]) {
             harness.input_mut().events.extend([
@@ -4956,7 +4987,7 @@ mod tests {
             if let Some(pressed) = pressed {
                 harness.input_mut().events.push(egui::Event::PointerButton {
                     pos,
-                    button: egui::PointerButton::Primary,
+                    button,
                     pressed,
                     modifiers,
                 });
@@ -4982,7 +5013,12 @@ mod tests {
         let at = *origin + node_position(s, layer.node, &default_positions(s));
         let start = at - Vec2::new(120.0, 30.0);
         let end = at + Vec2::new(100.0, 20.0);
-        pointer_gesture(&mut harness, [start, end, end], egui::Modifiers::NONE);
+        pointer_gesture(
+            &mut harness,
+            [start, end, end],
+            egui::Modifiers::NONE,
+            egui::PointerButton::Primary,
+        );
         assert_eq!(harness.state().1.selection, BTreeSet::from([layer.node]));
         assert_eq!(harness.state().1.pan, Vec2::ZERO);
 
@@ -4994,8 +5030,29 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         });
         let end = at + Vec2::new(45.0, 30.0);
-        pointer_gesture(&mut harness, [at, end, end], egui::Modifiers::NONE);
+        pointer_gesture(
+            &mut harness,
+            [at, end, end],
+            egui::Modifiers::NONE,
+            egui::PointerButton::Primary,
+        );
         assert_eq!(harness.state().1.pan, end - at);
+        assert_eq!(harness.state().1.selection, BTreeSet::from([layer.node]));
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let middle_end = end + Vec2::new(30.0, 24.0);
+        pointer_gesture(
+            &mut harness,
+            [end, middle_end, middle_end],
+            egui::Modifiers::NONE,
+            egui::PointerButton::Middle,
+        );
+        assert_eq!(harness.state().1.pan, middle_end - at);
         assert_eq!(harness.state().1.selection, BTreeSet::from([layer.node]));
     }
 
@@ -5020,7 +5077,12 @@ mod tests {
                 .unwrap()
                 .1;
             let away = from + Vec2::new(190.0, 35.0);
-            pointer_gesture(&mut harness, [from, away, away], egui::Modifiers::NONE);
+            pointer_gesture(
+                &mut harness,
+                [from, away, away],
+                egui::Modifiers::NONE,
+                egui::PointerButton::Primary,
+            );
             let (s, state) = harness.state();
             assert_eq!(s.doc.graph.links(), before);
             assert_eq!(state.link_anims.iter().any(|animation| {
@@ -5045,7 +5107,12 @@ mod tests {
         let origin = harness.state().2;
         let layer = harness.state().0.doc.layers[0];
         let cable = origin + Vec2::Y * 82.0;
-        pointer_gesture(&mut harness, [cable; 3], egui::Modifiers::ALT);
+        pointer_gesture(
+            &mut harness,
+            [cable; 3],
+            egui::Modifiers::ALT,
+            egui::PointerButton::Primary,
+        );
         assert_eq!(harness.state().0.doc.graph.input(layer.node, 0), None);
         harness.state_mut().0.undo();
         assert_eq!(
@@ -5055,7 +5122,12 @@ mod tests {
 
         let from = origin + Vec2::Y * 120.0;
         let away = from + Vec2::X * 180.0;
-        pointer_gesture(&mut harness, [from, away, away], egui::Modifiers::ALT);
+        pointer_gesture(
+            &mut harness,
+            [from, away, away],
+            egui::Modifiers::ALT,
+            egui::PointerButton::Primary,
+        );
         let s = &harness.state().0;
         assert_eq!(s.doc.graph.input(layer.node, 0), None);
         assert_eq!(s.doc.graph.input(s.doc.composite, 0), None);
@@ -5077,15 +5149,30 @@ mod tests {
         let layer = harness.state().0.doc.layers[0];
         let peg = origin + Vec2::Y * 43.0;
         let drawing = origin + Vec2::Y * 120.0;
-        pointer_gesture(&mut harness, [peg; 3], egui::Modifiers::NONE);
-        pointer_gesture(&mut harness, [drawing; 3], egui::Modifiers::SHIFT);
+        pointer_gesture(
+            &mut harness,
+            [peg; 3],
+            egui::Modifiers::NONE,
+            egui::PointerButton::Primary,
+        );
+        pointer_gesture(
+            &mut harness,
+            [drawing; 3],
+            egui::Modifiers::SHIFT,
+            egui::PointerButton::Primary,
+        );
         assert_eq!(
             harness.state().1.selection,
             BTreeSet::from([layer.peg, layer.node])
         );
         assert_eq!(harness.state().0.selected_node, Some(layer.node));
         let end = drawing + Vec2::new(50.0, 10.0);
-        pointer_gesture(&mut harness, [drawing, end, end], egui::Modifiers::NONE);
+        pointer_gesture(
+            &mut harness,
+            [drawing, end, end],
+            egui::Modifiers::NONE,
+            egui::PointerButton::Primary,
+        );
         assert_eq!(
             harness.state().0.doc.node_positions[&layer.node],
             [50.0, 130.0]

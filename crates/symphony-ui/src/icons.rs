@@ -11,6 +11,7 @@ use crate::theme;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Select,
+    Cutter,
     Transform,
     Brush,
     /// Vector lines (the Brush tool in vector mode).
@@ -56,8 +57,9 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 39] = [
+    pub const ALL: [Icon; 40] = [
         Icon::Select,
+        Icon::Cutter,
         Icon::Transform,
         Icon::Brush,
         Icon::Pen,
@@ -186,6 +188,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
                 (12.5, 9.2),
             ],
         ),
+        Icon::Cutter => {
+            g.closed(p, &[(3.0, 10.5), (10.5, 3.0), (13.0, 5.5), (5.5, 13.0)]);
+            g.line(p, &[(8.5, 5.0), (11.0, 7.5)]);
+            g.line(p, &[(10.5, 3.0), (12.0, 1.5), (14.5, 4.0), (13.0, 5.5)]);
+        }
         Icon::Transform => {
             g.closed(p, &[(4.0, 4.0), (12.0, 4.0), (12.0, 12.0), (4.0, 12.0)]);
             for (x, y) in [(4.0, 4.0), (12.0, 4.0), (12.0, 12.0), (4.0, 12.0)] {

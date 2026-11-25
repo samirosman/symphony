@@ -319,6 +319,9 @@ and animation state.
   anything destructive.
 - **D8.7 Discoverable.** Every action is in a menu, and the menu shows its
   shortcut. Shortcuts are speed-ups, never the only way.
+- **D8.7a Small sets of modes.** Use the shared sliding selector for up to
+  four choices. Stack the segments in a narrow panel. Put sibling actions
+  such as Attach drawing and New drawing on the same row when they fit.
 - **D8.8 Scrubbable numbers.** Every numeric field can be dragged to
   change it, typed into, and reset (double-click or a reset button).
 - **D8.9 Selection is consistent.**
@@ -393,10 +396,10 @@ and animation state.
 
 ## 11. Profiles: Harmony and Symphony
 
-- **D11.1** Two profiles, chosen at first launch and changeable in
+- **D11.1** Two profiles, with Symphony selected for new installs and both available in
   *Preferences → Workflow*:
   - **Harmony**: shortcuts and workflows as the latest Harmony does them.
-  - **Symphony**: our improvements.
+  - **Symphony**: plain-letter tools with shortcuts scoped to the view under the pointer.
 - **D11.2** Both profiles are always complete and fully working. A
   Symphony improvement never removes the Harmony way.
 - **D11.3** Every Symphony-only difference is listed in §11.1 below, with
@@ -412,6 +415,11 @@ and animation state.
 | Area | Harmony profile | Symphony profile | Why |
 |---|---|---|---|
 | Redo on macOS | Control+Shift+Z (as Harmony 27 documents) | Cmd+Shift+Z | Matches every other Mac app |
+| Tool keys | Harmony bindings | S Select, B Brush, E Eraser, L Line, T Text, P Paint, C Close Gap, D Dropper, N Line Editor, X Transform, H Hand, Z Zoom | Use mnemonic keys in Drawing and Camera |
+| Zoom | Harmony bindings | 1 zooms in and 2 zooms out in Drawing, Camera, and Node | Use the same gesture across viewports |
+| Plus and minus | Change exposure | Resize the brush in Drawing and Camera, change exposure in Timeline and Xsheet | Apply the adjustment to the view under the pointer |
+| Search | Tab | Tab | Open Search from the workspace |
+
 
 ---
 

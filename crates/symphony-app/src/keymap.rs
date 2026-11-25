@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Profile {
-    #[default]
     Harmony,
+    #[default]
     Symphony,
 }
 
@@ -27,7 +27,7 @@ impl Profile {
     pub fn blurb(self) -> &'static str {
         match self {
             Profile::Harmony => "Shortcuts and workflow as in the latest Harmony.",
-            Profile::Symphony => "Harmony's base plus Symphony's improvements.",
+            Profile::Symphony => "Contextual shortcuts with plain-letter tool keys.",
         }
     }
 }
@@ -57,6 +57,8 @@ pub enum Action {
     PlayPause,
     IncreaseExposure,
     DecreaseExposure,
+    IncreaseBrushSize,
+    DecreaseBrushSize,
     CreateEmptyDrawing,
     AddLayer,
     ToggleOnionSkin,
@@ -118,7 +120,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 78] = [
+    pub const ALL: [Action; 80] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -141,6 +143,8 @@ impl Action {
         Action::PlayPause,
         Action::IncreaseExposure,
         Action::DecreaseExposure,
+        Action::IncreaseBrushSize,
+        Action::DecreaseBrushSize,
         Action::CreateEmptyDrawing,
         Action::AddLayer,
         Action::ToggleOnionSkin,
@@ -224,6 +228,8 @@ impl Action {
             Action::PlayPause => "playback.toggle",
             Action::IncreaseExposure => "timing.increase_exposure",
             Action::DecreaseExposure => "timing.decrease_exposure",
+            Action::IncreaseBrushSize => "drawing.increase_brush_size",
+            Action::DecreaseBrushSize => "drawing.decrease_brush_size",
             Action::CreateEmptyDrawing => "drawing.create_empty",
             Action::AddLayer => "layer.add",
             Action::ToggleOnionSkin => "view.onion_skin",
@@ -307,6 +313,8 @@ impl Action {
             Action::PlayPause => "Play / pause",
             Action::IncreaseExposure => "Increase exposure",
             Action::DecreaseExposure => "Decrease exposure",
+            Action::IncreaseBrushSize => "Increase brush size",
+            Action::DecreaseBrushSize => "Decrease brush size",
             Action::CreateEmptyDrawing => "Create empty drawing",
             Action::AddLayer => "Add drawing layer",
             Action::ToggleOnionSkin => "Onion skin",
@@ -431,6 +439,7 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::PlayPause => b(Key::Enter, SHIFT),  // Toggle Playback
         Action::IncreaseExposure => b(Key::Plus, NONE),
         Action::DecreaseExposure => b(Key::Minus, NONE),
+        Action::IncreaseBrushSize | Action::DecreaseBrushSize => None,
         Action::CreateEmptyDrawing => b(Key::R, ALT_SHIFT),
         Action::AddLayer => b(Key::R, CMD),
         Action::ToggleOnionSkin => b(Key::O, ALT),
@@ -497,14 +506,89 @@ fn harmony(action: Action) -> Option<Binding> {
     }
 }
 
-/// Symphony profile: Harmony's bindings unless an improvement is logged
-/// in DESIGN.md §11.1. There are none yet.
+/// Symphony uses mnemonic tool keys and scopes them to the workspace under the pointer.
 fn symphony(action: Action) -> Option<Binding> {
     match action {
-        // Mac-standard Redo (DESIGN §11.1).
         Action::Redo => b(Key::Z, CMD_SHIFT),
+        Action::ZoomIn => b(Key::Num1, NONE),
+        Action::ZoomOut => b(Key::Num2, NONE),
+        Action::IncreaseBrushSize => b(Key::Plus, NONE),
+        Action::DecreaseBrushSize => b(Key::Minus, NONE),
+        Action::ToolSelect => b(Key::S, NONE),
+        Action::ToolTransform => b(Key::X, NONE),
+        Action::ToolBrush => b(Key::B, NONE),
+        Action::ToolLine => b(Key::L, NONE),
+        Action::ToolText => b(Key::T, NONE),
+        Action::ToolPencil => None,
+        Action::ToolEraser => b(Key::E, NONE),
+        Action::ToolPaint => b(Key::P, NONE),
+        Action::ToolCloseGap => b(Key::C, NONE),
+        Action::ToolDropper => b(Key::D, NONE),
+        Action::ToolLineEditor => b(Key::N, NONE),
+        Action::ToolHand => b(Key::H, NONE),
+        Action::ToolZoom => b(Key::Z, NONE),
+        Action::SwitchLineColourArt => b(Key::L, SHIFT),
+        Action::PreviewArtLayers => b(Key::P, ALT),
         _ => harmony(action),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Global,
+    Canvas,
+    Timing,
+    Viewport,
+}
+
+pub fn scope(profile: Profile, action: Action) -> Scope {
+    use Action::*;
+    match action {
+        IncreaseBrushSize | DecreaseBrushSize => Scope::Canvas,
+        _ if profile == Profile::Harmony => Scope::Global,
+        ToolSelect
+        | ToolTransform
+        | ToolBrush
+        | ToolLine
+        | ToolText
+        | ToolPencil
+        | ToolEraser
+        | ToolPaint
+        | ToolPaintUnpainted
+        | ToolRepaint
+        | ToolUnpaint
+        | ToolCloseGap
+        | ToolDropper
+        | ToolLineEditor
+        | ToolHand
+        | ToolZoom
+        | ShowStrokes
+        | RespectProtectedColours
+        | SwitchLineColourArt
+        | SwitchOverlayUnderlay
+        | PreviewArtLayers
+        | CreateColourArt
+        | FlipHorizontal
+        | FlipVertical
+        | SelectAll
+        | DeselectAll
+        | Delete
+        | Cut
+        | Copy
+        | Paste => Scope::Canvas,
+        IncreaseExposure | DecreaseExposure | SubstituteNext | SubstitutePrevious
+        | GoToNextDrawing | GoToPreviousDrawing => Scope::Timing,
+        ZoomIn | ZoomOut => Scope::Viewport,
+        _ => Scope::Global,
+    }
+}
+
+fn scopes_overlap(profile: Profile, a: Action, b: Action) -> bool {
+    !matches!(
+        (scope(profile, a), scope(profile, b)),
+        (Scope::Timing, Scope::Canvas | Scope::Viewport)
+            | (Scope::Canvas | Scope::Viewport, Scope::Timing)
+    )
 }
 
 pub fn binding(profile: Profile, action: Action) -> Option<Binding> {
@@ -628,7 +712,7 @@ pub fn clashes(profile: Profile, action: Action, key: Key, mods: Modifiers) -> V
     let wanted = (key, Mods::of(mods));
     Action::ALL
         .into_iter()
-        .filter(|a| *a != action)
+        .filter(|a| *a != action && scopes_overlap(profile, action, *a))
         .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
         .collect()
 }
@@ -658,12 +742,7 @@ pub fn combo_label(key: Key, mods: Modifiers) -> String {
 /// Give `action` the shortcut `key` + `mods` in `profile`. Any other action
 /// using that shortcut loses it, and is returned so the caller can say so.
 pub fn remap(profile: Profile, action: Action, key: Key, mods: Modifiers) -> Vec<Action> {
-    let wanted = (key, Mods::of(mods));
-    let taken: Vec<Action> = Action::ALL
-        .into_iter()
-        .filter(|a| *a != action)
-        .filter(|a| binding(profile, *a).is_some_and(|b| (b.key, Mods::of(b.mods)) == wanted))
-        .collect();
+    let taken = clashes(profile, action, key, mods);
     for other in &taken {
         put(profile, *other, None);
     }
@@ -765,19 +844,47 @@ pub fn tooltip(profile: Profile, action: Action) -> String {
 mod tests {
     use super::*;
 
-    /// E11.3: no two actions share a binding within a profile.
+    /// Bindings may be shared by views that cannot both handle them.
     #[test]
-    fn no_duplicate_bindings() {
+    fn no_overlapping_bindings() {
         let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
         for profile in [Profile::Harmony, Profile::Symphony] {
-            let mut seen = Vec::new();
-            for a in Action::ALL {
-                if let Some(bind) = binding(profile, a) {
-                    let k = (bind.key, bind.mods);
-                    assert!(!seen.contains(&k), "{profile:?}: {} clashes", a.id());
-                    seen.push(k);
+            for action in Action::ALL {
+                if let Some(bind) = binding(profile, action) {
+                    assert!(
+                        clashes(profile, action, bind.key, bind.mods).is_empty(),
+                        "{profile:?}: {} clashes",
+                        action.id()
+                    );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn symphony_uses_mnemonics_and_reuses_exposure_keys_on_canvas() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = Profile::Symphony;
+        assert_eq!(fired(profile, Key::E, NONE), [Action::ToolEraser]);
+        assert_eq!(fired(profile, Key::Num1, NONE), [Action::ZoomIn]);
+        assert_eq!(fired(profile, Key::Num2, NONE), [Action::ZoomOut]);
+        assert_eq!(fired(profile, Key::Tab, NONE), [Action::Search]);
+        assert_eq!(scope(profile, Action::ToolEraser), Scope::Canvas);
+        for (key, exposure, brush) in [
+            (
+                Key::Plus,
+                Action::IncreaseExposure,
+                Action::IncreaseBrushSize,
+            ),
+            (
+                Key::Minus,
+                Action::DecreaseExposure,
+                Action::DecreaseBrushSize,
+            ),
+        ] {
+            assert_eq!(fired(profile, key, NONE), [exposure, brush]);
+            assert_eq!(scope(profile, exposure), Scope::Timing);
+            assert_eq!(scope(profile, brush), Scope::Canvas);
         }
     }
 

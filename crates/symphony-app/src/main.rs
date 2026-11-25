@@ -676,7 +676,13 @@ impl SymphonyApp {
                 s.use_no_ai,
                 s.pressure_gamma,
             ),
-            None => (Workspace::Default, Vec::new(), Profile::Harmony, true, None),
+            None => (
+                Workspace::Default,
+                Vec::new(),
+                Profile::Symphony,
+                true,
+                None,
+            ),
         };
         // Screenshot runs can pick a profile: SYMPHONY_SHOT_PROFILE=Symphony.
         let profile = match std::env::var("SYMPHONY_SHOT_PROFILE").as_deref() {
@@ -1369,9 +1375,8 @@ impl SymphonyApp {
                 self.drawing.apply_at(action, pointer);
             }
             Action::Search => {
-                // Tab keeps moving keyboard focus between controls when one
-                // has it; otherwise it opens search next to the mouse.
-                if ctx.memory(|mem| mem.focused().is_none()) && self.palette.is_none() {
+                // Tab opens Search near the pointer. Text fields keep their focus handling.
+                if !ctx.text_edit_focused() && self.palette.is_none() {
                     let at = ctx
                         .pointer_hover_pos()
                         .unwrap_or_else(|| ctx.content_rect().center());
@@ -1451,6 +1456,22 @@ impl SymphonyApp {
                     }
                     Action::IncreaseExposure => s.change_exposure(1),
                     Action::DecreaseExposure => s.change_exposure(-1),
+                    Action::IncreaseBrushSize | Action::DecreaseBrushSize => {
+                        let factor = if other == Action::IncreaseBrushSize {
+                            1.1_f32
+                        } else {
+                            1.0 / 1.1
+                        };
+                        let settings = match s.tool {
+                            Tool::Eraser => &mut s.eraser,
+                            Tool::Pencil => &mut s.pencil,
+                            _ => &mut s.brush,
+                        };
+                        let minimum = if s.tool == Tool::Eraser { 1.0 } else { 0.5 };
+                        settings.max_width = (settings.max_width * factor).clamp(minimum, 4096.0);
+                        settings.min_width = (settings.min_width * factor).min(settings.max_width);
+                    }
+
                     Action::CreateEmptyDrawing => s.new_drawing(),
                     Action::AddLayer => s.add_layer(),
                     Action::ToggleOnionSkin => s.onion.on = !s.onion.on,
@@ -1505,13 +1526,20 @@ impl SymphonyApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.palette.is_none() && !ctx.text_edit_focused() {
+        if self.palette.is_some() || ctx.text_edit_focused() {
+            return;
+        }
+        let hovered = self.hovered_view;
+        let canvas = matches!(hovered, Some(View::Drawing | View::Camera));
+        let timing = matches!(hovered, Some(View::Timeline | View::Xsheet));
+        let symphony = self.profile == Profile::Symphony;
+        if symphony || !ctx.egui_wants_keyboard_input() {
             let here = self.hovered_view.or_else(|| {
                 self.layout_mut()
                     .find_active_focused()
                     .map(|(_, view)| *view)
             });
-            if here == Some(View::Node) && !ctx.egui_wants_keyboard_input() {
+            if !symphony && here == Some(View::Node) {
                 let zoom = ctx.input_mut(|input| {
                     if input.consume_key(egui::Modifiers::NONE, egui::Key::Num1) {
                         Some(true)
@@ -1526,9 +1554,7 @@ impl SymphonyApp {
                     ctx.request_repaint();
                 }
             }
-            if matches!(here, Some(View::Timeline | View::Xsheet))
-                && !ctx.egui_wants_keyboard_input()
-            {
+            if timing || (!symphony && matches!(here, Some(View::Timeline | View::Xsheet))) {
                 let clipboard = ctx.input_mut(|input| {
                     use views::timing::TimelineAction;
                     if input.consume_key(egui::Modifiers::COMMAND, egui::Key::C) {
@@ -1541,15 +1567,18 @@ impl SymphonyApp {
                 });
                 if let Some(action) = clipboard {
                     action.run(&mut self.s);
+                    ctx.request_repaint();
                 }
             }
-            if here == Some(View::Timeline)
+            if (hovered == Some(View::Timeline) || (!symphony && here == Some(View::Timeline)))
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
             {
                 views::timing::TimelineAction::SetKey.run(&mut self.s);
+                ctx.request_repaint();
             }
         }
-        if ctx.egui_wants_keyboard_input() {
+        let control_focused = ctx.egui_wants_keyboard_input();
+        if control_focused && !symphony {
             return;
         }
         // Rig keys while posing a bone (Transform tool): A cycles the
@@ -1559,7 +1588,7 @@ impl SymphonyApp {
                 .s
                 .selected_node
                 .is_some_and(|id| self.s.doc.graph.bone(id).is_some());
-        if self.palette.is_none() && posing_bone {
+        if posing_bone && (!symphony || canvas) {
             use egui::{Key, Modifiers};
             let (cycle, flip, nudge) = ctx.input_mut(|i| {
                 let cycle = i.consume_key(Modifiers::NONE, Key::A);
@@ -1572,7 +1601,10 @@ impl SymphonyApp {
                     (Key::ArrowUp, [0.0, -step]),
                     (Key::ArrowDown, [0.0, step]),
                 ] {
-                    if i.consume_key(Modifiers::NONE, key) || i.consume_key(Modifiers::SHIFT, key) {
+                    if !control_focused
+                        && (i.consume_key(Modifiers::NONE, key)
+                            || i.consume_key(Modifiers::SHIFT, key))
+                    {
                         d[0] += v[0];
                         d[1] += v[1];
                     }
@@ -1581,31 +1613,67 @@ impl SymphonyApp {
             });
             if cycle {
                 views::rig_edit::cycle_anchor(&mut self.s);
+                ctx.request_repaint();
             }
             if flip {
                 views::rig_edit::flip_bend(&mut self.s);
+                ctx.request_repaint();
             }
             if nudge != [0.0, 0.0] {
                 views::rig_edit::nudge(&mut self.s, nudge[0], nudge[1]);
+                ctx.request_repaint();
             }
         }
-        if self.palette.is_none() && self.s.tool == Tool::Select {
+        if self.s.tool == Tool::Select && (!symphony || canvas) {
             self.s.validate_selection();
             if !self.s.selection.strokes.is_empty() {
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F)) {
                     self.s.fill_selection();
+                    ctx.request_repaint();
                 }
                 if ctx.input_mut(|i| {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
                         || i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                 }) {
                     self.s.delete_selection();
+                    ctx.request_repaint();
                 }
             }
         }
-        for a in Action::ALL {
-            if keymap::pressed(ctx, self.profile, a) {
-                self.run(ctx, a);
+        for action in Action::ALL {
+            let allowed = match keymap::scope(self.profile, action) {
+                keymap::Scope::Global => true,
+                keymap::Scope::Timing => timing,
+                keymap::Scope::Canvas => canvas,
+                keymap::Scope::Viewport => canvas || hovered == Some(View::Node),
+            };
+            if !allowed
+                || (control_focused && matches!(action, Action::Delete | Action::PlayPause))
+                || !keymap::pressed(ctx, self.profile, action)
+            {
+                continue;
+            }
+            if let Some(tool) = Tool::ALL
+                .into_iter()
+                .find(|&tool| tool_action(tool) == action)
+            {
+                if symphony && !tool.fits(self.s.tool_context()) {
+                    continue;
+                }
+            }
+            if symphony && matches!(action, Action::ZoomIn | Action::ZoomOut) {
+                match hovered {
+                    Some(View::Node) => {
+                        views::node::zoom_by_keyboard(&mut self.node_view, action == Action::ZoomIn)
+                    }
+                    Some(View::Drawing) => self.drawing.apply_at(action, ctx.pointer_hover_pos()),
+                    Some(View::Camera) => self.camera.apply_at(action, ctx.pointer_hover_pos()),
+                    _ => {}
+                }
+                ctx.request_repaint();
+            } else {
+                self.run(ctx, action);
+                ctx.request_repaint();
             }
         }
     }
@@ -2150,6 +2218,10 @@ impl SymphonyApp {
             let mut tip = keymap::tooltip(self.profile, tool_action(tool));
             // Select shows that it also transforms what it selected.
             let icon = match tool {
+                Tool::Select if self.s.cutter_mode => {
+                    tip.insert_str(0, "Cutter\n");
+                    Icon::Cutter
+                }
                 Tool::Select if !self.s.selection.strokes.is_empty() => {
                     tip.push_str("\nDrag, scale or rotate the selection");
                     Icon::Transform
@@ -4125,14 +4197,7 @@ impl SymphonyApp {
         self.expire_notice(now);
         self.autosave(now);
         self.tick_playback(&ctx);
-        if self.pending.is_none()
-            && self.save_dialog.is_none()
-            && self.recovered.is_empty()
-            && self.error.is_none()
-        {
-            self.shortcuts(&ctx);
-        }
-
+        let editing_text = ctx.text_edit_focused();
         let title = if self.s.dirty() {
             format!("{} (edited) - Symphony", self.s.name())
         } else {
@@ -4575,6 +4640,15 @@ impl SymphonyApp {
                 .update_camera(&ctx, &self.s, wallpaper_pixels);
         }
         views::node::windows(&ctx, &mut self.s, &mut self.node_view);
+        if !editing_text
+            && self.pending.is_none()
+            && self.save_dialog.is_none()
+            && self.recovered.is_empty()
+            && self.error.is_none()
+        {
+            self.shortcuts(&ctx);
+        }
+
         self.search_box(&ctx);
         self.dialogs(&ctx);
 

@@ -980,7 +980,8 @@ pub fn ui(
             i.modifiers.alt,
         )
     });
-    let navigating = space || s.tool == Tool::Hand;
+    let middle = response.dragged_by(egui::PointerButton::Middle);
+    let navigating = space || middle || s.tool == Tool::Hand;
     if response.hovered() || response.dragged() {
         if let Some(p) = response.hover_pos() {
             if zoom_delta != 1.0 {
@@ -992,7 +993,7 @@ pub fn ui(
         }
     }
     if response.dragged() && navigating {
-        if space && shift {
+        if (space || middle) && shift {
             // Rotate around the view centre by the angle the pointer swept.
             if let Some(p) = response.interact_pointer_pos() {
                 let c = rect.center() + state.pan;
@@ -1378,7 +1379,7 @@ pub fn ui(
         super::rig_edit::draw_rest_guide(&painter, s, view);
     }
     state.select.camera_space = !drawing_only;
-    let navigating_now = space || s.tool == Tool::Hand;
+    let navigating_now = navigating || response.drag_stopped_by(egui::PointerButton::Middle);
     let warp_busy = !navigating_now
         && super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view);
     let rig_busy = if !navigating_now && !drawing_only {
@@ -1480,7 +1481,16 @@ pub fn ui(
         }
     }
 
-    text_tool(ui, &response, &painter, s, state, view, layer_world, space);
+    text_tool(
+        ui,
+        &response,
+        &painter,
+        s,
+        state,
+        view,
+        layer_world,
+        navigating_now,
+    );
 
     // Pen input.
     let zoom_factor = ui.ctx().zoom_factor();
@@ -1494,7 +1504,7 @@ pub fn ui(
             | Tool::CloseGap
             | Tool::Dropper
             | Tool::LineEditor
-    ) && !space
+    ) && !navigating_now
         && projected_layer.is_some();
     let locked = s.doc.column(s.selected).is_some_and(|c| c.locked);
     for sm in samples {
@@ -1805,7 +1815,7 @@ pub fn ui(
         rect,
         s,
         Mods {
-            space,
+            space: space || middle,
             shift,
             alt,
             pen_eraser,
@@ -2133,6 +2143,7 @@ fn draw_cursor(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &Session
         Icon::Eraser
     } else {
         match s.tool {
+            Tool::Select if s.cutter_mode => Icon::Cutter,
             Tool::Select => Icon::Select,
             Tool::Transform => Icon::Transform,
             Tool::Pencil => Icon::Pencil,

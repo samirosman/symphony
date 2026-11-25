@@ -334,6 +334,7 @@ pub struct Onion {
 pub struct Selection {
     pub drawing: Option<Id>,
     pub strokes: Vec<Id>,
+    cut_outline: Option<(Vec<Id>, Vec<[f32; 2]>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -535,7 +536,7 @@ impl Session {
             stroke_detail: 0.6,
             colours: CanvasColours::default(),
             marquee_mode: false,
-            easy_drag: false,
+            easy_drag: true,
             clipboard: Vec::new(),
             drawing_clipboard: None,
             clipboard_fills: Vec::new(),
@@ -691,6 +692,7 @@ impl Session {
         // The status bar says what was undone and how much history is left.
         match self.history.undo(&mut self.doc) {
             Some(name) => {
+                self.selection.cut_outline = None;
                 let left = self.history.undo_len();
                 self.note(if left == 0 {
                     format!("Undid {name} · nothing more to undo")
@@ -705,7 +707,10 @@ impl Session {
 
     pub fn redo(&mut self) {
         match self.history.redo(&mut self.doc) {
-            Some(name) => self.note(format!("Redid {name}")),
+            Some(name) => {
+                self.selection.cut_outline = None;
+                self.note(format!("Redid {name}"));
+            }
             None => self.note("Nothing to redo"),
         }
         self.clamp_selection();
@@ -1514,6 +1519,7 @@ impl Session {
             self.selection = Selection {
                 drawing: current,
                 strokes: Vec::new(),
+                ..Selection::default()
             };
             return;
         }
@@ -1524,6 +1530,11 @@ impl Session {
                 d.strokes.iter().any(|st| st.id == *id) || d.fills.iter().any(|f| f.id == *id)
             });
         }
+    }
+
+    pub fn selection_cut_outline(&self) -> Option<&[[f32; 2]]> {
+        let (ids, points) = self.selection.cut_outline.as_ref()?;
+        (ids == &self.selection.strokes).then_some(points.as_slice())
     }
 
     /// Selected colour zones (the Select tool picks zones as well as
@@ -1600,6 +1611,7 @@ impl Session {
     }
 
     pub fn deselect(&mut self) {
+        self.selection.cut_outline = None;
         self.selection.strokes.clear();
     }
 
@@ -1673,6 +1685,13 @@ impl Session {
                         before: Some(object.clone()),
                         after: Some(after),
                     });
+                }
+            }
+        }
+        if let Some((ids, outline)) = &mut self.selection.cut_outline {
+            if ids == &self.selection.strokes {
+                for point in outline {
+                    *point = m.apply(point[0], point[1]).into();
                 }
             }
         }
@@ -1883,6 +1902,7 @@ impl Session {
         self.selection = Selection {
             drawing: Some(drawing),
             strokes: ids,
+            ..Selection::default()
         };
     }
 
@@ -3247,7 +3267,7 @@ impl Session {
         let Some(doc) = self.doc.drawings.get(&drawing) else {
             return;
         };
-        let clip = shape::from_polygons(vec![polygon], true);
+        let clip = shape::from_polygons(vec![polygon.clone()], true);
         if clip.is_empty() {
             return;
         }
@@ -3375,6 +3395,8 @@ impl Session {
             selection.sort_unstable();
             selection.dedup();
         }
+        self.selection.cut_outline =
+            (!add && !remove && !selection.is_empty()).then(|| (selection.clone(), polygon));
         self.selection.strokes = selection;
     }
 
@@ -3557,17 +3579,17 @@ mod tests {
         s.validate_selection();
         let id = s.doc.exposed(0, 1).unwrap();
         let before = s.doc.drawings[&id].clone();
-        s.cut_area(
-            id,
-            vec![[50.0, 0.0], [100.0, 0.0], [100.0, 100.0], [50.0, 100.0]],
-            false,
-            false,
-        );
+        let trace = vec![[50.0, 0.0], [100.0, 0.0], [100.0, 100.0], [50.0, 100.0]];
+        s.cut_area(id, trace.clone(), false, false);
+        assert_eq!(s.selection_cut_outline(), Some(trace.as_slice()));
         assert_eq!(s.doc.drawings[&id].strokes.len(), 2);
         assert_eq!(s.doc.drawings[&id].fills.len(), 2);
         assert_eq!(s.selected_strokes().len(), 1);
         assert!(s.selected_fills()[0].contains(65.0, 50.0));
         assert!(!s.selected_fills()[0].contains(35.0, 50.0));
+        s.transform_selection(Affine::translate(4.0, 7.0), "Move selection");
+        assert_eq!(s.selection_cut_outline().unwrap()[0], [54.0, 7.0]);
+        s.undo();
         s.undo();
         assert_eq!(s.doc.drawings[&id], before);
     }
@@ -3582,6 +3604,7 @@ mod tests {
         s.selection = Selection {
             drawing: Some(drawing),
             strokes: original.glyphs.clone(),
+            ..Selection::default()
         };
         s.transform_selection(Affine::translate(60.0, 2.0), "Move text");
         let moved = s.doc.drawings[&drawing].text[0].clone();
@@ -3611,6 +3634,7 @@ mod tests {
         s.selection = Selection {
             drawing: Some(drawing),
             strokes,
+            ..Selection::default()
         };
         s.transform_selection(Affine::translate(100.0, 0.0), "Move lines");
         let moved = &s.doc.drawings[&drawing].fills[0];

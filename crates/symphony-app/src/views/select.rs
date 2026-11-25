@@ -24,7 +24,7 @@ const ROTATE_ZONE: f32 = 24.0;
 /// Pick tolerance in screen points.
 const PICK: f32 = 5.0;
 const LASSO_THRESHOLD: f32 = 8.0;
-const CLOSE_RADIUS: f32 = 9.0;
+const CLOSE_RADIUS: f32 = 16.0;
 
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -202,9 +202,18 @@ fn drag_transform(d: &Drag, now: Pos2, uniform: bool) -> Option<Affine> {
     })
 }
 
-fn draw_box(painter: &egui::Painter, lo: [f32; 2], hi: [f32; 2], m: Affine) {
+fn draw_box(
+    painter: &egui::Painter,
+    lo: [f32; 2],
+    hi: [f32; 2],
+    m: Affine,
+    cut: Option<&[[f32; 2]]>,
+) {
     let pts = corners(lo, hi).map(|c| pos(m.apply(c.0, c.1)));
-    let outline = vec![pts[0], pts[1], pts[2], pts[3]];
+    let outline = cut.map_or_else(
+        || pts.to_vec(),
+        |points| points.iter().map(|&[x, y]| pos(m.apply(x, y))).collect(),
+    );
     painter.add(egui::Shape::closed_line(
         outline,
         EStroke::new(1.0, theme::ACCENT_SELECT),
@@ -276,6 +285,10 @@ pub fn ui(
         },
         _ => None,
     };
+
+    if cutter {
+        st.hover = Some(Icon::Cutter);
+    }
 
     let drawing = s.selection.drawing;
     let has_polygon = |st: &SelectState| !st.polygon.is_empty() || st.polygon_drag.is_some();
@@ -371,7 +384,7 @@ pub fn ui(
     }
 
     // Continue it.
-    if response.dragged() {
+    if response.dragged_by(egui::PointerButton::Primary) {
         if let Some(p) = response.interact_pointer_pos() {
             if let Some(d) = &st.drag {
                 if let Some(l) = drag_transform(d, p, shift) {
@@ -457,7 +470,9 @@ pub fn ui(
 
     if response.clicked_by(egui::PointerButton::Primary) {
         if let Some(p) = response.interact_pointer_pos() {
-            if st.polygon.len() >= 3 && p.distance(st.polygon[0].at) <= CLOSE_RADIUS {
+            if st.polygon.len() >= 3
+                && (p.distance(st.polygon[0].at) <= CLOSE_RADIUS || response.double_clicked())
+            {
                 finish_polygon = true;
             } else if cutter
                 || !st.polygon.is_empty()
@@ -502,6 +517,15 @@ pub fn ui(
                 EStroke::new(1.2, theme::ACCENT_SELECT),
             ));
         }
+        if st.polygon.len() >= 3 {
+            let start = st.polygon[0].at;
+            let active = pointer.is_some_and(|p| p.distance(start) <= CLOSE_RADIUS);
+            painter.circle_stroke(
+                start,
+                if active { CLOSE_RADIUS } else { 6.0 },
+                EStroke::new(1.0, theme::ACCENT_SELECT),
+            );
+        }
         for anchor in &st.polygon {
             painter.circle_filled(anchor.at, 3.5, theme::ACCENT_SELECT);
         }
@@ -532,7 +556,12 @@ pub fn ui(
     }
     if let Some((lo, hi, m)) = target {
         let m = st.preview.map_or(m, |l| m.compose(l));
-        draw_box(painter, lo, hi, m);
+        let cut = if transform_tool {
+            None
+        } else {
+            s.selection_cut_outline()
+        };
+        draw_box(painter, lo, hi, m, cut);
         if s.show_selected_points && !transform_tool {
             let mark = |x, y| {
                 let at = pos(m.apply(x, y));
