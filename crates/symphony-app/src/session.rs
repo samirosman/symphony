@@ -1833,6 +1833,24 @@ impl Session {
         );
     }
 
+    /// Turn the selection by `degrees`, clockwise on screen, around the
+    /// middle of its box.
+    pub fn rotate_selection(&mut self, degrees: f32) {
+        let Some((lo, hi)) = self.selection_bounds() else {
+            return;
+        };
+        let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+        let m = Affine::translate(cx, cy)
+            .compose(Affine::rotate_deg(degrees))
+            .compose(Affine::translate(-cx, -cy));
+        let title = if degrees > 0.0 {
+            "Rotate 90° CW"
+        } else {
+            "Rotate 90° CCW"
+        };
+        self.transform_selection(m, title);
+    }
+
     /// Apply the active swatch to selected lines and closed regions they enclose.
     pub fn fill_selection(&mut self) {
         let Some(drawing) = self.selection.drawing else {

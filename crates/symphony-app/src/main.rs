@@ -1510,22 +1510,10 @@ impl SymphonyApp {
                         s.tool = Tool::Select;
                         s.paste();
                     }
-                    Action::FlipHorizontal | Action::FlipVertical => {
-                        let h = other == Action::FlipHorizontal;
-                        if s.tool == Tool::Transform {
-                            let layer = s.selected;
-                            s.adjust_peg(layer, |v| {
-                                if h {
-                                    v.scale_x = -v.scale_x
-                                } else {
-                                    v.scale_y = -v.scale_y
-                                }
-                            });
-                            s.end_gesture();
-                        } else {
-                            s.flip_selection(h);
-                        }
-                    }
+                    Action::FlipHorizontal
+                    | Action::FlipVertical
+                    | Action::Rotate90Cw
+                    | Action::Rotate90Ccw => views::select::quick_transform(s, other),
                     Action::Redo => s.redo(),
                     Action::PrevFrame => s.frame = s.frame.saturating_sub(1).max(1),
                     Action::NextFrame => s.frame = (s.frame + 1).min(s.length()),
@@ -1854,6 +1842,8 @@ impl SymphonyApp {
             ui.separator();
             self.menu_action(ui, Action::FlipHorizontal);
             self.menu_action(ui, Action::FlipVertical);
+            self.menu_action(ui, Action::Rotate90Cw);
+            self.menu_action(ui, Action::Rotate90Ccw);
             ui.separator();
             if ui.button("Preferences").clicked() {
                 self.show_preferences = true;

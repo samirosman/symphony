@@ -787,26 +787,11 @@ fn tool_properties_body(
                     "Drag the selection from anywhere inside its box, not only on the artwork.",
                 );
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Flip horizontal").clicked() {
-                        if select {
-                            s.flip_selection(true);
-                        } else {
-                            let l = s.selected;
-                            s.adjust_peg(l, |v| v.scale_x = -v.scale_x);
-                            s.end_gesture();
-                        }
-                    }
-                    if ui.button("Flip vertical").clicked() {
-                        if select {
-                            s.flip_selection(false);
-                        } else {
-                            let l = s.selected;
-                            s.adjust_peg(l, |v| v.scale_y = -v.scale_y);
-                            s.end_gesture();
-                        }
-                    }
-                });
+                if select {
+                    super::select::quick_transform_buttons(ui, s);
+                } else {
+                    super::select::operations_ui(ui, s);
+                }
                 if select {
                     let n = s.selection.strokes.len();
                     hint(
