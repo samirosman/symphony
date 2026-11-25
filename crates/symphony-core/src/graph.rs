@@ -73,6 +73,9 @@ pub enum NodeKind {
     /// Warp). A position node, like a peg.
     /// Boxed: it's much bigger than the other kinds.
     MeshWarp(Box<crate::warp::MeshWarp>),
+    /// Follows the end of the Bone it hangs from, like a peg, without
+    /// bending the artwork under it (Harmony's Kinematic Output).
+    KinematicOutput,
     /// Stacks its inputs. Port 0 (leftmost) is in front.
     Composite,
     Effect(Effect),
@@ -560,9 +563,14 @@ impl Graph {
                     | NodeKind::Drawing { .. }
             ),
             NodeKind::Skeleton(_) => matches!(target.kind, NodeKind::Bone(_)),
+            NodeKind::KinematicOutput => matches!(
+                target.kind,
+                NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Drawing { .. }
+            ),
             NodeKind::Bone(_) => matches!(
                 target.kind,
                 NodeKind::Bone(_)
+                    | NodeKind::KinematicOutput
                     | NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
                     | NodeKind::Drawing { .. }
@@ -774,7 +782,8 @@ impl Graph {
             NodeKind::Peg(_)
             | NodeKind::MeshWarp(_)
             | NodeKind::Skeleton(_)
-            | NodeKind::Bone(_) => {}
+            | NodeKind::Bone(_)
+            | NodeKind::KinematicOutput => {}
         }
         Ok(())
     }
@@ -797,7 +806,18 @@ impl Graph {
             chain.push(n);
             at = self.input(n, 0);
         }
-        let bound_bone = chain
+        // A Kinematic Output only moves what is under it: the bones above
+        // it bend nothing below.
+        let below_kinematic = chain
+            .iter()
+            .position(|&n| {
+                matches!(
+                    self.node(n).map(|n| &n.kind),
+                    Some(NodeKind::KinematicOutput)
+                )
+            })
+            .unwrap_or(chain.len());
+        let bound_bone = chain[..below_kinematic]
             .iter()
             .copied()
             .find(|&id| self.bone(id).is_some() && self.enabled_at(id, frame));
@@ -1345,8 +1365,28 @@ impl Graph {
                     depth: parent.depth + p.z.at(frame),
                 }
             }
+            NodeKind::KinematicOutput if self.enabled_at(id, frame) => {
+                match self.input(id, 0).filter(|&b| self.bone(b).is_some()) {
+                    Some(bone) => StagePose {
+                        transform: parent.transform.compose(self.kinematic_at(
+                            bone,
+                            frame,
+                            depth + 1,
+                        )?),
+                        depth: parent.depth,
+                    },
+                    None => parent,
+                }
+            }
             _ => parent,
         })
+    }
+
+    /// How the end of `bone` moves from the rest pose at `frame`, as a
+    /// peg would move it: what a Kinematic Output under it applies.
+    fn kinematic_at(&self, bone: NodeId, frame: u32, depth: usize) -> Result<Affine, EvalError> {
+        let chain = self.chain_pose(bone, frame, depth)?;
+        Ok(chain.kinematic(chain.bone_count().saturating_sub(1)))
     }
 }
 
@@ -1463,6 +1503,71 @@ mod tests {
             graph.drawing_bone_guide(drawing, 2),
             Some([(20.0, 40.0), (100.0, 40.0)])
         );
+    }
+
+    /// A drawing under a Kinematic Output follows the end of the bone
+    /// above it as a peg would, and the bone does not bend it.
+    #[test]
+    fn a_kinematic_output_follows_the_bone_end_without_bending() {
+        let (mut graph, xs, display, _) = scene();
+        let drawings: Vec<_> = graph
+            .nodes()
+            .filter_map(|(id, node)| matches!(node.kind, NodeKind::Drawing { .. }).then_some(id))
+            .collect();
+        let skeleton = graph.add(
+            "Skeleton",
+            NodeKind::Skeleton(PegParams {
+                x: Value::Constant(30.0),
+                ..PegParams::default()
+            }),
+        );
+        let upper = graph.add(
+            "Upper",
+            NodeKind::Bone(Bone {
+                length: 100.0,
+                ..Bone::default()
+            }),
+        );
+        let lower = graph.add(
+            "Lower",
+            NodeKind::Bone(Bone {
+                rotation: Value::Constant(90.0),
+                ..Bone::default()
+            }),
+        );
+        let output = graph.add("Hand", NodeKind::KinematicOutput);
+        assert!(graph.can_connect(lower, output));
+        assert!(!graph.can_connect(skeleton, output));
+        assert!(!graph.can_connect(output, display));
+        graph.connect(skeleton, upper, 0);
+        graph.connect(upper, lower, 0);
+        graph.connect(lower, output, 0);
+        for &id in &drawings {
+            assert!(graph.can_connect(output, id));
+            graph.connect(output, id, 0);
+        }
+        // The lower bone runs from (100, 0) to (260, 0) at rest and turns
+        // 90 degrees: its end goes to (100, 160), then the skeleton's 30.
+        for &id in &drawings {
+            let t = graph.world_transform(id, 1).unwrap();
+            let (x, y) = t.apply(260.0, 0.0);
+            assert!((x - 130.0).abs() < 1e-3 && (y - 160.0).abs() < 1e-3);
+            let (x, y) = t.apply(270.0, 0.0);
+            assert!((x - 130.0).abs() < 1e-3 && (y - 170.0).abs() < 1e-3);
+        }
+        for command in graph.render_commands(display, &xs, 1).unwrap() {
+            let RenderCommand::Drawing(item) = command else {
+                panic!("expected drawing")
+            };
+            assert!(item.warp.is_none());
+        }
+        // Switched off, it passes its parent's pose through.
+        graph.node_mut(output).unwrap().enabled = false;
+        let (x, y) = graph
+            .world_transform(drawings[0], 1)
+            .unwrap()
+            .apply(260.0, 0.0);
+        assert!((x - 290.0).abs() < 1e-3 && y.abs() < 1e-3);
     }
 
     #[test]

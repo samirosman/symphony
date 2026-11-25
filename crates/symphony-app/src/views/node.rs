@@ -325,6 +325,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Skeleton(_) => "Skeleton",
         NodeKind::Bone(_) => "Bone",
         NodeKind::MeshWarp(_) => "Mesh Warp",
+        NodeKind::KinematicOutput => "Kinematic Output",
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
@@ -362,6 +363,7 @@ pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
         NodeKind::Peg(Default::default()),
         NodeKind::Skeleton(Default::default()),
         mesh_warp(1920, 1080),
+        NodeKind::KinematicOutput,
         NodeKind::Composite,
     ]
     .into_iter()
@@ -393,8 +395,9 @@ pub(super) fn node_name(node: &Node) -> &str {
 
 pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKind) {
     let kind = fit_to_stage(s, kind);
-    // A Mesh Warp found by search bends the selected layer straight away.
-    if matches!(kind, NodeKind::MeshWarp(_)) {
+    // A Mesh Warp found by search bends the selected layer straight away;
+    // a Kinematic Output goes between the selected layer and its bone.
+    if matches!(kind, NodeKind::MeshWarp(_) | NodeKind::KinematicOutput) {
         if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
             insert_near(s, node, kind);
             return;
@@ -487,6 +490,33 @@ fn insert_after_selected_layer(s: &mut Session, state: &mut NodeViewState, kind:
     true
 }
 
+/// Where a new Kinematic Output goes for `target`: between the bone it
+/// hangs from (found up through pegs) and the node under that bone.
+fn kinematic_splice(
+    graph: &symphony_core::graph::Graph,
+    target: NodeId,
+) -> Option<(Option<Link>, Option<NodeId>, Input)> {
+    let kind_of = |id: NodeId| graph.node(id).map(|n| &n.kind);
+    let mut below = target;
+    for _ in 0..32 {
+        match graph.input(below, 0) {
+            Some(up) if matches!(kind_of(up), Some(NodeKind::Peg(_) | NodeKind::MeshWarp(_))) => {
+                below = up;
+            }
+            _ => break,
+        }
+    }
+    let bone = graph
+        .input(below, 0)
+        .filter(|&bone| matches!(kind_of(bone), Some(NodeKind::Bone(_))))?;
+    let old = Link {
+        from: bone,
+        to: below,
+        port: 0,
+    };
+    Some((Some(old), Some(bone), (below, 0)))
+}
+
 /// Add a node next to `target` in the nearest place in the hierarchy that
 /// fits, in one undo step: a peg becomes the target's new parent (between
 /// it and its old one); an effect or composite goes after the drawing the
@@ -517,6 +547,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
             });
             Some((old, parent, (target, 0)))
         }
+        NodeKind::KinematicOutput => kinematic_splice(graph, target),
         NodeKind::Effect(_) | NodeKind::Composite => {
             // From a peg, go down to the drawing it carries.
             let mut src = target;
@@ -542,7 +573,10 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         return;
     };
     let id = s.doc.graph.next_id();
-    let position = if matches!(kind, NodeKind::Peg(_) | NodeKind::MeshWarp(_)) {
+    let position = if matches!(
+        kind,
+        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::KinematicOutput
+    ) {
         [at[0], at[1] - (H + 30.0)]
     } else {
         [at[0], at[1] + H + 30.0]
@@ -2905,7 +2939,11 @@ fn arrange_columns(
 /// effects on a composite and nested composites retain top-down flow.
 fn arrange_band(kind: &NodeKind) -> usize {
     match kind {
-        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_) | NodeKind::MeshWarp(_) => 0,
+        NodeKind::Peg(_)
+        | NodeKind::Skeleton(_)
+        | NodeKind::Bone(_)
+        | NodeKind::MeshWarp(_)
+        | NodeKind::KinematicOutput => 0,
         NodeKind::Drawing { .. } | NodeKind::Gradient(_) => 1,
         NodeKind::Effect(_) => 2,
         NodeKind::Composite => 3,
@@ -4355,6 +4393,10 @@ fn library_details(kind: &NodeKind) -> (&'static str, &'static str) {
             "Rigging",
             "Deforms artwork with a grid or points placed on the drawing.",
         ),
+        NodeKind::KinematicOutput => (
+            "Rigging",
+            "Follows the end of the bone above it, like a peg, without bending the drawings under it.",
+        ),
         NodeKind::Composite => (
             "Compositing",
             "Stacks image inputs in port order. The leftmost input renders in front.",
@@ -4876,6 +4918,26 @@ mod tests {
             s.doc.graph.world_transform(layer.node, s.frame)
         );
         assert!(render(&s) != before, "the peg moves the drawing");
+    }
+
+    /// Add node > Kinematic Output on a drawing under a bone puts it
+    /// between the two.
+    #[test]
+    fn a_kinematic_output_goes_between_a_drawing_and_its_bone() {
+        let mut s = Session::new_scene();
+        let drawing = s.doc.layers[0].node;
+        let bone = s
+            .doc
+            .graph
+            .add("Bone", NodeKind::Bone(symphony_core::rig::Bone::default()));
+        s.doc.graph.connect(bone, drawing, 0);
+        insert_near(&mut s, drawing, NodeKind::KinematicOutput);
+        let output = s.doc.graph.input(drawing, 0).unwrap();
+        assert!(matches!(
+            s.doc.graph.node(output).unwrap().kind,
+            NodeKind::KinematicOutput
+        ));
+        assert_eq!(s.doc.graph.input(output, 0), Some(bone));
     }
 
     #[test]
