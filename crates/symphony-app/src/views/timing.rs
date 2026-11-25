@@ -42,6 +42,9 @@ pub struct TimingState {
     pub sound_editor: Option<SoundEditor>,
     /// A layer being dragged to a new place in the stack (its row).
     layer_drag: Option<usize>,
+    /// The width of a frame in the Timeline, once Ctrl+wheel has changed
+    /// it.
+    frame_w: Option<f32>,
     scrubbing: bool,
     /// Layer order last frame (columns), and layers that just arrived or
     /// moved with when, so their row glows briefly.
@@ -794,7 +797,10 @@ pub fn timeline(
     const RULER: f32 = 28.0;
     // The lock switch, just left of the Parameters field.
     const LOCK: std::ops::Range<f32> = HEAD - PARAM_W - 28.0..HEAD - PARAM_W - 6.0;
-    let cw = theme::FRAME_CELL;
+    // Ctrl+wheel zooms the frames, from a whole scene at a glance to
+    // wide cells.
+    const FRAME_W: std::ops::RangeInclusive<f32> = 2.0..=48.0;
+    let cw = t.frame_w.unwrap_or(theme::FRAME_CELL);
     let rh = theme::ROW;
     // Sound tracks come after the drawing layers, as in Harmony.
     let layers = s.layer_count();
@@ -916,6 +922,20 @@ pub fn timeline(
             let o = resp.rect.min;
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
+            let zoom = ui.input(|i| i.zoom_delta());
+            if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| {
+                zoom != 1.0 && ui.clip_rect().contains(*p) && ui.rect_contains_pointer(resp.rect)
+            }) {
+                let wide = (cw * zoom).clamp(*FRAME_W.start(), *FRAME_W.end());
+                // The frame under the pointer stays under it.
+                let along = (p.x - o.x - HEAD).max(0.0);
+                ui.scroll_with_delta_animation(
+                    Vec2::new(-along * (wide / cw - 1.0), 0.0),
+                    egui::style::ScrollAnimation::none(),
+                );
+                t.frame_w = Some(wide);
+                ui.ctx().request_repaint();
+            }
             // The ruler stays at the top of the view while the rows
             // scroll under it.
             let ruler_y = ui.clip_rect().top().max(o.y);
@@ -927,8 +947,10 @@ pub fn timeline(
             // Number every small step if there's room, else every half.
             let label_step = if small as f32 * cw >= 22.0 {
                 small
-            } else {
+            } else if half as f32 * cw >= 22.0 {
                 half
+            } else {
+                second
             };
             let beat = |f: u32| {
                 if f.is_multiple_of(second) {
@@ -1342,6 +1364,10 @@ pub fn timeline(
             for f in 1..=len {
                 let x = frame_x(f) + cw / 2.0;
                 let level = beat(f);
+                // Frames too narrow to tell apart keep only the beats.
+                if level == 0 && cw < 5.0 {
+                    continue;
+                }
                 let top = match level {
                     0 => 22.0,
                     1 => 18.0,
@@ -1900,6 +1926,64 @@ mod hierarchy_tests {
         // Below the ruler, a click picks the row there.
         click(&mut harness, Pos2::new(400.0, top + 28.0 + 30.0));
         assert_ne!(harness.state().0.selected, selected);
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_the_frames_of_the_timeline() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (Session::new_scene(), TimingState::default()),
+            );
+        harness.run_steps(3);
+        let at = Pos2::new(400.0, 200.0);
+        let frame_at = |harness: &mut egui_kittest::Harness<'_, (Session, TimingState)>, pos| {
+            for pressed in [true, false] {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(1);
+            }
+            harness.state().0.frame
+        };
+        let before = frame_at(&mut harness, at);
+        // egui turns Ctrl+wheel into a zoom.
+        harness
+            .input_mut()
+            .events
+            .extend([egui::Event::PointerMoved(at), egui::Event::Zoom(2.0)]);
+        harness.run_steps(3);
+        assert_eq!(harness.state().1.frame_w, Some(2.0 * theme::FRAME_CELL));
+        // The frame under the pointer stayed there, and frames are twice
+        // as wide: four cells further on is two frames later.
+        assert_eq!(frame_at(&mut harness, at), before);
+        let further = at + Vec2::new(4.0 * theme::FRAME_CELL, 0.0);
+        assert_eq!(frame_at(&mut harness, further), before + 2);
+        // The zoom stops at its limits.
+        for _ in 0..8 {
+            harness
+                .input_mut()
+                .events
+                .extend([egui::Event::PointerMoved(at), egui::Event::Zoom(0.25)]);
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().1.frame_w, Some(2.0));
     }
 
     #[test]
