@@ -5,8 +5,9 @@
 //! - Grid: the grid shows over the artwork, bent as it bends the art;
 //!   dragging a point bends everything under it. A clicked point shows
 //!   its Bezier handles; dragging one bends the grid lines through the
-//!   point, and its opposite handle follows as a mirror (Alt-drag moves
-//!   it alone, and the pair then stays apart). Dragging an empty space
+//!   point, and its opposite handle turns by the same angle and keeps
+//!   its length, as Harmony's deformer handles do (Alt-drag turns one
+//!   handle alone). Dragging an empty space
 //!   inside the grid moves the whole grid (Harmony's "grab the grid in
 //!   the void spaces to pan it"); the squares outside its corners and the
 //!   arrows outside its sides change its width and height.
@@ -49,7 +50,7 @@ pub struct WarpEdit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Grab {
     Point(usize),
-    /// A grid point's handle, and whether its opposite follows.
+    /// A grid point's handle, and whether its opposite turns with it.
     Handle(usize, Handle, bool),
     /// The whole grid, by an empty space inside it.
     Pan,
@@ -171,7 +172,7 @@ pub fn ui(
     if response.drag_started() {
         let alt = ui.input(|i| i.modifiers.alt);
         state.dragging = nearest.map(|g| match g {
-            Grab::Handle(i, h, _) => Grab::Handle(i, h, !alt && mirrored(&warp, s.frame, i, h)),
+            Grab::Handle(i, h, _) => Grab::Handle(i, h, !alt),
             g => g,
         });
         if let (Some(Grab::Point(i)), Some(_)) = (state.dragging, &grid) {
@@ -397,15 +398,26 @@ fn place_or_remove(
     }
 }
 
-/// Do grid point `i`'s handle `h` and its opposite move as mirrors on
-/// `frame` (as they do until one is moved alone)?
-fn mirrored(warp: &MeshWarp, frame: u32, i: usize, h: Handle) -> bool {
-    let Some(hs) = warp.handles.get(i) else {
-        return true;
-    };
-    let at = |h: Handle| hs[h as usize].each_ref().map(|v| v.at(frame));
-    let (a, b) = (at(h), at(h.opposite()));
-    (a[0] + b[0]).abs() < 1e-3 && (a[1] + b[1]).abs() < 1e-3
+/// Handle `h` of point (r, c) goes to `to`: how far the opposite handle
+/// must move from its rest place to turn by the same angle about the
+/// point and keep its length. None when there is no opposite handle or
+/// no angle (a handle on its point).
+fn turned_opposite(grid: &WarpGrid, r: u32, c: u32, h: Handle, to: [f32; 2]) -> Option<[f32; 2]> {
+    let p = grid.point(r, c);
+    let (now, other) = (grid.handle(r, c, h)?, grid.handle(r, c, h.opposite())?);
+    let rest = grid.handle_rest(r, c, h.opposite())?;
+    let angle = |q: [f32; 2]| (q[1] - p[1]).atan2(q[0] - p[0]);
+    let tiny = |q: [f32; 2]| (q[0] - p[0]).hypot(q[1] - p[1]) < 1e-6;
+    if tiny(now) || tiny(to) {
+        return None;
+    }
+    let (sin, cos) = (angle(to) - angle(now)).sin_cos();
+    let o = [other[0] - p[0], other[1] - p[1]];
+    let turned = [
+        p[0] + o[0] * cos - o[1] * sin,
+        p[1] + o[0] * sin + o[1] * cos,
+    ];
+    Some([turned[0] - rest[0], turned[1] - rest[1]])
 }
 
 /// Move what `grab` holds to `to` (the warp's space).
@@ -425,12 +437,14 @@ fn drag(
             let rest = grid.rest((i / cols) as u32, (i % cols) as u32);
             move_point(s, id, i, [x - rest[0], y - rest[1]]);
         }
-        (Grab::Handle(i, h, mirror), Some(grid)) => {
+        (Grab::Handle(i, h, turn), Some(grid)) => {
             let cols = grid.columns as usize + 1;
             let (r, c) = ((i / cols) as u32, (i % cols) as u32);
             if let Some(rest) = grid.handle_rest(r, c, h) {
-                let mirror = mirror && grid.handle_rest(r, c, h.opposite()).is_some();
-                move_handle(s, id, i, h, [x - rest[0], y - rest[1]], mirror);
+                let opposite = turn
+                    .then(|| turned_opposite(grid, r, c, h, [x, y]))
+                    .flatten();
+                move_handle(s, id, i, h, [x - rest[0], y - rest[1]], opposite);
             }
         }
         (Grab::Point(i), None) if placing => {
@@ -738,9 +752,16 @@ fn move_point(s: &mut Session, id: NodeId, i: usize, offset: [f32; 2]) {
 }
 
 /// Set grid point `i`'s handle `h` to `moved` from its rest place, and
-/// the opposite handle to the mirror of that when `mirror`; keyed as
+/// the opposite handle to `opposite` from its own when given; keyed as
 /// [`move_point`] keys.
-fn move_handle(s: &mut Session, id: NodeId, i: usize, h: Handle, moved: [f32; 2], mirror: bool) {
+fn move_handle(
+    s: &mut Session,
+    id: NodeId,
+    i: usize,
+    h: Handle,
+    moved: [f32; 2],
+    opposite: Option<[f32; 2]>,
+) {
     let (animate, frame) = (s.animate, s.frame);
     edit(
         s,
@@ -751,9 +772,9 @@ fn move_handle(s: &mut Session, id: NodeId, i: usize, h: Handle, moved: [f32; 2]
             if let Some(pair) = w.handle_mut(i, h) {
                 set_pair(pair, moved, animate, frame);
             }
-            if mirror {
+            if let Some(to) = opposite {
                 if let Some(pair) = w.handle_mut(i, h.opposite()) {
-                    set_pair(pair, [-moved[0], -moved[1]], animate, frame);
+                    set_pair(pair, to, animate, frame);
                 }
             }
         },
@@ -810,10 +831,11 @@ mod tests {
         assert!(!points(&s).has_key(10));
     }
 
-    /// A handle moves with its opposite as a mirror; once moved alone
-    /// (Alt), the pair stays apart. In Animate mode both are keyed.
+    /// A dragged handle turns its opposite by the same angle, and the
+    /// opposite keeps its length; Alt (no turn) leaves it. In Animate
+    /// mode both are keyed, and undo takes the drag back.
     #[test]
-    fn a_handle_moves_its_opposite_until_broken() {
+    fn a_handle_turns_its_opposite_and_keeps_its_length() {
         let mut s = Session::new_scene();
         let node = s.doc.layers[0].node;
         crate::views::node::insert_near(&mut s, node, crate::views::node::mesh_warp(100, 100));
@@ -822,22 +844,48 @@ mod tests {
             NodeKind::MeshWarp(w) => (**w).clone(),
             _ => unreachable!(),
         };
-        let at = |w: &MeshWarp, h: Handle| w.grid_at(1).handles[12][h as usize];
+        // Point 12 is (row 2, column 2) of the 4 x 4 grid.
+        let arm = |w: &MeshWarp, h: Handle| {
+            let g = w.grid_at(1);
+            let (p, q) = (g.point(2, 2), g.handle(2, 2, h).unwrap());
+            [q[0] - p[0], q[1] - p[1]]
+        };
+        let drag_to = |s: &mut Session, h: Handle, arm_to: [f32; 2], turn: bool| {
+            let g = warp(s).grid_at(s.frame);
+            let p = g.point(2, 2);
+            let to = [p[0] + arm_to[0], p[1] + arm_to[1]];
+            let rest = g.handle_rest(2, 2, h).unwrap();
+            let opposite = turn.then(|| turned_opposite(&g, 2, 2, h, to)).flatten();
+            move_handle(s, id, 12, h, [to[0] - rest[0], to[1] - rest[1]], opposite);
+            s.end_gesture();
+        };
         s.animate = false;
-        assert!(mirrored(&warp(&s), 1, 12, Handle::NextColumn));
-        move_handle(&mut s, id, 12, Handle::NextColumn, [3.0, -8.0], true);
-        s.end_gesture();
-        assert_eq!(at(&warp(&s), Handle::PrevColumn), [-3.0, 8.0]);
-        assert!(mirrored(&warp(&s), 1, 12, Handle::PrevColumn));
-        // Alt-drag: the opposite stays, and the pair is now apart.
-        move_handle(&mut s, id, 12, Handle::NextColumn, [0.0, -20.0], false);
-        s.end_gesture();
-        assert_eq!(at(&warp(&s), Handle::PrevColumn), [-3.0, 8.0]);
-        assert!(!mirrored(&warp(&s), 1, 12, Handle::NextColumn));
+        let before = arm(&warp(&s), Handle::PrevColumn);
+        let length = before[0].hypot(before[1]);
+        // Turn the next-column handle a quarter turn, and make it longer.
+        let next = arm(&warp(&s), Handle::NextColumn);
+        drag_to(
+            &mut s,
+            Handle::NextColumn,
+            [-next[1] * 2.0, next[0] * 2.0],
+            true,
+        );
+        let after = arm(&warp(&s), Handle::PrevColumn);
+        assert!(
+            (after[0].hypot(after[1]) - length).abs() < 1e-3,
+            "{after:?}"
+        );
+        let turned = [-before[1], before[0]];
+        assert!(
+            (after[0] - turned[0]).abs() < 1e-3 && (after[1] - turned[1]).abs() < 1e-3,
+            "{after:?} vs {turned:?}"
+        );
+        // Alt: the opposite stays.
+        drag_to(&mut s, Handle::NextColumn, [5.0, 5.0], false);
+        assert_eq!(arm(&warp(&s), Handle::PrevColumn), after);
         s.animate = true;
         s.frame = 7;
-        move_handle(&mut s, id, 12, Handle::PrevRow, [1.0, 1.0], true);
-        s.end_gesture();
+        drag_to(&mut s, Handle::PrevRow, [3.0, -9.0], true);
         assert!(warp(&s).has_key(7));
         s.undo();
         assert!(!warp(&s).has_key(7));

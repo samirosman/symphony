@@ -324,8 +324,8 @@ continues.
   art, Build mesh over its shape, as-rigid-as-possible bending, only
   connected art follows). Lines: ✅ Paths (keep thickness) or ✅ Whole shape
   (thickness follows the warp). ✅ Bézier handles on grid points (click a
-  point to show them; the opposite handle mirrors, Alt-drag moves one
-  alone). ✅ Moving the grid by an empty space inside it, and sizing
+  point to show them; the opposite handle turns with it and keeps its
+  length, Alt-drag turns one alone). ✅ Moving the grid by an empty space inside it, and sizing
   it by controls outside its corners and sides. Still to do: rotating/scaling single points, bones and cages,
   per-point Weight, rigidity maps, bending imported pictures.
 - ⬜ Bone deformer (bias, regions of influence, chains)
