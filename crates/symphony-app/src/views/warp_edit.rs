@@ -148,9 +148,8 @@ pub fn ui(
     let sizes = grid
         .as_ref()
         .map_or_else(Vec::new, |grid| size_controls(grid, &screen));
-    let pointer = response.hover_pos().or(response.interact_pointer_pos());
-    let nearest =
-        pointer.and_then(|p| {
+    let grab_at =
+        |p: Pos2| {
             let near = |q: Pos2| Some(q.distance(p)).filter(|d| *d <= GRAB);
             let selected = state.selected.map(|(_, i)| i);
             on_screen
@@ -167,11 +166,16 @@ pub fn ui(
                     let grid = grid.as_ref()?;
                     inside(&outline(grid, &screen), p).then_some(Grab::Pan)
                 })
-        });
+        };
+    let pointer = response.hover_pos().or(response.interact_pointer_pos());
+    let nearest = pointer.and_then(grab_at);
     state.hover = nearest;
-    if response.drag_started() {
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        // What was under the press: egui starts a drag only once the
+        // pointer has moved a few points, maybe off the control already.
+        let pressed_on = ui.input(|i| i.pointer.press_origin()).and_then(grab_at);
         let alt = ui.input(|i| i.modifiers.alt);
-        state.dragging = nearest.map(|g| match g {
+        state.dragging = pressed_on.map(|g| match g {
             Grab::Handle(i, h, _) => Grab::Handle(i, h, !alt),
             g => g,
         });
