@@ -1109,6 +1109,7 @@ impl Graph {
                 range: [length * min, length * max],
                 spring_stiffness: bone.spring_stiffness,
                 rest_angle: bone.rest_angle,
+                angle_range: bone.angle_limits,
             });
             if let Some(anchor) = bone.anchor.as_ref().filter(|_| self.enabled_at(id, frame)) {
                 let goal = [anchor.target[0].at(frame), anchor.target[1].at(frame)];
@@ -1149,11 +1150,18 @@ impl Graph {
         let drive = drag.and_then(|(id, mut goal)| {
             let index = *joint_index.get(&id)?;
             let bone = self.bone(id)?;
-            if bone.spring_stiffness > 0.0 && bone.anchor.is_none() {
+            let springy = bone.spring_stiffness > 0.0 && bone.anchor.is_none();
+            if springy || bone.angle_limits.is_some() {
                 let pose = self.bone_pose(id, frame)?;
                 let (x, y) = pose.posed.inverse()?.apply(goal[0], goal[1]);
-                let wanted = bone.rotation.at(frame) + y.atan2(x).to_degrees();
-                let turn = (bone.spring_rotation(wanted) - bone.rotation.at(frame)).to_radians();
+                let now = bone.rotation.at(frame);
+                let wanted = now + y.atan2(x).to_degrees();
+                let wanted = if springy {
+                    bone.spring_rotation(wanted)
+                } else {
+                    wanted
+                };
+                let turn = (bone.clamp_rotation(wanted) - now).to_radians();
                 let reach = x.hypot(y);
                 let (x, y) = pose.posed.apply(reach * turn.cos(), reach * turn.sin());
                 goal = [x, y];
@@ -1237,7 +1245,8 @@ impl Graph {
             angles.insert(id, angle);
             let wanted = angle - parent_angle - bone.rest_angle;
             let now = bone.rotation.at(frame);
-            let rotation = now + (wanted - now + 180.0).rem_euclid(360.0) - 180.0;
+            let rotation =
+                bone.clamp_rotation(now + (wanted - now + 180.0).rem_euclid(360.0) - 180.0);
             let stretch = (tx - x).hypot(ty - y) / bone.length();
             if (rotation - now).abs() > 1e-3 || (stretch - bone.stretch_at(frame)).abs() > 1e-4 {
                 changes.push((id, rotation, stretch));
@@ -1267,7 +1276,7 @@ impl Graph {
             return bone.rest_angle;
         }
         let Some(lower) = self.smart_controller(id, frame) else {
-            return bone.rest_angle + bone.rotation.at(frame);
+            return bone.rest_angle + bone.rotation_at(frame);
         };
         let pair = self
             .parent_bone(lower)
@@ -1279,12 +1288,13 @@ impl Graph {
             Some((upper, lower_bone, joint)) => {
                 let [aim, bend] = joint.solve(frame, upper.length(), lower_bone.length());
                 if lower == id {
-                    bend
+                    let rest = lower_bone.rest_angle;
+                    rest + lower_bone.clamp_rotation(bend - rest)
                 } else {
-                    bone.rest_angle + aim
+                    bone.rest_angle + bone.clamp_rotation(aim)
                 }
             }
-            None => bone.rest_angle + bone.rotation.at(frame),
+            None => bone.rest_angle + bone.rotation_at(frame),
         }
     }
 
@@ -1958,6 +1968,64 @@ mod tests {
             [100.0, 0.0],
             0.5
         ));
+    }
+
+    #[test]
+    fn angle_limits_hold_a_keyed_rotation() {
+        let (mut graph, [hip, _, _]) = leg();
+        let set = |graph: &mut Graph, rotation: f32, limits: Option<[f32; 2]>| {
+            if let Some(NodeKind::Bone(b)) = graph.node_mut(hip).map(|n| &mut n.kind) {
+                b.rotation = Value::Constant(rotation);
+                b.angle_limits = limits;
+            }
+        };
+        set(&mut graph, 45.0, None);
+        let at_limit = graph.bone_pose(hip, 1).unwrap().tip();
+        set(&mut graph, 120.0, Some([-45.0, 45.0]));
+        let held = graph.bone_pose(hip, 1).unwrap().tip();
+        assert!(near(held, [at_limit.0, at_limit.1], 0.01), "{held:?}");
+        assert_eq!(graph.bone(hip).unwrap().rotation_at(1), 45.0);
+    }
+
+    #[test]
+    fn the_anchored_solve_keeps_bones_inside_their_angle_limits() {
+        let (mut graph, [hip, _, foot]) = leg();
+        if let Some(NodeKind::Bone(b)) = graph.node_mut(hip).map(|n| &mut n.kind) {
+            b.angle_limits = Some([-20.0, 20.0]);
+        }
+        if let Some(NodeKind::Bone(b)) = graph.node_mut(foot).map(|n| &mut n.kind) {
+            b.anchor = Some(Box::new(crate::rig::Anchor {
+                kind: crate::rig::AnchorKind::Locked,
+                target: [Value::Constant(230.0), Value::Constant(0.0)],
+            }));
+        }
+        // The knee (the hip's tip) wants the hip turned about 37 degrees.
+        let changes = graph.solve_rig(hip, [80.0, 60.0], 1).unwrap();
+        apply(&mut graph, &changes.changes);
+        let rotation = graph.bone(hip).unwrap().rotation.at(1);
+        assert!(rotation.abs() <= 20.001, "hip turned {rotation}");
+        let tip = graph.bone_pose(foot, 1).unwrap().tip();
+        assert!(near(tip, [230.0, 0.0], 0.5), "the foot stayed: {tip:?}");
+    }
+
+    #[test]
+    fn the_anchored_solve_keeps_other_bones_inside_their_limits() {
+        let (mut graph, [hip, knee, foot]) = leg();
+        if let Some(NodeKind::Bone(b)) = graph.node_mut(knee).map(|n| &mut n.kind) {
+            b.angle_limits = Some([-30.0, 30.0]);
+        }
+        if let Some(NodeKind::Bone(b)) = graph.node_mut(foot).map(|n| &mut n.kind) {
+            b.anchor = Some(Box::new(crate::rig::Anchor {
+                kind: crate::rig::AnchorKind::Locked,
+                target: [Value::Constant(230.0), Value::Constant(0.0)],
+            }));
+        }
+        let changes = graph.solve_rig(hip, [80.0, 60.0], 1).unwrap();
+        apply(&mut graph, &changes.changes);
+        let rotation = graph.bone(knee).unwrap().rotation.at(1);
+        assert!(rotation.abs() <= 30.001, "knee turned {rotation}");
+        let tip = graph.bone_pose(foot, 1).unwrap().tip();
+        assert!(near(tip, [230.0, 0.0], 0.5), "the foot stayed: {tip:?}");
     }
 
     #[test]

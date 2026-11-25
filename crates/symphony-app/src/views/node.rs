@@ -1693,6 +1693,7 @@ fn bone_batch_form(ui: &mut egui::Ui, s: &mut Session, ids: &[NodeId]) {
     if response.drag_stopped() {
         s.end_gesture();
     }
+    angle_limit_rows(ui, s, ids, &bones);
 
     let anchor = shared(&bones, |bone| {
         bone.anchor.as_ref().map(|anchor| anchor.kind)
@@ -1806,6 +1807,67 @@ fn bone_batch_form(ui: &mut egui::Ui, s: &mut Session, ids: &[NodeId]) {
         }
     }
 }
+
+/// Limit angle, with Min and Max angle, for one or more bones.
+fn angle_limit_rows(
+    ui: &mut egui::Ui,
+    s: &mut Session,
+    ids: &[NodeId],
+    bones: &[symphony_core::rig::Bone],
+) {
+    let Some(first) = bones.first() else { return };
+    let shared = |value: &dyn Fn(&symphony_core::rig::Bone) -> Option<[f32; 2]>| {
+        bones
+            .iter()
+            .all(|bone| value(bone) == value(first))
+            .then(|| value(first))
+    };
+    let all_limited = bones.iter().all(|bone| bone.angle_limits.is_some());
+    let mixed = bones
+        .iter()
+        .any(|bone| bone.angle_limits.is_some() != all_limited);
+    let mut limit = all_limited;
+    if widgets::checkbox(
+        ui,
+        &mut limit,
+        if mixed {
+            "Limit angle · Mixed"
+        } else {
+            "Limit angle"
+        },
+    )
+    .on_hover_text("The bone turns no further than its min and max angle.")
+    .changed()
+    {
+        edit_bone_batch(s, ids, "angle-limit", false, |_, bone| {
+            bone.angle_limits = limit.then(|| bone.angle_limits.unwrap_or(DEFAULT_ANGLE_LIMITS));
+        });
+    }
+    if !all_limited {
+        return;
+    }
+    let same = shared(&|bone| bone.angle_limits);
+    for (axis, name, range) in [
+        (0, "Min angle", -360.0..=0.0),
+        (1, "Max angle", 0.0..=360.0),
+    ] {
+        let mut value = first.angle_limits.expect("all selected bones have limits")[axis];
+        let response = bone_number(ui, name, &mut value, range, "°", same.is_none());
+        if response.changed() {
+            edit_bone_batch(s, ids, name, response.dragged(), |_, bone| {
+                if let Some(limits) = &mut bone.angle_limits {
+                    limits[axis] = value;
+                }
+            });
+        }
+        if response.drag_stopped() {
+            s.end_gesture();
+        }
+    }
+}
+
+/// A new angle limit: a quarter turn each way from the rest angle.
+const DEFAULT_ANGLE_LIMITS: [f32; 2] = [-90.0, 90.0];
 
 /// A Curve or Envelope node's properties.
 fn curve_properties(ui: &mut egui::Ui, frame: u32, c: &mut CurveDeformer) {
@@ -1957,6 +2019,16 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             .changed()
             {
                 bone.spring_stiffness = percent / 100.0;
+            }
+            let mut limited = bone.angle_limits.is_some();
+            widgets::checkbox(ui, &mut limited, "Limit angle")
+                .on_hover_text("The bone turns no further than its min and max angle.");
+            if limited != bone.angle_limits.is_some() {
+                bone.angle_limits = limited.then_some(DEFAULT_ANGLE_LIMITS);
+            }
+            if let Some([lo, hi]) = &mut bone.angle_limits {
+                bone_number(ui, "Min angle", lo, -360.0..=0.0, "°", false);
+                bone_number(ui, "Max angle", hi, 0.0..=360.0, "°", false);
             }
             use symphony_core::rig::AnchorKind;
             let parent = s.doc.graph.parent_bone(draft.id);

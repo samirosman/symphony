@@ -94,3 +94,20 @@ fn the_skeleton_base_still_moves_the_whole_rig() {
         tip(&h, bone)
     );
 }
+
+#[test]
+fn a_turn_stops_at_the_angle_limit() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    let graph = &mut h.state_mut().s.doc.graph;
+    if let Some(NodeKind::Bone(b)) = graph.node_mut(bone).map(|n| &mut n.kind) {
+        b.angle_limits = Some([-30.0, 30.0]);
+    }
+    h.run_steps(1);
+    // Sweep a quarter turn; the bone stops a third of the way.
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    let rotation = h.state().s.doc.graph.bone(bone).unwrap().rotation.at(1);
+    assert!((rotation.abs() - 30.0).abs() < 0.01, "rotation {rotation}");
+    let (x, y) = tip(&h, bone);
+    let angle = y.atan2(x).to_degrees();
+    assert!((angle - 30.0).abs() < 0.5, "tip at {angle} degrees");
+}
