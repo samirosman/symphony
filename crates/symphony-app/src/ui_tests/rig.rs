@@ -81,6 +81,22 @@ fn without_ctrl_a_turn_keeps_the_length() {
 }
 
 #[test]
+fn a_tip_drag_turns_a_stretchable_bone_without_ctrl() {
+    let (mut h, _, bone) = one_bone(Stretch::Simple);
+    drag(&mut h, (200.0, 0.0), (300.0, 300.0), Modifiers::NONE);
+    let (x, y) = tip(&h, bone);
+    assert!((x.hypot(y) - 200.0).abs() < 2.0, "tip ({x}, {y})");
+    assert!((x - y).abs() < 2.0, "tip ({x}, {y})");
+}
+
+#[test]
+fn ctrl_on_the_tip_stretches_a_stretchable_bone() {
+    let (mut h, _, bone) = one_bone(Stretch::Simple);
+    drag(&mut h, (200.0, 0.0), (300.0, 0.0), CTRL);
+    assert!(near(tip(&h, bone), (300.0, 0.0)), "tip {:?}", tip(&h, bone));
+}
+
+#[test]
 fn the_skeleton_base_still_moves_the_whole_rig() {
     let (mut h, skeleton, bone) = one_bone(Stretch::Rigid);
     drag(&mut h, (0.0, 0.0), (50.0, 40.0), Modifiers::NONE);

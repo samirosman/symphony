@@ -375,7 +375,12 @@ pub fn ui(
         if let Some(p) = response.interact_pointer_pos() {
             let snap = ui.input(|i| i.modifiers.shift);
             match drag {
-                Drag::Tip(id, grab) => pose_tip(s, id, view, snapped(p, grab, snap), false),
+                Drag::Tip(id, grab) => {
+                    let stretch = ui.input(|i| i.modifiers.command);
+                    let at = handles.iter().find(|h| h.0 == id).map(|h| (h.1, h.2));
+                    let target = tip_target(s, id, at, snapped(p, grab, snap), stretch);
+                    pose_tip(s, id, view, target, false);
+                }
                 Drag::Turn {
                     id,
                     base,
@@ -437,6 +442,30 @@ fn turned(base: Pos2, tip: Pos2, grab: Pos2, pointer: Pos2, stretch: bool) -> Po
     let arm = tip - base;
     let (sin, cos) = angle.sin_cos();
     base + egui::vec2(arm.x * cos - arm.y * sin, arm.x * sin + arm.y * cos) * scale
+}
+
+/// Where a tip drag puts the tip. Only Ctrl changes a bone's length
+/// (Harmony's Skeleton Bone): without it, a stretchable bone keeps its
+/// length and turns toward the pointer. `at` is the bone's base and tip
+/// on screen.
+fn tip_target(
+    s: &Session,
+    id: NodeId,
+    at: Option<(Pos2, Pos2)>,
+    pointer: Pos2,
+    stretch: bool,
+) -> Pos2 {
+    let stretchable = s
+        .doc
+        .graph
+        .bone(id)
+        .is_some_and(|b| b.stretch_mode != symphony_core::rig::Stretch::Rigid);
+    match at {
+        Some((base, tip)) if stretchable && !stretch && (pointer - base).length() > 1.0 => {
+            base + (pointer - base).normalized() * (tip - base).length()
+        }
+        _ => pointer,
+    }
 }
 
 fn pos((x, y): (f32, f32)) -> Pos2 {
