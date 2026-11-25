@@ -177,7 +177,7 @@ impl Default for FunctionState {
 const LIST_W: f32 = 148.0;
 const KEY_R: f32 = 4.0;
 const HANDLE_R: f32 = 3.5;
-/// The frame scale under the graph.
+/// The frame scale above the graph, where the Timeline has its ruler.
 const SCALE_H: f32 = 18.0;
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
@@ -560,8 +560,8 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
     let full = resp.rect;
     theme::feather_panel(&painter, full, theme::BG_INPUT, 5.0);
     let rect = Rect::from_min_max(
-        full.min + Vec2::new(50.0, 10.0),
-        full.max - Vec2::new(14.0, SCALE_H + 4.0),
+        full.min + Vec2::new(50.0, SCALE_H + 8.0),
+        full.max - Vec2::new(14.0, 10.0),
     );
     let len = s.length().max(2) as f32;
     let shown: Vec<Param> = Param::ALL
@@ -594,7 +594,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
         );
         crate::views::timing::frame_tag(
             &painter,
-            Pos2::new(cx, rect.bottom() + SCALE_H / 2.0 + 2.0),
+            Pos2::new(cx, rect.top() - SCALE_H / 2.0 - 2.0),
             s.frame,
         );
     }
@@ -608,7 +608,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
     let hit = |pos: Pos2| hit_key(pos, active, peg, &shown, &map);
 
     if let Some(at) = press.filter(|_| resp.drag_started() || resp.clicked()) {
-        if at.y > rect.bottom() {
+        if at.y < rect.top() {
             s.frame = frame_at(at.x);
             st.drag = resp.drag_started().then_some(Drag::Scrub);
         } else if let Some((id, grab)) = hit(at) {
@@ -643,7 +643,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
         }
     }
     if let (Some(pos), true) = (pointer, resp.double_clicked()) {
-        if hit(pos).is_none() && pos.y <= rect.bottom() {
+        if hit(pos).is_none() && pos.y >= rect.top() {
             add_key_on_nearest_curve(s, st, peg, &shown, &map, pos);
         }
     }
@@ -740,7 +740,7 @@ fn paint_grid(painter: &egui::Painter, map: &Map, full: Rect, len: f32) {
         );
         if f >= 1.0 {
             painter.text(
-                Pos2::new(x, rect.bottom() + SCALE_H / 2.0 + 2.0),
+                Pos2::new(x, rect.top() - SCALE_H / 2.0 - 2.0),
                 Align2::CENTER_CENTER,
                 format!("{f:.0}"),
                 theme::numbers(),
@@ -1029,9 +1029,9 @@ mod tests {
                 (session, FunctionState::default()),
             );
         h.run_steps(2);
-        // From the blank margin left of frame 1 to past the last key, above
+        // From the blank margin left of frame 1 to past the last key, below
         // the frame scale.
-        let (from, to) = (Pos2::new(190.0, 46.0), Pos2::new(885.0, 385.0));
+        let (from, to) = (Pos2::new(190.0, 68.0), Pos2::new(885.0, 400.0));
         let none = egui::Modifiers::NONE;
         let button = egui::PointerButton::Primary;
         h.input_mut().events.push(egui::Event::PointerMoved(from));
