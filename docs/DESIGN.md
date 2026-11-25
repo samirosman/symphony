@@ -131,6 +131,42 @@ Spend boldness in one place (P5). Symphony's signature is **time**:
   neutral shadow, on the grey surround. This is the one docked thing that
   casts a shadow (an exception to D6.4).
 
+### 3.3 Tool Properties and Node Properties
+
+- **D3.11 Shared layout.** Use the same form components, typography, and
+  spacing in both views and in floating properties windows. Show the active
+  tool or selected node name at the top, followed by its settings. Use 12 px
+  panel padding, a 4 px gap between related rows, and 8 px between sections.
+  Use short section headings and whitespace to group fields on the panel's
+  continuous glass surface.
+- **D3.12 Predictable rows.** Align labels and controls to shared columns.
+  Give X/Y pairs and related values matching widths. Use the shared control
+  styles from D6.7. Use checkboxes for independent settings, segmented
+  controls for a short set of mutually exclusive modes, and menus for longer
+  lists. Keep units next to values, and make numeric values scrubbable and
+  editable as in D8.8. Align keyframe controls at the trailing edge and keep
+  their space reserved when their state changes.
+- **D3.13 Order by what the artist is doing.** In Tool Properties, put
+  frequent adjustments for the current tool and mode first, such as brush
+  size and opacity. In Node Properties, start with the settings and assignments
+  that define the selected node. A Bone starts with its drawing preview and
+  attachment controls, then shows posing settings. Keep related actions next
+  to the data they affect. Collapse infrequent tuning under a named section
+  such as Pressure or Stretch limits. When a mode reveals extra fields, place
+  them directly below that mode and keep unrelated rows in order.
+- **D3.14 Keep the dock usable at narrow widths.** Stack labels above
+  controls when the columns no longer fit. Keep control targets at least
+  24 px and allow vertical scrolling. Wrap essential instructions and
+  preserve access to full names when labels truncate. Use a short empty
+  state when the selection is empty or a relevant assignment is missing,
+  with the action beside it when one is available.
+- **D3.15 Make state and feedback consistent.** A properties edit applies
+  to the tool or node identified in the header. Reuse the same actions in
+  docked and floating forms. Keep hover, focus, disabled, and keyed states
+  distinct. Group a continuous drag into one undo step where the setting
+  supports undo. Use a clear unavailable state with a brief reason when
+  an otherwise relevant setting depends on another option.
+
 ## 4. Colour
 
 ### 4.1 Tokens
@@ -472,6 +508,8 @@ finished.
 - [ ] Any new colour pairing is contrast-checked (D4.4).
 - [ ] Sizes are on the 4 px grid and use the standard sizes (D6).
 - [ ] Areas separated by tone, not boxes (D3.7, D3.8). No new chrome buttons.
+- [ ] Properties forms use shared rows and section order, and stay usable
+      when docked narrow, floated, and scaled (§3.3).
 - [ ] Looks the same on all three OSes, or the difference is listed in D12.2.
 - [ ] Icons are from our set, on the grid and tooltipped. No emoji (D7).
 - [ ] Works with the pen alone. Nothing is hover-only (D8.1).
