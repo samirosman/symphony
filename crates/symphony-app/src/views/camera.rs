@@ -63,6 +63,8 @@ pub struct CanvasState {
     pub render_effects: bool,
     /// The selected Mesh Warp's grid, being edited.
     warp_edit: super::warp_edit::WarpEdit,
+    /// The selected Curve or Envelope, being edited.
+    curve_edit: super::curve_edit::CurveEdit,
     rig_edit: super::rig_edit::RigEdit,
     /// Text being typed with the Text tool.
     text: Option<TextDraft>,
@@ -94,6 +96,7 @@ impl Default for CanvasState {
             settling: Vec::new(),
             render_effects: true,
             warp_edit: Default::default(),
+            curve_edit: Default::default(),
             rig_edit: Default::default(),
             text: None,
             bent: Default::default(),
@@ -1450,7 +1453,8 @@ pub fn ui(
     state.select.camera_space = !drawing_only;
     let navigating_now = navigating || response.drag_stopped_by(egui::PointerButton::Middle);
     let warp_busy = !navigating_now
-        && super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view);
+        && (super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view)
+            || super::curve_edit::ui(ui, &response, &painter, s, &mut state.curve_edit, view));
     let rig_busy = if !navigating_now && !drawing_only {
         super::rig_edit::ui(ui, &response, &painter, s, &mut state.rig_edit, view)
     } else {

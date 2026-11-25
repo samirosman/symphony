@@ -531,6 +531,8 @@ pub enum WarpField {
     /// A chain of bones, root first, down to the bone the artwork hangs
     /// from.
     Bone(Box<crate::deform::ChainPose>),
+    /// A Curve or Envelope deformer.
+    Curve(std::sync::Arc<crate::envelope::CurveField>),
 }
 
 impl WarpField {
@@ -539,6 +541,7 @@ impl WarpField {
             WarpField::Grid(g) => g.apply(p),
             WarpField::Points(f) => f.apply(p),
             WarpField::Bone(f) => f.map(p),
+            WarpField::Curve(f) => f.apply(p),
         }
     }
 
@@ -547,6 +550,7 @@ impl WarpField {
             WarpField::Grid(g) => g.is_flat(),
             WarpField::Points(f) => f.is_flat(),
             WarpField::Bone(f) => f.at_rest(),
+            WarpField::Curve(f) => f.is_flat(),
         }
     }
 
@@ -558,6 +562,7 @@ impl WarpField {
             WarpField::Bone(f) => f
                 .smallest_radius()
                 .map_or(f32::MAX, |radius| (radius / 4.0).max(1.0)),
+            WarpField::Curve(f) => f.piece(),
         }
     }
 }
@@ -610,6 +615,7 @@ impl Warp {
                 }
                 WarpField::Points(f) => f.key().hash(&mut h),
                 WarpField::Bone(f) => f.hash_into(&mut h),
+                WarpField::Curve(f) => f.hash_into(&mut h),
             }
         }
         h.finish()

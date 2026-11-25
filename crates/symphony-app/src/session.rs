@@ -2049,6 +2049,7 @@ impl Session {
                     n.kind,
                     symphony_core::graph::NodeKind::Peg(_)
                         | symphony_core::graph::NodeKind::MeshWarp(_)
+                        | symphony_core::graph::NodeKind::Curve(_)
                         | symphony_core::graph::NodeKind::KinematicOutput
                         | symphony_core::graph::NodeKind::Skeleton(_)
                         | symphony_core::graph::NodeKind::Bone(_)
@@ -2097,6 +2098,7 @@ impl Session {
             Some(
                 NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
+                    | NodeKind::Curve(_)
                     | NodeKind::KinematicOutput
                     | NodeKind::Skeleton(_)
                     | NodeKind::Bone(_)
