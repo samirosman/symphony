@@ -7,7 +7,7 @@
 //! outline, so it thickens where the warp stretches and thins where it
 //! squeezes, like a picture seen in perspective. (Textured lines stamp
 //! along their path, so they always bend as paths.) An imported picture
-//! isn't bent (it's left out; draw it with the plain transform).
+//! is left out: the renderers bend it as a mesh.
 
 use symphony_core::stroke::{Drawing, Point, Stroke};
 use symphony_core::warp::{densify, Warp, WarpLines};

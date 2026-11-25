@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::anim::Value;
 use crate::id::Id;
 use crate::math::Affine;
-use crate::rig::{Bone, BoneField, BonePose};
+use crate::rig::{Bone, BonePose};
 use crate::xsheet::Xsheet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -816,20 +816,11 @@ impl Graph {
                 NodeKind::Peg(p) | NodeKind::Skeleton(p) => {
                     outer = outer.compose(p.transform_at(frame))
                 }
-                NodeKind::Bone(bone) if bound_bone == Some(n) => {
-                    let pose = self.bone_pose_inner(n, frame, depth)?;
-                    let radius = self
-                        .parent_bone(n)
-                        .map_or(0.0, |_| bone.bend_radius.clamp(0.0, pose.length));
-                    let field = BoneField {
-                        rest_inverse: pose.rest.inverse().unwrap_or(Affine::IDENTITY),
-                        parent: pose.parent_skin,
-                        child: pose.skin(),
-                        radius,
-                    };
+                NodeKind::Bone(_) if bound_bone == Some(n) => {
+                    let chain = self.chain_pose(n, frame, depth)?;
                     steps.push(crate::warp::WarpStep {
                         outer,
-                        field: crate::warp::WarpField::Bone(Box::new(field)),
+                        field: crate::warp::WarpField::Bone(Box::new(chain)),
                     });
                     outer = Affine::IDENTITY;
                 }
@@ -929,32 +920,78 @@ impl Graph {
             (origin, origin, Affine::IDENTITY)
         };
         let rest_turn = Affine::rotate_deg(bone.rest_angle);
-        let mut turn = bone.rest_angle;
-        if self.enabled_at(id, frame) {
-            turn += bone.rotation.at(frame);
-            if let Some(lower) = self.smart_controller(id, frame) {
-                if let Some((upper, lower_bone)) = self
-                    .parent_bone(lower)
-                    .and_then(|upper| self.bone(upper))
-                    .zip(self.bone(lower))
-                {
-                    if let Some(joint) = &lower_bone.smart {
-                        let [aim, bend] = joint.solve(frame, upper.length(), lower_bone.length());
-                        turn = if lower == id {
-                            bend
-                        } else {
-                            bone.rest_angle + aim
-                        };
-                    }
-                }
-            }
-        }
+        let turn = self.bone_turn(id, bone, frame);
         Ok(BonePose {
             rest: rest_base.compose(rest_turn),
             posed: posed_base.compose(Affine::rotate_deg(turn)),
             parent_skin,
             length: bone.length(),
         })
+    }
+
+    /// The bone's angle to its parent on `frame`, in degrees: the rest
+    /// angle plus its rotation, or what its smart joint solves.
+    fn bone_turn(&self, id: NodeId, bone: &Bone, frame: u32) -> f32 {
+        if !self.enabled_at(id, frame) {
+            return bone.rest_angle;
+        }
+        let Some(lower) = self.smart_controller(id, frame) else {
+            return bone.rest_angle + bone.rotation.at(frame);
+        };
+        let pair = self
+            .parent_bone(lower)
+            .and_then(|upper| self.bone(upper))
+            .zip(self.bone(lower));
+        match pair
+            .and_then(|(upper, lower_bone)| Some((upper, lower_bone, lower_bone.smart.as_ref()?)))
+        {
+            Some((upper, lower_bone, joint)) => {
+                let [aim, bend] = joint.solve(frame, upper.length(), lower_bone.length());
+                if lower == id {
+                    bend
+                } else {
+                    bone.rest_angle + aim
+                }
+            }
+            None => bone.rest_angle + bone.rotation.at(frame),
+        }
+    }
+
+    /// The bones from the root of the chain down to `id`, solved for
+    /// `frame`: what bends the artwork under `id`. Every joint on the
+    /// way bends it, not only the nearest one.
+    fn chain_pose(
+        &self,
+        id: NodeId,
+        frame: u32,
+        depth: usize,
+    ) -> Result<crate::deform::ChainPose, EvalError> {
+        use crate::deform::{BonePose as Pose, ChainPose, Influence};
+        let mut ids = vec![id];
+        while let Some(parent) = self.parent_bone(ids[ids.len() - 1]) {
+            if ids.len() + depth > MAX_DEPTH {
+                return Err(EvalError::Cycle(parent));
+            }
+            ids.push(parent);
+        }
+        let (mut rest, mut posed) = (Vec::new(), Vec::new());
+        for &id in ids.iter().rev() {
+            let bone = self.bone(id).ok_or(EvalError::UnknownNode(id))?;
+            let pose = Pose {
+                x: bone.origin[0],
+                y: bone.origin[1],
+                orientation: bone.rest_angle,
+                length: bone.length(),
+                radius: bone.bend_radius,
+                bias: bone.bias,
+            };
+            rest.push(pose);
+            posed.push(Pose {
+                orientation: self.bone_turn(id, bone, frame),
+                ..pose
+            });
+        }
+        Ok(ChainPose::new(&rest, &posed, Influence::Infinite))
     }
 
     /// The skeleton that owns this bone, or the disconnected chain's root bone.
@@ -1158,10 +1195,52 @@ mod tests {
             let tip = warp.bend([160.0, 0.0]);
             assert!((tip[0] - 100.0).abs() < 0.001 && (tip[1] - 60.0).abs() < 0.001);
             assert_eq!(warp.outer().tx, 30.0);
-            let raster = warp.raster_transform().unwrap().apply(160.0, 0.0);
-            assert!((raster.0 - 130.0).abs() < 0.001 && (raster.1 - 60.0).abs() < 0.001);
         }
         assert!(graph.render_commands(lower, &xs, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_joint_above_a_drawing_bends_it_and_old_bones_load() {
+        let (mut graph, xs, display, _) = scene();
+        let body = graph
+            .nodes()
+            .find_map(|(id, node)| (node.name == "Body").then_some(id))
+            .unwrap();
+        let mut above = None;
+        for turn in [0.0, 90.0, -90.0] {
+            let bone = graph.add(
+                "Bone",
+                NodeKind::Bone(Bone {
+                    length: 100.0,
+                    rotation: Value::Constant(turn),
+                    bend_radius: 20.0,
+                    ..Bone::default()
+                }),
+            );
+            if let Some(parent) = above {
+                graph.connect(parent, bone, 0);
+            }
+            above = Some(bone);
+        }
+        graph.connect(above.unwrap(), body, 0);
+        let items = graph.evaluate(display, &xs, 1).unwrap();
+        let warp = items[0].warp.as_ref().unwrap();
+        let close = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).hypot(p[1] - q[1]) < 0.001;
+        // Solid on each bone: the first stays, the second points up, the
+        // third points along x again from the second one's end.
+        assert!(close(warp.bend([50.0, 5.0]), [50.0, 5.0]));
+        assert!(close(warp.bend([150.0, 5.0]), [95.0, 50.0]));
+        assert!(close(warp.bend([250.0, 5.0]), [150.0, 105.0]));
+        // In a joint zone the art keeps its distance to the joint.
+        let folded = warp.bend([110.0, 0.0]);
+        assert!(((folded[0] - 100.0).hypot(folded[1]) - 10.0).abs() < 0.001);
+        assert!(folded[0] > 100.0 && folded[1] > 0.0);
+
+        // A bone saved before the bias existed gets the default fold.
+        let mut saved = serde_json::to_value(Bone::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("bias");
+        let bone: Bone = serde_json::from_value(saved).unwrap();
+        assert_eq!(bone, Bone::default());
     }
 
     #[test]

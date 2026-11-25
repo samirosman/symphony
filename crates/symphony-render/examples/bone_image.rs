@@ -68,7 +68,7 @@ fn main() {
         for &angle in &ANGLES {
             let pose = arm_pose(BONE, angle);
             let mut pix = white(W, H);
-            let mesh = paint_image_bent(&mut pix, &scene, r, view, &pose, &detail);
+            let mesh = paint_image_bent(&mut pix, &scene, r, view, |p| pose.map(p), &detail);
             a.push(to_image(pix.clone()));
             if let Some(mesh) = mesh {
                 wireframe(&mut pix, &mesh);
@@ -94,12 +94,13 @@ fn main() {
     for (name, detail) in details() {
         let mut pix = white(1920, 1080);
         // The first call decodes the image into the cache.
-        let mesh = paint_image_bent(&mut pix, &big, br, view, &pose, &detail).expect("bent");
+        let mesh =
+            paint_image_bent(&mut pix, &big, br, view, |p| pose.map(p), &detail).expect("bent");
         let runs = 5;
         let t = Instant::now();
         for _ in 0..runs {
             let mut pix = white(1920, 1080);
-            paint_image_bent(&mut pix, &big, br, view, &pose, &detail);
+            paint_image_bent(&mut pix, &big, br, view, |p| pose.map(p), &detail);
         }
         let ms = t.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!(
