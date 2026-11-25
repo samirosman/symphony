@@ -42,15 +42,11 @@ pub enum Fold {
     /// The zone follows a circular arc that touches both bones, and every
     /// cross-section stays straight (Barr's bend, SIGGRAPH 1984). The limb
     /// keeps its width. Bias shortens the arc for a sharper elbow.
+    /// (Files from before the rotation blends were dropped, 2026-11-25,
+    /// open with the arc.)
     #[default]
+    #[serde(alias = "Rotation", alias = "RotationEnvelope")]
     Arc,
-    /// Each point turns about the joint by a share of the bend that rises
-    /// smoothly across the zone (what dual quaternion skinning does in
-    /// 2D). The outer side bulges.
-    Rotation,
-    /// The same turn with envelope weights: both bones weigh the same in
-    /// the core that Bias sets, as in Blender's Grease Pencil rigging.
-    RotationEnvelope,
     /// A straight blend of where each bone puts the point (linear blend
     /// skinning). The joint thins as it bends.
     Linear,
@@ -61,19 +57,11 @@ pub enum Fold {
 }
 
 impl Fold {
-    pub const ALL: [Fold; 5] = [
-        Fold::Arc,
-        Fold::Rotation,
-        Fold::RotationEnvelope,
-        Fold::Linear,
-        Fold::MovingLeastSquares,
-    ];
+    pub const ALL: [Fold; 3] = [Fold::Arc, Fold::Linear, Fold::MovingLeastSquares];
 
     pub fn title(self) -> &'static str {
         match self {
             Fold::Arc => "Circular arc",
-            Fold::Rotation => "Rotation blend",
-            Fold::RotationEnvelope => "Rotation blend, flat core",
             Fold::Linear => "Linear blend",
             Fold::MovingLeastSquares => "Moving least squares",
         }
@@ -83,8 +71,6 @@ impl Fold {
     pub fn hint(self) -> &'static str {
         match self {
             Fold::Arc => "The joint follows an arc and the limb keeps its width.",
-            Fold::Rotation => "Art turns about the joint. The outer side bulges.",
-            Fold::RotationEnvelope => "Art turns about the joint; Bias sets a flat core.",
             Fold::Linear => "A straight blend. The joint thins as it bends.",
             Fold::MovingLeastSquares => "Soft all over. The whole chain bends as one.",
         }
@@ -335,34 +321,6 @@ fn turn(v: V, radians: f32) -> V {
 /// Handles along each bone for [`Fold::MovingLeastSquares`].
 const MLS_SAMPLES: usize = 16;
 
-/// Weight of the far bone at distance `d` from the joint's bisector, as an
-/// envelope falloff: 1 inside the core, then down to 0 at `radius`.
-fn falloff(d: f32, radius: f32, core: f32) -> f32 {
-    let inner = core * radius;
-    if d <= inner {
-        return 1.0;
-    }
-    let span = radius - inner;
-    if span <= 0.0 || d >= radius {
-        return 0.0;
-    }
-    let x = (d - inner) / span;
-    1.0 - x * x
-}
-
-/// Weight of the child bone for a point `sigma` from the bisector of a
-/// joint (negative on the parent's side), with the joint's `radius` and
-/// `bias`. Both bones' weights add up to 1.
-pub fn child_weight(sigma: f32, radius: f32, bias: f32) -> f32 {
-    let core = bias.clamp(0.0, MAX_BIAS);
-    let f = falloff(sigma.abs(), radius.max(0.0), core);
-    if sigma < 0.0 {
-        f / (1.0 + f)
-    } else {
-        1.0 / (1.0 + f)
-    }
-}
-
 /// A chain solved for one frame. Building it allocates; [`Self::map`]
 /// does not.
 #[derive(Clone, Debug, PartialEq)]
@@ -469,10 +427,6 @@ impl ChainPose {
             if sigma.abs() < joint.radius {
                 return match joint.fold {
                     Fold::Arc | Fold::MovingLeastSquares => self.arc(p, j, sigma),
-                    Fold::Rotation => self.blend(p, j, smooth_weight(sigma, joint.radius)),
-                    Fold::RotationEnvelope => {
-                        self.blend(p, j, child_weight(sigma, joint.radius, joint.core))
-                    }
                     Fold::Linear => {
                         let w = smooth_weight(sigma, joint.radius);
                         let (a, b) = (self.bone_map(j - 1, p), self.bone_map(j, p));
@@ -562,28 +516,6 @@ impl ChainPose {
             along += w * dot(a, b);
         }
         add(to, turn(sub(p, from), cross.atan2(along)))
-    }
-
-    /// Blend the maps of bones `j - 1` and `j` in polar form around the
-    /// animated joint, `w` being the weight of bone `j`.
-    fn blend(&self, p: V, j: usize, w: f32) -> V {
-        let a = self.bone_map(j - 1, p);
-        let b = self.bone_map(j, p);
-        let c = self.anim[j].p;
-        let (va, vb) = (sub(a, c), sub(b, c));
-        let (la, lb) = (len(va), len(vb));
-        if la < 1e-6 || lb < 1e-6 {
-            return add(a, mul(sub(b, a), w));
-        }
-        let ta = va[1].atan2(va[0]);
-        let mut delta = vb[1].atan2(vb[0]) - ta;
-        if delta > std::f32::consts::PI {
-            delta -= std::f32::consts::TAU;
-        } else if delta < -std::f32::consts::PI {
-            delta += std::f32::consts::TAU;
-        }
-        let (s, co) = (ta + w * delta).sin_cos();
-        add(c, mul([co, s], la + w * (lb - la)))
     }
 
     /// Move `p` rigidly with bone `i`, stretching along the bone. Before
@@ -744,25 +676,6 @@ mod tests {
     }
 
     #[test]
-    fn the_rotation_fold_is_continuous_and_keeps_distance_to_the_joint() {
-        let pose = bent_by(1.0, 90.0, Fold::RotationEnvelope);
-        let mut last = pose.map([0.5, 0.0]);
-        for i in 1..=400 {
-            let x = 0.5 + i as f32 / 400.0;
-            let q = pose.map([x, 0.0]);
-            // Neighbours 0.0025 apart stay close: no tear, no jump. The
-            // weight is steepest at the zone edge (as in Blender), where
-            // one step moves a point about 0.013.
-            assert!(len(sub(q, last)) < 0.02, "jump at x = {x}");
-            last = q;
-            // Polar blend: the distance to the joint is kept, as with
-            // Blender's Preserve Volume.
-            let d = (x - 1.0).abs();
-            assert!((len(sub(q, [1.0, 0.0])) - d).abs() < 1e-4, "x = {x}");
-        }
-    }
-
-    #[test]
     fn no_fold_tears_the_art_off_the_bone_axis() {
         // Continuous means neighbours move apart by at most a fixed
         // multiple of the step. The steepest is the envelope's zone edge:
@@ -852,45 +765,11 @@ mod tests {
         assert!(close(pose.map([-0.3, 0.0]), [-0.3, 0.0], 1e-5));
     }
 
+    /// Scenes saved with a rotation blend open with the arc.
     #[test]
-    fn weights_match_blender_grease_pencil_automatic_weights() {
-        // Child bone weight along two bones of length 1 (joint at x = 1),
-        // read from Blender 5.3.0's Automatic Weights. Blender's zone
-        // ends a little later (about 0.31), so allow 0.1.
-        let blender = [
-            (0.725, 0.2152),
-            (0.75, 0.2967),
-            (0.80, 0.4030),
-            (0.85, 0.4658),
-            (0.90, 0.5),
-            (1.0, 0.5),
-            (1.10, 0.5),
-            (1.15, 0.5342),
-            (1.20, 0.5970),
-            (1.25, 0.7033),
-            (1.275, 0.7848),
-        ];
-        for (x, w) in blender {
-            let ours = child_weight(x - 1.0, 0.3, DEFAULT_BIAS);
-            assert!((ours - w).abs() <= 0.1, "x = {x}: {ours} vs {w}");
-        }
-        assert_eq!(child_weight(-0.3, 0.3, DEFAULT_BIAS), 0.0);
-        assert_eq!(child_weight(0.3, 0.3, DEFAULT_BIAS), 1.0);
-    }
-
-    #[test]
-    fn a_larger_bias_widens_the_core() {
-        let (r, sigma) = (0.3, -0.15);
-        assert!(child_weight(sigma, r, 0.1) < child_weight(sigma, r, 0.7));
-        assert_eq!(child_weight(sigma, r, 0.7), 0.5);
-        // Weights rise monotonically across the zone.
-        for bias in [0.0, DEFAULT_BIAS, MAX_BIAS] {
-            let mut last = 0.0;
-            for i in -30..=30 {
-                let w = child_weight(i as f32 * 0.01, r, bias);
-                assert!(w >= last - 1e-6);
-                last = w;
-            }
+    fn dropped_rotation_folds_open_as_the_arc() {
+        for old in ["\"Rotation\"", "\"RotationEnvelope\""] {
+            assert_eq!(serde_json::from_str::<Fold>(old).unwrap(), Fold::Arc);
         }
     }
 
