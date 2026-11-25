@@ -2187,11 +2187,6 @@ fn the_text_tool_types_vector_letters() {
     });
     h.run_steps(3);
     let after = strokes(&h, layer);
-    if after.len() == before {
-        // No fonts on this machine (headless CI): nothing to type with.
-        assert!(crate::vector_import::text_shapes("Hi", &Default::default()).is_empty());
-        return;
-    }
     let new: Vec<_> = after[before..].to_vec();
     assert!(new.len() >= 2, "H and i (with its dot): {}", new.len());
     let s = &h.state().s;
