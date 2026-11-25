@@ -42,6 +42,9 @@ pub struct TimingState {
     pub sound_editor: Option<SoundEditor>,
     /// A layer being dragged to a new place in the stack (its row).
     layer_drag: Option<usize>,
+    /// The width of a frame in the Timeline, once Ctrl+wheel has changed
+    /// it.
+    frame_w: Option<f32>,
     scrubbing: bool,
     /// Layer order last frame (columns), and layers that just arrived or
     /// moved with when, so their row glows briefly.
@@ -794,7 +797,10 @@ pub fn timeline(
     const RULER: f32 = 28.0;
     // The lock switch, just left of the Parameters field.
     const LOCK: std::ops::Range<f32> = HEAD - PARAM_W - 28.0..HEAD - PARAM_W - 6.0;
-    let cw = theme::FRAME_CELL;
+    // Ctrl+wheel zooms the frames, from a whole scene at a glance to
+    // wide cells.
+    const FRAME_W: std::ops::RangeInclusive<f32> = 2.0..=48.0;
+    let cw = t.frame_w.unwrap_or(theme::FRAME_CELL);
     let rh = theme::ROW;
     // Sound tracks come after the drawing layers, as in Harmony.
     let layers = s.layer_count();
@@ -916,6 +922,23 @@ pub fn timeline(
             let o = resp.rect.min;
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
+            let zoom = ui.input(|i| i.zoom_delta());
+            if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| {
+                zoom != 1.0 && ui.clip_rect().contains(*p) && ui.rect_contains_pointer(resp.rect)
+            }) {
+                let wide = (cw * zoom).clamp(*FRAME_W.start(), *FRAME_W.end());
+                // The frame under the pointer stays under it.
+                let along = (p.x - o.x - HEAD).max(0.0);
+                ui.scroll_with_delta_animation(
+                    Vec2::new(-along * (wide / cw - 1.0), 0.0),
+                    egui::style::ScrollAnimation::none(),
+                );
+                t.frame_w = Some(wide);
+                ui.ctx().request_repaint();
+            }
+            // The ruler stays at the top of the view while the rows
+            // scroll under it.
+            let ruler_y = ui.clip_rect().top().max(o.y);
 
             // Beats follow the frame rate: the second, its half and a
             // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
@@ -924,49 +947,29 @@ pub fn timeline(
             // Number every small step if there's room, else every half.
             let label_step = if small as f32 * cw >= 22.0 {
                 small
-            } else {
+            } else if half as f32 * cw >= 22.0 {
                 half
+            } else {
+                second
             };
-            for f in 1..=len {
-                let x = frame_x(f) + cw / 2.0;
-                let level = if f % second == 0 {
+            let beat = |f: u32| {
+                if f.is_multiple_of(second) {
                     3
-                } else if f % half == 0 {
+                } else if f.is_multiple_of(half) {
                     2
-                } else if f % small == 0 {
+                } else if f.is_multiple_of(small) {
                     1
                 } else {
                     0
-                };
-                if level > 0 {
-                    let alpha = [0.0, 0.35, 0.6, 1.0][level];
-                    painter.line_segment(
-                        [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
-                        Stroke::new(1.0, theme::LINE_STRONG.gamma_multiply(alpha)),
-                    );
                 }
-                let top = match level {
-                    0 => 22.0,
-                    1 => 18.0,
-                    _ => 15.0,
-                };
+            };
+            for f in (1..=len).filter(|&f| beat(f) > 0) {
+                let x = frame_x(f) + cw / 2.0;
+                let alpha = [0.0, 0.35, 0.6, 1.0][beat(f)];
                 painter.line_segment(
-                    [Pos2::new(x, o.y + top), Pos2::new(x, o.y + RULER - 2.0)],
-                    Stroke::new(1.0, theme::LINE_STRONG),
+                    [Pos2::new(x, o.y + RULER), Pos2::new(x, rows_bottom)],
+                    Stroke::new(1.0, theme::LINE_STRONG.gamma_multiply(alpha)),
                 );
-                if f == 1 || f % label_step == 0 {
-                    painter.text(
-                        Pos2::new(x, o.y + 4.0),
-                        Align2::CENTER_TOP,
-                        f.to_string(),
-                        theme::numbers(),
-                        if level == 3 {
-                            theme::TEXT_PRIMARY
-                        } else {
-                            theme::TEXT_SECONDARY
-                        },
-                    );
-                }
             }
 
             for i in 0..rows {
@@ -1260,9 +1263,15 @@ pub fn timeline(
             let pressed_on = ui
                 .input(|i| i.pointer.press_origin())
                 .filter(|_| resp.is_pointer_button_down_on() || resp.drag_stopped());
-            let on_block = pressed_on.and_then(hit).is_some();
+            let on_block = pressed_on
+                .filter(|p| p.y >= ruler_y + RULER)
+                .and_then(hit)
+                .is_some();
             if resp.drag_started() {
-                if let Some((p, (id, part))) = pressed_on.and_then(|p| hit(p).map(|h| (p, h))) {
+                if let Some((p, (id, part))) = pressed_on
+                    .filter(|p| p.y >= ruler_y + RULER)
+                    .and_then(|p| hit(p).map(|h| (p, h)))
+                {
                     if let Some(original) = s.doc.sounds.iter().find(|t| t.id == id).cloned() {
                         t.sound_drag = Some(SoundDrag {
                             part,
@@ -1343,12 +1352,54 @@ pub fn timeline(
                     ui.ctx().request_repaint();
                 }
             }
+            // The ruler, over the rows that have scrolled under it.
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(ui.clip_rect().left(), ruler_y),
+                    Vec2::new(ui.clip_rect().width(), RULER),
+                ),
+                0.0,
+                theme::BG_PANEL,
+            );
+            for f in 1..=len {
+                let x = frame_x(f) + cw / 2.0;
+                let level = beat(f);
+                // Frames too narrow to tell apart keep only the beats.
+                if level == 0 && cw < 5.0 {
+                    continue;
+                }
+                let top = match level {
+                    0 => 22.0,
+                    1 => 18.0,
+                    _ => 15.0,
+                };
+                painter.line_segment(
+                    [
+                        Pos2::new(x, ruler_y + top),
+                        Pos2::new(x, ruler_y + RULER - 2.0),
+                    ],
+                    Stroke::new(1.0, theme::LINE_STRONG),
+                );
+                if f == 1 || f % label_step == 0 {
+                    painter.text(
+                        Pos2::new(x, ruler_y + 4.0),
+                        Align2::CENTER_TOP,
+                        f.to_string(),
+                        theme::numbers(),
+                        if level == 3 {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
+                    );
+                }
+            }
             // The playback range, as a band along the ruler.
             if let Some((a, b)) = s.play_range {
                 let (a, b) = (a.clamp(1, len), b.clamp(1, len));
                 let band = Rect::from_min_max(
-                    Pos2::new(frame_x(a.min(b)), o.y + 2.0),
-                    Pos2::new(frame_x(a.max(b)) + cw, o.y + RULER - 2.0),
+                    Pos2::new(frame_x(a.min(b)), ruler_y + 2.0),
+                    Pos2::new(frame_x(a.max(b)) + cw, ruler_y + RULER - 2.0),
                 );
                 painter.rect_filled(
                     band,
@@ -1399,14 +1450,18 @@ pub fn timeline(
                 + (frame_x((whole + 1).min(len)) - frame_x(whole)) * shown.fract()
                 + cw / 2.0;
             painter.line_segment(
-                [Pos2::new(cx, o.y + RULER - 4.0), Pos2::new(cx, rows_bottom)],
+                [
+                    Pos2::new(cx, ruler_y + RULER - 4.0),
+                    Pos2::new(cx, rows_bottom),
+                ],
                 Stroke::new(1.5, theme::ACCENT_TIME),
             );
-            frame_tag(&painter, Pos2::new(cx, o.y + RULER - 12.0), s.frame);
+            frame_tag(&painter, Pos2::new(cx, ruler_y + RULER - 12.0), s.frame);
 
             let slot_at = |p: Pos2| -> Option<Slot> {
                 let r = ((p.y - o.y - RULER) / rh).floor();
-                (r >= 0.0)
+                // Not a row where the ruler covers it.
+                (r >= 0.0 && p.y >= ruler_y + RULER)
                     .then(|| layout.get(r as usize).map(|&(row, _)| row))
                     .flatten()
             };
@@ -1800,6 +1855,135 @@ mod hierarchy_tests {
         harness.run_steps(1);
         assert_eq!(harness.state().0.frame, 1);
         assert!(!harness.state().1.scrubbing);
+    }
+
+    #[test]
+    fn the_ruler_stays_on_top_when_the_rows_scroll() {
+        let mut session = Session::new_scene();
+        for _ in 0..30 {
+            session.add_layer();
+        }
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (session, TimingState::default()),
+            );
+        harness.run_steps(3);
+        let click = |harness: &mut egui_kittest::Harness<'_, (Session, TimingState)>, pos| {
+            for pressed in [true, false] {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(1);
+            }
+        };
+        // The top of the scrolling part: the first height where a click
+        // on the frames moves the playhead.
+        let top = (40..200)
+            .map(|y| y as f32)
+            .find(|&y| {
+                harness.state_mut().0.frame = 1;
+                click(&mut harness, Pos2::new(400.0, y));
+                harness.state().0.frame != 1
+            })
+            .expect("the ruler");
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(Pos2::new(400.0, 300.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -240.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        harness.run_steps(8);
+        // Rows are under the ruler now. A click on it still only moves
+        // the playhead.
+        let selected = harness.state().0.selected;
+        for dy in [6.0, 14.0, 22.0] {
+            harness.state_mut().0.frame = 1;
+            click(&mut harness, Pos2::new(400.0, top + dy));
+            assert_ne!(harness.state().0.frame, 1);
+            assert_eq!(harness.state().0.selected, selected);
+        }
+        // Below the ruler, a click picks the row there.
+        click(&mut harness, Pos2::new(400.0, top + 28.0 + 30.0));
+        assert_ne!(harness.state().0.selected, selected);
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_the_frames_of_the_timeline() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (Session::new_scene(), TimingState::default()),
+            );
+        harness.run_steps(3);
+        let at = Pos2::new(400.0, 200.0);
+        let frame_at = |harness: &mut egui_kittest::Harness<'_, (Session, TimingState)>, pos| {
+            for pressed in [true, false] {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(1);
+            }
+            harness.state().0.frame
+        };
+        let before = frame_at(&mut harness, at);
+        // egui turns Ctrl+wheel into a zoom.
+        harness
+            .input_mut()
+            .events
+            .extend([egui::Event::PointerMoved(at), egui::Event::Zoom(2.0)]);
+        harness.run_steps(3);
+        assert_eq!(harness.state().1.frame_w, Some(2.0 * theme::FRAME_CELL));
+        // The frame under the pointer stayed there, and frames are twice
+        // as wide: four cells further on is two frames later.
+        assert_eq!(frame_at(&mut harness, at), before);
+        let further = at + Vec2::new(4.0 * theme::FRAME_CELL, 0.0);
+        assert_eq!(frame_at(&mut harness, further), before + 2);
+        // The zoom stops at its limits.
+        for _ in 0..8 {
+            harness
+                .input_mut()
+                .events
+                .extend([egui::Event::PointerMoved(at), egui::Event::Zoom(0.25)]);
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().1.frame_w, Some(2.0));
     }
 
     #[test]
