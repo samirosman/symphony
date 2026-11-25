@@ -1,7 +1,7 @@
 //! Function view (Harmony's curve editor): the selected layer's peg
-//! functions as curves over time. Select and drag keys, shape Bézier
-//! segments with handles, switch a segment between Linear, Bezier and
-//! Stop-motion, and add or delete keys.
+//! functions as curves over time. Zoom and pan, box select and drag
+//! keys, shape Bézier segments with handles, and add or delete keys. The
+//! selected keys' settings show in Layer Properties (`key_properties`).
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use symphony_core::anim::{Continuity, Interp, Value};
@@ -78,26 +78,98 @@ impl Param {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Grab {
     Key,
     LeftHandle,
     RightHandle,
 }
 
+/// A key: its function and frame.
+type KeyId = (Param, u32);
+
+/// Frames and values in sight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Span {
+    f0: f32,
+    f1: f32,
+    v0: f32,
+    v1: f32,
+}
+
+impl Span {
+    /// Zoom time by `k` (below 1 zooms in) keeping frame `at` in place.
+    fn zoom_frames(self, at: f32, k: f32, most: f32) -> Span {
+        let width = ((self.f1 - self.f0) * k).clamp(4.0, most);
+        let t = (at - self.f0) / (self.f1 - self.f0);
+        let f0 = at - t * width;
+        Span {
+            f0,
+            f1: f0 + width,
+            ..self
+        }
+    }
+
+    /// Zoom values by `k` keeping value `at` in place.
+    fn zoom_values(self, at: f32, k: f32) -> Span {
+        let height = ((self.v1 - self.v0) * k).max(1e-3);
+        let t = (at - self.v0) / (self.v1 - self.v0);
+        let v0 = at - t * height;
+        Span {
+            v0,
+            v1: v0 + height,
+            ..self
+        }
+    }
+
+    /// Slide by `delta` screen points in a `rect` (the art follows).
+    fn pan(self, delta: Vec2, rect: Rect) -> Span {
+        let df = -delta.x / rect.width() * (self.f1 - self.f0);
+        let dv = delta.y / rect.height() * (self.v1 - self.v0);
+        Span {
+            f0: self.f0 + df,
+            f1: self.f1 + df,
+            v0: self.v0 + dv,
+            v1: self.v1 + dv,
+        }
+    }
+}
+
+/// What a press in the graph turned into.
+enum Drag {
+    /// The selected keys, moved together from the peg as it was at the
+    /// press.
+    Keys {
+        start: Box<PegParams>,
+        from: Pos2,
+        keys: Vec<KeyId>,
+    },
+    Handle(KeyId, Grab),
+    /// A box select from this corner.
+    Box(Pos2),
+    /// The frame scale moves the playhead.
+    Scrub,
+}
+
 pub struct FunctionState {
     shown: [bool; 5],
-    /// Selected key: function and frame.
-    selected: Option<(Param, u32)>,
-    drag: Option<(Param, u32, Grab)>,
+    /// Selected keys.
+    selected: Vec<KeyId>,
+    /// The key whose handles show: the last one picked.
+    active: Option<KeyId>,
+    drag: Option<Drag>,
+    /// What's in sight; `None` fits the whole scene.
+    view: Option<Span>,
 }
 
 impl Default for FunctionState {
     fn default() -> Self {
         FunctionState {
             shown: [true; 5],
-            selected: None,
+            selected: Vec::new(),
+            active: None,
             drag: None,
+            view: None,
         }
     }
 }
@@ -105,6 +177,8 @@ impl Default for FunctionState {
 const LIST_W: f32 = 148.0;
 const KEY_R: f32 = 4.0;
 const HANDLE_R: f32 = 3.5;
+/// The frame scale under the graph.
+const SCALE_H: f32 = 18.0;
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
     let layer = s.selected;
@@ -114,12 +188,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
         });
         return;
     };
-    // Forget a selection whose key is gone.
-    if let Some((p, f)) = st.selected {
-        if !p.get(&peg).is_some_and(|v| v.has_key(f)) {
-            st.selected = None;
-        }
-    }
+    forget_missing_keys(st, &peg);
     toolbar(ui, s, st, &peg);
     ui.separator();
     let avail = ui.available_size();
@@ -137,25 +206,176 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
     });
 }
 
+/// Drop selected keys that are gone (undo, another view, a new layer).
+fn forget_missing_keys(st: &mut FunctionState, peg: &PegParams) {
+    let exists = |(p, f): &KeyId| p.get(peg).is_some_and(|v| v.has_key(*f));
+    st.selected.retain(exists);
+    if !st.active.as_ref().is_some_and(exists) {
+        st.active = None;
+    }
+}
+
+/// Move `keys` by `df` frames and `dv` value units, all at once, from the
+/// peg `start`. `None` if a key would land before frame 1 or on a key
+/// that isn't moving.
+fn move_keys(start: &PegParams, keys: &[KeyId], df: i64, dv: f32) -> Option<PegParams> {
+    let mut p = start.clone();
+    for param in Param::ALL {
+        let frames: Vec<u32> = keys
+            .iter()
+            .filter(|(q, _)| *q == param)
+            .map(|(_, f)| *f)
+            .collect();
+        if frames.is_empty() {
+            continue;
+        }
+        let Value::Keys(list) = param.get_mut(&mut p) else {
+            continue;
+        };
+        let (mut moving, staying): (Vec<_>, Vec<_>) =
+            list.drain(..).partition(|k| frames.contains(&k.frame));
+        for k in &mut moving {
+            let to = i64::from(k.frame) + df;
+            if to < 1 || staying.iter().any(|s| i64::from(s.frame) == to) {
+                return None;
+            }
+            k.frame = to as u32;
+            k.value += dv;
+        }
+        list.extend(staying);
+        list.extend(moving);
+        list.sort_by_key(|k| k.frame);
+    }
+    Some(p)
+}
+
+/// The keys' info and segment settings, for the Layer Properties panel.
+/// Shows nothing while no key is selected in the Function view.
+pub fn key_properties(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState) {
+    let layer = s.selected;
+    let Some(peg) = s.doc.peg(layer).cloned() else {
+        return;
+    };
+    forget_missing_keys(st, &peg);
+    if st.selected.is_empty() {
+        return;
+    }
+    let key_of = |(p, f): KeyId| {
+        p.get(&peg)
+            .and_then(|v| v.keys().iter().find(|k| k.frame == f).copied())
+    };
+    egui::Frame::new()
+        .inner_margin(egui::Margin::same(theme::CARD_PAD))
+        .show(ui, |ui| {
+            let one = (st.selected.len() == 1).then(|| st.selected[0]);
+            let title = match one {
+                Some((p, _)) => format!("Key on {}", p.name()),
+                None => format!("{} keys", st.selected.len()),
+            };
+            ui.heading(title);
+            let first = st.selected.iter().find_map(|&id| key_of(id));
+            let Some(k) = first else { return };
+            let mut interp = k.interp;
+            let mut cont = k.continuity;
+            egui::Grid::new("function-key")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Segment");
+                    ui.horizontal(|ui| {
+                        for (label, i, tip) in [
+                            ("Linear", Interp::Linear, "A straight line to the next key"),
+                            ("Bezier", Interp::Bezier, "A curve shaped by handles"),
+                            (
+                                "Stop-motion",
+                                Interp::Stop,
+                                "Hold until the next key (Harmony's stop-motion keyframe)",
+                            ),
+                        ] {
+                            ui.selectable_value(&mut interp, i, label)
+                                .on_hover_text(tip);
+                        }
+                    });
+                    ui.end_row();
+                    if interp == Interp::Bezier {
+                        ui.label("Continuity");
+                        egui::ComboBox::from_id_salt("continuity")
+                            .selected_text(match cont {
+                                Continuity::Smooth => "Smooth",
+                                Continuity::Straight => "Straight",
+                                Continuity::Corner => "Corner",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut cont, Continuity::Smooth, "Smooth");
+                                ui.selectable_value(&mut cont, Continuity::Straight, "Straight");
+                                ui.selectable_value(&mut cont, Continuity::Corner, "Corner");
+                            });
+                        ui.end_row();
+                    }
+                    if interp != k.interp || cont != k.continuity {
+                        let mut p = peg.clone();
+                        for &(param, f) in &st.selected {
+                            if let Some(km) = param.get_mut(&mut p).key_mut(f) {
+                                if interp == Interp::Bezier
+                                    && km.interp != Interp::Bezier
+                                    && km.right == [0.0, 0.0]
+                                {
+                                    // Start a new curve with gentle ease handles.
+                                    km.right = [1.0, 0.0];
+                                    km.left = [-1.0, 0.0];
+                                }
+                                km.interp = interp;
+                                km.continuity = cont;
+                            }
+                        }
+                        s.set_peg(layer, p);
+                        s.end_gesture();
+                    }
+                    let Some((param, f)) = one else { return };
+                    let mut kf = i64::from(k.frame);
+                    let mut kv = k.value;
+                    ui.label("Frame");
+                    let fr = ui.add(egui::DragValue::new(&mut kf).range(1..=100_000).speed(0.2));
+                    ui.end_row();
+                    ui.label("Value");
+                    let vr = ui.add(egui::DragValue::new(&mut kv).speed(0.1).max_decimals(3));
+                    ui.end_row();
+                    if fr.changed() || vr.changed() {
+                        let mut p = peg.clone();
+                        if param.get_mut(&mut p).move_key(f, kf as u32, kv) {
+                            st.selected = vec![(param, kf as u32)];
+                            st.active = Some((param, kf as u32));
+                            s.set_peg(layer, p);
+                        }
+                    }
+                    if fr.drag_stopped() || vr.drag_stopped() || fr.lost_focus() || vr.lost_focus()
+                    {
+                        s.end_gesture();
+                    }
+                });
+        });
+}
+
 fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegParams) {
     let layer = s.selected;
     let frame = s.frame;
     ui.horizontal(|ui| {
-        // Add a key at the current frame to the selected function, or to
-        // every shown function when none is selected.
         if ui
             .button("Add key")
-            .on_hover_text("Add a key at the current frame to the selected function, or to every shown function")
+            .on_hover_text(
+                "Add a key at the current frame to the functions of the selected keys, \
+                 or to every shown function",
+            )
             .clicked()
         {
             let mut p = peg.clone();
-            let targets: Vec<Param> = match st.selected {
-                Some((param, _)) => vec![param],
-                None => Param::ALL
+            let mut targets: Vec<Param> = st.selected.iter().map(|(q, _)| *q).collect();
+            targets.dedup();
+            if targets.is_empty() {
+                targets = Param::ALL
                     .into_iter()
                     .filter(|f| st.shown[*f as usize])
-                    .collect(),
-            };
+                    .collect();
+            }
             for param in targets {
                 let v = param.get(&p).map_or(param.rest(), |v| v.at(frame));
                 param.get_mut(&mut p).set_key(frame, v);
@@ -163,85 +383,36 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &Peg
             s.set_peg(layer, p);
             s.end_gesture();
         }
-        let sel = st.selected;
         if ui
-            .add_enabled(sel.is_some(), egui::Button::new("Delete key"))
+            .add_enabled(!st.selected.is_empty(), egui::Button::new("Delete keys"))
+            .on_hover_text("Delete the selected keys")
             .clicked()
         {
-            if let Some((param, f)) = sel {
-                let mut p = peg.clone();
+            let mut p = peg.clone();
+            for &(param, f) in &st.selected {
                 param.get_mut(&mut p).remove_key(f);
-                s.set_peg(layer, p);
-                s.end_gesture();
-                st.selected = None;
             }
+            s.set_peg(layer, p);
+            s.end_gesture();
+            st.selected.clear();
+            st.active = None;
         }
         ui.separator();
-        let key = sel.and_then(|(param, f)| {
-            param.get(peg).and_then(|v| v.keys().iter().find(|k| k.frame == f).copied())
-        });
-        match key {
-            Some(k) => {
-                let (param, f) = sel.unwrap_or((Param::X, 0));
-                let mut interp = k.interp;
-                ui.label(egui::RichText::new("Segment").font(theme::dense()).color(theme::TEXT_SECONDARY));
-                for (label, i, tip) in [
-                    ("Linear", Interp::Linear, "A straight line to the next key"),
-                    ("Bezier", Interp::Bezier, "A curve shaped by handles"),
-                    ("Stop-motion", Interp::Stop, "Hold until the next key (Harmony's stop-motion keyframe)"),
-                ] {
-                    ui.selectable_value(&mut interp, i, label).on_hover_text(tip);
-                }
-                let mut cont = k.continuity;
-                if interp == Interp::Bezier {
-                    egui::ComboBox::from_id_salt("continuity")
-                        .selected_text(match cont {
-                            Continuity::Smooth => "Smooth",
-                            Continuity::Straight => "Straight",
-                            Continuity::Corner => "Corner",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut cont, Continuity::Smooth, "Smooth");
-                            ui.selectable_value(&mut cont, Continuity::Straight, "Straight");
-                            ui.selectable_value(&mut cont, Continuity::Corner, "Corner");
-                        });
-                }
-                ui.separator();
-                let mut kf = k.frame as i64;
-                let mut kv = k.value;
-                ui.label(egui::RichText::new("Frame").font(theme::dense()).color(theme::TEXT_SECONDARY));
-                let fr = ui.add(egui::DragValue::new(&mut kf).range(1..=100_000).speed(0.2));
-                ui.label(egui::RichText::new("Value").font(theme::dense()).color(theme::TEXT_SECONDARY));
-                let vr = ui.add(egui::DragValue::new(&mut kv).speed(0.1).max_decimals(3));
-                if interp != k.interp || cont != k.continuity || fr.changed() || vr.changed() {
-                    let mut p = peg.clone();
-                    let v = param.get_mut(&mut p);
-                    if let Some(km) = v.key_mut(f) {
-                        if interp == Interp::Bezier && km.interp != Interp::Bezier && km.right == [0.0, 0.0] {
-                            // Start a new curve with gentle ease handles.
-                            km.right = [1.0, 0.0];
-                            km.left = [-1.0, 0.0];
-                        }
-                        km.interp = interp;
-                        km.continuity = cont;
-                    }
-                    if v.move_key(f, kf as u32, kv) {
-                        st.selected = Some((param, kf as u32));
-                    }
-                    s.set_peg(layer, p);
-                }
-                if fr.drag_stopped() || vr.drag_stopped() || fr.lost_focus() || vr.lost_focus() {
-                    s.end_gesture();
-                }
-            }
-            None => {
-                ui.label(
-                    egui::RichText::new("Click a key to edit it. Double-click a curve to add one.")
-                        .font(theme::dense())
-                        .color(theme::TEXT_SECONDARY),
-                );
-            }
+        if ui
+            .add_enabled(st.view.is_some(), egui::Button::new("Reset view"))
+            .on_hover_text("Show the whole scene and every value again")
+            .clicked()
+        {
+            st.view = None;
         }
+        ui.label(
+            egui::RichText::new(
+                "Wheel zooms time, Ctrl+wheel values, middle drag pans. \
+                 Drag on blank to box select.",
+            )
+            .font(theme::dense())
+            .color(theme::TEXT_SECONDARY),
+        );
     });
 }
 
@@ -306,27 +477,10 @@ impl Map {
     }
 }
 
-fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegParams) {
-    let layer = s.selected;
-    let size = ui.available_size().max(Vec2::new(120.0, 80.0));
-    let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
-    // The graph always fits its curves, so there is nothing to pan. The
-    // middle button does nothing here; it never picks or moves a key.
-    let (resp, _) = widgets::middle_pan(ui, resp);
-    let full = resp.rect;
-    theme::feather_panel(&painter, full, theme::BG_INPUT, 5.0);
-    let rect = full
-        .shrink2(Vec2::new(36.0, 14.0))
-        .translate(Vec2::new(14.0, 0.0));
-    let len = s.length().max(2) as f32;
-    let shown: Vec<Param> = Param::ALL
-        .into_iter()
-        .filter(|p| st.shown[*p as usize])
-        .collect();
-
-    // Fit the shown functions' values over the scene, with some room.
+/// The whole scene and every shown value, with some room.
+fn fit(peg: &PegParams, shown: &[Param], len: f32) -> Span {
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-    for p in &shown {
+    for p in shown {
         let v = p.get(peg).cloned().unwrap_or(Value::Constant(p.rest()));
         for i in 0..=200 {
             let x = v.at_f(1.0 + (len - 1.0) * i as f32 / 200.0);
@@ -348,217 +502,210 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
         (lo, hi) = (mid - 0.5, mid + 0.5);
     }
     let pad = (hi - lo) * 0.12;
-    let map = Map {
-        rect,
+    Span {
         f0: 1.0,
         f1: len,
         v0: lo - pad,
         v1: hi + pad,
-    };
+    }
+}
 
-    // Grid: frames every 5 (labels every 10), a few value lines.
-    for f in (5..=len as u32).step_by(5) {
-        let x = map.pos(f as f32, 0.0).x;
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(1.0, theme::LINE_SUBTLE),
-        );
-        if f % 10 == 0 {
-            painter.text(
-                Pos2::new(x, full.bottom() - 2.0),
-                Align2::CENTER_BOTTOM,
-                f.to_string(),
-                theme::numbers(),
-                theme::TEXT_SECONDARY,
-            );
+/// A round step (1, 2, 5, 10, 20, 50 ...) at least `least` units wide.
+fn nice_step(least: f32) -> f32 {
+    let mut step = 1e-3_f32;
+    loop {
+        for m in [1.0, 2.0, 5.0] {
+            if step * m >= least {
+                return step * m;
+            }
+        }
+        step *= 10.0;
+    }
+}
+
+/// Wheel zooms time at the pointer, Ctrl+wheel zooms values, a sideways
+/// wheel (or Shift+wheel) slides time, and the middle button pans.
+fn navigate(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    st: &mut FunctionState,
+    span: Span,
+    map: &Map,
+    len: f32,
+) {
+    let mut view = span;
+    if let Some(p) = resp.hover_pos().filter(|_| resp.hovered()) {
+        let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+        let most = (len * 4.0).max(40.0);
+        if zoom != 1.0 {
+            view = view.zoom_values(map.value(p.y), 1.0 / zoom);
+        }
+        if scroll.y != 0.0 {
+            view = view.zoom_frames(map.frame(p.x), (-scroll.y * 0.0025).exp(), most);
+        }
+        if scroll.x != 0.0 {
+            view = view.pan(Vec2::new(scroll.x, 0.0), map.rect);
         }
     }
-    for i in 0..=4 {
-        let v = map.v0 + (map.v1 - map.v0) * i as f32 / 4.0;
-        let y = map.pos(1.0, v).y;
-        painter.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(1.0, theme::LINE_SUBTLE),
-        );
-        painter.text(
-            Pos2::new(full.left() + 4.0, y),
-            Align2::LEFT_CENTER,
-            format!("{v:.1}"),
-            theme::numbers(),
-            theme::TEXT_SECONDARY,
-        );
+    if view != span {
+        st.view = Some(view);
     }
-    // Current frame.
-    let cx = map.pos(s.frame as f32, 0.0).x;
-    painter.line_segment(
-        [Pos2::new(cx, full.top()), Pos2::new(cx, full.bottom())],
-        Stroke::new(1.5, theme::ACCENT_TIME),
+}
+
+fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegParams) {
+    let layer = s.selected;
+    let size = ui.available_size().max(Vec2::new(120.0, 80.0));
+    let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+    let (resp, pan) = widgets::middle_pan(ui, resp);
+    let full = resp.rect;
+    theme::feather_panel(&painter, full, theme::BG_INPUT, 5.0);
+    let rect = Rect::from_min_max(
+        full.min + Vec2::new(50.0, 10.0),
+        full.max - Vec2::new(14.0, SCALE_H + 4.0),
     );
+    let len = s.length().max(2) as f32;
+    let shown: Vec<Param> = Param::ALL
+        .into_iter()
+        .filter(|p| st.shown[*p as usize])
+        .collect();
+    let mut span = st.view.unwrap_or_else(|| fit(peg, &shown, len));
+    if let Some(delta) = pan {
+        span = span.pan(delta, rect);
+        st.view = Some(span);
+    }
+    let map = Map {
+        rect,
+        f0: span.f0,
+        f1: span.f1,
+        v0: span.v0,
+        v1: span.v1,
+    };
+    navigate(ui, &resp, st, span, &map, len);
 
-    // Curves, then keys and handles on top.
-    for p in &shown {
-        let v = p.get(peg).cloned().unwrap_or(Value::Constant(p.rest()));
-        let steps = (rect.width() / 2.0).max(20.0) as usize;
-        let pts: Vec<Pos2> = (0..=steps)
-            .map(|i| {
-                let f = 1.0 + (len - 1.0) * i as f32 / steps as f32;
-                map.pos(f, v.at_f(f))
-            })
-            .collect();
-        painter.add(egui::Shape::line(pts, Stroke::new(1.5, p.colour())));
-        for k in v.keys() {
-            let c = map.pos(k.frame as f32, k.value);
-            let selected = st.selected == Some((*p, k.frame));
-            if selected && (k.interp == Interp::Bezier || prev_is_bezier(&v, k.frame)) {
-                for (h, show) in [
-                    (k.left, prev_is_bezier(&v, k.frame)),
-                    (k.right, k.interp == Interp::Bezier),
-                ] {
-                    if show {
-                        let hp = map.pos(k.frame as f32 + h[0], k.value + h[1]);
-                        painter.line_segment([c, hp], Stroke::new(1.0, theme::TEXT_SECONDARY));
-                        painter.circle_filled(hp, HANDLE_R, theme::TEXT_PRIMARY);
-                    }
-                }
-            }
-            let r = Rect::from_center_size(c, Vec2::splat(KEY_R * 2.0));
-            painter.rect_filled(
-                r,
-                1.0,
-                if selected {
-                    theme::ACCENT_SELECT
-                } else {
-                    p.colour()
-                },
-            );
-            painter.rect_stroke(
-                r,
-                1.0,
-                Stroke::new(1.0, theme::BG_BASE),
-                egui::StrokeKind::Outside,
-            );
-        }
+    paint_grid(&painter, &map, full, len);
+    let art = painter.with_clip_rect(rect.expand(KEY_R + 1.0));
+    paint_curves(&art, st, peg, &shown, &map);
+    // The playhead: a line and the current frame on the frame scale.
+    let cx = map.pos(s.frame as f32, 0.0).x;
+    if (rect.left()..=rect.right()).contains(&cx) {
+        painter.line_segment(
+            [Pos2::new(cx, rect.top()), Pos2::new(cx, rect.bottom())],
+            Stroke::new(1.5, theme::ACCENT_TIME),
+        );
+        crate::views::timing::frame_tag(
+            &painter,
+            Pos2::new(cx, rect.bottom() + SCALE_H / 2.0 + 2.0),
+            s.frame,
+        );
     }
 
-    // Input.
-    let selected_now = st.selected;
-    let hit = |pos: Pos2| -> Option<(Param, u32, Grab)> {
-        let mut best: Option<(f32, (Param, u32, Grab))> = None;
-        for p in &shown {
-            let Some(v) = p.get(peg) else { continue };
-            for k in v.keys() {
-                let c = map.pos(k.frame as f32, k.value);
-                let mut cands = vec![(c, Grab::Key)];
-                if selected_now == Some((*p, k.frame)) {
-                    if k.interp == Interp::Bezier {
-                        cands.push((
-                            map.pos(k.frame as f32 + k.right[0], k.value + k.right[1]),
-                            Grab::RightHandle,
-                        ));
+    let pointer = resp.interact_pointer_pos();
+    let press = ui.input(|i| i.pointer.press_origin()).or(pointer);
+    let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+    let last = s.length();
+    let frame_at = |x: f32| (map.frame(x).round().max(1.0) as u32).min(last);
+    let active = st.active;
+    let hit = |pos: Pos2| hit_key(pos, active, peg, &shown, &map);
+
+    if let Some(at) = press.filter(|_| resp.drag_started() || resp.clicked()) {
+        if at.y > rect.bottom() {
+            s.frame = frame_at(at.x);
+            st.drag = resp.drag_started().then_some(Drag::Scrub);
+        } else if let Some((id, grab)) = hit(at) {
+            if grab != Grab::Key {
+                st.drag = resp.drag_started().then_some(Drag::Handle(id, grab));
+            } else if ctrl {
+                st.selected.retain(|k| *k != id);
+            } else {
+                if !st.selected.contains(&id) {
+                    if !shift {
+                        st.selected.clear();
                     }
-                    if prev_is_bezier(v, k.frame) {
-                        cands.push((
-                            map.pos(k.frame as f32 + k.left[0], k.value + k.left[1]),
-                            Grab::LeftHandle,
-                        ));
-                    }
+                    st.selected.push(id);
                 }
-                for (q, g) in cands {
-                    let d = q.distance(pos);
-                    if d <= 8.0 && best.is_none_or(|(bd, _)| d < bd) {
-                        best = Some((d, (*p, k.frame, g)));
-                    }
+                st.active = Some(id);
+                if resp.drag_started() {
+                    st.drag = Some(Drag::Keys {
+                        start: Box::new(peg.clone()),
+                        from: at,
+                        keys: st.selected.clone(),
+                    });
                 }
             }
+        } else if resp.drag_started() {
+            st.drag = Some(Drag::Box(at));
+        } else {
+            if !(shift || ctrl) {
+                st.selected.clear();
+                st.active = None;
+            }
+            s.frame = frame_at(at.x);
         }
-        best.map(|b| b.1)
-    };
-    if let Some(pos) = resp.interact_pointer_pos() {
-        if resp.drag_started() || resp.clicked() {
-            match hit(pos) {
-                Some((p, f, g)) => {
-                    st.selected = Some((p, f));
-                    st.drag = resp.drag_started().then_some((p, f, g));
-                }
-                None => {
-                    st.selected = None;
-                    s.frame = (map.frame(pos.x).round() as u32).clamp(1, s.length());
+    }
+    if let (Some(pos), true) = (pointer, resp.double_clicked()) {
+        if hit(pos).is_none() && pos.y <= rect.bottom() {
+            add_key_on_nearest_curve(s, st, peg, &shown, &map, pos);
+        }
+    }
+    if let (Some(pos), true) = (pointer, resp.dragged()) {
+        match &st.drag {
+            Some(Drag::Scrub) => s.frame = frame_at(pos.x),
+            Some(Drag::Keys { start, from, keys }) => {
+                let df = (map.frame(pos.x) - map.frame(from.x)).round() as i64;
+                let dv = map.value(pos.y) - map.value(from.y);
+                if let Some(p) = move_keys(start, keys, df, dv) {
+                    let moved = |(q, f): KeyId| (q, (i64::from(f) + df) as u32);
+                    st.selected = keys.iter().map(|&k| moved(k)).collect();
+                    st.active = st
+                        .active
+                        .and_then(|a| keys.iter().position(|k| *k == a))
+                        .map(|i| moved(keys[i]));
+                    s.set_peg(layer, p);
                 }
             }
-        }
-        if resp.double_clicked() && hit(pos).is_none() {
-            // Add a key on the nearest shown curve at that frame.
-            let f = (map.frame(pos.x).round() as u32).clamp(1, s.length());
-            let near = shown
-                .iter()
-                .map(|p| {
-                    let v = p.get(peg).cloned().unwrap_or(Value::Constant(p.rest()));
-                    let y = map.pos(f as f32, v.at(f)).y;
-                    ((y - pos.y).abs(), *p, v.at(f))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0));
-            if let Some((_, p, value)) = near {
+            Some(Drag::Handle((p, f), grab)) => {
                 let mut np = peg.clone();
-                p.get_mut(&mut np).set_key(f, value);
-                s.set_peg(layer, np);
-                s.end_gesture();
-                st.selected = Some((p, f));
-            }
-        }
-        if resp.dragged() {
-            if let Some((p, f, g)) = st.drag {
-                let mut np = peg.clone();
-                let v = p.get_mut(&mut np);
-                match g {
-                    Grab::Key => {
-                        let to = (map.frame(pos.x).round() as i64).clamp(1, 100_000) as u32;
-                        let val = map.value(pos.y);
-                        if v.move_key(f, to, val) {
-                            st.drag = Some((p, to, g));
-                            st.selected = Some((p, to));
-                        }
-                    }
-                    Grab::LeftHandle | Grab::RightHandle => {
-                        if let Some(k) = v.key_mut(f) {
-                            let off = [map.frame(pos.x) - f as f32, map.value(pos.y) - k.value];
-                            let right = g == Grab::RightHandle;
-                            let off = if right {
-                                [off[0].max(0.0), off[1]]
-                            } else {
-                                [off[0].min(0.0), off[1]]
-                            };
-                            let (mine, other) = if right {
-                                (&mut k.right, &mut k.left)
-                            } else {
-                                (&mut k.left, &mut k.right)
-                            };
-                            *mine = off;
-                            // Continuity: Smooth mirrors angle and length,
-                            // Straight keeps the other handle's length.
-                            let other_len =
-                                (other[0] * other[0] + (other[1] / map.per_point()).powi(2)).sqrt();
-                            match k.continuity {
-                                Continuity::Smooth => *other = [-off[0], -off[1]],
-                                Continuity::Straight => {
-                                    let len = (off[0] * off[0]
-                                        + (off[1] / map.per_point()).powi(2))
-                                    .sqrt()
-                                    .max(1e-6);
-                                    let scale = other_len / len;
-                                    *other = [-off[0] * scale, -off[1] * scale];
-                                }
-                                Continuity::Corner => {}
-                            }
-                        }
-                    }
+                if let Some(k) = p.get_mut(&mut np).key_mut(*f) {
+                    drag_handle(k, *grab, &map, pos);
                 }
                 s.set_peg(layer, np);
             }
+            Some(Drag::Box(from)) => {
+                let r = Rect::from_two_pos(*from, pos);
+                painter.rect_filled(r, 0.0, theme::ACCENT_SELECT.gamma_multiply(0.12));
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.0, theme::ACCENT_SELECT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            None => {}
         }
     }
     if resp.drag_stopped() {
-        st.drag = None;
-        s.end_gesture();
+        match st.drag.take() {
+            Some(Drag::Box(from)) => {
+                let end = pointer.or(ui.input(|i| i.pointer.latest_pos()));
+                let r = Rect::from_two_pos(from, end.unwrap_or(from));
+                let inside = keys_in(r, peg, &shown, &map);
+                if ctrl {
+                    st.selected.retain(|k| !inside.contains(k));
+                } else {
+                    if !shift {
+                        st.selected.clear();
+                    }
+                    for k in inside {
+                        if !st.selected.contains(&k) {
+                            st.selected.push(k);
+                        }
+                    }
+                }
+                st.active = st.selected.last().copied();
+            }
+            Some(Drag::Keys { .. } | Drag::Handle(..)) => s.end_gesture(),
+            _ => {}
+        }
     }
     if shown.is_empty() {
         painter.text(
@@ -571,6 +718,230 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
     }
 }
 
+/// Grid lines at round steps, frame numbers on the frame scale, values
+/// on the left. Frames outside the scene are shaded.
+fn paint_grid(painter: &egui::Painter, map: &Map, full: Rect, len: f32) {
+    let rect = map.rect;
+    let fstep = nice_step(60.0 * (map.f1 - map.f0) / rect.width()).max(1.0);
+    let mut f = (map.f0 / fstep).ceil() * fstep;
+    while f <= map.f1 {
+        let x = map.pos(f, 0.0).x;
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(1.0, theme::LINE_SUBTLE),
+        );
+        if f >= 1.0 {
+            painter.text(
+                Pos2::new(x, rect.bottom() + SCALE_H / 2.0 + 2.0),
+                Align2::CENTER_CENTER,
+                format!("{f}"),
+                theme::numbers(),
+                theme::TEXT_SECONDARY,
+            );
+        }
+        f += fstep;
+    }
+    for (a, b) in [(map.f0, 1.0), (len, map.f1)] {
+        if a < b {
+            let r = Rect::from_x_y_ranges(
+                map.pos(a, 0.0).x.max(rect.left())..=map.pos(b, 0.0).x.min(rect.right()),
+                rect.y_range(),
+            );
+            painter.rect_filled(r, 0.0, theme::BG_BASE.gamma_multiply(0.5));
+        }
+    }
+    let vstep = nice_step(40.0 * (map.v1 - map.v0) / rect.height());
+    let decimals = if vstep >= 1.0 {
+        0
+    } else {
+        (-vstep.log10()).ceil() as usize
+    };
+    let mut v = (map.v0 / vstep).ceil() * vstep;
+    while v <= map.v1 {
+        let y = map.pos(map.f0, v).y;
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            Stroke::new(1.0, theme::LINE_SUBTLE),
+        );
+        painter.text(
+            Pos2::new(rect.left() - 6.0, y),
+            Align2::RIGHT_CENTER,
+            format!("{v:.decimals$}"),
+            theme::numbers(),
+            theme::TEXT_SECONDARY,
+        );
+        v += vstep;
+    }
+    let _ = full;
+}
+
+/// Curves, then keys and the active key's handles on top.
+fn paint_curves(
+    painter: &egui::Painter,
+    st: &FunctionState,
+    peg: &PegParams,
+    shown: &[Param],
+    map: &Map,
+) {
+    let rect = map.rect;
+    for p in shown {
+        let v = p.get(peg).cloned().unwrap_or(Value::Constant(p.rest()));
+        let steps = (rect.width() / 2.0).max(20.0) as usize;
+        let pts: Vec<Pos2> = (0..=steps)
+            .map(|i| {
+                let f = map.f0 + (map.f1 - map.f0) * i as f32 / steps as f32;
+                map.pos(f, v.at_f(f.max(1.0)))
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, Stroke::new(1.5, p.colour())));
+        for k in v.keys() {
+            let c = map.pos(k.frame as f32, k.value);
+            let id = (*p, k.frame);
+            if st.active == Some(id) {
+                for (h, show) in [
+                    (k.left, prev_is_bezier(&v, k.frame)),
+                    (k.right, k.interp == Interp::Bezier),
+                ] {
+                    if show {
+                        let hp = map.pos(k.frame as f32 + h[0], k.value + h[1]);
+                        painter.line_segment([c, hp], Stroke::new(1.0, theme::TEXT_SECONDARY));
+                        painter.circle_filled(hp, HANDLE_R, theme::TEXT_PRIMARY);
+                    }
+                }
+            }
+            let r = Rect::from_center_size(c, Vec2::splat(KEY_R * 2.0));
+            let fill = if st.selected.contains(&id) {
+                theme::ACCENT_SELECT
+            } else {
+                p.colour()
+            };
+            painter.rect_filled(r, 1.0, fill);
+            painter.rect_stroke(
+                r,
+                1.0,
+                Stroke::new(1.0, theme::BG_BASE),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+}
+
+/// The key or active-key handle nearest `pos`, within 8 points.
+fn hit_key(
+    pos: Pos2,
+    active: Option<KeyId>,
+    peg: &PegParams,
+    shown: &[Param],
+    map: &Map,
+) -> Option<(KeyId, Grab)> {
+    let mut best: Option<(f32, (KeyId, Grab))> = None;
+    for p in shown {
+        let Some(v) = p.get(peg) else { continue };
+        for k in v.keys() {
+            let id = (*p, k.frame);
+            let mut cands = vec![(map.pos(k.frame as f32, k.value), Grab::Key)];
+            if active == Some(id) {
+                if k.interp == Interp::Bezier {
+                    cands.push((
+                        map.pos(k.frame as f32 + k.right[0], k.value + k.right[1]),
+                        Grab::RightHandle,
+                    ));
+                }
+                if prev_is_bezier(v, k.frame) {
+                    cands.push((
+                        map.pos(k.frame as f32 + k.left[0], k.value + k.left[1]),
+                        Grab::LeftHandle,
+                    ));
+                }
+            }
+            for (q, g) in cands {
+                let d = q.distance(pos);
+                if d <= 8.0 && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, (id, g)));
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// The shown keys inside `r` (screen).
+fn keys_in(r: Rect, peg: &PegParams, shown: &[Param], map: &Map) -> Vec<KeyId> {
+    shown
+        .iter()
+        .filter_map(|p| p.get(peg).map(|v| (p, v)))
+        .flat_map(|(p, v)| {
+            v.keys()
+                .iter()
+                .filter(|k| r.contains(map.pos(k.frame as f32, k.value)))
+                .map(|k| (*p, k.frame))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Double-click on blank: a key on the nearest shown curve at that frame.
+fn add_key_on_nearest_curve(
+    s: &mut Session,
+    st: &mut FunctionState,
+    peg: &PegParams,
+    shown: &[Param],
+    map: &Map,
+    pos: Pos2,
+) {
+    let f = (map.frame(pos.x).round().max(1.0) as u32).min(s.length());
+    let near = shown
+        .iter()
+        .map(|p| {
+            let v = p.get(peg).cloned().unwrap_or(Value::Constant(p.rest()));
+            let y = map.pos(f as f32, v.at(f)).y;
+            ((y - pos.y).abs(), *p, v.at(f))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, p, value)) = near {
+        let mut np = peg.clone();
+        p.get_mut(&mut np).set_key(f, value);
+        s.set_peg(s.selected, np);
+        s.end_gesture();
+        st.selected = vec![(p, f)];
+        st.active = Some((p, f));
+    }
+}
+
+/// Drag one Bézier handle to `pos`; the other follows the continuity.
+fn drag_handle(k: &mut symphony_core::anim::Key, grab: Grab, map: &Map, pos: Pos2) {
+    let off = [
+        map.frame(pos.x) - k.frame as f32,
+        map.value(pos.y) - k.value,
+    ];
+    let right = grab == Grab::RightHandle;
+    let off = if right {
+        [off[0].max(0.0), off[1]]
+    } else {
+        [off[0].min(0.0), off[1]]
+    };
+    let (mine, other) = if right {
+        (&mut k.right, &mut k.left)
+    } else {
+        (&mut k.left, &mut k.right)
+    };
+    *mine = off;
+    // Continuity: Smooth mirrors angle and length, Straight keeps the
+    // other handle's length.
+    let other_len = (other[0] * other[0] + (other[1] / map.per_point()).powi(2)).sqrt();
+    match k.continuity {
+        Continuity::Smooth => *other = [-off[0], -off[1]],
+        Continuity::Straight => {
+            let len = (off[0] * off[0] + (off[1] / map.per_point()).powi(2))
+                .sqrt()
+                .max(1e-6);
+            let scale = other_len / len;
+            *other = [-off[0] * scale, -off[1] * scale];
+        }
+        Continuity::Corner => {}
+    }
+}
+
 /// Is the segment that ends at `frame` a Bézier one (so the key's left
 /// handle matters)?
 fn prev_is_bezier(v: &Value, frame: u32) -> bool {
@@ -579,4 +950,108 @@ fn prev_is_bezier(v: &Value, frame: u32) -> bool {
         .position(|k| k.frame == frame)
         .and_then(|i| i.checked_sub(1))
         .is_some_and(|i| keys[i].interp == Interp::Bezier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peg with keys on X at frames 3 and 10, and on Y at 6.
+    fn keyed() -> PegParams {
+        let mut p = PegParams::default();
+        p.x.set_key(3, 0.0);
+        p.x.set_key(10, 5.0);
+        p.y.set_key(6, 2.0);
+        p
+    }
+
+    fn frames(v: &Value) -> Vec<(u32, f32)> {
+        v.keys().iter().map(|k| (k.frame, k.value)).collect()
+    }
+
+    #[test]
+    fn selected_keys_move_together() {
+        let keys = [(Param::X, 3), (Param::Y, 6)];
+        let p = move_keys(&keyed(), &keys, 2, 1.0).expect("room to move");
+        assert_eq!(frames(&p.x), [(5, 1.0), (10, 5.0)]);
+        assert_eq!(frames(&p.y), [(8, 3.0)]);
+        // Both X keys may pass each other's old frames together.
+        let both = [(Param::X, 3), (Param::X, 10)];
+        let p = move_keys(&keyed(), &both, 7, 0.0).expect("both move");
+        assert_eq!(frames(&p.x), [(10, 0.0), (17, 5.0)]);
+    }
+
+    #[test]
+    fn keys_never_land_on_a_still_key_or_before_frame_one() {
+        let keys = [(Param::X, 3)];
+        assert!(
+            move_keys(&keyed(), &keys, 7, 0.0).is_none(),
+            "frame 10 is taken"
+        );
+        assert!(move_keys(&keyed(), &keys, -3, 0.0).is_none(), "frame 0");
+        assert!(move_keys(&keyed(), &keys, -2, 0.0).is_some(), "frame 1");
+    }
+
+    #[test]
+    fn zoom_keeps_the_point_under_the_pointer() {
+        let span = Span {
+            f0: 1.0,
+            f1: 101.0,
+            v0: -10.0,
+            v1: 10.0,
+        };
+        let z = span.zoom_frames(26.0, 0.5, 1000.0);
+        assert!((z.f1 - z.f0 - 50.0).abs() < 1e-4);
+        assert!(((26.0 - z.f0) / (z.f1 - z.f0) - 0.25).abs() < 1e-5);
+        let z = span.zoom_values(5.0, 2.0);
+        assert!((z.v1 - z.v0 - 40.0).abs() < 1e-4);
+        assert!(((5.0 - z.v0) / (z.v1 - z.v0) - 0.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_box_drag_selects_keys_and_delete_removes_them_all() {
+        use egui_kittest::kittest::Queryable;
+        let mut session = Session::new_scene();
+        session.set_peg(0, keyed());
+        session.end_gesture();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(900.0, 420.0))
+            .build_ui_state(
+                |u, (s, st)| super::ui(u, s, st),
+                (session, FunctionState::default()),
+            );
+        h.run_steps(2);
+        // From the blank margin left of frame 1 to past the last key, above
+        // the frame scale.
+        let (from, to) = (Pos2::new(190.0, 46.0), Pos2::new(885.0, 385.0));
+        let none = egui::Modifiers::NONE;
+        let button = egui::PointerButton::Primary;
+        h.input_mut().events.push(egui::Event::PointerMoved(from));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: from,
+            button,
+            pressed: true,
+            modifiers: none,
+        });
+        h.run_steps(1);
+        for k in 1..=5 {
+            let at = from + (to - from) * (k as f32 / 5.0);
+            h.input_mut().events.push(egui::Event::PointerMoved(at));
+            h.run_steps(1);
+        }
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: to,
+            button,
+            pressed: false,
+            modifiers: none,
+        });
+        h.run_steps(2);
+        let mut picked = h.state().1.selected.clone();
+        picked.sort_by_key(|(p, f)| (*p as usize, *f));
+        assert_eq!(picked, [(Param::X, 3), (Param::X, 10), (Param::Y, 6)]);
+        h.get_by_label("Delete keys").click();
+        h.run_steps(2);
+        let peg = h.state().0.doc.peg(0).cloned().expect("a peg");
+        assert!(peg.x.keys().is_empty() && peg.y.keys().is_empty());
+    }
 }
