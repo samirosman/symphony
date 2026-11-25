@@ -50,6 +50,16 @@ pub const FUNCTION_Y: Color32 = hex(0x6CCB8E);
 pub const FUNCTION_ANGLE: Color32 = hex(0x6FA8F5);
 pub const FUNCTION_SCALE_X: Color32 = hex(0xC99AF2);
 pub const FUNCTION_SCALE_Y: Color32 = hex(0x5CCFD0);
+// Bone colours in the Camera view: one hue per group of bones,
+// readable on the stage and on BG_BASE. No blue: blue marks the
+// selected bone (ACCENT_SELECT).
+pub const RIG_RED: Color32 = hex(0xE2665C);
+pub const RIG_ORANGE: Color32 = hex(0xE8913A);
+pub const RIG_YELLOW: Color32 = hex(0xD8B92E);
+pub const RIG_GREEN: Color32 = hex(0x4FB873);
+pub const RIG_TEAL: Color32 = hex(0x3DB8B4);
+pub const RIG_PURPLE: Color32 = hex(0xB27BE8);
+pub const RIG_PINK: Color32 = hex(0xE476B4);
 /// Restrained contact shadow under the stage (D3.10).
 pub const SHADOW: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 76);
 

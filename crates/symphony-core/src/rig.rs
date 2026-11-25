@@ -36,6 +36,15 @@ pub struct Bone {
     /// degrees; None: no limit.
     #[serde(default)]
     pub angle_limits: Option<[f32; 2]>,
+    /// The colour of its handles in the Camera view.
+    #[serde(default)]
+    pub colour: BoneColour,
+    /// Show the bone's name next to it in the Camera view.
+    #[serde(default)]
+    pub show_label: bool,
+    /// Its handles take no drag (it still shows, and can be selected).
+    #[serde(default)]
+    pub locked: bool,
     /// An anchor on the bone's tip (smart rigs).
     /// (Boxed: most bones have none, and nodes stay small.)
     #[serde(default)]
@@ -44,6 +53,46 @@ pub struct Bone {
 
 fn one() -> Value {
     Value::Constant(1.0)
+}
+
+/// A colour for grouping bones on screen (arms, legs, face controls).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoneColour {
+    #[default]
+    Plain,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Purple,
+    Pink,
+}
+
+impl BoneColour {
+    pub const ALL: [BoneColour; 8] = [
+        BoneColour::Plain,
+        BoneColour::Red,
+        BoneColour::Orange,
+        BoneColour::Yellow,
+        BoneColour::Green,
+        BoneColour::Teal,
+        BoneColour::Purple,
+        BoneColour::Pink,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            BoneColour::Plain => "Plain",
+            BoneColour::Red => "Red",
+            BoneColour::Orange => "Orange",
+            BoneColour::Yellow => "Yellow",
+            BoneColour::Green => "Green",
+            BoneColour::Teal => "Teal",
+            BoneColour::Purple => "Purple",
+            BoneColour::Pink => "Pink",
+        }
+    }
 }
 
 /// How a bone changes length.
@@ -91,6 +140,9 @@ impl Default for Bone {
             stretch: one(),
             stretch_limits: None,
             angle_limits: None,
+            colour: BoneColour::default(),
+            show_label: false,
+            locked: false,
             anchor: None,
         }
     }

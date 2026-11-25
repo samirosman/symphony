@@ -111,3 +111,16 @@ fn a_turn_stops_at_the_angle_limit() {
     let angle = y.atan2(x).to_degrees();
     assert!((angle - 30.0).abs() < 0.5, "tip at {angle} degrees");
 }
+
+#[test]
+fn a_locked_bone_takes_no_drag() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    let graph = &mut h.state_mut().s.doc.graph;
+    if let Some(NodeKind::Bone(b)) = graph.node_mut(bone).map(|n| &mut n.kind) {
+        b.locked = true;
+    }
+    h.run_steps(1);
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    drag(&mut h, (200.0, 0.0), (0.0, 200.0), Modifiers::NONE);
+    assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
+}

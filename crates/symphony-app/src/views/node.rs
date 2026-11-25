@@ -1674,6 +1674,25 @@ fn bone_batch_form(ui: &mut egui::Ui, s: &mut Session, ids: &[NodeId]) {
         .filter_map(|&id| s.doc.graph.bone(id).cloned())
         .collect();
     let Some(first) = bones.first() else { return };
+    property_heading(ui, "Display");
+    let mut display = first.clone();
+    bone_display_rows(ui, &mut display);
+    if display.colour != first.colour {
+        edit_bone_batch(s, ids, "colour", false, |_, bone| {
+            bone.colour = display.colour
+        });
+    }
+    if display.show_label != first.show_label {
+        edit_bone_batch(s, ids, "label", false, |_, bone| {
+            bone.show_label = display.show_label
+        });
+    }
+    if display.locked != first.locked {
+        edit_bone_batch(s, ids, "lock", false, |_, bone| {
+            bone.locked = display.locked
+        });
+    }
+    ui.add_space(8.0);
     property_heading(ui, "Posing");
     let mut stiffness = first.spring_stiffness * 100.0;
     let mixed = shared(&bones, |bone| bone.spring_stiffness).is_none();
@@ -1866,6 +1885,25 @@ fn angle_limit_rows(
     }
 }
 
+/// Colour, Show label and Lock for one bone.
+fn bone_display_rows(ui: &mut egui::Ui, bone: &mut symphony_core::rig::Bone) {
+    use symphony_core::rig::BoneColour;
+    property_row(ui, "Colour", |ui| {
+        egui::ComboBox::from_id_salt("bone-colour")
+            .selected_text(bone.colour.title())
+            .show_ui(ui, |ui| {
+                for colour in BoneColour::ALL {
+                    ui.selectable_value(&mut bone.colour, colour, colour.title());
+                }
+            })
+            .response
+    });
+    widgets::checkbox(ui, &mut bone.show_label, "Show label")
+        .on_hover_text("Show the bone's name next to it in the Camera view.");
+    widgets::checkbox(ui, &mut bone.locked, "Lock")
+        .on_hover_text("The bone shows but takes no drag in the Camera view.");
+}
+
 /// A new angle limit: a quarter turn each way from the rest angle.
 const DEFAULT_ANGLE_LIMITS: [f32; 2] = [-90.0, 90.0];
 
@@ -2004,6 +2042,9 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
                 }
                 return;
             }
+            ui.add_space(8.0);
+            property_heading(ui, "Display");
+            bone_display_rows(ui, bone);
             ui.add_space(8.0);
             property_heading(ui, "Posing");
             let mut percent = bone.spring_stiffness * 100.0;

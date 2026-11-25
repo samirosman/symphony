@@ -51,18 +51,67 @@ pub fn draw_rest_guide(painter: &egui::Painter, s: &Session, view: Affine) {
     painter.circle(tip, 3.0, outline, Stroke::new(1.2, ink));
 }
 
+/// A bone's handle colour: the selection blue, else its own colour,
+/// faded when it is locked.
+fn bone_ink(bone: Option<&symphony_core::rig::Bone>, selected: bool) -> egui::Color32 {
+    use symphony_core::rig::BoneColour;
+    let base = if selected {
+        theme::ACCENT_SELECT
+    } else {
+        match bone.map_or(BoneColour::Plain, |bone| bone.colour) {
+            BoneColour::Plain => theme::TEXT_SECONDARY,
+            BoneColour::Red => theme::RIG_RED,
+            BoneColour::Orange => theme::RIG_ORANGE,
+            BoneColour::Yellow => theme::RIG_YELLOW,
+            BoneColour::Green => theme::RIG_GREEN,
+            BoneColour::Teal => theme::RIG_TEAL,
+            BoneColour::Purple => theme::RIG_PURPLE,
+            BoneColour::Pink => theme::RIG_PINK,
+        }
+    };
+    if bone.is_some_and(|bone| bone.locked) {
+        base.gamma_multiply(0.5)
+    } else {
+        base
+    }
+}
+
+/// The bone's name beside its middle, on a dark chip so it reads over
+/// any artwork.
+fn paint_label(painter: &egui::Painter, start: Pos2, tip: Pos2, name: &str, ink: egui::Color32) {
+    let along = (tip - start).normalized();
+    let side = egui::vec2(-along.y, along.x) * 12.0;
+    let at = start + (tip - start) * 0.5 + side;
+    let galley = painter.layout_no_wrap(
+        name.to_owned(),
+        egui::FontId::proportional(theme::SIZE_DENSE),
+        ink,
+    );
+    let rect = egui::Align2::CENTER_CENTER
+        .anchor_size(at, galley.size())
+        .expand2(egui::vec2(4.0, 1.0));
+    painter.rect_filled(rect, 3.0, theme::BG_BASE.gamma_multiply(0.8));
+    painter.galley(rect.shrink2(egui::vec2(4.0, 1.0)).min, galley, ink);
+}
+
+/// A bone as a long diamond. A dark edge under the coloured line keeps
+/// every bone colour above 3:1 on the light stage too (D4.4).
 fn paint_bone(painter: &egui::Painter, start: Pos2, tip: Pos2, ink: egui::Color32) {
+    let edge = Stroke::new(3.0, theme::BG_BASE.gamma_multiply(0.85));
     let delta = tip - start;
     if delta.length() > 12.0 {
         let along = delta.normalized();
         let across = egui::vec2(-along.y, along.x) * 4.0;
         let shoulder = start + along * 7.0;
+        let outline = vec![start, shoulder + across, tip, shoulder - across];
+        painter.add(egui::Shape::closed_line(outline.clone(), edge));
         painter.add(egui::Shape::convex_polygon(
-            vec![start, shoulder + across, tip, shoulder - across],
+            outline,
             ink.gamma_multiply(0.28),
             Stroke::new(1.0, ink),
         ));
     } else {
+        painter.line_segment([start, tip], edge);
         painter.line_segment([start, tip], Stroke::new(1.0, ink));
     }
 }
@@ -88,6 +137,12 @@ pub fn ui(
     };
     let root = s.doc.graph.rig_root(selected);
     let graph = &s.doc.graph;
+    let locked_bones: Vec<NodeId> = graph
+        .nodes()
+        .filter(|(_, node)| matches!(&node.kind, NodeKind::Bone(bone) if bone.locked))
+        .map(|(id, _)| id)
+        .collect();
+    let locked = |id: NodeId| locked_bones.contains(&id);
     let mut handles = Vec::new();
     for (id, _) in graph.nodes().filter(|(id, _)| graph.bone(*id).is_some()) {
         if graph.rig_root(id) != root {
@@ -113,12 +168,15 @@ pub fn ui(
                 )))
             });
         let handle = target.unwrap_or(tip);
-        let ink = if id == selected {
-            theme::ACCENT_SELECT
-        } else {
-            theme::TEXT_SECONDARY
-        };
+        let ink = bone_ink(graph.bone(id), id == selected);
         paint_bone(painter, from, tip, ink);
+        if let Some(name) = graph
+            .node(id)
+            .filter(|_| graph.bone(id).is_some_and(|bone| bone.show_label))
+            .map(|node| node.name.as_str())
+        {
+            paint_label(painter, from, tip, name, ink);
+        }
         painter.circle_filled(handle, 5.5, theme::BG_BASE);
         if target.is_some() {
             if handle.distance(tip) > 6.0 {
@@ -138,17 +196,13 @@ pub fn ui(
             from,
             handle,
             graph.parent_bone(id).is_some(),
-            controller.is_none_or(|owner| owner == id),
+            controller.is_none_or(|owner| owner == id) && !locked(id),
         ));
     }
     // Draw joints over the tips they share with their parent.
     for &(id, joint, _, connected, _) in &handles {
         if connected {
-            let ink = if id == selected {
-                theme::ACCENT_SELECT
-            } else {
-                theme::TEXT_SECONDARY
-            };
+            let ink = bone_ink(graph.bone(id), id == selected);
             painter.circle_filled(joint, 6.0, theme::BG_BASE);
             painter.circle_stroke(joint, 4.0, Stroke::new(1.5, ink));
         }
@@ -212,6 +266,7 @@ pub fn ui(
     let nearest_anchor = |pointer: Pos2| {
         anchors
             .iter()
+            .filter(|&&(id, _)| !locked(id))
             .map(|&(id, at)| (id, pointer.distance(at)))
             .filter(|(_, d)| *d <= 10.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -259,7 +314,7 @@ pub fn ui(
                 .map(|id| Drag::Anchor(id, grab))
                 .or_else(|| nearest(grab, false).map(|id| Drag::Tip(id, grab)))
                 .or_else(|| {
-                    let id = bone_at(grab)?;
+                    let id = bone_at(grab).filter(|&id| !locked(id))?;
                     let &(_, base, tip, _, _) = handles.iter().find(|h| h.0 == id)?;
                     Some(Drag::Turn {
                         id,
