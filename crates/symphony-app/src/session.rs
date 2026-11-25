@@ -357,6 +357,8 @@ pub struct Session {
     /// A layer with work on it, waiting on "Delete layer?" (by column, so
     /// it survives layers moving).
     pub confirm_delete: Option<symphony_core::id::Id>,
+    /// More layers with work on them, asked about one after the other.
+    confirm_delete_next: Vec<symphony_core::id::Id>,
     /// The layers the Transform tool works on, by layer node, so the list
     /// survives layers moving. Empty: no box.
     pub transform_layers: Vec<NodeId>,
@@ -480,6 +482,7 @@ impl Session {
             playing: false,
             selected: 0,
             confirm_delete: None,
+            confirm_delete_next: Vec::new(),
             transform_layers: Vec::new(),
             transform_for: None,
             selected_node: None,
@@ -2797,7 +2800,8 @@ impl Session {
         self.note(format!("Moved {name}"));
     }
 
-    /// How many of layer `i`'s drawings hold strokes or an image.
+    /// How many of layer `i`'s drawings hold strokes, colour zones or an
+    /// image.
     pub fn drawings_with_work(&self, i: usize) -> usize {
         let Some(column) = self.doc.column(i).map(|c| c.id) else {
             return 0;
@@ -2805,8 +2809,30 @@ impl Session {
         self.doc
             .drawings
             .values()
-            .filter(|d| d.column == column && (!d.strokes.is_empty() || d.image.is_some()))
+            .filter(|d| {
+                d.column == column
+                    && (!d.strokes.is_empty() || !d.fills.is_empty() || d.image.is_some())
+            })
             .count()
+    }
+
+    /// Ask "Delete layer?" for each of these layers (by column), one
+    /// after the other.
+    pub fn ask_delete_layers(&mut self, columns: Vec<symphony_core::id::Id>) {
+        self.confirm_delete_next.extend(columns);
+        if self.confirm_delete.is_none() {
+            self.answer_delete_question();
+        }
+    }
+
+    /// "Delete layer?" has its answer: go on to the next layer that
+    /// waits, if any.
+    pub fn answer_delete_question(&mut self) {
+        self.confirm_delete = if self.confirm_delete_next.is_empty() {
+            None
+        } else {
+            Some(self.confirm_delete_next.remove(0))
+        };
     }
 
     /// Delete layer `i`. A layer with work on it asks first (see
@@ -3743,6 +3769,14 @@ mod tests {
         let st = line(&mut s, 0.0, 10.0);
         s.commit_stroke(0, 1, st);
         let worked = s.doc.column(0).unwrap().id;
+
+        // Deleting its Drawing node asks too, and keeps the layer.
+        let node = s.doc.layers[0].node;
+        assert_eq!(crate::views::node::delete_nodes(&mut s, &[node]), 0);
+        assert_eq!(s.layer_count(), count);
+        assert_eq!(s.confirm_delete, Some(worked));
+        s.answer_delete_question();
+        assert_eq!(s.confirm_delete, None);
 
         s.delete_layer(1);
         assert_eq!(s.layer_count(), count - 1, "an empty layer goes at once");
