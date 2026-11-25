@@ -82,6 +82,8 @@ pub enum Action {
     Paste,
     FlipHorizontal,
     FlipVertical,
+    Rotate90Cw,
+    Rotate90Ccw,
     PrevFrame,
     NextFrame,
     FirstFrame,
@@ -165,7 +167,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 101] = [
+    pub const ALL: [Action; 103] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -181,6 +183,8 @@ impl Action {
         Action::Paste,
         Action::FlipHorizontal,
         Action::FlipVertical,
+        Action::Rotate90Cw,
+        Action::Rotate90Ccw,
         Action::PrevFrame,
         Action::NextFrame,
         Action::FirstFrame,
@@ -287,6 +291,8 @@ impl Action {
             Action::Paste => "edit.paste",
             Action::FlipHorizontal => "edit.flip_horizontal",
             Action::FlipVertical => "edit.flip_vertical",
+            Action::Rotate90Cw => "edit.rotate_90_cw",
+            Action::Rotate90Ccw => "edit.rotate_90_ccw",
             Action::PrevFrame => "frame.previous",
             Action::NextFrame => "frame.next",
             Action::FirstFrame => "frame.first",
@@ -385,6 +391,8 @@ impl Action {
             Action::Paste => "Paste",
             Action::FlipHorizontal => "Flip horizontal",
             Action::FlipVertical => "Flip vertical",
+            Action::Rotate90Cw => "Rotate 90° CW",
+            Action::Rotate90Ccw => "Rotate 90° CCW",
             Action::PrevFrame => "Previous frame",
             Action::NextFrame => "Next frame",
             Action::FirstFrame => "First frame",
@@ -524,6 +532,8 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::Paste => b(Key::V, CMD),
         Action::FlipHorizontal => b(Key::Num4, NONE),
         Action::FlipVertical => b(Key::Num5, NONE),
+        Action::Rotate90Ccw => b(Key::Num7, CMD),
+        Action::Rotate90Cw => b(Key::Num9, CMD),
         Action::PrevFrame => b(Key::Comma, NONE),
         Action::NextFrame => b(Key::Period, NONE),
         Action::FirstFrame => b(Key::Comma, SHIFT), // "<"
@@ -728,6 +738,8 @@ pub fn scope(profile: Profile, action: Action) -> Scope {
         | ToggleOnionSkin
         | MirrorView
         | FlipVertical
+        | Rotate90Cw
+        | Rotate90Ccw
         | SelectAll
         | DeselectAll
         | Delete
@@ -1153,6 +1165,23 @@ mod tests {
         });
         out.textures_delta.clear();
         got
+    }
+
+    #[test]
+    fn ctrl_7_and_9_turn_a_quarter_in_every_profile() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        for profile in Profile::ALL {
+            assert_eq!(
+                fired(profile, Key::Num7, CMD),
+                [Action::Rotate90Ccw],
+                "{profile:?}"
+            );
+            assert_eq!(
+                fired(profile, Key::Num9, CMD),
+                [Action::Rotate90Cw],
+                "{profile:?}"
+            );
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ use symphony_ui::icons::Icon;
 use symphony_ui::theme;
 use symphony_vector::{bounds_of, hits, inside_polygon, scale_of};
 
+use crate::keymap::Action;
 use crate::session::{PegValues, Session, Tool};
 
 const HANDLE: f32 = 7.0;
@@ -764,7 +765,14 @@ fn apply_group_drag(s: &mut Session, d: &Drag, g: Affine) {
         Kind::Rotate => (g.b.atan2(g.a).to_degrees(), 1.0, 1.0),
         Kind::Scale(_) => (0.0, g.a, g.d),
     };
-    for start in &d.group {
+    apply_group(s, &d.group, g, turn, fx, fy);
+}
+
+/// Move each layer of a group by the scene-space transform `g`: its
+/// pivot follows `g`, and the layer turns by `turn` degrees and scales by
+/// `fx` and `fy` around its own pivot.
+fn apply_group(s: &mut Session, group: &[GroupStart], g: Affine, turn: f32, fx: f32, fy: f32) {
+    for start in group {
         let (px, py) = start.pivot;
         let (nx, ny) = g.apply(px, py);
         let linear = Affine {
@@ -804,6 +812,214 @@ fn group_start(s: &Session, layer: usize) -> Option<GroupStart> {
         parent,
         pivot: parent.apply(v.x + px, v.y + py),
     })
+}
+
+/// A Transform tool operation from Tool Properties.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Step {
+    /// Move by this much, in the current layer's peg units.
+    Offset(f32, f32),
+    /// Turn by this many degrees, clockwise on screen.
+    Turn(f32),
+    /// Multiply the width and the height.
+    Scale(f32, f32),
+}
+
+/// Flip or turn a quarter, from a key, a menu or a Tool Properties
+/// button: the Transform tool moves its layers, other tools change the
+/// selected artwork. One action is one undo step.
+pub fn quick_transform(s: &mut Session, action: Action) {
+    let step = match action {
+        Action::FlipHorizontal => Step::Scale(-1.0, 1.0),
+        Action::FlipVertical => Step::Scale(1.0, -1.0),
+        Action::Rotate90Cw => Step::Turn(90.0),
+        Action::Rotate90Ccw => Step::Turn(-90.0),
+        _ => return,
+    };
+    if s.tool == Tool::Transform {
+        transform_step(s, step);
+        s.end_gesture();
+        return;
+    }
+    match step {
+        Step::Scale(fx, _) => s.flip_selection(fx < 0.0),
+        Step::Turn(a) => s.rotate_selection(a),
+        Step::Offset(..) => {}
+    }
+}
+
+/// The flip and quarter-turn buttons of the Select and Transform tools.
+pub fn quick_transform_buttons(ui: &mut egui::Ui, s: &mut Session) {
+    ui.horizontal_wrapped(|ui| {
+        for action in [
+            Action::FlipHorizontal,
+            Action::FlipVertical,
+            Action::Rotate90Cw,
+            Action::Rotate90Ccw,
+        ] {
+            if ui.button(action.name()).clicked() {
+                quick_transform(s, action);
+            }
+        }
+    });
+}
+
+/// Apply `step` to the Transform tool's layers (locked layers stay). One
+/// layer turns and scales around the middle of its drawing, as a drag on
+/// its box does. Several turn and scale together around the middle of
+/// their pivots. The caller seals the undo step.
+pub fn transform_step(s: &mut Session, step: Step) {
+    follow_current_layer(s);
+    match transform_indices(s).as_slice() {
+        [] => {}
+        [layer] => step_one(s, *layer, step),
+        layers => step_group(s, layers, step),
+    }
+}
+
+fn step_one(s: &mut Session, layer: usize, step: Step) {
+    if !matches!(step, Step::Offset(..)) {
+        let bounds = s
+            .doc
+            .exposed(layer, s.frame)
+            .and_then(|d| s.doc.drawings.get(&d))
+            .and_then(|dr| drawing_bounds(s, dr));
+        if let Some((lo, hi)) = bounds {
+            s.ensure_pivot(layer, ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0));
+        }
+    }
+    s.adjust_peg(layer, |v| match step {
+        Step::Offset(dx, dy) => {
+            v.x += dx;
+            v.y += dy;
+        }
+        Step::Turn(a) => v.rotation += a,
+        Step::Scale(fx, fy) => {
+            v.scale_x *= fx;
+            v.scale_y *= fy;
+        }
+    });
+}
+
+fn step_group(s: &mut Session, layers: &[usize], step: Step) {
+    let group: Vec<GroupStart> = layers.iter().filter_map(|&l| group_start(s, l)).collect();
+    let Some(first) = group.first() else {
+        return;
+    };
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for g in &group {
+        lo = [lo[0].min(g.pivot.0), lo[1].min(g.pivot.1)];
+        hi = [hi[0].max(g.pivot.0), hi[1].max(g.pivot.1)];
+    }
+    let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+    let around = |m: Affine| {
+        Affine::translate(cx, cy)
+            .compose(m)
+            .compose(Affine::translate(-cx, -cy))
+    };
+    let (g, turn, fx, fy) = match step {
+        Step::Offset(dx, dy) => {
+            // The fields show the current layer, so its peg units set
+            // how far the group moves in the scene.
+            let base = group
+                .iter()
+                .find(|g| g.layer == s.selected)
+                .unwrap_or(first)
+                .parent;
+            let (wx, wy) = Affine {
+                tx: 0.0,
+                ty: 0.0,
+                ..base
+            }
+            .apply(dx, dy);
+            (Affine::translate(wx, wy), 0.0, 1.0, 1.0)
+        }
+        Step::Turn(a) => (around(Affine::rotate_deg(a)), a, 1.0, 1.0),
+        Step::Scale(fx, fy) => (around(Affine::scale(fx, fy)), 0.0, fx, fy),
+    };
+    apply_group(s, &group, g, turn, fx, fy);
+}
+
+/// The Transform tool's operations in Tool Properties: flips, quarter
+/// turns ([`quick_transform_buttons`]), and fields for position, size and angle. The fields show the
+/// current layer; with several layers, a change moves them all by the
+/// same amount.
+pub fn operations_ui(ui: &mut egui::Ui, s: &mut Session) {
+    follow_current_layer(s);
+    let layers = transform_indices(s);
+    let layer = if layers.contains(&s.selected) {
+        Some(s.selected)
+    } else {
+        layers.first().copied()
+    };
+    let v = layer.map_or(
+        PegValues {
+            x: 0.0,
+            y: 0.0,
+            rotation: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+        },
+        |l| current_peg(s, l),
+    );
+    let lock_id = egui::Id::unique("transform-size-lock");
+    let mut lock = ui.data(|d| d.get_temp(lock_id)).unwrap_or(true);
+    let mut step = None;
+    let mut seal = false;
+    ui.add_enabled_ui(layer.is_some(), |ui| {
+        quick_transform_buttons(ui, s);
+        ui.add_space(4.0);
+        egui::Grid::new("transform-fields")
+            .num_columns(2)
+            .spacing(Vec2::new(8.0, 4.0))
+            .show(ui, |ui| {
+                let mut field = |ui: &mut egui::Ui, label: &str, value: f32, suffix: &str| {
+                    ui.label(label);
+                    let mut n = value;
+                    let r = ui.add(
+                        egui::DragValue::new(&mut n)
+                            .speed(if suffix.is_empty() { 1.0 } else { 0.5 })
+                            .max_decimals(2)
+                            .suffix(suffix),
+                    );
+                    ui.end_row();
+                    seal |= r.drag_stopped() || (r.changed() && !r.dragged());
+                    (r.changed() && n != value).then_some(n)
+                };
+                if let Some(x) = field(ui, "X", v.x, "") {
+                    step = Some(Step::Offset(x - v.x, 0.0));
+                }
+                if let Some(y) = field(ui, "Y", v.y, "") {
+                    step = Some(Step::Offset(0.0, y - v.y));
+                }
+                if let Some(w) = field(ui, "Width", v.scale_x * 100.0, " %") {
+                    step = size_step(w / 100.0, v.scale_x)
+                        .map(|f| Step::Scale(f, if lock { f } else { 1.0 }));
+                }
+                if let Some(h) = field(ui, "Height", v.scale_y * 100.0, " %") {
+                    step = size_step(h / 100.0, v.scale_y)
+                        .map(|f| Step::Scale(if lock { f } else { 1.0 }, f));
+                }
+                if let Some(a) = field(ui, "Angle", v.rotation, "°") {
+                    step = Some(Step::Turn(a - v.rotation));
+                }
+            });
+        ui.checkbox(&mut lock, "Lock width and height")
+            .on_hover_text("Keeps the ratio between Width and Height when you change one.");
+    });
+    ui.data_mut(|d| d.insert_temp(lock_id, lock));
+    if let Some(step) = step {
+        transform_step(s, step);
+    }
+    if seal {
+        s.end_gesture();
+    }
+}
+
+/// The factor that takes a scale from `old` to `new`, or None when either
+/// is zero (a zero scale has no size to multiply).
+fn size_step(new: f32, old: f32) -> Option<f32> {
+    (new != 0.0 && old != 0.0).then(|| new / old)
 }
 
 /// The Transform tool's layers, as indices, front to back as listed.
@@ -1577,5 +1793,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn a_quarter_turn_turns_one_layer_around_its_middle() {
+        let (mut s, _) = two_layers();
+        s.selected = 0;
+        transform_step(&mut s, Step::Turn(90.0));
+        s.end_gesture();
+        let v = current_peg(&s, 0);
+        assert!(close(v.rotation, 90.0), "{v:?}");
+        // Layer 0's line runs from x 400 to 500: the pivot is its middle.
+        let p = s.transform_peg(0).unwrap().pivot;
+        assert!(close(p.0, 450.0) && close(p.1, 0.0), "{p:?}");
+        // One click is one undo step.
+        s.undo();
+        assert!(close(current_peg(&s, 0).rotation, 0.0));
+    }
+
+    #[test]
+    fn size_and_offset_steps_change_one_layer() {
+        let (mut s, _) = two_layers();
+        s.selected = 1;
+        transform_step(&mut s, Step::Scale(1.5, 1.5));
+        transform_step(&mut s, Step::Scale(-1.0, 1.0));
+        transform_step(&mut s, Step::Offset(12.0, -3.0));
+        let v = current_peg(&s, 1);
+        assert!(close(v.scale_x, -1.5) && close(v.scale_y, 1.5), "{v:?}");
+        assert!(close(v.x, 12.0) && close(v.y, -3.0), "{v:?}");
+        assert_eq!(size_step(2.0, 1.0), Some(2.0));
+        assert_eq!(size_step(0.0, 1.0), None);
+        assert_eq!(size_step(1.0, 0.0), None);
+    }
+
+    #[test]
+    fn steps_on_several_layers_move_them_as_a_group() {
+        let (mut s, _) = two_layers();
+        s.selected = 0;
+        s.transform_layers = vec![s.doc.layers[0].node, s.doc.layers[1].node];
+        s.transform_for = Some(s.doc.layers[0].node);
+        let pivots = |s: &Session| [0, 1].map(|l| group_start(s, l).unwrap().pivot);
+        let before = pivots(&s);
+        transform_step(&mut s, Step::Turn(90.0));
+        s.end_gesture();
+        let after = pivots(&s);
+        // Pivots turn a quarter around the middle of both.
+        let (cx, cy) = (
+            (before[0].0 + before[1].0) / 2.0,
+            (before[0].1 + before[1].1) / 2.0,
+        );
+        for (b, a) in before.iter().zip(after) {
+            let want = (cx - (b.1 - cy), cy + (b.0 - cx));
+            assert!(
+                close(a.0, want.0) && close(a.1, want.1),
+                "want {want:?}, got {a:?}"
+            );
+        }
+        for l in [0, 1] {
+            assert!(close(current_peg(&s, l).rotation, 90.0));
+        }
+        // A locked layer stays.
+        s.toggle_locked(1);
+        let x1 = current_peg(&s, 1).x;
+        transform_step(&mut s, Step::Offset(5.0, 0.0));
+        assert!(close(current_peg(&s, 1).x, x1));
     }
 }

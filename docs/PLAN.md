@@ -238,7 +238,7 @@ continues.
 
 ### 4.5 Animation
 - ⬜ Animate mode (on/off)
-- 🟡 Transform tool (move, rotate, scale, skew, pivot): move, rotate, scale and flip done; skew and pivot dragging next
+- 🟡 Transform tool (move, rotate, scale, skew, pivot): move, rotate, scale and flip done; Rotate 90° CW and CCW (Ctrl+9, Ctrl+7) and X, Y, Width, Height and Angle fields in Tool Properties done; skew and pivot dragging next
 - ⬜ Keyframes: motion and stop-motion keyframes, ease in/out, constant segments
 - ⬜ Motion paths (on-screen editing)
 - ⬜ 3D paths and 3D transforms
