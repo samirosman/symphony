@@ -722,9 +722,17 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
 /// on the left. Frames outside the scene are shaded.
 fn paint_grid(painter: &egui::Painter, map: &Map, full: Rect, len: f32) {
     let rect = map.rect;
-    let fstep = nice_step(60.0 * (map.f1 - map.f0) / rect.width()).max(1.0);
-    let mut f = (map.f0 / fstep).ceil() * fstep;
-    while f <= map.f1 {
+    // Whole frames only: nice_step builds its steps from 0.001, so its
+    // sums are a little off (20.000002).
+    let fstep = nice_step(60.0 * (map.f1 - map.f0) / rect.width())
+        .max(1.0)
+        .round();
+    let mut k = (map.f0 / fstep).ceil();
+    loop {
+        let f = k * fstep;
+        if f > map.f1 {
+            break;
+        }
         let x = map.pos(f, 0.0).x;
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
@@ -734,12 +742,12 @@ fn paint_grid(painter: &egui::Painter, map: &Map, full: Rect, len: f32) {
             painter.text(
                 Pos2::new(x, rect.bottom() + SCALE_H / 2.0 + 2.0),
                 Align2::CENTER_CENTER,
-                format!("{f}"),
+                format!("{f:.0}"),
                 theme::numbers(),
                 theme::TEXT_SECONDARY,
             );
         }
-        f += fstep;
+        k += 1.0;
     }
     for (a, b) in [(map.f0, 1.0), (len, map.f1)] {
         if a < b {
