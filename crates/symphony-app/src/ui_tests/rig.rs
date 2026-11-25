@@ -81,6 +81,22 @@ fn without_ctrl_a_turn_keeps_the_length() {
 }
 
 #[test]
+fn a_tip_drag_turns_a_stretchable_bone_without_ctrl() {
+    let (mut h, _, bone) = one_bone(Stretch::Simple);
+    drag(&mut h, (200.0, 0.0), (300.0, 300.0), Modifiers::NONE);
+    let (x, y) = tip(&h, bone);
+    assert!((x.hypot(y) - 200.0).abs() < 2.0, "tip ({x}, {y})");
+    assert!((x - y).abs() < 2.0, "tip ({x}, {y})");
+}
+
+#[test]
+fn ctrl_on_the_tip_stretches_a_stretchable_bone() {
+    let (mut h, _, bone) = one_bone(Stretch::Simple);
+    drag(&mut h, (200.0, 0.0), (300.0, 0.0), CTRL);
+    assert!(near(tip(&h, bone), (300.0, 0.0)), "tip {:?}", tip(&h, bone));
+}
+
+#[test]
 fn the_skeleton_base_still_moves_the_whole_rig() {
     let (mut h, skeleton, bone) = one_bone(Stretch::Rigid);
     drag(&mut h, (0.0, 0.0), (50.0, 40.0), Modifiers::NONE);
@@ -166,4 +182,25 @@ fn a_locked_bone_takes_no_drag() {
     drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
     drag(&mut h, (200.0, 0.0), (0.0, 200.0), Modifiers::NONE);
     assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
+}
+
+#[test]
+fn a_locked_first_bone_pins_the_skeleton_base() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    let graph = &mut h.state_mut().s.doc.graph;
+    if let Some(NodeKind::Bone(b)) = graph.node_mut(bone).map(|n| &mut n.kind) {
+        b.locked = true;
+    }
+    h.run_steps(1);
+    drag(&mut h, (0.0, 0.0), (50.0, 40.0), Modifiers::NONE);
+    assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
+}
+
+#[test]
+fn a_click_on_empty_space_drops_the_bone_selection() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    super::deformers::click(&mut h, 100.0, 0.0);
+    assert_eq!(h.state().s.selected_node, Some(bone));
+    super::deformers::click(&mut h, 100.0, 250.0);
+    assert_ne!(h.state().s.selected_node, Some(bone));
 }

@@ -104,16 +104,38 @@ fn paint_bone(painter: &egui::Painter, start: Pos2, tip: Pos2, ink: egui::Color3
         let across = egui::vec2(-along.y, along.x) * 4.0;
         let shoulder = start + along * 7.0;
         let outline = vec![start, shoulder + across, tip, shoulder - across];
-        painter.add(egui::Shape::closed_line(outline.clone(), edge));
+        // Each side as its own segment: a closed line joins the sides
+        // with a miter, and the sharp tip makes a spike.
+        let sides: Vec<[Pos2; 2]> = (0..outline.len())
+            .map(|i| [outline[i], outline[(i + 1) % outline.len()]])
+            .collect();
+        for &side in &sides {
+            painter.line_segment(side, edge);
+        }
         painter.add(egui::Shape::convex_polygon(
             outline,
             ink.gamma_multiply(0.28),
-            Stroke::new(1.0, ink),
+            Stroke::NONE,
         ));
+        for &side in &sides {
+            painter.line_segment(side, Stroke::new(1.0, ink));
+        }
     } else {
         painter.line_segment([start, tip], edge);
         painter.line_segment([start, tip], Stroke::new(1.0, ink));
     }
+}
+
+/// The skeleton's base handle. It sits on the first bone, so a locked
+/// first bone pins it, and it shows faded.
+fn paint_base(painter: &egui::Painter, origin: Pos2, locked: bool) {
+    let ink = if locked {
+        theme::ACCENT_SELECT.gamma_multiply(0.4)
+    } else {
+        theme::ACCENT_SELECT
+    };
+    painter.circle_filled(origin, 7.0, theme::BG_BASE);
+    painter.circle_stroke(origin, 5.0, Stroke::new(2.0, ink));
 }
 
 pub fn ui(
@@ -224,13 +246,21 @@ pub fn ui(
         let NodeKind::Skeleton(peg) = &node.kind else {
             return None;
         };
-        let (_, origin, _, _, _) = handles.iter().find(|(_, _, _, connected, _)| !connected)?;
-        Some((*origin, [peg.x.at(s.frame), peg.y.at(s.frame)]))
+        let (first, origin, _, _, _) = handles.iter().find(|(_, _, _, connected, _)| !connected)?;
+        Some((
+            *origin,
+            [peg.x.at(s.frame), peg.y.at(s.frame)],
+            locked(*first),
+        ))
     });
-    if let Some((origin, _)) = skeleton {
-        painter.circle_filled(origin, 7.0, theme::BG_BASE);
-        painter.circle_stroke(origin, 5.0, Stroke::new(2.0, theme::ACCENT_SELECT));
+    if let Some((origin, _, base_locked)) = skeleton {
+        paint_base(painter, origin, base_locked);
     }
+    // A locked first bone keeps the base still: the press falls through
+    // to the bone, which takes no drag either.
+    let skeleton = skeleton
+        .filter(|&(_, _, base_locked)| !base_locked)
+        .map(|(origin, start, _)| (origin, start));
     // Anchors: a pin (Locked) or a ring (Aim) on their targets, tied to
     // the joint they hold.
     let mut anchors: Vec<(NodeId, Pos2)> = Vec::new();
@@ -333,19 +363,29 @@ pub fn ui(
         }
     }
     if response.clicked_by(egui::PointerButton::Primary) {
-        if let Some(id) = response.interact_pointer_pos().and_then(|p| {
-            nearest(p, true)
-                .or_else(|| nearest(p, false))
-                .or_else(|| bone_at(p))
-        }) {
-            s.select_graph_node(id, true);
+        let p = response.interact_pointer_pos().unwrap_or_default();
+        let hit = nearest(p, true)
+            .or_else(|| nearest(p, false))
+            .or_else(|| bone_at(p));
+        match hit {
+            Some(id) => s.select_graph_node(id, true),
+            // A click on empty space drops the bone selection (Harmony:
+            // click the negative space to discard the selection), which
+            // brings the drawing tools back.
+            None if nearest_anchor(p).is_none() => s.selected_node = None,
+            None => {}
         }
     }
     if let Some(drag) = state.drag {
         if let Some(p) = response.interact_pointer_pos() {
             let snap = ui.input(|i| i.modifiers.shift);
             match drag {
-                Drag::Tip(id, grab) => pose_tip(s, id, view, snapped(p, grab, snap), false),
+                Drag::Tip(id, grab) => {
+                    let stretch = ui.input(|i| i.modifiers.command);
+                    let at = handles.iter().find(|h| h.0 == id).map(|h| (h.1, h.2));
+                    let target = tip_target(s, id, at, snapped(p, grab, snap), stretch);
+                    pose_tip(s, id, view, target, false);
+                }
                 Drag::Turn {
                     id,
                     base,
@@ -407,6 +447,30 @@ fn turned(base: Pos2, tip: Pos2, grab: Pos2, pointer: Pos2, stretch: bool) -> Po
     let arm = tip - base;
     let (sin, cos) = angle.sin_cos();
     base + egui::vec2(arm.x * cos - arm.y * sin, arm.x * sin + arm.y * cos) * scale
+}
+
+/// Where a tip drag puts the tip. Only Ctrl changes a bone's length
+/// (Harmony's Skeleton Bone): without it, a stretchable bone keeps its
+/// length and turns toward the pointer. `at` is the bone's base and tip
+/// on screen.
+fn tip_target(
+    s: &Session,
+    id: NodeId,
+    at: Option<(Pos2, Pos2)>,
+    pointer: Pos2,
+    stretch: bool,
+) -> Pos2 {
+    let stretchable = s
+        .doc
+        .graph
+        .bone(id)
+        .is_some_and(|b| b.stretch_mode != symphony_core::rig::Stretch::Rigid);
+    match at {
+        Some((base, tip)) if stretchable && !stretch && (pointer - base).length() > 1.0 => {
+            base + (pointer - base).normalized() * (tip - base).length()
+        }
+        _ => pointer,
+    }
 }
 
 fn pos((x, y): (f32, f32)) -> Pos2 {
