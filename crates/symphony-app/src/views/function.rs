@@ -310,6 +310,9 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
     let layer = s.selected;
     let size = ui.available_size().max(Vec2::new(120.0, 80.0));
     let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+    // The graph always fits its curves, so there is nothing to pan. The
+    // middle button does nothing here; it never picks or moves a key.
+    let (resp, _) = widgets::middle_pan(ui, resp);
     let full = resp.rect;
     theme::feather_panel(&painter, full, theme::BG_INPUT, 5.0);
     let rect = full

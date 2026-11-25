@@ -2201,7 +2201,11 @@ impl SymphonyApp {
                 Tool::Brush if !crate::views::panels::is_bitmap(&self.s.brush) => Icon::Pen,
                 Tool::Brush => Icon::Brush,
                 Tool::Transform => {
-                    tip = format!("Transform the peg\n{tip}");
+                    let what = match context {
+                        session::ToolContext::Peg => "Transform the peg",
+                        session::ToolContext::Drawing => "Pick, move, scale and rotate layers",
+                    };
+                    tip = format!("{what}\n{tip}");
                     Icon::Transform
                 }
                 _ => tool_icon(tool),
@@ -2252,6 +2256,11 @@ impl SymphonyApp {
                     s.doc.settings.width, s.doc.settings.height, s.doc.settings.fps
                 ),
                 theme::TEXT_SECONDARY,
+            );
+            dense(
+                ui,
+                format!("Frame {} of {}", s.frame, s.length()),
+                theme::TEXT_PRIMARY,
             );
             if s.doc.column(s.selected).is_some_and(|column| column.locked) {
                 dense(ui, "Layer locked".into(), theme::TEXT_PRIMARY);

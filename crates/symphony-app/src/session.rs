@@ -94,7 +94,9 @@ impl Tool {
     /// only moves, so on a peg it's Transform and the view tools.
     pub fn fits(self, context: ToolContext) -> bool {
         match context {
-            ToolContext::Drawing => !matches!(self, Tool::Transform | Tool::Pencil),
+            // Transform picks and moves whole layers, images included,
+            // which Select (strokes of the current drawing) can't.
+            ToolContext::Drawing => !matches!(self, Tool::Pencil),
             ToolContext::Peg => matches!(self, Tool::Transform | Tool::Hand | Tool::Zoom),
         }
     }
@@ -365,6 +367,8 @@ pub struct Session {
     pub selected_node: Option<NodeId>,
     /// The drawing tool to return to after working on a peg.
     pub last_drawing_tool: Tool,
+    /// The context `fit_tool_to_context` last saw.
+    tool_context_was: ToolContext,
     pub reveal_node_track: Option<NodeId>,
     pub tool: Tool,
     pub brush: BrushSettings,
@@ -480,6 +484,7 @@ impl Session {
             transform_for: None,
             selected_node: None,
             last_drawing_tool: Tool::Brush,
+            tool_context_was: ToolContext::Drawing,
             reveal_node_track: None,
             tool: Tool::Brush,
             brush: BrushSettings {
@@ -1943,6 +1948,11 @@ impl Session {
     /// tool.
     pub fn fit_tool_to_context(&mut self) {
         let context = self.tool_context();
+        let was = std::mem::replace(&mut self.tool_context_was, context);
+        if was == ToolContext::Peg && context == ToolContext::Drawing {
+            self.tool = self.last_drawing_tool;
+            return;
+        }
         if self.tool.fits(context) {
             if context == ToolContext::Drawing {
                 self.last_drawing_tool = self.tool;

@@ -637,6 +637,16 @@ fn waveform(
 /// Harmony's Timeline Parameters column for a drawing layer: the drawing
 /// exposed at the current frame. Drag sideways to cycle through the
 /// layer's drawings, or double-click to type a drawing's name.
+/// A middle drag scrolls the Timeline or Xsheet instead of acting on
+/// `resp`; see [`widgets::middle_pan`].
+fn middle_scrolls(ui: &egui::Ui, resp: egui::Response) -> egui::Response {
+    let (resp, pan) = widgets::middle_pan(ui, resp);
+    if let Some(delta) = pan {
+        ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+    }
+    resp
+}
+
 fn parameters_field(
     ui: &mut egui::Ui,
     painter: &egui::Painter,
@@ -705,6 +715,7 @@ fn parameters_field(
         .on_hover_text(
             "Drawing at this frame. Drag sideways to swap it, or double-click to type a name.",
         );
+    let resp = middle_scrolls(ui, resp);
     if resp.drag_started() || resp.clicked() {
         s.select_graph_node(s.doc.layers[row].node, false);
     }
@@ -900,6 +911,8 @@ pub fn timeline(
                 (RULER + track_count as f32 * rh + 8.0).max(ui.available_height()),
             );
             let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+            // The middle button scrolls the view and never edits it.
+            let resp = middle_scrolls(ui, resp);
             let o = resp.rect.min;
             let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
@@ -1581,6 +1594,8 @@ pub fn xsheet(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, profile: 
                 HEAD + len as f32 * rh + 8.0,
             );
             let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+            // The middle button scrolls the view and never edits it.
+            let resp = middle_scrolls(ui, resp);
             let o = resp.rect.min;
             let row_y = |f: u32| o.y + HEAD + (f - 1) as f32 * rh;
 
@@ -1796,6 +1811,54 @@ mod hierarchy_tests {
         assert_eq!(ruler_steps(60.0), [15, 30, 60]);
     }
     use symphony_core::graph::Effect;
+
+    /// Press, drag and release `button` across the Timeline's tracks;
+    /// returns the frame it ends on.
+    fn drag_on_timeline(button: egui::PointerButton) -> u32 {
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(900.0, 320.0))
+            // The header's frame-rate box has no name yet; not this test's job.
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (s, t, sounds)| timeline(ui, s, t, sounds, Profile::Symphony),
+                (
+                    Session::new_scene(),
+                    TimingState::default(),
+                    SoundState::default(),
+                ),
+            );
+        h.state_mut().0.frame = 1;
+        h.run_steps(2);
+        let none = egui::Modifiers::NONE;
+        let (from, to) = (Pos2::new(420.0, 200.0), Pos2::new(560.0, 220.0));
+        let mut send = |pos: Pos2, pressed: Option<bool>| {
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers: none,
+                });
+            }
+            h.run_steps(1);
+        };
+        send(from, Some(true));
+        for k in 1..=6 {
+            send(from + (to - from) * (k as f32 / 6.0), None);
+        }
+        send(to, Some(false));
+        h.state().0.frame
+    }
+
+    #[test]
+    fn a_middle_drag_on_the_timeline_does_not_move_the_playhead() {
+        assert!(
+            drag_on_timeline(egui::PointerButton::Primary) > 1,
+            "the primary button scrubs (checks the test reaches the tracks)"
+        );
+        assert_eq!(drag_on_timeline(egui::PointerButton::Middle), 1);
+    }
 
     /// Nodes added from the Timeline go to the nearest fitting place, and
     /// the Timeline lists each layer's pegs right above it.
