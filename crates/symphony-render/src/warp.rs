@@ -538,9 +538,8 @@ mod tests {
         let rest = [root, child];
         let mut anim = rest;
         anim[1].orientation = deg;
-        // The golden images were made with this fold. They test the mesh
-        // and its edges, not the fold.
-        anim[1].fold = symphony_core::deform::Fold::RotationEnvelope;
+        // The golden images test the mesh and its edges, not the fold.
+        anim[1].fold = symphony_core::deform::Fold::Arc;
         ChainPose::new(&rest, &anim, Influence::Infinite)
     }
 
