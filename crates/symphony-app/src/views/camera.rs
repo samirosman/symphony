@@ -273,6 +273,12 @@ impl CanvasState {
         Pos2::new(sx, sy)
     }
 
+    /// The scene point under screen point `p` last frame (UI tests).
+    #[cfg(test)]
+    pub fn to_scene(&self, p: Pos2) -> (f32, f32) {
+        self.last_view.apply(p.x, p.y)
+    }
+
     /// Set the zoom (screen points per scene unit), e.g. from search.
     pub fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);

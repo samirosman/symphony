@@ -13,6 +13,8 @@ use crate::keymap::Profile;
 use crate::session::{Session, Tool};
 use crate::views::camera::{self, CanvasState};
 
+mod deformers;
+
 pub struct Rig {
     pub s: Session,
     pub canvas: CanvasState,
@@ -23,6 +25,11 @@ pub struct Rig {
 pub fn rig() -> Harness<'static, Rig> {
     let mut s = Session::new_scene();
     s.animate = false;
+    rig_from(s)
+}
+
+/// The Camera view over a scene made beforehand.
+pub fn rig_from(s: Session) -> Harness<'static, Rig> {
     let rig = Rig {
         s,
         canvas: CanvasState::default(),

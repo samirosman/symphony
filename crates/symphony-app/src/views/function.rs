@@ -788,15 +788,18 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
     }
 }
 
+/// The frame scale's step for `frames` shown across `width` points: a
+/// whole number of frames, about 60 points apart. (nice_step builds its
+/// steps from 0.001, so its sums are a little off: 20.000002.)
+fn frame_step(frames: f32, width: f32) -> f32 {
+    nice_step(60.0 * frames / width).max(1.0).round()
+}
+
 /// Grid lines at round steps, frame numbers on the frame scale, values
 /// on the left. Frames outside the scene are shaded.
 fn paint_grid(painter: &egui::Painter, map: &Map, full: Rect, len: f32) {
     let rect = map.rect;
-    // Whole frames only: nice_step builds its steps from 0.001, so its
-    // sums are a little off (20.000002).
-    let fstep = nice_step(60.0 * (map.f1 - map.f0) / rect.width())
-        .max(1.0)
-        .round();
+    let fstep = frame_step(map.f1 - map.f0, rect.width());
     let mut k = (map.f0 / fstep).ceil();
     loop {
         let f = k * fstep;
@@ -1074,6 +1077,26 @@ mod tests {
 
     fn source_values(s: &Session) -> PegParams {
         source(s).unwrap().1
+    }
+
+    #[test]
+    fn the_frame_scale_counts_whole_frames_at_any_zoom() {
+        for frames in [3.0, 10.0, 47.5, 120.0, 999.0, 24_000.0] {
+            for width in [120.0, 400.0, 1333.0, 3000.0] {
+                let step = frame_step(frames, width);
+                assert!(
+                    step >= 1.0 && step.fract() == 0.0,
+                    "{frames} in {width}: {step}"
+                );
+                // Every label k * step is a whole frame.
+                for k in 0..50 {
+                    assert_eq!((k as f32 * step).fract(), 0.0);
+                }
+                // Labels stay apart, unless one frame is already wider.
+                let points = step * width / frames;
+                assert!(points >= 60.0 - 1e-3 || step == 1.0, "{points}");
+            }
+        }
     }
 
     #[test]

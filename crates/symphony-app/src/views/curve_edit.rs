@@ -150,15 +150,19 @@ pub fn ui(
     };
     let poses = shown(&c, s.frame, rest);
     let controls = controls(&c, &poses, rest || adding, &screen);
-    let pointer = response.hover_pos().or(response.interact_pointer_pos());
-    let nearest = pointer.and_then(|p| {
+    let grab_at = |p: Pos2| {
         controls
             .iter()
             .map(|&(g, q)| (g, q.distance(p)))
             .filter(|(_, d)| *d <= GRAB)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(g, _)| g)
-    });
+    };
+    let pointer = response.hover_pos().or(response.interact_pointer_pos());
+    let nearest = pointer.and_then(grab_at);
+    // A drag takes what was under the press: egui starts it only once the
+    // pointer has moved a few points, maybe off the control already.
+    let pressed_on = ui.input(|i| i.pointer.press_origin()).and_then(grab_at);
     state.hover = nearest;
     let look = Look {
         c: &c,
@@ -179,9 +183,9 @@ pub fn ui(
                 _ => None,
             };
         }
-        if response.drag_started() {
-            state.dragging = nearest;
-            if let Some(Grab::Point(i)) = nearest {
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            state.dragging = pressed_on;
+            if let Some(Grab::Point(i)) = pressed_on {
                 state.selected = Some((id, i));
             }
             let origin = ui.input(|i| i.pointer.press_origin()).and_then(to_node);
@@ -437,7 +441,7 @@ fn place(
         }
         return;
     }
-    if response.drag_started() && !closes {
+    if response.drag_started_by(egui::PointerButton::Primary) && !closes {
         let origin = ui.input(|i| i.pointer.press_origin()).and_then(to_node);
         if let Some(at) = origin {
             add_point(s, id, unroot(c, frame, false, at));

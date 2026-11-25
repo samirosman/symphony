@@ -1047,6 +1047,21 @@ pub fn tooltip(profile: Profile, action: Action) -> String {
 mod tests {
     use super::*;
 
+    /// Search lists each command with where its key works. In the Studio
+    /// profile K sets a key in the Timeline and shows strokes elsewhere;
+    /// a key that works everywhere has no place after it.
+    #[test]
+    fn search_names_where_a_shared_key_works() {
+        let _remaps = TEST_REMAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let p = Profile::Studio;
+        assert_eq!(
+            label_where(p, Action::Timeline(TimelineAction::SetKey)),
+            "K in Timeline"
+        );
+        assert_eq!(label_where(p, Action::ShowStrokes), "K outside Timeline");
+        assert_eq!(label_where(p, Action::Search), label(p, Action::Search));
+    }
+
     /// Bindings may be shared by views that cannot both handle them.
     #[test]
     fn no_overlapping_bindings() {

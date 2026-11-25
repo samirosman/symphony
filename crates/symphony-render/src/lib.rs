@@ -1346,6 +1346,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Put `kind` between the image layer's peg and its drawing.
+    fn deform_image(
+        s: &mut Scene,
+        layer: symphony_core::doc::Layer,
+        kind: symphony_core::graph::NodeKind,
+    ) {
+        let id = s.graph.add("Deformer", kind);
+        s.graph.connect(layer.peg, id, 0);
+        s.graph.connect(id, layer.node, 0);
+    }
+
+    /// The image fills the 200 x 100 stage; a white pixel at the top
+    /// middle means its top edge was pulled down.
+    fn top_middle(s: &Scene) -> [u8; 4] {
+        render_frame(s, 2, 200, 100).unwrap().get_pixel(100, 4).0
+    }
+
+    #[test]
+    fn a_mesh_warp_bends_an_imported_image() {
+        use symphony_core::{anim::Value, warp::MeshWarp};
+        let (mut s, dir, layer) = scene_with_image();
+        let mut w = MeshWarp::new(2, 2, 0.0, 0.0, 200.0, 100.0);
+        assert_eq!(top_middle(&s), [0, 0, 255, 255]);
+        // The top middle point (row 0, column 1) down by 30.
+        w.points[1][1] = Value::Constant(30.0);
+        deform_image(
+            &mut s,
+            layer,
+            symphony_core::graph::NodeKind::MeshWarp(Box::new(w)),
+        );
+        assert_eq!(top_middle(&s), [255; 4]);
+        let img = render_frame(&s, 2, 200, 100).unwrap();
+        assert_eq!(
+            img.get_pixel(100, 60).0,
+            [0, 0, 255, 255],
+            "the middle stays covered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_envelope_bends_an_imported_image() {
+        use symphony_core::anim::Value;
+        use symphony_core::envelope::{CurveDeformer, CurvePoint, PointPose};
+        let (mut s, dir, layer) = scene_with_image();
+        // A diamond well outside the image, its top point pulled down.
+        let mut e = CurveDeformer::new(true);
+        e.points = [
+            ([0.0, -200.0], [100.0, 0.0]),
+            ([200.0, 0.0], [0.0, 100.0]),
+            ([0.0, 200.0], [-100.0, 0.0]),
+            ([-200.0, 0.0], [0.0, -100.0]),
+        ]
+        .into_iter()
+        .map(|(p, out)| CurvePoint::new(PointPose::smooth(p, out)))
+        .collect();
+        e.points[0].anim.y = Value::Constant(-80.0);
+        deform_image(
+            &mut s,
+            layer,
+            symphony_core::graph::NodeKind::Curve(Box::new(e)),
+        );
+        assert_eq!(top_middle(&s), [255; 4]);
+        let img = render_frame(&s, 2, 200, 100).unwrap();
+        assert_eq!(
+            img.get_pixel(100, 90).0,
+            [0, 0, 255, 255],
+            "the bottom stays"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_curve_bends_an_imported_image() {
+        use symphony_core::anim::Value;
+        use symphony_core::envelope::{CurveDeformer, CurvePoint, PointPose};
+        let (mut s, dir, layer) = scene_with_image();
+        // Along the middle; the far end lifted out of the frame's top.
+        let mut c = CurveDeformer::new(false);
+        c.points = [-100.0, 0.0, 100.0]
+            .into_iter()
+            .map(|x| CurvePoint::new(PointPose::smooth([x, 0.0], [30.0, 0.0])))
+            .collect();
+        c.points[2].anim.y = Value::Constant(60.0);
+        deform_image(
+            &mut s,
+            layer,
+            symphony_core::graph::NodeKind::Curve(Box::new(c)),
+        );
+        let img = render_frame(&s, 2, 200, 100).unwrap();
+        assert_eq!(
+            img.get_pixel(196, 4).0,
+            [255; 4],
+            "the far end left the top"
+        );
+        assert_eq!(
+            img.get_pixel(4, 50).0,
+            [0, 0, 255, 255],
+            "the root end stays"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An export that stops part way (Cancel here; a crash or a full disk
     /// leave the same files) keeps every finished frame, leaves no broken
     /// file under the real name, and exporting again reuses those frames.

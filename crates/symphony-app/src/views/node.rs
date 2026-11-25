@@ -4700,6 +4700,32 @@ pub fn convert_drawing(s: &mut Session, id: NodeId) {
 mod tests {
     use super::*;
 
+    /// Reset to rest puts a bent Curve back as it rests: a keyed value
+    /// gets a key on this frame (its other keys stay), a plain one changes
+    /// for every frame, and the root goes back to zero.
+    #[test]
+    fn reset_to_rest_keys_what_is_keyed_and_sets_the_rest() {
+        use symphony_core::anim::Value;
+        use symphony_core::envelope::{CurvePoint, PointPose};
+        let mut c = CurveDeformer::new(false);
+        for x in [0.0, 100.0] {
+            c.points
+                .push(CurvePoint::new(PointPose::smooth([x, 0.0], [30.0, 0.0])));
+        }
+        c.points[1].anim.y = Value::default();
+        c.points[1].anim.y.set_key(1, 0.0);
+        c.points[1].anim.y.set_key(10, 50.0);
+        c.points[1].anim.out_length = Value::Constant(80.0);
+        c.root.angle = Value::Constant(30.0);
+        reset_to_rest(&mut c, 10);
+        let y = &c.points[1].anim.y;
+        assert_eq!((y.at(10), y.at(1)), (0.0, 0.0));
+        assert!(y.has_key(1), "other keys stay");
+        assert_eq!(c.points[1].anim.out_length, Value::Constant(30.0));
+        assert_eq!(c.root.angle, Value::Constant(0.0));
+        assert!(c.field_at(10).unwrap().is_flat());
+    }
+
     fn overlapping(s: &Session) -> Vec<(NodeId, NodeId)> {
         let defaults = default_positions(s);
         let ids: Vec<NodeId> = s.doc.graph.nodes().map(|(id, _)| id).collect();
