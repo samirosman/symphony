@@ -427,6 +427,8 @@ pub struct Session {
     pub link_bucket_fills: bool,
     /// Harmony's Show Strokes (K): reveal invisible strokes.
     pub show_strokes: bool,
+    /// Bone handles in the Camera view (Shift+C hides them).
+    pub show_rig_controls: bool,
     /// Harmony's Respect Protected Colours (Shift+S), on by default.
     pub respect_protected: bool,
     /// The art layer tools draw and edit on (Harmony's Art Layer toolbar).
@@ -552,6 +554,7 @@ impl Session {
             paint_mode: PaintMode::Paint,
             link_bucket_fills: true,
             show_strokes: false,
+            show_rig_controls: true,
             respect_protected: true,
             art: ArtLayer::LineArt,
             art_preview: true,

@@ -163,11 +163,17 @@ pub enum Action {
     ToggleCameraEffects,
     ToggleAutoKey,
     ToggleLayerVisible,
+    /// Show or hide the bone handles in the Camera view (Harmony's
+    /// Hide All Controls, as a switch).
+    ToggleRigControls,
+    /// Key every bone of the selected rig on this frame (Moho's Freeze
+    /// Pose).
+    KeyRig,
     Timeline(TimelineAction),
 }
 
 impl Action {
-    pub const ALL: [Action; 103] = [
+    pub const ALL: [Action; 105] = [
         Action::NewScene,
         Action::Open,
         Action::Save,
@@ -262,6 +268,8 @@ impl Action {
         Action::ToggleCameraEffects,
         Action::ToggleAutoKey,
         Action::ToggleLayerVisible,
+        Action::ToggleRigControls,
+        Action::KeyRig,
         Action::Timeline(TimelineAction::SetKey),
         Action::Timeline(TimelineAction::DeleteKey),
         Action::Timeline(TimelineAction::InsertNew),
@@ -370,6 +378,8 @@ impl Action {
             Action::ToggleCameraEffects => "camera.effects",
             Action::ToggleAutoKey => "timing.animate",
             Action::ToggleLayerVisible => "layer.visible",
+            Action::ToggleRigControls => "camera.rig-controls",
+            Action::KeyRig => "rig.key",
             Action::Timeline(action) => action.id(),
         }
     }
@@ -470,6 +480,8 @@ impl Action {
             Action::ToggleCameraEffects => "Toggle camera effects",
             Action::ToggleAutoKey => "Toggle auto-key",
             Action::ToggleLayerVisible => "Hide or show the selected layer",
+            Action::ToggleRigControls => "Show rig controls",
+            Action::KeyRig => "Set keyframe on whole rig",
             Action::Timeline(action) => action.label(),
         }
     }
@@ -613,7 +625,11 @@ fn harmony(action: Action) -> Option<Binding> {
         Action::Timeline(TimelineAction::SetKey) => b(Key::K, NONE),
         Action::Timeline(TimelineAction::CopyDrawing) => b(Key::C, CMD),
         Action::Timeline(TimelineAction::PasteDrawing) => b(Key::V, CMD),
+        // Harmony 27.1 (master-controller/display-test-widget): Shift+C
+        // hides all controls.
+        Action::ToggleRigControls => b(Key::C, SHIFT),
         Action::Timeline(_)
+        | Action::KeyRig
         | Action::SelectCutter
         | Action::ToggleSelectedPoints
         | Action::ArrangeNodes
@@ -706,7 +722,7 @@ pub fn scope(profile: Profile, action: Action) -> Scope {
             Scope::Canvas
         }
         ArrangeNodes | ShowNodeProperties | RenderNodePreview | ResetNodeView => Scope::Node,
-        ToggleCameraEffects => Scope::Camera,
+        ToggleCameraEffects | ToggleRigControls => Scope::Camera,
         Timeline(TimelineAction::SetKey) if !profile.contextual() => Scope::Timeline,
         Timeline(_) | ToggleAutoKey | ToggleLayerVisible => Scope::Timing,
         Copy | Paste if !profile.contextual() => Scope::OutsideTiming,

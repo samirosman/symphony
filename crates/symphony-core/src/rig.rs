@@ -32,6 +32,19 @@ pub struct Bone {
     /// length); None: no limit.
     #[serde(default)]
     pub stretch_limits: Option<[f32; 2]>,
+    /// Least and most the bone may turn from its rest angle, in
+    /// degrees; None: no limit.
+    #[serde(default)]
+    pub angle_limits: Option<[f32; 2]>,
+    /// The colour of its handles in the Camera view.
+    #[serde(default)]
+    pub colour: BoneColour,
+    /// Show the bone's name next to it in the Camera view.
+    #[serde(default)]
+    pub show_label: bool,
+    /// Its handles take no drag (it still shows, and can be selected).
+    #[serde(default)]
+    pub locked: bool,
     /// An anchor on the bone's tip (smart rigs).
     /// (Boxed: most bones have none, and nodes stay small.)
     #[serde(default)]
@@ -40,6 +53,46 @@ pub struct Bone {
 
 fn one() -> Value {
     Value::Constant(1.0)
+}
+
+/// A colour for grouping bones on screen (arms, legs, face controls).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoneColour {
+    #[default]
+    Plain,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Purple,
+    Pink,
+}
+
+impl BoneColour {
+    pub const ALL: [BoneColour; 8] = [
+        BoneColour::Plain,
+        BoneColour::Red,
+        BoneColour::Orange,
+        BoneColour::Yellow,
+        BoneColour::Green,
+        BoneColour::Teal,
+        BoneColour::Purple,
+        BoneColour::Pink,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            BoneColour::Plain => "Plain",
+            BoneColour::Red => "Red",
+            BoneColour::Orange => "Orange",
+            BoneColour::Yellow => "Yellow",
+            BoneColour::Green => "Green",
+            BoneColour::Teal => "Teal",
+            BoneColour::Purple => "Purple",
+            BoneColour::Pink => "Pink",
+        }
+    }
 }
 
 /// How a bone changes length.
@@ -86,6 +139,10 @@ impl Default for Bone {
             stretch_mode: Stretch::Rigid,
             stretch: one(),
             stretch_limits: None,
+            angle_limits: None,
+            colour: BoneColour::default(),
+            show_label: false,
+            locked: false,
             anchor: None,
         }
     }
@@ -96,6 +153,20 @@ impl Bone {
     pub fn spring_rotation(&self, wanted: f32) -> f32 {
         let from_rest = (wanted + 180.0).rem_euclid(360.0) - 180.0;
         wanted - from_rest * self.spring_stiffness.clamp(0.0, 1.0) * 0.9
+    }
+
+    /// `rotation` (a turn from the rest angle, degrees) kept inside the
+    /// angle limits.
+    pub fn clamp_rotation(&self, rotation: f32) -> f32 {
+        match self.angle_limits {
+            Some([lo, hi]) => rotation.clamp(lo.min(hi), hi.max(lo)),
+            None => rotation,
+        }
+    }
+
+    /// The bone's turn from its rest angle on `frame`, inside its limits.
+    pub fn rotation_at(&self, frame: u32) -> f32 {
+        self.clamp_rotation(self.rotation.at(frame))
     }
 
     pub fn length(&self) -> f32 {
@@ -332,6 +403,8 @@ pub(crate) struct RigEdge {
     pub range: [f32; 2],
     pub spring_stiffness: f32,
     pub rest_angle: f32,
+    /// The bone's angle limits (degrees from its rest angle).
+    pub angle_range: Option<[f32; 2]>,
 }
 
 /// Project the whole tree together. Roots, locked anchors, and the
@@ -421,6 +494,33 @@ pub(crate) fn solve_tree(
                         .rem_euclid(std::f32::consts::TAU)
                         - std::f32::consts::PI;
                     let next = current + turn * strength * 0.2;
+                    let base = points[edge.start];
+                    let length = distance(base, points[edge.end]);
+                    points[edge.end] =
+                        [base[0] + next.cos() * length, base[1] + next.sin() * length];
+                }
+            }
+            // Angle limits: turn a bone back inside its range, about
+            // its base.
+            for edge in edges
+                .iter()
+                .filter(|edge| active[edge.end] && !pinned[edge.end])
+            {
+                let Some([lo, hi]) = edge.angle_range else {
+                    continue;
+                };
+                let angle = |points: &[[f32; 2]], edge: &RigEdge| {
+                    let (a, b) = (points[edge.start], points[edge.end]);
+                    (b[1] - a[1]).atan2(b[0] - a[0])
+                };
+                let current = angle(&points, edge);
+                let parent = parents[edge.start].map_or(0.0, |i| angle(&points, &edges[i]));
+                let turn = ((current - parent).to_degrees() - edge.rest_angle + 180.0)
+                    .rem_euclid(360.0)
+                    - 180.0;
+                let kept = turn.clamp(lo.min(hi), hi.max(lo));
+                if (kept - turn).abs() > 1e-4 {
+                    let next = parent + (edge.rest_angle + kept).to_radians();
                     let base = points[edge.start];
                     let length = distance(base, points[edge.end]);
                     points[edge.end] =
