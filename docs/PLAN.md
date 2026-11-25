@@ -144,6 +144,8 @@ continues.
 - ⬜ Customisable toolbars
 - 🟡 Keyboard shortcut sets: a Harmony-style set built from the published
   default list, plus custom sets (Harmony 27 defaults verified for every built action; custom sets later)
+- ⬜ [Contextual keybindings](plans/contextual-keybindings.md) with Symphony as the default, Harmony and Photoshop presets, and a choice of hover or interaction to activate a panel.
+- [Icon redesign inventory](plans/icon-inventory.md)
 - ⬜ Preferences dialog (all tabs)
 - 🟡 Rotate, flip and zoom the canvas. Reset view. (Harmony toolbars and resets done; flipping the view still to do)
 - ⬜ Field guide, grid, rulers, safe areas, guides (including perspective guides)

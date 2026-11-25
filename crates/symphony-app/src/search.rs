@@ -269,7 +269,16 @@ pub fn query_terms(q: &str) -> Vec<String> {
         .collect();
     // "show" or "open" alone is still a request worth searching.
     let words = if kept.is_empty() { all } else { kept };
-    words.iter().map(|w| stem(w)).collect()
+    words
+        .iter()
+        .map(|w| {
+            if w.chars().count() <= 2 {
+                w.clone()
+            } else {
+                stem(w)
+            }
+        })
+        .collect()
 }
 
 /// Other stems that mean the same as `term`.
@@ -318,7 +327,7 @@ fn term_match(q: &str, w: &str) -> f32 {
     if q == w {
         return 1.0;
     }
-    if q.len() >= 2 && w.starts_with(q) {
+    if q.chars().count() >= 2 && w.starts_with(q) {
         return 0.85;
     }
     if w.len() >= 3 && q.starts_with(w) {
@@ -351,25 +360,35 @@ pub fn rank(
     uses: &dyn Fn(&str) -> u32,
 ) -> Vec<Hit> {
     let terms = query_terms(query);
+    let short_prefix = terms.len() == 1 && terms[0].chars().count() == 2;
     let mut hits: Vec<Hit> = Vec::new();
     for (index, e) in entries.iter().enumerate() {
-        let title: Vec<String> = tokens(&e.title).iter().map(|w| stem(w)).collect();
-        let extra: Vec<String> = e.keywords.iter().map(|w| stem(w)).collect();
+        let title = tokens(&e.title);
+        let title_stems: Vec<_> = title.iter().map(|word| stem(word)).collect();
+        let keyword_stems: Vec<_> = e.keywords.iter().map(|word| stem(word)).collect();
         let mut score = 0.0f32;
         let mut matched = 0usize;
         for t in &terms {
-            let direct = title
+            let (title_words, keywords) = if t.chars().count() <= 2 {
+                (&title, &e.keywords)
+            } else {
+                (&title_stems, &keyword_stems)
+            };
+            let direct = title_words
                 .iter()
                 .map(|w| term_match(t, w) * 3.0)
-                .chain(extra.iter().map(|w| term_match(t, w) * 2.0))
+                .chain(keywords.iter().map(|w| term_match(t, w) * 2.0))
                 .fold(0.0f32, f32::max);
             let via_synonym = synonyms(t)
                 .iter()
-                .flat_map(|s| {
-                    title
-                        .iter()
-                        .map(move |w| if s == w { 2.4 } else { 0.0 })
-                        .chain(extra.iter().map(move |w| if s == w { 1.6 } else { 0.0 }))
+                .map(|word| {
+                    if title_stems.contains(word) {
+                        2.4
+                    } else if keyword_stems.contains(word) {
+                        1.6
+                    } else {
+                        0.0
+                    }
                 })
                 .fold(0.0f32, f32::max);
             let best = direct.max(via_synonym);
@@ -400,7 +419,7 @@ pub fn rank(
     }
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
     // With words typed, drop weak matches far below the best one.
-    if !terms.is_empty() {
+    if !terms.is_empty() && !short_prefix {
         if let Some(best) = hits.first().map(|h| h.score) {
             hits.retain(|h| h.score >= best * 0.4);
         }
@@ -495,6 +514,39 @@ pub fn phrase(query: &str) -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_letter_prefixes_survive_stemming_and_usage_boosts() {
+        let entries = [
+            Entry::new(
+                "Pencil",
+                Kind::Tool,
+                Command::Action(Action::ToolPencil),
+                "pencil",
+            ),
+            Entry::new(
+                "Select pen preset",
+                Kind::Action,
+                Command::Action(Action::ToolPencil),
+                "pen",
+            ),
+            Entry::new(
+                "Reset view",
+                Kind::Action,
+                Command::Action(Action::ResetView),
+                "reset",
+            ),
+        ];
+        let hits = rank(&entries, "pe", Some(View::Drawing), &|key| {
+            if key == "pencil" {
+                u32::MAX
+            } else {
+                0
+            }
+        });
+        assert_eq!(hits.iter().map(|hit| hit.index).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(rank(&entries, "re", None, &|_| 0)[0].index, 2);
+    }
 
     #[test]
     fn timeline_phrases_do_not_steal_named_drawing_searches() {
