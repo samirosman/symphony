@@ -304,6 +304,32 @@ and animation state.
   states and accessibility labels are consistent. Review new controls in the
   running app at 1280×800 and 1024×640, including a keyboard pass.
 
+- **D6.8 A control’s appearance tells you what clicking it does.** Use the
+  same role, shape, and resting cues everywhere that kind of control
+  appears. Choose an existing shared widget and theme tokens. Add shared
+  variants when a new role is needed.
+
+  | Role | Appearance and behaviour |
+  |---|---|
+  | Primary action | Filled cel blue button for the main action in the current panel or dialog. |
+  | Secondary action | Neutral button for other commands. |
+  | Destructive action | Shared button or menu style with a clear verb and the destructive token. |
+  | Icon action | Standard icon and hit area, with a tooltip and an accessible name. |
+  | Menu trigger | A dropdown cue for contextual triggers. The menu bar uses its shared menu-label style. |
+  | Tab or selectable row | Shared tab or row style with a persistent selected state. |
+  | Toggle or choice | Checkbox, radio, or toolbar toggle with a visible on or selected state. |
+  | Link | Link styling with a visible underline at rest. Activates a destination. |
+  | Plain text | Label or body styling for information. |
+
+- **D6.9 Make states recognisable.** Enabled controls have a resting cue
+  that works with a pen and on touch. Hover, keyboard focus, and press give
+  distinct feedback. Focus uses a visible outline, and selection or an on
+  state persists after the pointer leaves. Disabled controls retain their
+  shape, use the disabled token, and cannot be activated. Use a check,
+  underline, fill, or outline alongside colour so states remain distinct
+  without relying on hue alone. Preserve the hit area and layout as visual
+  states change.
+
 ---
 
 ## 7. Icons
@@ -390,8 +416,12 @@ and animation state.
 
 ## 9. Motion
 
-- **D9.1 No decorative animation.** Motion only answers an action, such as
-  a panel opening or a drop target appearing, and lasts 240 ms or less.
+- **D9.1 Make the interface feel interactive.** Use small animations
+  to give actions a satisfying response. A node connector can follow
+  a drag, acknowledge a valid connection, and settle when it snaps
+  into place. Tabs, toggles, and docking targets can respond just as
+  deliberately. Keep motion close to the interaction and let it settle
+  when the action ends. Brief transitions last 240 ms or less.
 - **D9.4 One motion per kind of action** (`symphony_ui::motion`), never
   written ad hoc, so the same action always moves the same way:
   - **Appear** (140 ms, ease-out): something opening. A plain fade: it
@@ -406,8 +436,11 @@ and animation state.
     in place, like a docked view, a snapped divider or a dropped item.
 - **D9.2 Motion never delays input.** An animation in progress never
   holds back a click or a stroke.
-- **D9.3** Respect the OS "reduce motion" setting, which turns all UI
-  motion off.
+- **D9.3 Make interface motion optional.** Respect Preferences →
+  Interface → Interface effects, the interface animation setting, and
+  the OS reduce-motion setting. When motion is off, show the same
+  feedback and final state immediately using static cues. An active
+  connector or valid drop target remains identifiable without animation.
 
 ---
 
@@ -500,6 +533,30 @@ Speed is part of the design (P1). Budgets are in
 [ENGINEERING.md](ENGINEERING.md) E6. A feature that breaks a budget isn't
 finished.
 
+- **D14.1 Give the artist’s current action priority.** Show fresh ink,
+  the result of a handle drag, or the pose at the new playhead before
+  rendering nearby frames or refreshing thumbnails. Let background jobs
+  yield when drawing, dragging, or scrubbing needs the same resources.
+- **D14.2 Update the part that changed.** Reuse valid render results and
+  recompute only affected regions and their dependencies. Account for
+  effects that extend or move pixels beyond the original edit, including
+  blur and distortion. Prioritize the visible Camera area and the active
+  drawing, handle, or matte.
+- **D14.3 Adapt preview quality during interaction.** A cheaper pass is
+  useful for expensive effects during a drag or scrub when it preserves
+  the cues the artist needs, such as a matte edge they are placing.
+  Give visually important changes priority over refinement. Settle
+  paused previews at full quality and keep them consistent with export.
+- **D14.4 Match work to the hardware.** Keep input and immediate feedback
+  on a short path. Move downloads, disk reads, and decoding off that path.
+  Use the GPU for parallel pixel work where profiling shows an advantage
+  after transfers. Size background work to leave resources for interaction.
+- **D14.5 Review slow cases as well as typical ones.** Measure cold launch
+  to a usable Welcome screen, pen-to-visible-ink latency, and scrub-to-pose
+  latency in a busy shot. Repeat while downloading or exporting to catch
+  hitches that average frame rate can hide.
+
+
 ---
 
 ## 15. Review checklist (every UI change)
@@ -517,7 +574,12 @@ finished.
 - [ ] The action is in a menu, with its shortcut shown (D8.7).
 - [ ] Shortcuts are defined for both profiles. Any Symphony difference is
       logged in §11.1.
+- [ ] Clickable controls reuse the shared style for their role. Check that
+      labels, links, selection, keyboard focus, and disabled controls are
+      distinguishable (D6.8–D6.9).
 - [ ] Words: sentence case, Harmony vocabulary, verb-first buttons (D5.3, D10).
+- [ ] Small animations respond to interactions. Check the same feedback
+      with Interface effects and motion disabled (D9.1–D9.3).
 - [ ] Nothing blocks input, and slow work runs in the background (D8.2).
 - [ ] Waits follow §17: acknowledged at once, spinner past 150 ms, words and progress past 1 s, Cancel past 3 s.
 - [ ] No generative AI. Any assisted tool is labelled, opt-in, and behind the switch (§16).
@@ -539,7 +601,7 @@ happening and roughly how long is left.
 | > 150 ms | An activity indicator **where the work was triggered**: a spinner on the button, in the view, or in the status bar. Never earlier, so fast actions don't flicker (E5.4). |
 | > 1 s | **What** is happening, in words ("Opening Walk", "Rendering frame 12 of 48"), and determinate progress whenever the work can be counted. |
 | > 3 s | A **Cancel** button, and elapsed time or time remaining. |
-| Startup | The window shows something within 200 ms. A launch that will take longer shows a loading screen with its current step. Never a blank or frozen window. |
+| Startup | Aim to show a usable Welcome screen within 200 ms. If essential work delays it, show the current startup step. |
 
 ### 17.2 Rules
 - **D17.1 Never freeze.** The UI keeps answering while work runs. Slow
@@ -573,8 +635,19 @@ happening and roughly how long is left.
   become a static "Working" label with pulsing removed. Progress bars
   still fill (D9.3).
 - **D17.10 Motion here is allowed.** Loading indicators are the one
-  continuous motion in the app (an exception to D9.1), because they
+  continuous motion while waiting, because they
   answer the user's action and show it's still alive.
+- **D17.11 Make startup useful in stages.** Enable Create and Open
+  as soon as the Welcome screen can accept input. Use the time an artist
+  spends in Welcome to warm the renderer and load recent-project previews.
+  On opening a scene, give its current frame priority. Load nearby frames,
+  thumbnails, and other secondary content as resources become available.
+  Run optional downloads in the background when possible, with progress
+  available where the artist requested them.
+- **D17.12 Let visible progress reflect real work.** Reveal usable content
+  as it becomes ready and keep its layout stable. For waits that need a
+  dedicated screen, update the step or count as work completes. Keep the
+  feedback calm, legible, and consistent with reduced-motion settings.
 
 ## 16. AI
 
