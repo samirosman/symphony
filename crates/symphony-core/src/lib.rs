@@ -8,10 +8,12 @@
 //! - [`sound`]: sound tracks that play with the picture.
 //! - [`bitmap`]: imported images kept as the original file.
 //! - [`deform`]: bone chains that bend drawings at their joints.
+//! - [`control`]: rig controls whose poses add offsets to the rig.
 
 pub mod anim;
 pub mod b64;
 pub mod bitmap;
+pub mod control;
 pub mod deform;
 pub mod doc;
 pub mod envelope;

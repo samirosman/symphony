@@ -333,6 +333,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Curve(c) if c.closed => "Envelope",
         NodeKind::Curve(_) => "Curve",
         NodeKind::KinematicOutput => "Kinematic Output",
+        NodeKind::Control(_) => "Control",
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
@@ -3177,7 +3178,8 @@ fn arrange_band(kind: &NodeKind) -> usize {
         | NodeKind::Bone(_)
         | NodeKind::MeshWarp(_)
         | NodeKind::Curve(_)
-        | NodeKind::KinematicOutput => 0,
+        | NodeKind::KinematicOutput
+        | NodeKind::Control(_) => 0,
         NodeKind::Drawing { .. } | NodeKind::Gradient(_) => 1,
         NodeKind::Effect(_) => 2,
         NodeKind::Composite => 3,
@@ -4622,6 +4624,10 @@ fn library_details(kind: &NodeKind) -> (&'static str, &'static str) {
         NodeKind::Bone(_) => (
             "Rigging",
             "Poses attached drawings and bends vector artwork around a joint.",
+        ),
+        NodeKind::Control(_) => (
+            "Rigging",
+            "Blends saved poses of the rig under it, picked with one slider.",
         ),
         NodeKind::MeshWarp(_) => (
             "Rigging",

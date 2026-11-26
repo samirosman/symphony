@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::anim::Value;
+use crate::control::Channel;
 use crate::id::Id;
 use crate::math::Affine;
 use crate::rig::{Bone, BonePose};
@@ -34,12 +35,18 @@ pub struct PegParams {
 
 impl PegParams {
     pub fn transform_at(&self, frame: u32) -> Affine {
-        let sx = self.scale_x.as_ref().map_or(1.0, |v| v.at(frame));
-        let sy = self.scale_y.as_ref().map_or(1.0, |v| v.at(frame));
+        self.transform_plus(frame, [0.0; 5])
+    }
+
+    /// The transform on `frame` with `add` (X, Y, rotation, scale X,
+    /// scale Y) added to the keyed values: what rig controls change.
+    pub fn transform_plus(&self, frame: u32, add: [f32; 5]) -> Affine {
+        let sx = self.scale_x.as_ref().map_or(1.0, |v| v.at(frame)) + add[3];
+        let sy = self.scale_y.as_ref().map_or(1.0, |v| v.at(frame)) + add[4];
         let (px, py) = self.pivot;
-        Affine::translate(self.x.at(frame), self.y.at(frame))
+        Affine::translate(self.x.at(frame) + add[0], self.y.at(frame) + add[1])
             .compose(Affine::translate(px, py))
-            .compose(Affine::rotate_deg(self.rotation.at(frame)))
+            .compose(Affine::rotate_deg(self.rotation.at(frame) + add[2]))
             .compose(Affine::scale(sx, sy))
             .compose(Affine::translate(-px, -py))
     }
@@ -80,6 +87,10 @@ pub enum NodeKind {
     /// Follows the end of the Bone it hangs from, like a peg, without
     /// bending the artwork under it (Harmony's Kinematic Output).
     KinematicOutput,
+    /// A rig control: its poses add offsets to the values of the nodes
+    /// under it (Harmony's Attribute Controller). It moves nothing by
+    /// itself.
+    Control(crate::control::Control),
     /// Stacks its inputs. Port 0 (leftmost) is in front.
     Composite,
     Effect(Effect),
@@ -454,6 +465,7 @@ impl Graph {
                 NodeKind::Bone(bone) => bone.has_key(frame),
                 NodeKind::MeshWarp(warp) => warp.has_key(frame),
                 NodeKind::Curve(curve) => curve.has_key(frame),
+                NodeKind::Control(control) => control.has_key(frame),
                 _ => false,
             })
     }
@@ -560,20 +572,27 @@ impl Graph {
             return false;
         };
         let valid = match source.kind {
-            NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_) => matches!(
-                target.kind,
-                NodeKind::Peg(_)
-                    | NodeKind::MeshWarp(_)
-                    | NodeKind::Curve(_)
-                    | NodeKind::Skeleton(_)
-                    | NodeKind::Drawing { .. }
-            ),
+            NodeKind::Peg(_)
+            | NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
+            | NodeKind::Control(_) => {
+                matches!(
+                    target.kind,
+                    NodeKind::Peg(_)
+                        | NodeKind::MeshWarp(_)
+                        | NodeKind::Curve(_)
+                        | NodeKind::Skeleton(_)
+                        | NodeKind::Control(_)
+                        | NodeKind::Drawing { .. }
+                )
+            }
             NodeKind::Skeleton(_) => matches!(target.kind, NodeKind::Bone(_)),
             NodeKind::KinematicOutput => matches!(
                 target.kind,
                 NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
                     | NodeKind::Curve(_)
+                    | NodeKind::Control(_)
                     | NodeKind::Drawing { .. }
             ),
             NodeKind::Bone(_) => matches!(
@@ -583,6 +602,7 @@ impl Graph {
                     | NodeKind::Peg(_)
                     | NodeKind::MeshWarp(_)
                     | NodeKind::Curve(_)
+                    | NodeKind::Control(_)
                     | NodeKind::Drawing { .. }
             ),
             NodeKind::Composite
@@ -794,7 +814,8 @@ impl Graph {
             | NodeKind::Curve(_)
             | NodeKind::Skeleton(_)
             | NodeKind::Bone(_)
-            | NodeKind::KinematicOutput => {}
+            | NodeKind::KinematicOutput
+            | NodeKind::Control(_) => {}
         }
         Ok(())
     }
@@ -845,7 +866,7 @@ impl Graph {
             }
             match &node.kind {
                 NodeKind::Peg(p) | NodeKind::Skeleton(p) => {
-                    outer = outer.compose(p.transform_at(frame))
+                    outer = outer.compose(self.peg_transform(n, p, frame))
                 }
                 NodeKind::Bone(_) if bound_bone == Some(n) => {
                     let chain = self.chain_pose(n, frame, depth)?;
@@ -894,10 +915,10 @@ impl Graph {
                 NodeKind::Bone(_) => return Some((id, inner)),
                 NodeKind::Peg(peg) => {
                     if self.enabled_at(id, frame) {
-                        inner = peg.transform_at(frame).compose(inner);
+                        inner = self.peg_transform(id, peg, frame).compose(inner);
                     }
                 }
-                NodeKind::MeshWarp(_) | NodeKind::Curve(_) => {}
+                NodeKind::MeshWarp(_) | NodeKind::Curve(_) | NodeKind::Control(_) => {}
                 _ => return None,
             }
         }
@@ -1154,7 +1175,7 @@ impl Graph {
             if springy || bone.angle_limits.is_some() {
                 let pose = self.bone_pose(id, frame)?;
                 let (x, y) = pose.posed.inverse()?.apply(goal[0], goal[1]);
-                let now = bone.rotation.at(frame);
+                let now = bone.rotation.at(frame) + self.offset(id, Channel::Rotation, frame);
                 let wanted = now + y.atan2(x).to_degrees();
                 let wanted = if springy {
                     bone.spring_rotation(wanted)
@@ -1244,12 +1265,18 @@ impl Graph {
                 .unwrap_or(0.0);
             angles.insert(id, angle);
             let wanted = angle - parent_angle - bone.rest_angle;
-            let now = bone.rotation.at(frame);
+            // The solve works on what shows (keys plus control offsets);
+            // the change keeps the offsets out of the keys.
+            let [turn, grow] =
+                [Channel::Rotation, Channel::Stretch].map(|c| self.offset(id, c, frame));
+            let now = bone.rotation.at(frame) + turn;
             let rotation =
                 bone.clamp_rotation(now + (wanted - now + 180.0).rem_euclid(360.0) - 180.0);
             let stretch = (tx - x).hypot(ty - y) / bone.length();
-            if (rotation - now).abs() > 1e-3 || (stretch - bone.stretch_at(frame)).abs() > 1e-4 {
-                changes.push((id, rotation, stretch));
+            if (rotation - now).abs() > 1e-3
+                || (stretch - bone.stretch_plus(frame, grow)).abs() > 1e-4
+            {
+                changes.push((id, rotation - turn, stretch - grow));
             }
         }
         Some(RigSolution {
@@ -1265,7 +1292,7 @@ impl Graph {
     /// How much longer than its rest length bone `id` is at `frame`.
     fn bone_stretch(&self, id: NodeId, bone: &Bone, frame: u32) -> f32 {
         if self.enabled_at(id, frame) {
-            bone.stretch_at(frame)
+            bone.stretch_plus(frame, self.offset(id, Channel::Stretch, frame))
         } else {
             1.0
         }
@@ -1276,7 +1303,8 @@ impl Graph {
             return bone.rest_angle;
         }
         let Some(lower) = self.smart_controller(id, frame) else {
-            return bone.rest_angle + bone.rotation_at(frame);
+            return bone.rest_angle
+                + bone.rotation_plus(frame, self.offset(id, Channel::Rotation, frame));
         };
         let pair = self
             .parent_bone(lower)
@@ -1294,8 +1322,53 @@ impl Graph {
                     bone.rest_angle + bone.clamp_rotation(aim)
                 }
             }
-            None => bone.rest_angle + bone.rotation_at(frame),
+            None => {
+                bone.rest_angle
+                    + bone.rotation_plus(frame, self.offset(id, Channel::Rotation, frame))
+            }
         }
+    }
+
+    /// What the rig controls above `id` add to its `channel` on `frame`.
+    /// A Control changes only the nodes under it in the Node view.
+    pub fn offset(&self, id: NodeId, channel: Channel, frame: u32) -> f32 {
+        if !self.has_controls() {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        let mut at = self.input(id, 0);
+        for _ in 0..MAX_DEPTH {
+            let Some(n) = at else { break };
+            if let Some(NodeKind::Control(control)) = self.node(n).map(|node| &node.kind) {
+                if self.enabled_at(n, frame) {
+                    sum += control.offset_at(frame, id, channel);
+                }
+            }
+            at = self.input(n, 0);
+        }
+        sum
+    }
+
+    fn has_controls(&self) -> bool {
+        self.nodes()
+            .any(|(_, node)| matches!(node.kind, NodeKind::Control(_)))
+    }
+
+    /// A peg's transform on `frame`, with the offsets of the rig
+    /// controls above it.
+    fn peg_transform(&self, id: NodeId, peg: &PegParams, frame: u32) -> Affine {
+        if !self.has_controls() {
+            return peg.transform_at(frame);
+        }
+        let add = [
+            Channel::X,
+            Channel::Y,
+            Channel::Rotation,
+            Channel::ScaleX,
+            Channel::ScaleY,
+        ]
+        .map(|channel| self.offset(id, channel, frame));
+        peg.transform_plus(frame, add)
     }
 
     /// The bones from the root of the chain down to `id`, solved for
@@ -1391,8 +1464,8 @@ impl Graph {
                     .map_or(node.enabled, |key| key.enabled) =>
             {
                 StagePose {
-                    transform: parent.transform.compose(p.transform_at(frame)),
-                    depth: parent.depth + p.z.at(frame),
+                    transform: parent.transform.compose(self.peg_transform(id, p, frame)),
+                    depth: parent.depth + p.z.at(frame) + self.offset(id, Channel::Z, frame),
                 }
             }
             NodeKind::KinematicOutput if self.enabled_at(id, frame) => {
@@ -2058,5 +2131,229 @@ mod tests {
             (b.0 - a.0).abs() < 1.0 && b.1 > a.1 + 90.0,
             "the foot points down"
         );
+    }
+
+    mod controls {
+        use super::*;
+        use crate::control::{Channel, Control, Offset, Pose};
+
+        /// A slider at `position` whose pose at 1 adds `offsets`, put
+        /// above `below`.
+        fn control_above(
+            graph: &mut Graph,
+            below: NodeId,
+            position: f32,
+            offsets: &[(NodeId, Channel, f32)],
+        ) -> NodeId {
+            let control = graph.add(
+                "Control",
+                NodeKind::Control(Control {
+                    value: Value::Constant(position),
+                    poses: vec![Pose {
+                        at: 1.0,
+                        offsets: offsets
+                            .iter()
+                            .map(|&(node, channel, amount)| Offset {
+                                node,
+                                channel,
+                                amount,
+                            })
+                            .collect(),
+                    }],
+                    ..Control::default()
+                }),
+            );
+            if let Some(parent) = graph.input(below, 0) {
+                let links = graph
+                    .links()
+                    .iter()
+                    .copied()
+                    .filter(|l| !(l.to == below && l.port == 0))
+                    .collect();
+                graph.replace_links(links);
+                graph.connect(parent, control, 0);
+            }
+            graph.connect(control, below, 0);
+            control
+        }
+
+        fn turned(angle: f32) -> [f32; 2] {
+            let r = angle.to_radians();
+            [100.0 * r.cos(), 100.0 * r.sin()]
+        }
+
+        #[test]
+        fn a_control_turns_a_bone_under_it_without_keys() {
+            let (mut graph, [hip, _, _]) = leg();
+            control_above(
+                &mut graph,
+                NodeId(0),
+                0.5,
+                &[(hip, Channel::Rotation, 40.0)],
+            );
+            assert!(near(
+                graph.bone_pose(hip, 1).unwrap().tip(),
+                turned(20.0),
+                0.01
+            ));
+            assert_eq!(graph.bone(hip).unwrap().rotation.at(1), 0.0, "keys stay");
+        }
+
+        #[test]
+        fn a_control_leaves_nodes_outside_it_alone() {
+            let (mut graph, [hip, _, _]) = leg();
+            let other = graph.add(
+                "Other",
+                NodeKind::Bone(Bone {
+                    length: 100.0,
+                    ..Bone::default()
+                }),
+            );
+            control_above(
+                &mut graph,
+                NodeId(0),
+                1.0,
+                &[
+                    (other, Channel::Rotation, 40.0),
+                    (hip, Channel::Rotation, 10.0),
+                ],
+            );
+            assert!(near(
+                graph.bone_pose(other, 1).unwrap().tip(),
+                turned(0.0),
+                0.01
+            ));
+            assert!(near(
+                graph.bone_pose(hip, 1).unwrap().tip(),
+                turned(10.0),
+                0.01
+            ));
+        }
+
+        #[test]
+        fn angle_and_stretch_limits_hold_under_a_control() {
+            let (mut graph, [hip, _, _]) = leg();
+            if let Some(NodeKind::Bone(b)) = graph.node_mut(hip).map(|n| &mut n.kind) {
+                b.angle_limits = Some([-10.0, 10.0]);
+                b.stretch_mode = crate::rig::Stretch::Simple;
+                b.stretch_limits = Some([1.0, 1.5]);
+            }
+            control_above(
+                &mut graph,
+                NodeId(0),
+                1.0,
+                &[(hip, Channel::Rotation, 40.0), (hip, Channel::Stretch, 2.0)],
+            );
+            let tip = graph.bone_pose(hip, 1).unwrap().tip();
+            let [x, y] = turned(10.0).map(|v| v * 1.5);
+            assert!(near(tip, [x, y], 0.01), "{tip:?}");
+        }
+
+        #[test]
+        fn a_control_moves_a_peg_and_its_depth() {
+            let mut graph = Graph::default();
+            let peg = graph.add("Peg", NodeKind::Peg(PegParams::default()));
+            let child = graph.add("Child", NodeKind::Peg(PegParams::default()));
+            graph.connect(peg, child, 0);
+            control_above(
+                &mut graph,
+                peg,
+                1.0,
+                &[
+                    (peg, Channel::X, 30.0),
+                    (peg, Channel::Z, 2.0),
+                    (peg, Channel::ScaleX, 1.0),
+                ],
+            );
+            let pose = graph.world_pose(child, 1).unwrap();
+            assert_eq!(pose.transform.apply(10.0, 0.0), (50.0, 0.0));
+            assert_eq!(pose.depth, 2.0);
+        }
+
+        #[test]
+        fn stacked_controls_add_and_a_disabled_one_adds_nothing() {
+            let (mut graph, [hip, _, _]) = leg();
+            let inner = control_above(
+                &mut graph,
+                NodeId(0),
+                1.0,
+                &[(hip, Channel::Rotation, 10.0)],
+            );
+            let outer = control_above(&mut graph, inner, 1.0, &[(hip, Channel::Rotation, 15.0)]);
+            assert_eq!(graph.offset(hip, Channel::Rotation, 1), 25.0);
+            assert!(near(
+                graph.bone_pose(hip, 1).unwrap().tip(),
+                turned(25.0),
+                0.01
+            ));
+            graph.node_mut(outer).unwrap().enabled = false;
+            assert_eq!(graph.offset(hip, Channel::Rotation, 1), 10.0);
+        }
+
+        #[test]
+        fn a_kinematic_output_follows_the_offset_bone() {
+            let (mut graph, [hip, _, _]) = leg();
+            let output = graph.add("Output", NodeKind::KinematicOutput);
+            graph.connect(hip, output, 0);
+            let child = graph.add("Child", NodeKind::Peg(PegParams::default()));
+            graph.connect(output, child, 0);
+            control_above(
+                &mut graph,
+                NodeId(0),
+                1.0,
+                &[(hip, Channel::Rotation, 90.0)],
+            );
+            let (x, y) = graph
+                .world_pose(child, 1)
+                .unwrap()
+                .transform
+                .apply(100.0, 0.0);
+            assert!(near((x, y), [0.0, 100.0], 0.01), "{x} {y}");
+        }
+
+        #[test]
+        fn the_anchored_solve_keeps_offsets_out_of_the_keys() {
+            let (mut graph, [hip, _, foot]) = leg();
+            let NodeKind::Bone(bone) = &mut graph.node_mut(foot).unwrap().kind else {
+                unreachable!()
+            };
+            bone.anchor = Some(Box::new(crate::rig::Anchor {
+                kind: crate::rig::AnchorKind::Locked,
+                target: [Value::Constant(230.0), Value::Constant(0.0)],
+            }));
+            control_above(
+                &mut graph,
+                NodeId(0),
+                1.0,
+                &[(hip, Channel::Rotation, 20.0)],
+            );
+            let drag = [80.0, 60.0];
+            let solution = graph.solve_rig(hip, drag, 1).unwrap();
+            apply(&mut graph, &solution.changes);
+            assert!(near(graph.bone_pose(hip, 1).unwrap().tip(), drag, 0.04));
+            assert!(near(
+                graph.bone_pose(foot, 1).unwrap().tip(),
+                [230.0, 0.0],
+                0.04
+            ));
+        }
+
+        #[test]
+        fn a_control_saves_and_loads() {
+            let (mut graph, [hip, _, _]) = leg();
+            control_above(
+                &mut graph,
+                NodeId(0),
+                0.5,
+                &[(hip, Channel::Rotation, 40.0)],
+            );
+            let text = serde_json::to_string(&graph).unwrap();
+            let back: Graph = serde_json::from_str(&text).unwrap();
+            assert!(near(
+                back.bone_pose(hip, 1).unwrap().tip(),
+                turned(20.0),
+                0.01
+            ));
+        }
     }
 }
