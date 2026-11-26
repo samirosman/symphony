@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::anim::Value;
-use crate::control::Channel;
+use crate::control::{Channel, Control};
 use crate::id::Id;
 use crate::math::Affine;
 use crate::rig::{Bone, BonePose};
@@ -398,6 +398,10 @@ pub struct Graph {
     keys: BTreeMap<NodeId, BTreeMap<u32, NodeKey>>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     matte_drawings: std::collections::BTreeSet<NodeId>,
+    /// A Control in Setup mode and its test position: it offsets the rig
+    /// in place of the keyed position. Never saved, never undone.
+    #[serde(skip)]
+    control_test: Option<(NodeId, f32)>,
 }
 
 /// Camera-facing artwork keeps a 2D transform and a separate depth.
@@ -1347,12 +1351,40 @@ impl Graph {
             let Some(n) = at else { break };
             if let Some(NodeKind::Control(control)) = self.node(n).map(|node| &node.kind) {
                 if self.enabled_at(n, frame) {
-                    sum += control.offset_at(frame, id, channel);
+                    let position = self.control_position(n, control, frame);
+                    sum += control.offset_for(position, id, channel);
                 }
             }
             at = self.input(n, 0);
         }
         sum
+    }
+
+    /// Control `id`'s position on `frame`: its test position in Setup
+    /// mode, else its keyed one (inside the range either way).
+    fn control_position(&self, id: NodeId, control: &Control, frame: u32) -> f32 {
+        match self.control_test {
+            Some((test, position)) if test == id => control.clamp(position),
+            _ => control.position_at(frame),
+        }
+    }
+
+    /// The position Control `id` shows on `frame` (None: not a Control).
+    pub fn control_shown_position(&self, id: NodeId, frame: u32) -> Option<f32> {
+        match &self.node(id)?.kind {
+            NodeKind::Control(control) => Some(self.control_position(id, control, frame)),
+            _ => None,
+        }
+    }
+
+    /// The Control in Setup mode and its test position.
+    pub fn control_test(&self) -> Option<(NodeId, f32)> {
+        self.control_test
+    }
+
+    /// Put Control `id` in Setup mode at `position` (None: out of it).
+    pub fn set_control_test(&mut self, test: Option<(NodeId, f32)>) {
+        self.control_test = test;
     }
 
     fn has_controls(&self) -> bool {

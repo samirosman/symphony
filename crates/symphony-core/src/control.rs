@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::anim::Value;
-use crate::graph::NodeId;
+use crate::graph::{NodeId, NodeKind};
 use crate::rig::BoneColour;
 
 /// One animated value of a node that a pose can offset. `Rotation`
@@ -165,6 +165,70 @@ impl Control {
 
     pub fn has_key(&self, frame: u32) -> bool {
         self.value.has_key(frame)
+    }
+
+    /// Add `amount` to the offset of `channel` of `node` in the pose at
+    /// `at`. False when no pose is there (the rest pose takes none).
+    pub fn add_offset(&mut self, at: f32, node: NodeId, channel: Channel, amount: f32) -> bool {
+        let Some(pose) = self.poses.iter_mut().find(|p| p.at == at && at != 0.0) else {
+            return false;
+        };
+        match pose
+            .offsets
+            .iter_mut()
+            .find(|o| o.node == node && o.channel == channel)
+        {
+            Some(offset) => offset.amount += amount,
+            None => pose.offsets.push(Offset {
+                node,
+                channel,
+                amount,
+            }),
+        }
+        true
+    }
+}
+
+/// The values of a bone or peg that a pose can offset, on `frame`.
+pub fn channel_values(kind: &NodeKind, frame: u32) -> Vec<(Channel, f32)> {
+    match kind {
+        NodeKind::Bone(bone) => vec![
+            (Channel::Rotation, bone.rotation.at(frame)),
+            (Channel::Stretch, bone.stretch.at(frame)),
+        ],
+        NodeKind::Peg(peg) | NodeKind::Skeleton(peg) => {
+            let scale = |v: &Option<Value>| v.as_ref().map_or(1.0, |v| v.at(frame));
+            vec![
+                (Channel::X, peg.x.at(frame)),
+                (Channel::Y, peg.y.at(frame)),
+                (Channel::Z, peg.z.at(frame)),
+                (Channel::Rotation, peg.rotation.at(frame)),
+                (Channel::ScaleX, scale(&peg.scale_x)),
+                (Channel::ScaleY, scale(&peg.scale_y)),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Put back into `kind` the values a pose can offset, as `from` holds
+/// them; every other setting stays.
+pub fn restore_channels(kind: &mut NodeKind, from: &NodeKind) {
+    match (kind, from) {
+        (NodeKind::Bone(bone), NodeKind::Bone(old)) => {
+            bone.rotation = old.rotation.clone();
+            bone.stretch = old.stretch.clone();
+        }
+        (NodeKind::Peg(peg), NodeKind::Peg(old))
+        | (NodeKind::Skeleton(peg), NodeKind::Skeleton(old)) => {
+            peg.x = old.x.clone();
+            peg.y = old.y.clone();
+            peg.z = old.z.clone();
+            peg.rotation = old.rotation.clone();
+            peg.scale_x = old.scale_x.clone();
+            peg.scale_y = old.scale_y.clone();
+        }
+        _ => {}
     }
 }
 

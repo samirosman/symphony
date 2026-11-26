@@ -10,12 +10,21 @@
 //!   pose at 0 included).
 //! - Double-click a pose dot to put the knob on that pose.
 //!
+//! - Setup mode (the panel at the top left, with the Control selected):
+//!   the knob turns white and is a test position that makes no key. Add
+//!   pose puts a pose at the knob; while the knob is on a pose, a change
+//!   to a bone's rotation or stretch, or a peg's position, rotation or
+//!   scale, under the Control goes into that pose instead of the rig's
+//!   keys. Done puts the knob back on its keyed position.
+//!
 //! The widget sits at its position in the space of the node it follows
 //! (the Control's own parent unless a peg or bone is set), so it moves
 //! with the character. Shift+C hides it with the other rig controls.
 
+use std::collections::BTreeMap;
+
 use eframe::egui::{self, Pos2, Stroke};
-use symphony_core::control::Control;
+use symphony_core::control::{channel_values, restore_channels, Control, Pose};
 use symphony_core::graph::{NodeId, NodeKind};
 use symphony_core::history::Edit;
 use symphony_core::math::Affine;
@@ -29,6 +38,15 @@ const GRAB: f32 = 10.0;
 #[derive(Default)]
 pub struct ControlEdit {
     drag: Option<NodeId>,
+}
+
+/// A Control in Setup mode (Harmony's Setup Mode).
+pub struct Setup {
+    pub control: NodeId,
+    /// The bones and pegs under the Control as last seen.
+    seen: BTreeMap<NodeId, NodeKind>,
+    /// `History::made` when last seen.
+    made: u64,
 }
 
 /// One widget as shown this frame.
@@ -85,11 +103,13 @@ fn controls(s: &Session) -> Vec<NodeId> {
     let start = s
         .selected_node
         .or_else(|| s.doc.layers.get(s.selected).map(|layer| layer.node));
-    let mut found = Vec::new();
+    let mut found: Vec<NodeId> = s.control_setup.iter().map(|setup| setup.control).collect();
     let mut at = start;
     for _ in 0..256 {
         let Some(id) = at else { break };
-        if matches!(graph.node(id).map(|n| &n.kind), Some(NodeKind::Control(_))) {
+        if matches!(graph.node(id).map(|n| &n.kind), Some(NodeKind::Control(_)))
+            && !found.contains(&id)
+        {
             found.push(id);
         }
         at = graph.input(id, 0);
@@ -170,9 +190,19 @@ fn paint(painter: &egui::Painter, s: &Session, w: &Shown) {
             painter.circle_filled(p, 2.5, ink);
         }
     }
-    let knob = w.place(w.control.position_at(s.frame));
+    let testing = s
+        .control_setup
+        .as_ref()
+        .is_some_and(|setup| setup.control == w.id);
+    let at = s
+        .doc
+        .graph
+        .control_shown_position(w.id, s.frame)
+        .unwrap_or_else(|| w.control.position_at(s.frame));
+    let knob = w.place(at);
     painter.circle_filled(knob, 7.5, theme::BG_BASE);
-    painter.circle_filled(knob, 5.5, ink);
+    // Setup mode: a white knob, a test position with no key.
+    painter.circle_filled(knob, 5.5, if testing { theme::ON_ACCENT } else { ink });
     if w.control.widget.show_label {
         if let Some(node) = s.doc.graph.node(w.id) {
             // Ends swapped: the label sits above a horizontal track and
@@ -183,10 +213,21 @@ fn paint(painter: &egui::Painter, s: &Session, w: &Shown) {
 }
 
 /// Set Control `id` to `position` on this frame (a key in Animate mode).
+/// In Setup mode it moves the test position only.
 fn set_position(s: &mut Session, id: NodeId, position: f32) {
     let Some(before) = s.doc.graph.node(id).cloned() else {
         return;
     };
+    if s.control_setup
+        .as_ref()
+        .is_some_and(|setup| setup.control == id)
+    {
+        if let NodeKind::Control(control) = &before.kind {
+            let test = Some((id, control.clamp(position)));
+            s.doc.graph.set_control_test(test);
+        }
+        return;
+    }
     let mut after = before.clone();
     let NodeKind::Control(control) = &mut after.kind else {
         return;
@@ -286,4 +327,226 @@ pub fn finish(s: &mut Session, state: &mut ControlEdit) {
     if state.drag.take().is_some() {
         s.end_gesture();
     }
+}
+
+/// The bones and pegs under Control `id`, as they are now.
+fn rig_under(s: &Session, id: NodeId) -> BTreeMap<NodeId, NodeKind> {
+    let graph = &s.doc.graph;
+    graph
+        .nodes()
+        .filter(|(_, node)| {
+            matches!(
+                node.kind,
+                NodeKind::Bone(_) | NodeKind::Peg(_) | NodeKind::Skeleton(_)
+            )
+        })
+        .filter(|&(node, _)| {
+            let mut at = graph.input(node, 0);
+            for _ in 0..256 {
+                match at {
+                    Some(n) if n == id => return true,
+                    Some(n) => at = graph.input(n, 0),
+                    None => break,
+                }
+            }
+            false
+        })
+        .map(|(node, n)| (node, n.kind.clone()))
+        .collect()
+}
+
+/// Put Control `id` in Setup mode, the knob on its keyed position.
+pub fn start_setup(s: &mut Session, id: NodeId) {
+    let Some(position) = s.doc.graph.control_shown_position(id, s.frame) else {
+        return;
+    };
+    s.end_gesture();
+    s.doc.graph.set_control_test(Some((id, position)));
+    s.control_setup = Some(Setup {
+        control: id,
+        seen: rig_under(s, id),
+        made: s.history.made(),
+    });
+}
+
+/// Leave Setup mode: the knob goes back to its keyed position.
+pub fn end_setup(s: &mut Session) {
+    s.control_setup = None;
+    s.doc.graph.set_control_test(None);
+}
+
+/// The Control in Setup mode, its test position, and whether a pose
+/// sits there.
+fn setup_state(s: &Session) -> Option<(NodeId, f32, bool)> {
+    let (id, at) = s.doc.graph.control_test()?;
+    let NodeKind::Control(control) = &s.doc.graph.node(id)?.kind else {
+        return None;
+    };
+    let on_pose = at != 0.0 && control.poses.iter().any(|p| p.at == at);
+    Some((id, at, on_pose))
+}
+
+/// Add a pose at the test position (one undo step).
+pub fn add_pose(s: &mut Session) {
+    let Some((id, at, false)) = setup_state(s).filter(|&(_, at, _)| at != 0.0) else {
+        return;
+    };
+    let Some(before) = s.doc.graph.node(id).cloned() else {
+        return;
+    };
+    let mut after = before.clone();
+    if let NodeKind::Control(control) = &mut after.kind {
+        control.poses.push(Pose {
+            at,
+            offsets: Vec::new(),
+        });
+        control.poses.sort_by(|a, b| a.at.total_cmp(&b.at));
+    }
+    s.history.apply(
+        &mut s.doc,
+        "Add pose",
+        vec![Edit::SetNodeProperties { id, before, after }],
+    );
+    record_setup(s, false);
+}
+
+/// In Setup mode, move each change to the rig under the Control into
+/// the pose at the knob, as part of the edit's own undo step. It waits
+/// until the edit ends (`pointer_down` false), so a drag records once.
+/// Undo and redo change nothing here: they only refresh what was seen.
+pub fn record_setup(s: &mut Session, pointer_down: bool) {
+    let Some(mut setup) = s.control_setup.take() else {
+        return;
+    };
+    let Some((id, at, on_pose)) = setup_state(s).filter(|t| t.0 == setup.control) else {
+        end_setup(s);
+        return;
+    };
+    if pointer_down {
+        s.control_setup = Some(setup);
+        return;
+    }
+    if setup.made != s.history.made() && on_pose {
+        let frame = s.frame;
+        let mut edits = Vec::new();
+        let mut control = s.doc.graph.node(id).cloned();
+        for (node, old) in &setup.seen {
+            let Some(now) = s.doc.graph.node(*node) else {
+                continue;
+            };
+            let mut changed = false;
+            for ((channel, value), (_, was)) in channel_values(&now.kind, frame)
+                .into_iter()
+                .zip(channel_values(old, frame))
+            {
+                if (value - was).abs() > 1e-5 {
+                    if let Some(NodeKind::Control(c)) = control.as_mut().map(|n| &mut n.kind) {
+                        changed |= c.add_offset(at, *node, channel, value - was);
+                    }
+                }
+            }
+            if changed {
+                let mut after = now.clone();
+                restore_channels(&mut after.kind, old);
+                edits.push(Edit::SetNodeProperties {
+                    id: *node,
+                    before: now.clone(),
+                    after,
+                });
+            }
+        }
+        if let Some(after) = control.filter(|_| !edits.is_empty()) {
+            if let Some(before) = s.doc.graph.node(id).cloned() {
+                edits.push(Edit::SetNodeProperties { id, before, after });
+            }
+            s.history.amend(&mut s.doc, "Record pose", edits);
+        }
+    }
+    setup.seen = rig_under(s, id);
+    setup.made = s.history.made();
+    s.control_setup = Some(setup);
+}
+
+/// The Setup mode panel and frame in the Camera view, and the recording.
+pub fn setup_ui(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    s: &mut Session,
+) {
+    let pointer_down = ui.input(|i| i.pointer.any_down());
+    record_setup(s, pointer_down);
+    let selected = s.selected_node.filter(|&id| {
+        matches!(
+            s.doc.graph.node(id).map(|n| &n.kind),
+            Some(NodeKind::Control(_))
+        )
+    });
+    let setup = setup_state(s).filter(|_| s.control_setup.is_some());
+    if setup.is_none() && (selected.is_none() || !s.show_rig_controls) {
+        return;
+    }
+    if setup.is_some() {
+        // A coloured frame: rig edits now go into a pose.
+        painter.rect_stroke(
+            response.rect.shrink(1.5),
+            0.0,
+            Stroke::new(3.0, theme::ACCENT_TIME),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let at = response.rect.left_top() + egui::vec2(12.0, 12.0);
+    egui::Area::new(response.id.with("control-setup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| match setup {
+                Some((id, at, on_pose)) => {
+                    let name = s.doc.graph.node(id).map_or("", |n| n.name.as_str());
+                    ui.label(
+                        egui::RichText::new(format!("Setup mode: {name}"))
+                            .color(theme::ACCENT_TIME),
+                    );
+                    let hint = if on_pose {
+                        format!(
+                            "Pose the rig. The changes go into the pose at {at:.2}, not into keys."
+                        )
+                    } else if at == 0.0 {
+                        "Move the knob away from the rest pose, then add a pose.".to_owned()
+                    } else {
+                        "Add a pose here, or move the knob onto a pose dot.".to_owned()
+                    };
+                    ui.label(
+                        egui::RichText::new(hint)
+                            .font(theme::dense())
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!on_pose && at != 0.0, egui::Button::new("Add pose"))
+                            .clicked()
+                        {
+                            add_pose(s);
+                        }
+                        if symphony_ui::widgets::primary_button(ui, "Done", true).clicked() {
+                            end_setup(s);
+                        }
+                    });
+                }
+                None => {
+                    if let Some(id) = selected {
+                        if ui
+                            .button("Setup mode")
+                            .on_hover_text(
+                                "Make poses for this control: the knob becomes a test \
+                                 position, and rig changes go into the pose at the knob.",
+                            )
+                            .clicked()
+                        {
+                            start_setup(s, id);
+                        }
+                    }
+                }
+            });
+        });
 }

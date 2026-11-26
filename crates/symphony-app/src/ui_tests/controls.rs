@@ -241,3 +241,117 @@ fn a_bone_drag_under_an_offset_keys_the_bone_without_it() {
     assert!(shown > 1.5, "longer: {shown}");
     assert!((shown - 0.5 - key).abs() < 0.01, "key {key}, shown {shown}");
 }
+
+fn pose_turn(h: &Harness<'static, Rig>, id: NodeId, bone: NodeId, at: f32) -> Option<f32> {
+    let c = control(h, id);
+    let pose = c.poses.iter().find(|p| (p.at - at).abs() < 0.02)?;
+    Some(pose.amount(bone, Channel::Rotation))
+}
+
+#[test]
+fn setup_mode_records_a_bone_turn_into_the_pose_at_the_knob() {
+    let Scene {
+        mut h,
+        control: id,
+        bone,
+    } = scene(0.0, 0.0, true);
+    crate::views::control_edit::start_setup(&mut h.state_mut().s, id);
+    h.run_steps(1);
+    // The knob is a test position: no key, even in Animate mode.
+    drag(&mut h, (0.0, -100.0), (100.0, -100.0), Modifiers::NONE);
+    assert!(!control(&h, id).has_key(1), "no key on the control");
+    assert_eq!(control(&h, id).value.at(1), 0.0);
+    let steps = h.state().s.history.undo_len();
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    assert!(near(tip(&h, bone), (0.0, 200.0)), "tip {:?}", tip(&h, bone));
+    let rotation = &h.state().s.doc.graph.bone(bone).unwrap().rotation;
+    assert!(
+        matches!(rotation, Value::Constant(r) if *r == 0.0),
+        "no rig key: {rotation:?}"
+    );
+    let turn = pose_turn(&h, id, bone, 1.0).unwrap();
+    assert!((turn - 90.0).abs() < 0.5, "pose turn {turn}");
+    assert_eq!(h.state().s.history.undo_len(), steps + 1, "one undo step");
+    // Done: the knob goes back to its keyed position (0, the rest).
+    crate::views::control_edit::end_setup(&mut h.state_mut().s);
+    assert!(near(tip(&h, bone), (200.0, 0.0)), "tip {:?}", tip(&h, bone));
+    // Undo takes the turn out of the pose.
+    h.state_mut().s.undo();
+    assert_eq!(pose_turn(&h, id, bone, 1.0), Some(0.0));
+}
+
+#[test]
+fn setup_mode_adds_a_pose_at_the_knob_from_its_panel() {
+    use egui_kittest::kittest::Queryable;
+    let Scene {
+        mut h,
+        control: id,
+        bone,
+    } = scene(0.0, 0.0, false);
+    h.state_mut().s.selected_node = Some(id);
+    h.run_steps(2);
+    h.get_by_label("Setup mode").click();
+    h.run_steps(2);
+    drag(&mut h, (0.0, -100.0), (-50.0, -100.0), Modifiers::NONE);
+    h.get_by_label("Add pose").click();
+    h.run_steps(2);
+    assert!(pose_turn(&h, id, bone, -0.5).is_some(), "a pose at -0.5");
+    // Select the bone and turn it: the turn goes into the new pose.
+    h.state_mut().s.selected_node = Some(bone);
+    h.run_steps(2);
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    let turn = pose_turn(&h, id, bone, -0.5).unwrap();
+    assert!((turn - 90.0).abs() < 0.5, "pose turn {turn}");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    assert!(h.state().s.control_setup.is_none());
+}
+
+#[test]
+fn off_a_pose_setup_mode_leaves_edits_as_keys() {
+    let Scene {
+        mut h,
+        control: id,
+        bone,
+    } = scene(0.0, 0.0, false);
+    crate::views::control_edit::start_setup(&mut h.state_mut().s, id);
+    h.run_steps(1);
+    drag(&mut h, (0.0, -100.0), (50.0, -100.0), Modifiers::NONE);
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    let rotation = h.state().s.doc.graph.bone(bone).unwrap().rotation.at(1);
+    assert!((rotation - 90.0).abs() < 0.5, "a normal edit: {rotation}");
+    assert_eq!(pose_turn(&h, id, bone, 1.0), Some(0.0));
+}
+
+#[test]
+fn setup_mode_records_a_skeleton_move_as_peg_offsets() {
+    let Scene {
+        mut h,
+        control: id,
+        bone,
+    } = scene(0.0, 0.0, false);
+    let skeleton = h.state().s.doc.graph.input(bone, 0).unwrap();
+    crate::views::control_edit::start_setup(&mut h.state_mut().s, id);
+    h.run_steps(1);
+    drag(&mut h, (0.0, -100.0), (100.0, -100.0), Modifiers::NONE);
+    drag(&mut h, (0.0, 0.0), (50.0, 40.0), Modifiers::NONE);
+    let c = control(&h, id);
+    let pose = c.poses.iter().find(|p| p.at == 1.0).unwrap();
+    let (x, y) = (
+        pose.amount(skeleton, Channel::X),
+        pose.amount(skeleton, Channel::Y),
+    );
+    assert!(
+        (x - 50.0).abs() < 1.0 && (y - 40.0).abs() < 1.0,
+        "({x}, {y})"
+    );
+    let NodeKind::Skeleton(peg) = &h.state().s.doc.graph.node(skeleton).unwrap().kind else {
+        panic!("not a skeleton");
+    };
+    assert_eq!((peg.x.at(1), peg.y.at(1)), (0.0, 0.0), "no rig key");
+    assert!(
+        near(tip(&h, bone), (250.0, 40.0)),
+        "tip {:?}",
+        tip(&h, bone)
+    );
+}

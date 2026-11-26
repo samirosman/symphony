@@ -1494,6 +1494,10 @@ pub fn ui(
     } else {
         state.select.hover = None;
     }
+    // After every tool: Setup mode records the frame's finished edits.
+    if !drawing_only {
+        super::control_edit::setup_ui(ui, &response, &painter, s);
+    }
     if !navigating_now && matches!(s.tool, Tool::Select | Tool::LineEditor) {
         let can_reduce = s.can_reduce_points();
         let has_points = s.tool == Tool::Select && s.has_selected_points();

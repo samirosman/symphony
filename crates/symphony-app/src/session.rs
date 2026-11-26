@@ -429,6 +429,8 @@ pub struct Session {
     pub show_strokes: bool,
     /// Bone handles in the Camera view (Shift+C hides them).
     pub show_rig_controls: bool,
+    /// A rig Control in Setup mode: rig edits go into its poses.
+    pub control_setup: Option<crate::views::control_edit::Setup>,
     /// Harmony's Respect Protected Colours (Shift+S), on by default.
     pub respect_protected: bool,
     /// The art layer tools draw and edit on (Harmony's Art Layer toolbar).
@@ -555,6 +557,7 @@ impl Session {
             link_bucket_fills: true,
             show_strokes: false,
             show_rig_controls: true,
+            control_setup: None,
             respect_protected: true,
             art: ArtLayer::LineArt,
             art_preview: true,

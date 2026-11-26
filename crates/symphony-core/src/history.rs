@@ -646,6 +646,8 @@ pub struct History {
     redo: Vec<Step>,
     /// Roughly how much memory the undo steps hold, in bytes.
     bytes: usize,
+    /// How many edits were applied (not counting undo and redo).
+    made: u64,
 }
 
 /// Undo is bounded by memory, not a small count (E3.4): up to this many
@@ -699,6 +701,7 @@ impl History {
             return;
         }
         self.seal();
+        self.made += 1;
         for e in &edits {
             e.apply(scene, true);
         }
@@ -712,6 +715,7 @@ impl History {
     /// Apply `edit` as part of an ongoing gesture `key` (a drag, an erase).
     /// Everything until `seal` becomes one undo step.
     pub fn apply_merged(&mut self, scene: &mut Scene, name: &str, key: &str, edit: Edit) {
+        self.made += 1;
         edit.apply(scene, true);
         if let Some(top) = self
             .undo
@@ -733,6 +737,38 @@ impl History {
             edits: vec![edit],
             open: Some(key.into()),
         });
+    }
+
+    /// How many edits were applied so far; undo and redo do not count.
+    pub fn made(&self) -> u64 {
+        self.made
+    }
+
+    /// Apply `edits` as part of the last undo step (a follow-up of that
+    /// step, such as a Setup mode recording), then end its gesture. With
+    /// no step yet, they become a step called `name`.
+    pub fn amend(&mut self, scene: &mut Scene, name: &str, edits: Vec<Edit>) {
+        if edits.is_empty() {
+            return;
+        }
+        for e in &edits {
+            e.apply(scene, true);
+        }
+        match self.undo.back_mut() {
+            Some(top) => {
+                let before = top.bytes();
+                top.edits.extend(edits);
+                top.open = None;
+                let after = top.bytes();
+                self.bytes = (self.bytes + after).saturating_sub(before);
+                self.trim();
+            }
+            None => self.push(Step {
+                name: name.into(),
+                edits,
+                open: None,
+            }),
+        }
     }
 
     /// End the current gesture.
