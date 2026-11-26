@@ -32,6 +32,14 @@ impl Param {
         Param::ScaleY,
     ];
 
+    /// Its show box and values slot: a Control's position uses X's.
+    fn slot(self) -> usize {
+        match self {
+            Param::Position => Param::X as usize,
+            p => p as usize,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Param::X => "Position X",
@@ -475,7 +483,7 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &Peg
                     .params
                     .iter()
                     .copied()
-                    .filter(|f| st.shown[*f as usize])
+                    .filter(|f| st.shown[f.slot()])
                     .collect();
             }
             for param in targets {
@@ -524,7 +532,7 @@ fn function_list(ui: &mut egui::Ui, st: &mut FunctionState, peg: &PegParams) {
         .show(ui, |ui| {
             ui.add_space(4.0);
             for &param in st.params {
-                let i = param as usize;
+                let i = param.slot();
                 let keys = param.get(peg).map_or(0, |v| v.keys().len());
                 ui.horizontal(|ui| {
                     ui.add_space(theme::CARD_PAD as f32 * 0.5);
@@ -672,7 +680,7 @@ fn graph(ui: &mut egui::Ui, s: &mut Session, st: &mut FunctionState, peg: &PegPa
         .params
         .iter()
         .copied()
-        .filter(|p| st.shown[*p as usize])
+        .filter(|p| st.shown[p.slot()])
         .collect();
     let mut span = st.view.unwrap_or_else(|| fit(peg, &shown, len));
     if let Some(delta) = pan {
@@ -1136,6 +1144,23 @@ mod tests {
         assert_eq!(frames(&moved.x), vec![(1, 0.0), (14, 1.0)]);
         s.undo();
         assert_eq!(position(&s).at(12), 0.0);
+    }
+
+    #[test]
+    fn the_view_draws_with_a_control_selected() {
+        let mut s = Session::new_scene();
+        let control = s
+            .doc
+            .graph
+            .add("Control", NodeKind::Control(Default::default()));
+        s.selected_node = Some(control);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 500.0))
+            .build_ui_state(
+                |u, (s, st): &mut (Session, FunctionState)| super::ui(u, s, st),
+                (s, FunctionState::default()),
+            );
+        h.run_steps(2);
     }
 
     fn source_values(s: &Session) -> PegParams {
