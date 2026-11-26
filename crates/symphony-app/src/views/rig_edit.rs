@@ -1,6 +1,7 @@
 use eframe::egui::{self, Pos2, Stroke};
 use symphony_core::{
     anim::Value,
+    control::Channel,
     graph::{NodeId, NodeKind},
     history::Edit,
     math::Affine,
@@ -53,21 +54,26 @@ pub fn draw_rest_guide(painter: &egui::Painter, s: &Session, view: Affine) {
 
 /// A bone's handle colour: the selection blue, else its own colour,
 /// faded when it is locked.
-fn bone_ink(bone: Option<&symphony_core::rig::Bone>, selected: bool) -> egui::Color32 {
+/// The ink of a rig colour (bones and control widgets).
+pub(super) fn colour_ink(colour: symphony_core::rig::BoneColour) -> egui::Color32 {
     use symphony_core::rig::BoneColour;
+    match colour {
+        BoneColour::Plain => theme::TEXT_SECONDARY,
+        BoneColour::Red => theme::RIG_RED,
+        BoneColour::Orange => theme::RIG_ORANGE,
+        BoneColour::Yellow => theme::RIG_YELLOW,
+        BoneColour::Green => theme::RIG_GREEN,
+        BoneColour::Teal => theme::RIG_TEAL,
+        BoneColour::Purple => theme::RIG_PURPLE,
+        BoneColour::Pink => theme::RIG_PINK,
+    }
+}
+
+fn bone_ink(bone: Option<&symphony_core::rig::Bone>, selected: bool) -> egui::Color32 {
     let base = if selected {
         theme::ACCENT_SELECT
     } else {
-        match bone.map_or(BoneColour::Plain, |bone| bone.colour) {
-            BoneColour::Plain => theme::TEXT_SECONDARY,
-            BoneColour::Red => theme::RIG_RED,
-            BoneColour::Orange => theme::RIG_ORANGE,
-            BoneColour::Yellow => theme::RIG_YELLOW,
-            BoneColour::Green => theme::RIG_GREEN,
-            BoneColour::Teal => theme::RIG_TEAL,
-            BoneColour::Purple => theme::RIG_PURPLE,
-            BoneColour::Pink => theme::RIG_PINK,
-        }
+        colour_ink(bone.map_or_else(Default::default, |bone| bone.colour))
     };
     if bone.is_some_and(|bone| bone.locked) {
         base.gamma_multiply(0.5)
@@ -78,7 +84,13 @@ fn bone_ink(bone: Option<&symphony_core::rig::Bone>, selected: bool) -> egui::Co
 
 /// The bone's name beside its middle, on a dark chip so it reads over
 /// any artwork.
-fn paint_label(painter: &egui::Painter, start: Pos2, tip: Pos2, name: &str, ink: egui::Color32) {
+pub(super) fn paint_label(
+    painter: &egui::Painter,
+    start: Pos2,
+    tip: Pos2,
+    name: &str,
+    ink: egui::Color32,
+) {
     let along = (tip - start).normalized();
     let side = egui::vec2(-along.y, along.x) * 12.0;
     let at = start + (tip - start) * 0.5 + side;
@@ -145,6 +157,7 @@ pub fn ui(
     s: &mut Session,
     state: &mut RigEdit,
     view: Affine,
+    blocked: bool,
 ) -> bool {
     if !s.show_rig_controls {
         finish(s, state);
@@ -293,7 +306,8 @@ pub fn ui(
         }
         anchors.push((id, at));
     }
-    if s.tool != Tool::Transform {
+    // A control widget over the rig has the pointer.
+    if s.tool != Tool::Transform || blocked {
         finish(s, state);
         return false;
     }
@@ -547,14 +561,18 @@ pub fn pose_to(s: &mut Session, id: NodeId, target: [f32; 2], snap: bool) {
         if x.hypot(y) < 1e-3 {
             return;
         }
-        let wanted = bone.rotation.at(frame) + y.atan2(x).to_degrees();
-        let rotation = bone.clamp_rotation(bone.spring_rotation(wanted));
+        // The bone shows its key plus the rig controls' offsets, inside
+        // its limits; the key is what is shown less the offset.
+        let offset = |channel| graph.offset(id, channel, frame);
+        let turn = offset(Channel::Rotation);
+        let wanted = bone.rotation_plus(frame, turn) + y.atan2(x).to_degrees();
+        let rotation = bone.clamp_rotation(bone.spring_rotation(wanted)) - turn;
         set_value(&mut bone.rotation, rotation, frame, animate);
         // A stretchable bone also follows the pull's length (resisting
         // near its limits).
         if bone.stretch_mode != symphony_core::rig::Stretch::Rigid {
             let wanted = x.hypot(y) / bone.length();
-            let stretch = bone.resist(wanted);
+            let stretch = bone.resist(wanted) - offset(Channel::Stretch);
             set_value(&mut bone.stretch, stretch, frame, animate);
         }
     }
@@ -901,7 +919,7 @@ pub fn translate_skeleton(s: &mut Session, id: NodeId, target: [f32; 2]) {
     }
 }
 
-fn set_value(value: &mut Value, number: f32, frame: u32, animate: bool) {
+pub(super) fn set_value(value: &mut Value, number: f32, frame: u32, animate: bool) {
     match value {
         Value::Constant(current) if !animate => *current = number,
         _ => value.set_key(frame, number),

@@ -65,6 +65,7 @@ pub struct CanvasState {
     warp_edit: super::warp_edit::WarpEdit,
     /// The selected Curve or Envelope, being edited.
     curve_edit: super::curve_edit::CurveEdit,
+    control_edit: super::control_edit::ControlEdit,
     rig_edit: super::rig_edit::RigEdit,
     /// Text being typed with the Text tool.
     text: Option<TextDraft>,
@@ -97,6 +98,7 @@ impl Default for CanvasState {
             render_effects: true,
             warp_edit: Default::default(),
             curve_edit: Default::default(),
+            control_edit: Default::default(),
             rig_edit: Default::default(),
             text: None,
             bent: Default::default(),
@@ -1461,11 +1463,27 @@ pub fn ui(
     let warp_busy = !navigating_now
         && (super::warp_edit::ui(ui, &response, &painter, s, &mut state.warp_edit, view)
             || super::curve_edit::ui(ui, &response, &painter, s, &mut state.curve_edit, view));
+    // Control widgets draw over the rig and take the pointer first.
+    let control_busy = if !navigating_now && !drawing_only && !warp_busy {
+        super::control_edit::ui(ui, &response, &painter, s, &mut state.control_edit, view)
+    } else {
+        super::control_edit::finish(s, &mut state.control_edit);
+        false
+    };
     let rig_busy = if !navigating_now && !drawing_only {
-        super::rig_edit::ui(ui, &response, &painter, s, &mut state.rig_edit, view)
+        let blocked = control_busy;
+        super::rig_edit::ui(
+            ui,
+            &response,
+            &painter,
+            s,
+            &mut state.rig_edit,
+            view,
+            blocked,
+        ) || control_busy
     } else {
         super::rig_edit::finish(s, &mut state.rig_edit);
-        false
+        control_busy
     };
     if matches!(s.tool, Tool::Select | Tool::Transform)
         && !navigating_now

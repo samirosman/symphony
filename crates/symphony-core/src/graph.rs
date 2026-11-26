@@ -717,6 +717,12 @@ impl Graph {
         }
     }
 
+    /// The space `node` gives its children on `frame`: its parents'
+    /// transforms and its own (a Control widget that follows a peg).
+    pub fn node_space(&self, node: NodeId, frame: u32) -> Result<StagePose, EvalError> {
+        self.eval_transform(node, frame, 0)
+    }
+
     fn get(&self, id: NodeId, depth: usize) -> Result<&Node, EvalError> {
         if depth > MAX_DEPTH {
             return Err(EvalError::Cycle(id));
