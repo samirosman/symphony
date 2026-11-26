@@ -19,6 +19,8 @@ pub enum Param {
     Rotation,
     ScaleX,
     ScaleY,
+    /// A Control's position (kept in the `x` slot).
+    Position,
 }
 
 impl Param {
@@ -37,12 +39,13 @@ impl Param {
             Param::Rotation => "Angle",
             Param::ScaleX => "Scale X",
             Param::ScaleY => "Scale Y",
+            Param::Position => "Control position",
         }
     }
 
     fn colour(self) -> Color32 {
         match self {
-            Param::X => theme::FUNCTION_X,
+            Param::X | Param::Position => theme::FUNCTION_X,
             Param::Y => theme::FUNCTION_Y,
             Param::Rotation => theme::FUNCTION_ANGLE,
             Param::ScaleX => theme::FUNCTION_SCALE_X,
@@ -53,7 +56,7 @@ impl Param {
     /// The function, if the peg has one (scale is absent until used).
     fn get(self, p: &PegParams) -> Option<&Value> {
         match self {
-            Param::X => Some(&p.x),
+            Param::X | Param::Position => Some(&p.x),
             Param::Y => Some(&p.y),
             Param::Rotation => Some(&p.rotation),
             Param::ScaleX => p.scale_x.as_ref(),
@@ -63,7 +66,7 @@ impl Param {
 
     fn get_mut(self, p: &mut PegParams) -> &mut Value {
         match self {
-            Param::X => &mut p.x,
+            Param::X | Param::Position => &mut p.x,
             Param::Y => &mut p.y,
             Param::Rotation => &mut p.rotation,
             Param::ScaleX => p.scale_x.get_or_insert(Value::Constant(1.0)),
@@ -184,12 +187,13 @@ const HANDLE_R: f32 = 3.5;
 /// The frame scale above the graph, where the Timeline has its ruler.
 const SCALE_H: f32 = 18.0;
 
-/// Whose functions the view shows: the selected bone's, or else the
-/// selected layer's peg.
+/// Whose functions the view shows: the selected bone's or Control's,
+/// or else the selected layer's peg.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Source {
     Layer(usize),
     Bone(NodeId),
+    Control(NodeId),
 }
 
 impl Source {
@@ -197,13 +201,27 @@ impl Source {
         match self {
             Source::Layer(_) => &Param::ALL,
             Source::Bone(_) => &[Param::Rotation],
+            Source::Control(_) => &[Param::Position],
         }
     }
 }
 
 /// The functions to show, as peg values: a bone's angle goes in
-/// `rotation`, and the rest stay unused.
+/// `rotation`, a Control's position in `x`, and the rest stay unused.
 fn source(s: &Session) -> Option<(Source, PegParams)> {
+    if let Some((id, control)) = s
+        .selected_node
+        .and_then(|id| match &s.doc.graph.node(id)?.kind {
+            NodeKind::Control(control) => Some((id, control)),
+            _ => None,
+        })
+    {
+        let values = PegParams {
+            x: control.value.clone(),
+            ..PegParams::default()
+        };
+        return Some((Source::Control(id), values));
+    }
     if let Some((id, bone)) = s
         .selected_node
         .and_then(|id| Some((id, s.doc.graph.bone(id)?)))
@@ -222,6 +240,24 @@ fn source(s: &Session) -> Option<(Source, PegParams)> {
 fn store(s: &mut Session, source: Source, values: PegParams) {
     match source {
         Source::Layer(layer) => s.set_peg(layer, values),
+        Source::Control(id) => {
+            let Some(before) = s.doc.graph.node(id).cloned() else {
+                return;
+            };
+            let mut after = before.clone();
+            let NodeKind::Control(control) = &mut after.kind else {
+                return;
+            };
+            control.value = values.x;
+            if after != before {
+                s.history.apply_merged(
+                    &mut s.doc,
+                    "Animate control",
+                    &format!("control-{}", id.0),
+                    Edit::SetNodeProperties { id, before, after },
+                );
+            }
+        }
         Source::Bone(id) => {
             let Some(before) = s.doc.graph.node(id).cloned() else {
                 return;
@@ -283,7 +319,7 @@ fn forget_missing_keys(st: &mut FunctionState, peg: &PegParams) {
 /// that isn't moving.
 fn move_keys(start: &PegParams, keys: &[KeyId], df: i64, dv: f32) -> Option<PegParams> {
     let mut p = start.clone();
-    for param in Param::ALL {
+    for param in Param::ALL.into_iter().chain([Param::Position]) {
         let frames: Vec<u32> = keys
             .iter()
             .filter(|(q, _)| *q == param)
@@ -1073,6 +1109,33 @@ mod tests {
         assert_eq!(source_values(&s).rotation.keys().len(), 2);
         s.undo();
         assert_eq!(angle(&s), 0.0);
+    }
+
+    /// A selected Control shows its position, and edits and key moves
+    /// go back to the Control.
+    #[test]
+    fn a_selected_control_shows_and_takes_its_position() {
+        let mut s = Session::new_scene();
+        let control = s
+            .doc
+            .graph
+            .add("Control", NodeKind::Control(Default::default()));
+        s.selected_node = Some(control);
+        let (source, mut values) = source(&s).unwrap();
+        assert_eq!(source, Source::Control(control));
+        assert_eq!(source.params(), &[Param::Position]);
+        values.x.set_key(1, 0.0);
+        values.x.set_key(12, 1.0);
+        store(&mut s, source, values);
+        let position = |s: &Session| match &s.doc.graph.node(control).unwrap().kind {
+            NodeKind::Control(c) => c.value.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(position(&s).at(12), 1.0);
+        let moved = move_keys(&source_values(&s), &[(Param::Position, 12)], 2, 0.0).unwrap();
+        assert_eq!(frames(&moved.x), vec![(1, 0.0), (14, 1.0)]);
+        s.undo();
+        assert_eq!(position(&s).at(12), 0.0);
     }
 
     fn source_values(s: &Session) -> PegParams {

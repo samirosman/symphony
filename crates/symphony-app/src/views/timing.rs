@@ -465,6 +465,7 @@ fn layer_chain(s: &Session, layer: usize) -> (Vec<NodeId>, Vec<NodeId>) {
                     | NodeKind::KinematicOutput
                     | NodeKind::Skeleton(_)
                     | NodeKind::Bone(_)
+                    | NodeKind::Control(_)
             )
         ) && !pegs.contains(&up)
         {
@@ -888,6 +889,9 @@ pub fn timeline(
                 for value in curve.values() {
                     frames.extend(value.keys().iter().map(|key| key.frame));
                 }
+            }
+            NodeKind::Control(control) => {
+                frames.extend(control.value.keys().iter().map(|key| key.frame));
             }
             NodeKind::Display => {
                 let motion = &s.doc.camera_motion;
