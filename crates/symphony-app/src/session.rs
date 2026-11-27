@@ -3091,6 +3091,70 @@ impl Session {
         );
     }
 
+    /// Show or hide every layer, as one undo step.
+    pub fn set_all_visible(&mut self, visible: bool) {
+        let edits: Vec<Edit> = (0..self.layer_count())
+            .filter_map(|i| self.doc.column(i))
+            .filter(|col| col.visible != visible)
+            .map(|col| Edit::SetVisible {
+                column: col.id,
+                before: col.visible,
+                after: visible,
+            })
+            .collect();
+        let name = if visible {
+            "Show all layers"
+        } else {
+            "Hide all layers"
+        };
+        self.history.apply(&mut self.doc, name, edits);
+    }
+
+    /// Lock or unlock every layer, as one undo step.
+    pub fn set_all_locked(&mut self, locked: bool) {
+        let edits: Vec<Edit> = (0..self.layer_count())
+            .filter_map(|i| self.doc.column(i))
+            .filter(|col| col.locked != locked)
+            .map(|col| Edit::SetLocked {
+                column: col.id,
+                before: col.locked,
+                after: locked,
+            })
+            .collect();
+        let name = if locked {
+            "Lock all layers"
+        } else {
+            "Unlock all layers"
+        };
+        self.history.apply(&mut self.doc, name, edits);
+    }
+
+    /// Whether the Timeline row of node `id` is tagged.
+    pub fn row_tagged(&self, id: NodeId) -> bool {
+        self.doc.tagged_rows.contains(&id)
+    }
+
+    /// Tag or untag the Timeline row of node `id`. Saved with the scene,
+    /// but not an undo step.
+    pub fn set_row_tagged(&mut self, id: NodeId, tagged: bool) {
+        let changed = if tagged {
+            self.doc.tagged_rows.insert(id)
+        } else {
+            self.doc.tagged_rows.remove(&id)
+        };
+        if changed {
+            self.doc.version += 1;
+        }
+    }
+
+    /// Untag every Timeline row.
+    pub fn untag_all(&mut self) {
+        if !self.doc.tagged_rows.is_empty() {
+            self.doc.tagged_rows.clear();
+            self.doc.version += 1;
+        }
+    }
+
     pub fn toggle_visible(&mut self, i: usize) {
         let Some(col) = self.doc.column(i) else {
             return;

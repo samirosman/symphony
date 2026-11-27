@@ -204,3 +204,38 @@ fn a_click_on_empty_space_drops_the_bone_selection() {
     super::deformers::click(&mut h, 100.0, 250.0);
     assert_ne!(h.state().s.selected_node, Some(bone));
 }
+
+/// With a bone selected, one press on other art picks it and drags it:
+/// no first click just to drop the bone. The art hangs on the bone, so
+/// its rig still shows after the drop.
+#[test]
+fn one_press_on_other_art_leaves_the_bone_and_moves_the_art() {
+    let (mut h, _, bone) = one_bone(Stretch::Rigid);
+    h.state_mut().s.tool = Tool::Brush;
+    super::drag(
+        &mut h,
+        &super::line((-100.0, 250.0), (100.0, 250.0), 20),
+        1.0,
+        symphony_pen::Tool::Pen,
+    );
+    let s = &mut h.state_mut().s;
+    let peg = s.doc.layers[0].peg;
+    s.doc.graph.connect(bone, peg, 0);
+    assert_eq!(
+        s.doc.graph.drawing_bone(s.doc.layers[0].node, 1),
+        Some(bone)
+    );
+    s.tool = Tool::Transform;
+    s.selected_node = Some(bone);
+    s.end_gesture();
+    h.run_steps(2);
+    let steps = h.state().s.history.undo_len();
+    super::deformers::drag(
+        &mut h,
+        (0.0, 250.0),
+        (60.0, 310.0),
+        eframe::egui::Modifiers::NONE,
+    );
+    assert_ne!(h.state().s.selected_node, Some(bone), "the bone is dropped");
+    assert_eq!(h.state().s.history.undo_len(), steps + 1, "the art moves");
+}

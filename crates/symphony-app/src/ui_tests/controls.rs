@@ -422,19 +422,18 @@ fn art_under_a_selected_control() -> (Harness<'static, Rig>, NodeId) {
 }
 
 #[test]
-fn a_selected_control_hides_the_layer_box_and_a_press_drops_it() {
+fn a_selected_control_hides_the_layer_box_and_a_press_passes_on() {
     let (mut h, _) = art_under_a_selected_control();
     // No box: no handle hint over the art's corner.
     let corner = h.state().canvas.to_screen(-100.0, 0.0);
     h.input_mut().events.push(egui::Event::PointerMoved(corner));
     h.run_steps(2);
     assert!(h.state().canvas.select.hover.is_none(), "no transform box");
+    // One press drops the Control and goes on to the Transform tool:
+    // the art moves in the same drag.
     let steps = h.state().s.history.undo_len();
     drag(&mut h, (0.0, 0.0), (60.0, 60.0), Modifiers::NONE);
-    assert_eq!(h.state().s.history.undo_len(), steps, "the art stays");
     assert_eq!(h.state().s.selected_node, None, "the press drops it");
-    // The next press reaches the artwork again.
-    drag(&mut h, (0.0, 0.0), (60.0, 60.0), Modifiers::NONE);
     assert_eq!(h.state().s.history.undo_len(), steps + 1, "the art moves");
 }
 

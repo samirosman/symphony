@@ -13,6 +13,10 @@ use crate::session::{Session, Tool};
 #[derive(Default)]
 pub struct RigEdit {
     drag: Option<Drag>,
+    /// The current press started away from every rig handle: until the
+    /// frame after its release, the press belongs to the Select and
+    /// Transform tools.
+    passing: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -453,15 +457,51 @@ pub fn ui(
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
-    } else if response.hover_pos().is_some_and(|p| {
+    }
+    let on_handle = |p: Pos2| {
         nearest_anchor(p).is_some() || nearest(p, false).is_some() || bone_at(p).is_some()
-    }) {
+    };
+    end_frame(ui, response, s, state, on_handle)
+}
+
+/// The end of the rig's frame: the grab cursor over a handle, and who
+/// has the pointer. A press away from the rig's handles drops the
+/// selection and goes on to the Select and Transform tools in the same
+/// click, so one click picks another object. With no button down the
+/// rig keeps the pointer, so the layer's box stays hidden under it.
+fn end_frame(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    s: &mut Session,
+    state: &mut RigEdit,
+    on_handle: impl Fn(Pos2) -> bool,
+) -> bool {
+    if state.drag.is_none() && response.hover_pos().is_some_and(&on_handle) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    if !ui.input(|i| i.pointer.primary_down()) {
+    let (down, pressed, released, origin) = ui.input(|i| {
+        (
+            i.pointer.primary_down(),
+            i.pointer.primary_pressed(),
+            i.pointer.primary_released(),
+            i.pointer.press_origin(),
+        )
+    });
+    if pressed && state.drag.is_none() {
+        state.passing = origin.is_some_and(|p| !on_handle(p));
+        if state.passing {
+            s.selected_node = None;
+        }
+    }
+    // The release frame still belongs to the press: the tools pick on it.
+    let passing = state.passing;
+    if !down && !released {
+        state.passing = false;
+    }
+    if !down {
         finish(s, state);
     }
-    true
+    state.drag.is_some() || !passing
 }
 
 pub fn finish(s: &mut Session, state: &mut RigEdit) {

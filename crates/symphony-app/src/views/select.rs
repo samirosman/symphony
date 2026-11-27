@@ -1204,7 +1204,10 @@ fn layer_at(s: &Session, p: Pos2, view: Affine, items: &[Item]) -> Option<usize>
         let dr = s.doc.drawings.get(d)?;
         let on_image = image_rect(s, dr)
             .is_some_and(|(lo, hi)| (lo[0]..=hi[0]).contains(&x) && (lo[1]..=hi[1]).contains(&y));
-        (on_image || dr.strokes.iter().any(|st| hits(st, x, y, r))).then_some(*layer)
+        // A line under the pointer, or a colour zone it is in.
+        let on_art = dr.strokes.iter().any(|st| hits(st, x, y, r))
+            || dr.fills.iter().any(|f| f.contains(x, y));
+        (on_image || on_art).then_some(*layer)
     })
 }
 
@@ -1728,6 +1731,31 @@ mod tests {
         let behind = transform_indices(&h.state().0);
         assert_eq!(behind.len(), 1);
         assert_ne!(behind, top, "the locked layer was picked");
+    }
+
+    /// A click inside a colour zone, away from any line, picks its layer:
+    /// a filled shape is picked by its colour, as in Harmony.
+    #[test]
+    fn a_click_inside_a_colour_zone_picks_its_layer() {
+        let (mut s, items) = two_layers();
+        let d = s.doc.exposed(1, 1).unwrap();
+        let fill = symphony_core::stroke::Fill {
+            id: s.doc.ids.fresh(),
+            swatch: s.doc.palette.swatches[0].id,
+            art: Default::default(),
+            linked: None,
+            contours: vec![vec![
+                [-500.0, 100.0],
+                [-300.0, 100.0],
+                [-300.0, 300.0],
+                [-500.0, 300.0],
+            ]],
+        };
+        s.doc.drawings.get_mut(&d).unwrap().fills.push(fill);
+        let inside = Pos2::new(-400.0, 200.0);
+        assert_eq!(layer_at(&s, inside, Affine::IDENTITY, &items), Some(1));
+        let outside = Pos2::new(-400.0, 400.0);
+        assert_eq!(layer_at(&s, outside, Affine::IDENTITY, &items), None);
     }
 
     #[test]
