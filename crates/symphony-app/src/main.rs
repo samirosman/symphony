@@ -201,6 +201,9 @@ struct Saved {
     /// Timeline: Parameters column hidden.
     #[serde(default)]
     timeline_hide_params: bool,
+    /// Timeline: the Advanced Timeline is on (off for new users).
+    #[serde(default)]
+    timeline_advanced: bool,
     /// Timeline: names panel width, once dragged.
     #[serde(default)]
     timeline_names_w: Option<f32>,
@@ -683,6 +686,7 @@ impl SymphonyApp {
         let hide_pegs = saved.as_ref().is_some_and(|s| s.hide_pegs);
         let names_w = saved.as_ref().and_then(|s| s.timeline_names_w);
         let hide_params = saved.as_ref().is_some_and(|s| s.timeline_hide_params);
+        let advanced = saved.as_ref().is_some_and(|s| s.timeline_advanced);
         let tool_dock = saved
             .as_ref()
             .map_or(ToolDock::Left, |saved| saved.tool_dock);
@@ -930,6 +934,7 @@ impl SymphonyApp {
                 t.hide_pegs = hide_pegs;
                 t.names_w = names_w;
                 t.hide_params = hide_params;
+                t.advanced = advanced;
                 t
             },
             export: Default::default(),
@@ -4222,6 +4227,7 @@ impl eframe::App for SymphonyApp {
             hide_pegs: self.timing.hide_pegs,
             timeline_names_w: self.timing.names_w,
             timeline_hide_params: self.timing.hide_params,
+            timeline_advanced: self.timing.advanced,
             import_options: Some(self.import_options),
         };
         eframe::set_value(storage, eframe::APP_KEY, &saved);

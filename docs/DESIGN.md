@@ -415,6 +415,13 @@ and animation state.
   - **Brush size cursor** (Preferences, as in Harmony): drawing tools add
     a circle the size of the brush. The Eraser always shows its circle.
   - Outside the canvas, the OS cursor is used as normal.
+- **D8.12 The Timeline starts simple.** New users get the Default
+  Timeline: the layer tree, the eye and lock switches, the Parameters
+  column, and Collapse all and Expand all. "Advanced Timeline", the first
+  item of the Timeline's View menu, adds the view modes, tags and the
+  Show options. It's a workspace setting, the same in every profile
+  (D11.4). In the Default Timeline the hidden options act at their
+  defaults, so no view is left that the menu can't undo.
 
 ---
 

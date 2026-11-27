@@ -25,6 +25,10 @@ pub struct TimingState {
     /// The node a right-click menu is for (a layer's drawing node too).
     menu_node: Option<NodeId>,
     show_unanimated_nodes: bool,
+    /// The Advanced Timeline: view modes, the Show options and tags. Off
+    /// (Default), those options act at their default values but keep
+    /// what was chosen. Saved with the app's workspace settings.
+    pub advanced: bool,
     /// Which rows the Timeline lists.
     pub view_mode: ViewMode,
     /// Hide the Parameters column. Saved with the app's workspace
@@ -77,6 +81,32 @@ pub enum ViewMode {
     Tagged,
 }
 
+impl TimingState {
+    /// The view mode in effect: always Normal in the Default Timeline.
+    fn mode(&self) -> ViewMode {
+        if self.advanced {
+            self.view_mode
+        } else {
+            ViewMode::Normal
+        }
+    }
+
+    /// Peg rows hidden (Advanced only).
+    fn pegs_hidden(&self) -> bool {
+        self.advanced && self.hide_pegs
+    }
+
+    /// The Parameters column hidden (Advanced only).
+    fn params_hidden(&self) -> bool {
+        self.advanced && self.hide_params
+    }
+
+    /// Node tracks with no keys shown too (Advanced only).
+    fn all_tracks_shown(&self) -> bool {
+        self.advanced && self.show_unanimated_nodes
+    }
+}
+
 impl ViewMode {
     fn label(self) -> &'static str {
         match self {
@@ -87,31 +117,22 @@ impl ViewMode {
     }
 }
 
-/// The Timeline's View menu: view modes, which rows and columns show,
-/// and Collapse all / Expand all.
+/// The Timeline's View menu: the Advanced switch, then (Advanced only)
+/// view modes and which rows and columns show, then Collapse all /
+/// Expand all.
 fn view_menu(ui: &mut egui::Ui, t: &mut TimingState, has_unanimated_nodes: bool) {
-    let label = match t.view_mode {
+    let label = match t.mode() {
         ViewMode::Normal => "View".to_owned(),
         mode => format!("View: {}", mode.label()),
     };
     ui.menu_button(label, |ui| {
-        for mode in [ViewMode::Normal, ViewMode::SelectionOnly, ViewMode::Tagged] {
-            ui.radio_value(&mut t.view_mode, mode, mode.label());
+        ui.checkbox(&mut t.advanced, "Advanced Timeline")
+            .on_hover_text("Adds view modes, tags and options for which rows and columns show.");
+        ui.separator();
+        if t.advanced {
+            advanced_view_options(ui, t, has_unanimated_nodes);
+            ui.separator();
         }
-        ui.separator();
-        let mut show_pegs = !t.hide_pegs;
-        ui.checkbox(&mut show_pegs, "Show pegs")
-            .on_hover_text("Show each layer's pegs above it.");
-        t.hide_pegs = !show_pegs;
-        ui.add_enabled(
-            has_unanimated_nodes,
-            egui::Checkbox::new(&mut t.show_unanimated_nodes, "Show all node tracks"),
-        )
-        .on_hover_text("Animated nodes and the selected node are always shown.");
-        let mut show_params = !t.hide_params;
-        ui.checkbox(&mut show_params, "Show parameters");
-        t.hide_params = !show_params;
-        ui.separator();
         if ui.button("Collapse all").clicked() {
             t.fold_all = Some(true);
             ui.close();
@@ -121,6 +142,26 @@ fn view_menu(ui: &mut egui::Ui, t: &mut TimingState, has_unanimated_nodes: bool)
             ui.close();
         }
     });
+}
+
+/// The Advanced part of the View menu: view modes and the Show options.
+fn advanced_view_options(ui: &mut egui::Ui, t: &mut TimingState, has_unanimated_nodes: bool) {
+    for mode in [ViewMode::Normal, ViewMode::SelectionOnly, ViewMode::Tagged] {
+        ui.radio_value(&mut t.view_mode, mode, mode.label());
+    }
+    ui.separator();
+    let mut show_pegs = !t.hide_pegs;
+    ui.checkbox(&mut show_pegs, "Show pegs")
+        .on_hover_text("Show each layer's pegs above it.");
+    t.hide_pegs = !show_pegs;
+    ui.add_enabled(
+        has_unanimated_nodes,
+        egui::Checkbox::new(&mut t.show_unanimated_nodes, "Show all node tracks"),
+    )
+    .on_hover_text("Animated nodes and the selected node are always shown.");
+    let mut show_params = !t.hide_params;
+    ui.checkbox(&mut show_params, "Show parameters");
+    t.hide_params = !show_params;
 }
 
 /// Keep only the rows a view mode lists, flat: no tree, so no carets.
@@ -819,9 +860,10 @@ fn tag_menu(ui: &mut egui::Ui, s: &mut Session, id: NodeId) {
     }
 }
 
-/// A row's name as the Timeline shows it: a tagged row has an asterisk.
-fn shown_name(s: &Session, id: NodeId, name: &str) -> String {
-    if s.row_tagged(id) {
+/// A row's name as the Timeline shows it: a tagged row has an asterisk
+/// when tags show (`marked`, the Advanced Timeline).
+fn shown_name(s: &Session, id: NodeId, name: &str, marked: bool) -> String {
+    if marked && s.row_tagged(id) {
         format!("* {name}")
     } else {
         name.to_owned()
@@ -1173,7 +1215,7 @@ pub fn timeline(
     let eye_col = 6.0..24.0;
     let lock_col = 24.0..TREE;
     // Where the Parameters field starts.
-    let param_w = if t.hide_params { 0.0 } else { PARAM_W };
+    let param_w = if t.params_hidden() { 0.0 } else { PARAM_W };
     let params = head_w - param_w - 6.0;
     // Ctrl+wheel zooms the frames, from a whole scene at a glance to
     // wide cells.
@@ -1245,10 +1287,10 @@ pub fn timeline(
     // of the layer's hierarchy. The filter is for loose nodes.
     let attached = attached_nodes(s);
     node_tracks.retain(|(id, _, frames)| {
-        if t.hide_pegs && matches!(kind_of(s, *id), Some(NodeKind::Peg(_))) {
+        if t.pegs_hidden() && matches!(kind_of(s, *id), Some(NodeKind::Peg(_))) {
             return false;
         }
-        t.show_unanimated_nodes
+        t.all_tracks_shown()
             || !frames.is_empty()
             || Some(*id) == visible_node
             || attached.contains(id)
@@ -1266,7 +1308,7 @@ pub fn timeline(
         s,
         hierarchy_rows(s, &track_ids, sound_rows),
         &node_tracks,
-        t.view_mode,
+        t.mode(),
         visible_node,
     );
     if let Some(folded) = t.fold_all.take() {
@@ -1542,13 +1584,13 @@ pub fn timeline(
                         &head,
                         Pos2::new(hx + TREE + 18.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
-                        &shown_name(s, node, s.layer_name(i)),
+                        &shown_name(s, node, s.layer_name(i), t.advanced),
                         theme::body(),
                         name_col,
                         params - TREE - 22.0 - indent,
                     );
                 }
-                if !t.hide_params {
+                if !t.params_hidden() {
                     parameters_field(
                         ui,
                         &head,
@@ -1667,7 +1709,7 @@ pub fn timeline(
                         &head,
                         Pos2::new(hx + TREE + 18.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
-                        &shown_name(s, *node, name),
+                        &shown_name(s, *node, name, t.advanced),
                         theme::body(),
                         theme::TEXT_SECONDARY,
                         head_w - TREE - 24.0 - indent,
@@ -2139,7 +2181,7 @@ pub fn timeline(
                         layer_menu(ui, s, t, row);
                         ui.separator();
                         fold_menu(ui, s, menu_caret, &fold.parents);
-                        if let Some(node) = t.menu_node {
+                        if let Some(node) = t.menu_node.filter(|_| t.advanced) {
                             ui.separator();
                             tag_menu(ui, s, node);
                         }
@@ -2163,7 +2205,7 @@ pub fn timeline(
                         }
                         ui.separator();
                         fold_menu(ui, s, menu_caret, &fold.parents);
-                        if let Some(node) = t.menu_node {
+                        if let Some(node) = t.menu_node.filter(|_| t.advanced) {
                             ui.separator();
                             tag_menu(ui, s, node);
                         }
@@ -3015,6 +3057,73 @@ mod hierarchy_tests {
         assert_ne!(name(&harness.state().0), "Hip peg with a long name");
     }
 
+    /// The Default Timeline uses the default view options, but keeps the
+    /// Advanced choices for when Advanced is on again.
+    #[test]
+    fn the_default_timeline_uses_default_options() {
+        let mut t = TimingState {
+            view_mode: ViewMode::Tagged,
+            hide_pegs: true,
+            hide_params: true,
+            show_unanimated_nodes: true,
+            ..Default::default()
+        };
+        assert!(!t.advanced, "new users start in Default");
+        assert_eq!(t.mode(), ViewMode::Normal);
+        assert!(!t.pegs_hidden() && !t.params_hidden() && !t.all_tracks_shown());
+        t.advanced = true;
+        assert_eq!(t.mode(), ViewMode::Tagged);
+        assert!(t.pegs_hidden() && t.params_hidden() && t.all_tracks_shown());
+    }
+
+    /// The View menu and the row menu show the Advanced items only with
+    /// Advanced Timeline on.
+    #[test]
+    fn advanced_items_show_only_in_the_advanced_timeline() {
+        use egui_kittest::kittest::Queryable;
+        let (mut harness, peg) = peg_row_harness();
+        for advanced in [false, true] {
+            harness.state_mut().1.advanced = advanced;
+            harness.run_steps(2);
+            harness.get_by_label("View").click();
+            harness.run_steps(2);
+            assert!(harness.query_by_label("Advanced Timeline").is_some());
+            assert!(harness.query_by_label("Collapse all").is_some());
+            for item in ["Normal view mode", "Show pegs", "Show parameters"] {
+                assert_eq!(
+                    harness.query_by_label(item).is_some(),
+                    advanced,
+                    "{item}, advanced {advanced}"
+                );
+            }
+            harness.key_press(egui::Key::Escape);
+            harness.run_steps(2);
+            harness.state_mut().1.menu_node = None;
+            let found = (20..300).step_by(4).any(|y| {
+                let pos = Pos2::new(90.0, y as f32);
+                for pressed in [true, false] {
+                    harness.input_mut().events.extend([
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            pressed,
+                            button: egui::PointerButton::Secondary,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]);
+                    harness.run_steps(1);
+                }
+                harness.run_steps(1);
+                harness.state().1.menu_node == Some(peg) && harness.state().1.menu_row.is_none()
+            });
+            assert!(found, "the peg row's menu");
+            assert!(harness.query_by_label("Rename node").is_some());
+            assert_eq!(harness.query_by_label("Timeline tag").is_some(), advanced);
+            harness.key_press(egui::Key::Escape);
+            harness.run_steps(2);
+        }
+    }
+
     /// The right-click menu of a node row has Rename node.
     #[test]
     fn the_node_row_menu_renames_the_node() {
@@ -3258,8 +3367,9 @@ mod hierarchy_tests {
             listed(&s, ViewMode::SelectionOnly, Some(outer)),
             [(Some(outer), 0)]
         );
-        assert_eq!(shown_name(&s, layer, "Arm"), "* Arm");
-        assert_eq!(shown_name(&s, outer, "Hip"), "Hip");
+        assert_eq!(shown_name(&s, layer, "Arm", true), "* Arm");
+        assert_eq!(shown_name(&s, layer, "Arm", false), "Arm");
+        assert_eq!(shown_name(&s, outer, "Hip", true), "Hip");
         s.untag_all();
         assert!(listed(&s, ViewMode::Tagged, None).is_empty());
     }
