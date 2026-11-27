@@ -99,11 +99,47 @@ pub(super) fn paint_label(
         egui::FontId::proportional(theme::SIZE_DENSE),
         ink,
     );
+    paint_chip(painter, at, galley, ink);
+}
+
+/// The name beside the middle of the segment, its chip's near edge
+/// `clear` points from the line whatever the line's direction. A
+/// vertical rig control keeps its knob and pose dots in sight.
+pub(super) fn paint_label_clear(
+    painter: &egui::Painter,
+    start: Pos2,
+    tip: Pos2,
+    name: &str,
+    ink: egui::Color32,
+    clear: f32,
+) {
+    let along = (tip - start).normalized();
+    let side = egui::vec2(-along.y, along.x);
+    let galley = painter.layout_no_wrap(
+        name.to_owned(),
+        egui::FontId::proportional(theme::SIZE_DENSE),
+        ink,
+    );
+    let half = (galley.size() + CHIP_PAD * 2.0) * 0.5;
+    let reach = side.x.abs() * half.x + side.y.abs() * half.y;
+    let at = start + (tip - start) * 0.5 + side * (clear + reach);
+    paint_chip(painter, at, galley, ink);
+}
+
+const CHIP_PAD: egui::Vec2 = egui::vec2(4.0, 1.0);
+
+/// Text centred on `at`, on a dark chip so it reads over any artwork.
+fn paint_chip(
+    painter: &egui::Painter,
+    at: Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    ink: egui::Color32,
+) {
     let rect = egui::Align2::CENTER_CENTER
         .anchor_size(at, galley.size())
-        .expand2(egui::vec2(4.0, 1.0));
+        .expand2(CHIP_PAD);
     painter.rect_filled(rect, 3.0, theme::BG_BASE.gamma_multiply(0.8));
-    painter.galley(rect.shrink2(egui::vec2(4.0, 1.0)).min, galley, ink);
+    painter.galley(rect.shrink2(CHIP_PAD).min, galley, ink);
 }
 
 /// A bone as a long diamond. A dark edge under the coloured line keeps

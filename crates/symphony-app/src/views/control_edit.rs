@@ -34,10 +34,15 @@ use crate::session::{Session, Tool};
 
 /// How near (screen points) a press must be to take the widget.
 const GRAB: f32 = 10.0;
+/// The knob's radius on screen, its dark edge included.
+const KNOB: f32 = 7.5;
 
 #[derive(Default)]
 pub struct ControlEdit {
     drag: Option<NodeId>,
+    /// A press dropped the Control selection: the rest of that press
+    /// does nothing.
+    dropped: bool,
 }
 
 /// A Control in Setup mode (Harmony's Setup Mode).
@@ -200,14 +205,14 @@ fn paint(painter: &egui::Painter, s: &Session, w: &Shown) {
         .control_shown_position(w.id, s.frame)
         .unwrap_or_else(|| w.control.position_at(s.frame));
     let knob = w.place(at);
-    painter.circle_filled(knob, 7.5, theme::BG_BASE);
+    painter.circle_filled(knob, KNOB, theme::BG_BASE);
     // Setup mode: a white knob, a test position with no key.
     painter.circle_filled(knob, 5.5, if testing { theme::ON_ACCENT } else { ink });
     if w.control.widget.show_label {
         if let Some(node) = s.doc.graph.node(w.id) {
             // Ends swapped: the label sits above a horizontal track and
-            // left of a vertical one.
-            super::rig_edit::paint_label(painter, w.high, w.low, &node.name, ink);
+            // left of a vertical one, clear of the knob.
+            super::rig_edit::paint_label_clear(painter, w.high, w.low, &node.name, ink, KNOB + 4.0);
         }
     }
 }
@@ -263,6 +268,12 @@ pub fn ui(
     for w in &widgets {
         paint(painter, s, w);
     }
+    if state.dropped {
+        state.dropped = ui.input(|i| i.pointer.primary_down());
+        if state.dropped {
+            return true;
+        }
+    }
     if s.tool != Tool::Transform || widgets.is_empty() {
         finish(s, state);
         return false;
@@ -277,6 +288,19 @@ pub fn ui(
     };
     let pointer = ui.input(|i| i.pointer.press_origin().or(i.pointer.hover_pos()));
     let over = pointer.and_then(hit).is_some();
+    // A selected Control owns the pointer, as a selected bone does: the
+    // layer's transform box stays hidden, and a press that no widget
+    // takes drops the selection (the next press reaches the artwork).
+    let control_selected = s
+        .selected_node
+        .is_some_and(|id| widgets.iter().any(|w| w.id == id));
+    if control_selected && !over && state.drag.is_none() && response.is_pointer_button_down_on() {
+        if ui.input(|i| i.pointer.primary_pressed()) {
+            s.selected_node = None;
+            state.dropped = true;
+        }
+        return true;
+    }
     if response.double_clicked() {
         let stop = response.interact_pointer_pos().and_then(|p| {
             let w = hit(p)?;
@@ -316,7 +340,7 @@ pub fn ui(
     } else if over {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    let busy = state.drag.is_some() || over;
+    let busy = state.drag.is_some() || over || control_selected;
     if !ui.input(|i| i.pointer.primary_down()) {
         finish(s, state);
     }

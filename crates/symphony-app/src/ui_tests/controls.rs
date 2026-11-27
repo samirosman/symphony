@@ -355,3 +355,65 @@ fn setup_mode_records_a_skeleton_move_as_peg_offsets() {
         tip(&h, bone)
     );
 }
+
+/// Layer 0 with a line from (-100, 0) to (100, 0), under a Control whose
+/// slider runs along y = -200. The Control is selected, with the
+/// Transform tool.
+fn art_under_a_selected_control() -> (Harness<'static, Rig>, NodeId) {
+    let mut h = super::rig();
+    h.state_mut().s.tool = Tool::Brush;
+    super::drag(
+        &mut h,
+        &super::line((-100.0, 0.0), (100.0, 0.0), 20),
+        1.0,
+        symphony_pen::Tool::Pen,
+    );
+    let s = &mut h.state_mut().s;
+    let layer = s.doc.layers[0].node;
+    let control = s.doc.graph.add(
+        "Kick",
+        NodeKind::Control(Control {
+            widget: Widget {
+                position: [0.0, -200.0],
+                size: 200.0,
+                ..Widget::default()
+            },
+            ..Control::default()
+        }),
+    );
+    // At the top of the layer's chain, as the Node view places it.
+    let mut top = layer;
+    while let Some(up) = s.doc.graph.input(top, 0) {
+        top = up;
+    }
+    s.doc.graph.connect(control, top, 0);
+    s.selected_node = Some(control);
+    s.tool = Tool::Transform;
+    s.end_gesture();
+    h.run_steps(2);
+    (h, control)
+}
+
+#[test]
+fn a_selected_control_hides_the_layer_box_and_a_press_drops_it() {
+    let (mut h, _) = art_under_a_selected_control();
+    // No box: no handle hint over the art's corner.
+    let corner = h.state().canvas.to_screen(-100.0, 0.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(corner));
+    h.run_steps(2);
+    assert!(h.state().canvas.select.hover.is_none(), "no transform box");
+    let steps = h.state().s.history.undo_len();
+    drag(&mut h, (0.0, 0.0), (60.0, 60.0), Modifiers::NONE);
+    assert_eq!(h.state().s.history.undo_len(), steps, "the art stays");
+    assert_eq!(h.state().s.selected_node, None, "the press drops it");
+    // The next press reaches the artwork again.
+    drag(&mut h, (0.0, 0.0), (60.0, 60.0), Modifiers::NONE);
+    assert_eq!(h.state().s.history.undo_len(), steps + 1, "the art moves");
+}
+
+#[test]
+fn a_knob_drag_keeps_the_control_selected() {
+    let (mut h, control) = art_under_a_selected_control();
+    drag(&mut h, (0.0, -200.0), (50.0, -200.0), Modifiers::NONE);
+    assert_eq!(h.state().s.selected_node, Some(control));
+}
