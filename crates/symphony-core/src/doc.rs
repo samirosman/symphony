@@ -173,6 +173,11 @@ pub struct Scene {
     /// an undo step.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub folded_rows: BTreeSet<NodeId>,
+    /// Timeline rows tagged for the View tagged layers mode, by node (a
+    /// layer by its drawing node). Saved with the scene; not an undo
+    /// step.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tagged_rows: BTreeSet<NodeId>,
     /// Front to back: index 0 is the top of the Timeline and composite port 0.
     pub layers: Vec<Layer>,
     pub drawings: BTreeMap<Id, Drawing>,
@@ -358,6 +363,7 @@ impl Scene {
             node_positions: BTreeMap::new(),
             custom_wiring: false,
             folded_rows: BTreeSet::new(),
+            tagged_rows: BTreeSet::new(),
             layers: Vec::new(),
             drawings: BTreeMap::new(),
             palette,

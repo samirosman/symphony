@@ -25,6 +25,14 @@ pub struct TimingState {
     /// The node a right-click menu is for (a layer's drawing node too).
     menu_node: Option<NodeId>,
     show_unanimated_nodes: bool,
+    /// Which rows the Timeline lists.
+    pub view_mode: ViewMode,
+    /// Hide the Parameters column. Saved with the app's workspace
+    /// settings.
+    pub hide_params: bool,
+    /// Collapse all (true) or Expand all (false), asked from the View
+    /// menu, done once the rows are known.
+    fold_all: Option<bool>,
     /// Width of the names panel, once dragged; saved with the app's
     /// workspace settings.
     pub names_w: Option<f32>,
@@ -55,6 +63,87 @@ pub struct TimingState {
     /// moved with when, so their row glows briefly.
     last_order: Vec<symphony_core::id::Id>,
     arrived: Vec<(symphony_core::id::Id, f64)>,
+}
+
+/// Which rows the Timeline lists (Harmony's view modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Every row, as a tree.
+    #[default]
+    Normal,
+    /// Only the selected row.
+    SelectionOnly,
+    /// Only the tagged rows.
+    Tagged,
+}
+
+impl ViewMode {
+    fn label(self) -> &'static str {
+        match self {
+            ViewMode::Normal => "Normal view mode",
+            ViewMode::SelectionOnly => "Selection only mode",
+            ViewMode::Tagged => "View tagged layers",
+        }
+    }
+}
+
+/// The Timeline's View menu: view modes, which rows and columns show,
+/// and Collapse all / Expand all.
+fn view_menu(ui: &mut egui::Ui, t: &mut TimingState, has_unanimated_nodes: bool) {
+    let label = match t.view_mode {
+        ViewMode::Normal => "View".to_owned(),
+        mode => format!("View: {}", mode.label()),
+    };
+    ui.menu_button(label, |ui| {
+        for mode in [ViewMode::Normal, ViewMode::SelectionOnly, ViewMode::Tagged] {
+            ui.radio_value(&mut t.view_mode, mode, mode.label());
+        }
+        ui.separator();
+        let mut show_pegs = !t.hide_pegs;
+        ui.checkbox(&mut show_pegs, "Show pegs")
+            .on_hover_text("Show each layer's pegs above it.");
+        t.hide_pegs = !show_pegs;
+        ui.add_enabled(
+            has_unanimated_nodes,
+            egui::Checkbox::new(&mut t.show_unanimated_nodes, "Show all node tracks"),
+        )
+        .on_hover_text("Animated nodes and the selected node are always shown.");
+        let mut show_params = !t.hide_params;
+        ui.checkbox(&mut show_params, "Show parameters");
+        t.hide_params = !show_params;
+        ui.separator();
+        if ui.button("Collapse all").clicked() {
+            t.fold_all = Some(true);
+            ui.close();
+        }
+        if ui.button("Expand all").clicked() {
+            t.fold_all = Some(false);
+            ui.close();
+        }
+    });
+}
+
+/// Keep only the rows a view mode lists, flat: no tree, so no carets.
+fn view_rows(
+    s: &Session,
+    layout: Vec<(Slot, usize)>,
+    tracks: &[(NodeId, String, KeySet)],
+    mode: ViewMode,
+    selected: Option<NodeId>,
+) -> Vec<(Slot, usize)> {
+    let keep = |id: Option<NodeId>| match mode {
+        ViewMode::Normal => true,
+        ViewMode::SelectionOnly => id.is_some() && id == selected,
+        ViewMode::Tagged => id.is_some_and(|id| s.row_tagged(id)),
+    };
+    if mode == ViewMode::Normal {
+        return layout;
+    }
+    layout
+        .into_iter()
+        .filter(|&(slot, _)| keep(row_node(s, tracks, slot)))
+        .map(|(slot, _)| (slot, 0))
+        .collect()
 }
 
 /// The names panel's width before any drag.
@@ -706,6 +795,39 @@ fn fold_menu(ui: &mut egui::Ui, s: &mut Session, row: Option<(NodeId, bool)>, pa
     }
 }
 
+/// Timeline tag and untag for a row's menu (Harmony's Tag menu).
+fn tag_menu(ui: &mut egui::Ui, s: &mut Session, id: NodeId) {
+    let tagged = s.row_tagged(id);
+    let label = if tagged {
+        "Timeline untag"
+    } else {
+        "Timeline tag"
+    };
+    if ui.button(label).clicked() {
+        s.set_row_tagged(id, !tagged);
+        ui.close();
+    }
+    if ui
+        .add_enabled(
+            !s.doc.tagged_rows.is_empty(),
+            egui::Button::new("Untag all"),
+        )
+        .clicked()
+    {
+        s.untag_all();
+        ui.close();
+    }
+}
+
+/// A row's name as the Timeline shows it: a tagged row has an asterisk.
+fn shown_name(s: &Session, id: NodeId, name: &str) -> String {
+    if s.row_tagged(id) {
+        format!("* {name}")
+    } else {
+        name.to_owned()
+    }
+}
+
 /// A key on a row that a fold hides: a small hollow diamond on the
 /// folded row.
 fn hidden_key(painter: &egui::Painter, c: Pos2) {
@@ -1051,7 +1173,8 @@ pub fn timeline(
     let eye_col = 6.0..24.0;
     let lock_col = 24.0..TREE;
     // Where the Parameters field starts.
-    let params = head_w - PARAM_W - 6.0;
+    let param_w = if t.hide_params { 0.0 } else { PARAM_W };
+    let params = head_w - param_w - 6.0;
     // Ctrl+wheel zooms the frames, from a whole scene at a glance to
     // wide cells.
     const FRAME_W: std::ops::RangeInclusive<f32> = 2.0..=48.0;
@@ -1117,16 +1240,7 @@ pub fn timeline(
         has_unanimated_nodes |= frames.is_empty();
         node_tracks.push((id, super::node::node_name(node), frames));
     }
-    ui.horizontal(|ui| {
-        let mut show_pegs = !t.hide_pegs;
-        ui.toggle_value(&mut show_pegs, "Show pegs")
-            .on_hover_text("Show each layer's pegs above it.");
-        t.hide_pegs = !show_pegs;
-        if has_unanimated_nodes {
-            ui.toggle_value(&mut t.show_unanimated_nodes, "Show all node tracks")
-                .on_hover_text("Animated nodes and the selected node are always shown.");
-        }
-    });
+    ui.horizontal(|ui| view_menu(ui, t, has_unanimated_nodes));
     // Pegs and effects that belong to a layer always show: they're part
     // of the layer's hierarchy. The filter is for loose nodes.
     let attached = attached_nodes(s);
@@ -1148,12 +1262,20 @@ pub fn timeline(
     // Where each row goes, following the node hierarchy; folded rows
     // hide the deeper rows under them.
     let track_ids: Vec<NodeId> = node_tracks.iter().map(|(id, _, _)| *id).collect();
-    let fold = fold_layout(
+    let rows_listed = view_rows(
         s,
-        &hierarchy_rows(s, &track_ids, sound_rows),
+        hierarchy_rows(s, &track_ids, sound_rows),
         &node_tracks,
+        t.view_mode,
         visible_node,
     );
+    if let Some(folded) = t.fold_all.take() {
+        let parents = fold_layout(s, &rows_listed, &node_tracks, None).parents;
+        for id in parents {
+            s.set_row_folded(id, folded);
+        }
+    }
+    let fold = fold_layout(s, &rows_listed, &node_tracks, visible_node);
     let layout = fold.rows.clone();
     let track_count = layout.len();
     // A hidden row takes the slot of the row that hides it.
@@ -1225,6 +1347,44 @@ pub fn timeline(
                 Pos2::new(viewport.left(), ruler_bottom.min(viewport.bottom())),
                 viewport.max,
             );
+            // The switch header row, as in Harmony: a click on the eye
+            // or the lock above the rows sets it for every layer.
+            let header = viewport_painter.with_clip_rect(Rect::from_min_max(
+                Pos2::new(viewport.left(), ruler_top),
+                Pos2::new(frames_left, ruler_bottom),
+            ));
+            let all_visible = (0..layers).all(|i| s.layer_visible(i));
+            let all_locked = layers > 0 && (0..layers).all(|i| s.layer_locked(i));
+            let switches = [
+                (eye_col.clone(), "all-eye", "Show or hide all layers"),
+                (lock_col.clone(), "all-lock", "Lock or unlock all layers"),
+            ];
+            for (k, (col, key, tip)) in switches.into_iter().enumerate() {
+                let rect = Rect::from_min_max(
+                    Pos2::new(hx + col.start, ruler_top),
+                    Pos2::new(hx + col.end, ruler_bottom),
+                );
+                let icon = match (k, all_visible, all_locked) {
+                    (0, true, _) => Icon::Eye,
+                    (0, false, _) => Icon::EyeOff,
+                    (_, _, true) => Icon::Lock,
+                    _ => Icon::Unlock,
+                };
+                icons::paint(
+                    &header,
+                    Rect::from_center_size(rect.center(), Vec2::splat(16.0)),
+                    icon,
+                    theme::TEXT_SECONDARY,
+                );
+                let r = ui
+                    .interact(rect, ui.scope_id().with(key), Sense::click())
+                    .on_hover_text(tip);
+                if r.clicked() && k == 0 {
+                    s.set_all_visible(!all_visible);
+                } else if r.clicked() {
+                    s.set_all_locked(!all_locked);
+                }
+            }
             ui.set_clip_rect(track_clip);
             // Row highlights span the whole width; frames stop at the
             // names; the names have their own column.
@@ -1382,23 +1542,25 @@ pub fn timeline(
                         &head,
                         Pos2::new(hx + TREE + 18.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
-                        s.layer_name(i),
+                        &shown_name(s, node, s.layer_name(i)),
                         theme::body(),
                         name_col,
                         params - TREE - 22.0 - indent,
                     );
                 }
-                parameters_field(
-                    ui,
-                    &head,
-                    s,
-                    t,
-                    i,
-                    Rect::from_min_size(
-                        Pos2::new(hx + head_w - PARAM_W - 6.0, y + 4.0),
-                        Vec2::new(PARAM_W, rh - 8.0),
-                    ),
-                );
+                if !t.hide_params {
+                    parameters_field(
+                        ui,
+                        &head,
+                        s,
+                        t,
+                        i,
+                        Rect::from_min_size(
+                            Pos2::new(hx + params, y + 4.0),
+                            Vec2::new(PARAM_W, rh - 8.0),
+                        ),
+                    );
+                }
 
                 if let Some(col) = s.doc.column(i) {
                     let mut f = 1;
@@ -1505,7 +1667,7 @@ pub fn timeline(
                         &head,
                         Pos2::new(hx + TREE + 18.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
-                        name,
+                        &shown_name(s, *node, name),
                         theme::body(),
                         theme::TEXT_SECONDARY,
                         head_w - TREE - 24.0 - indent,
@@ -1977,6 +2139,10 @@ pub fn timeline(
                         layer_menu(ui, s, t, row);
                         ui.separator();
                         fold_menu(ui, s, menu_caret, &fold.parents);
+                        if let Some(node) = t.menu_node {
+                            ui.separator();
+                            tag_menu(ui, s, node);
+                        }
                     } else if let Some(node) = t.menu_node {
                         // A peg, Mesh Warp or effect row.
                         ui.separator();
@@ -1997,6 +2163,10 @@ pub fn timeline(
                         }
                         ui.separator();
                         fold_menu(ui, s, menu_caret, &fold.parents);
+                        if let Some(node) = t.menu_node {
+                            ui.separator();
+                            tag_menu(ui, s, node);
+                        }
                     }
                 });
             }
@@ -3056,5 +3226,73 @@ mod hierarchy_tests {
         assert!((w - (NAMES_W + 100.0)).abs() < 2.0, "width {w}");
         let s = &harness.state().0;
         assert!((0..s.layer_count()).all(|i| s.layer_visible(i)));
+    }
+
+    #[test]
+    fn view_modes_list_only_tagged_or_selected_rows_flat() {
+        let (mut s, outer, inner) = two_peg_scene();
+        let layer = s.doc.layers[0].node;
+        let tracks = chain_tracks(&s);
+        let ids: Vec<NodeId> = tracks.iter().map(|t| t.0).collect();
+        let all = hierarchy_rows(&s, &ids, 0);
+        let listed = |s: &Session, mode, selected| -> Vec<(Option<NodeId>, usize)> {
+            view_rows(s, all.clone(), &tracks, mode, selected)
+                .into_iter()
+                .map(|(slot, depth)| (row_node(s, &tracks, slot), depth))
+                .collect()
+        };
+        assert_eq!(listed(&s, ViewMode::Normal, None).len(), all.len());
+        assert!(
+            listed(&s, ViewMode::Tagged, None).is_empty(),
+            "nothing tagged"
+        );
+        s.set_row_tagged(inner, true);
+        s.set_row_tagged(layer, true);
+        assert!(s.dirty(), "tags are saved with the scene");
+        assert_eq!(
+            listed(&s, ViewMode::Tagged, None),
+            [(Some(inner), 0), (Some(layer), 0)],
+            "flat, in tree order"
+        );
+        assert_eq!(
+            listed(&s, ViewMode::SelectionOnly, Some(outer)),
+            [(Some(outer), 0)]
+        );
+        assert_eq!(shown_name(&s, layer, "Arm"), "* Arm");
+        assert_eq!(shown_name(&s, outer, "Hip"), "Hip");
+        s.untag_all();
+        assert!(listed(&s, ViewMode::Tagged, None).is_empty());
+    }
+
+    /// The eye above the rows hides every layer in one undo step; the
+    /// lock beside it locks every layer.
+    #[test]
+    fn the_switch_header_sets_every_layer() {
+        let mut s = Session::new_scene();
+        s.add_layer();
+        s.add_layer();
+        let mut harness = timeline_harness(s);
+        let x = |col: f32| 8.0 + col;
+        // Down from the View button to the ruler row: stop when the
+        // header has hidden all layers.
+        let hit = (66..110).map(|y| y as f32).find(|&y| {
+            press(&mut harness, Pos2::new(x(15.0), y), Pos2::new(x(15.0), y));
+            harness.state().0.history.undo_name() == Some("Hide all layers")
+        });
+        let y = hit.expect("the header eye");
+        let s = &harness.state().0;
+        assert!((0..s.layer_count()).all(|i| !s.layer_visible(i)));
+        harness.state_mut().0.undo();
+        let s = &harness.state().0;
+        assert!(
+            (0..s.layer_count()).all(|i| s.layer_visible(i)),
+            "one undo step"
+        );
+        press(&mut harness, Pos2::new(x(33.0), y), Pos2::new(x(33.0), y));
+        let s = &harness.state().0;
+        assert!(
+            (0..s.layer_count()).all(|i| s.layer_locked(i)),
+            "the lock header"
+        );
     }
 }
