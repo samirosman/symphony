@@ -362,6 +362,19 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_layer_stays_folded_after_save_and_open() {
+        let dir = temp("folded");
+        let path = dir.join("Fold");
+        let mut s = sample();
+        let node = s.layers[0].node;
+        s.folded_rows.insert(node);
+        save(&s, &path).unwrap();
+        let back = open(&with_extension(&path)).unwrap();
+        assert!(back.folded_rows.contains(&node));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn imported_media_is_copied_into_the_project_and_found_again() {
         let dir = temp("media");
         let cache = dir.join("cache");

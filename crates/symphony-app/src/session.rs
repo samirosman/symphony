@@ -3054,6 +3054,25 @@ impl Session {
         );
     }
 
+    /// Whether the Timeline row of node `id` (a layer by its drawing
+    /// node) is folded, hiding the rows under it.
+    pub fn row_folded(&self, id: NodeId) -> bool {
+        self.doc.folded_rows.contains(&id)
+    }
+
+    /// Fold or unfold the Timeline row of node `id`. Saved with the
+    /// scene, so the scene counts as changed, but not an undo step.
+    pub fn set_row_folded(&mut self, id: NodeId, folded: bool) {
+        let changed = if folded {
+            self.doc.folded_rows.insert(id)
+        } else {
+            self.doc.folded_rows.remove(&id)
+        };
+        if changed {
+            self.doc.version += 1;
+        }
+    }
+
     /// Lock or unlock layer `i`, as one undo step.
     pub fn toggle_locked(&mut self, i: usize) {
         let Some(col) = self.doc.column(i) else {
