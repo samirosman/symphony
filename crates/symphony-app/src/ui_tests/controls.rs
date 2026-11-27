@@ -308,7 +308,7 @@ fn setup_mode_adds_a_pose_at_the_knob_from_its_panel() {
 }
 
 #[test]
-fn off_a_pose_setup_mode_leaves_edits_as_keys() {
+fn off_a_pose_setup_mode_refuses_rig_changes() {
     let Scene {
         mut h,
         control: id,
@@ -317,10 +317,37 @@ fn off_a_pose_setup_mode_leaves_edits_as_keys() {
     crate::views::control_edit::start_setup(&mut h.state_mut().s, id);
     h.run_steps(1);
     drag(&mut h, (0.0, -100.0), (50.0, -100.0), Modifiers::NONE);
+    let steps = h.state().s.history.undo_len();
     drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
     let rotation = h.state().s.doc.graph.bone(bone).unwrap().rotation.at(1);
-    assert!((rotation - 90.0).abs() < 0.5, "a normal edit: {rotation}");
+    assert_eq!(rotation, 0.0, "no key off a pose");
     assert_eq!(pose_turn(&h, id, bone, 1.0), Some(0.0));
+    assert_eq!(h.state().s.history.undo_len(), steps, "no undo step");
+    assert!(h.state().s.history.redo_name().is_none(), "nothing to redo");
+    // The rest pose takes no change either.
+    drag(&mut h, (50.0, -100.0), (0.0, -100.0), Modifiers::NONE);
+    drag(&mut h, (100.0, 0.0), (0.0, 100.0), Modifiers::NONE);
+    let rotation = h.state().s.doc.graph.bone(bone).unwrap().rotation.at(1);
+    assert_eq!(rotation, 0.0, "no key at the rest pose");
+}
+
+#[test]
+fn a_new_pose_between_poses_starts_from_what_the_rig_shows() {
+    let Scene {
+        mut h,
+        control: id,
+        bone,
+    } = scene(90.0, 0.0, false);
+    crate::views::control_edit::start_setup(&mut h.state_mut().s, id);
+    h.run_steps(1);
+    // Halfway to the pose at 1: the bone shows a 45 degree turn.
+    drag(&mut h, (0.0, -100.0), (50.0, -100.0), Modifiers::NONE);
+    let shown = tip(&h, bone);
+    crate::views::control_edit::add_pose(&mut h.state_mut().s);
+    h.run_steps(2);
+    let turn = pose_turn(&h, id, bone, 0.5).unwrap();
+    assert!((turn - 45.0).abs() < 0.5, "pose turn {turn}");
+    assert!(near(tip(&h, bone), shown), "the rig stays put");
 }
 
 #[test]

@@ -813,6 +813,21 @@ impl History {
         Some(name)
     }
 
+    /// Undo the last step and forget it: redo cannot bring it back. For
+    /// an edit the app refuses after it was made (a rig change in Setup
+    /// mode off a pose).
+    pub fn discard(&mut self, scene: &mut Scene) -> bool {
+        self.seal();
+        let Some(step) = self.undo.pop_back() else {
+            return false;
+        };
+        self.bytes = self.bytes.saturating_sub(step.bytes());
+        for e in step.edits.iter().rev() {
+            e.apply(scene, false);
+        }
+        true
+    }
+
     pub fn redo(&mut self, scene: &mut Scene) -> Option<String> {
         let step = self.redo.pop()?;
         for e in &step.edits {
@@ -878,6 +893,26 @@ mod tests {
     /// After the user rewires the Node view, a new layer still stacks
     /// where the Timeline shows it (port 0 = front), and undo and redo
     /// put the other inputs back where they were.
+    #[test]
+    fn a_discarded_step_is_gone_from_undo_and_redo() {
+        let (mut s, mut h) = scene_with_layer();
+        let (column, node) = (s.layers[0].column, s.layers[0].node);
+        h.apply(
+            &mut s,
+            "Rename",
+            vec![Edit::Rename {
+                column,
+                before: "Head".into(),
+                after: "Face".into(),
+            }],
+        );
+        assert!(h.discard(&mut s));
+        assert_eq!(s.graph.node(node).unwrap().name, "Head");
+        assert_eq!(h.undo_name(), Some("Add layer"));
+        assert_eq!(h.redo_name(), None);
+        assert!(h.redo(&mut s).is_none());
+    }
+
     #[test]
     fn a_new_layer_stacks_in_timeline_order_after_custom_wiring() {
         let mut s = Scene::new(Settings::default());

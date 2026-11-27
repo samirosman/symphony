@@ -167,6 +167,35 @@ impl Control {
         self.value.has_key(frame)
     }
 
+    /// Add a pose at `at` that holds what the control adds there now, so
+    /// the rig does not jump when the pose appears between or past
+    /// others. False at the rest pose, at a number that is not finite,
+    /// or where a pose already sits.
+    pub fn add_pose(&mut self, at: f32) -> bool {
+        if at == 0.0 || !at.is_finite() || self.poses.iter().any(|p| p.at == at) {
+            return false;
+        }
+        let mut targets: Vec<(NodeId, Channel)> = self
+            .poses
+            .iter()
+            .flat_map(|p| p.offsets.iter().map(|o| (o.node, o.channel)))
+            .collect();
+        targets.sort();
+        targets.dedup();
+        let offsets = targets
+            .into_iter()
+            .map(|(node, channel)| Offset {
+                node,
+                channel,
+                amount: self.offset_for(at, node, channel),
+            })
+            .filter(|o| o.amount != 0.0)
+            .collect();
+        self.poses.push(Pose { at, offsets });
+        self.poses.sort_by(|a, b| a.at.total_cmp(&b.at));
+        true
+    }
+
     /// Add `amount` to the offset of `channel` of `node` in the pose at
     /// `at`. False when no pose is there (the rest pose takes none).
     pub fn add_offset(&mut self, at: f32, node: NodeId, channel: Channel, amount: f32) -> bool {
@@ -293,6 +322,40 @@ mod tests {
         let c = slider(&[(1.0, 40.0)]);
         assert_eq!(c.offset_for(1.0, BONE, Channel::Stretch), 0.0);
         assert_eq!(c.offset_for(1.0, NodeId(4), Channel::Rotation), 0.0);
+    }
+
+    #[test]
+    fn a_new_pose_between_poses_keeps_the_blend() {
+        let mut c = slider(&[(1.0, 40.0), (-1.0, -20.0)]);
+        let before = at(&c, 0.5);
+        assert!(c.add_pose(0.5));
+        assert_eq!(at(&c, 0.5), before);
+        assert_eq!(at(&c, 0.75), 30.0, "the outer pose is unchanged");
+        let ats: Vec<f32> = c.poses.iter().map(|p| p.at).collect();
+        assert_eq!(ats, [-1.0, 0.5, 1.0], "sorted");
+    }
+
+    #[test]
+    fn a_new_pose_past_the_last_holds_its_offsets() {
+        let mut c = slider(&[(0.5, 10.0)]);
+        assert!(c.add_pose(1.0));
+        assert_eq!(c.poses[1].amount(BONE, Channel::Rotation), 10.0);
+    }
+
+    #[test]
+    fn a_new_pose_beside_rest_only_is_empty() {
+        let mut c = slider(&[(1.0, 40.0)]);
+        assert!(c.add_pose(-0.5));
+        assert!(c.poses[0].offsets.is_empty(), "the rest adds nothing");
+    }
+
+    #[test]
+    fn no_new_pose_at_rest_or_on_a_pose() {
+        let mut c = slider(&[(1.0, 40.0)]);
+        assert!(!c.add_pose(0.0));
+        assert!(!c.add_pose(1.0));
+        assert!(!c.add_pose(f32::NAN));
+        assert_eq!(c.poses.len(), 1);
     }
 
     #[test]
