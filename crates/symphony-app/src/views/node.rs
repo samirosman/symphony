@@ -2144,13 +2144,17 @@ fn reset_to_rest(c: &mut CurveDeformer, frame: u32) {
 
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
     let mut build_mesh_now = false;
-    ui.add_sized(
-        [ui.available_width(), 28.0],
-        egui::TextEdit::singleline(&mut draft.node.name)
-            .font(egui::FontId::proportional(theme::SIZE_HEADING))
-            .hint_text("Node name"),
-    )
-    .on_hover_text("Node name");
+    let name = ui
+        .add_sized(
+            [ui.available_width(), 28.0],
+            egui::TextEdit::singleline(&mut draft.node.name)
+                .font(egui::FontId::proportional(theme::SIZE_HEADING))
+                .hint_text("Node name"),
+        )
+        .on_hover_text("Node name. Enter renames the node.");
+    if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        rename_from_draft(s, draft);
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(
             egui::RichText::new(kind_label(&draft.node.kind))
@@ -2821,6 +2825,21 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             apply_properties(s, draft, false, true);
         }
     });
+}
+
+/// Enter in the name field: rename the node at once. Other changes in
+/// the panel stay staged for Apply changes.
+fn rename_from_draft(s: &mut Session, draft: &mut PropertyDraft) {
+    let name = draft.node.name.trim().to_owned();
+    if name.is_empty() {
+        return;
+    }
+    s.rename_node(draft.id, &name);
+    draft.node.name.clone_from(&name);
+    draft.initial.name = name;
+    // The rename is in the draft already: no reload, which would drop
+    // the staged changes.
+    draft.version = s.doc.version;
 }
 
 fn apply_name(s: &mut Session, draft: &mut PropertyDraft) {
@@ -5579,6 +5598,56 @@ mod tests {
         assert_eq!(poses(&harness.state().0), 0);
         harness.state_mut().0.undo();
         assert_eq!(poses(&harness.state().0), 1);
+    }
+
+    /// Enter in the name field renames the node at once, as one undo
+    /// step; a change staged in the panel stays staged.
+    #[test]
+    fn enter_in_the_name_field_renames_the_node() {
+        use egui_kittest::kittest::Queryable;
+        let mut s = Session::new_scene();
+        let control = s.doc.graph.add(
+            "Blink",
+            NodeKind::Control(symphony_core::control::Control::default()),
+        );
+        s.selected_node = Some(control);
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(360.0, 900.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (s, state)| inspector(ui, s, state),
+                (s, NodeViewState::default()),
+            );
+        harness.run_steps(2);
+        harness
+            .get_by(|n| {
+                n.role() == egui::accesskit::Role::TextInput
+                    && n.value().as_deref() == Some("Blink")
+            })
+            .click();
+        harness.run_steps(2);
+        harness
+            .state_mut()
+            .1
+            .properties
+            .as_mut()
+            .unwrap()
+            .node
+            .enabled = false;
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text(" and lift".into()));
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+        let name = |s: &Session| s.doc.graph.node(control).unwrap().name.clone();
+        assert_eq!(name(&harness.state().0), "Blink and lift");
+        assert!(harness.state().0.doc.graph.node(control).unwrap().enabled);
+        let draft = harness.state().1.properties.as_ref().unwrap();
+        assert!(!draft.node.enabled, "the staged change stays");
+        harness.state_mut().0.undo();
+        assert_eq!(name(&harness.state().0), "Blink");
     }
 
     #[test]

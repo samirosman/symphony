@@ -3035,6 +3035,25 @@ impl Session {
         );
     }
 
+    /// Rename graph node `id` (a peg, bone or Control row in the
+    /// Timeline), as one undo step. A blank name changes nothing.
+    pub fn rename_node(&mut self, id: NodeId, name: &str) {
+        let name = name.trim();
+        let Some(before) = self.doc.graph.node(id).cloned() else {
+            return;
+        };
+        if name.is_empty() || name == before.name {
+            return;
+        }
+        let mut after = before.clone();
+        after.name = name.into();
+        self.history.apply(
+            &mut self.doc,
+            "Rename node",
+            vec![Edit::SetNodeProperties { id, before, after }],
+        );
+    }
+
     /// Lock or unlock layer `i`, as one undo step.
     pub fn toggle_locked(&mut self, i: usize) {
         let Some(col) = self.doc.column(i) else {
