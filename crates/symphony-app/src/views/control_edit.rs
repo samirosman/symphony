@@ -41,7 +41,7 @@ const KNOB: f32 = 7.5;
 pub struct ControlEdit {
     drag: Option<NodeId>,
     /// A press dropped the Control selection: the rest of that press
-    /// does nothing.
+    /// goes to the Select and Transform tools.
     dropped: bool,
 }
 
@@ -270,10 +270,12 @@ pub fn ui(
     for w in &widgets {
         paint(painter, s, w);
     }
+    // The rest of a press that dropped the selection belongs to the
+    // Select and Transform tools.
     if state.dropped {
         state.dropped = ui.input(|i| i.pointer.primary_down());
         if state.dropped {
-            return true;
+            return false;
         }
     }
     if s.tool != Tool::Transform || widgets.is_empty() {
@@ -291,8 +293,9 @@ pub fn ui(
     let pointer = ui.input(|i| i.pointer.press_origin().or(i.pointer.hover_pos()));
     let over = pointer.and_then(hit).is_some();
     // A selected Control owns the pointer, as a selected bone does: the
-    // layer's transform box stays hidden, and a press that no widget
-    // takes drops the selection (the next press reaches the artwork).
+    // layer's transform box stays hidden. A press that no widget takes
+    // drops the selection and goes on to the Select and Transform tools
+    // in the same click, so one click picks another object.
     let control_selected = s
         .selected_node
         .is_some_and(|id| widgets.iter().any(|w| w.id == id));
@@ -300,6 +303,7 @@ pub fn ui(
         if ui.input(|i| i.pointer.primary_pressed()) {
             s.selected_node = None;
             state.dropped = true;
+            return false;
         }
         return true;
     }
