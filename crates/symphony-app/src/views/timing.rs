@@ -25,6 +25,9 @@ pub struct TimingState {
     /// The node a right-click menu is for (a layer's drawing node too).
     menu_node: Option<NodeId>,
     show_unanimated_nodes: bool,
+    /// Width of the names panel, once dragged; saved with the app's
+    /// workspace settings.
+    pub names_w: Option<f32>,
     /// Hide peg rows, so the Timeline reads as a plain layer stack.
     /// Saved with the app's workspace settings.
     pub hide_pegs: bool,
@@ -52,6 +55,20 @@ pub struct TimingState {
     /// moved with when, so their row glows briefly.
     last_order: Vec<symphony_core::id::Id>,
     arrived: Vec<(symphony_core::id::Id, f64)>,
+}
+
+/// The names panel's width before any drag.
+const NAMES_W: f32 = 176.0;
+/// The narrowest and widest the names panel can be dragged.
+const NAMES_RANGE: std::ops::RangeInclusive<f32> = 150.0..=600.0;
+
+impl TimingState {
+    /// The width of the Timeline's names panel.
+    pub fn names_width(&self) -> f32 {
+        self.names_w
+            .unwrap_or(NAMES_W)
+            .clamp(*NAMES_RANGE.start(), *NAMES_RANGE.end())
+    }
 }
 
 /// Which part of a sound block a drag holds.
@@ -436,6 +453,9 @@ fn ruler_steps(fps: f32) -> [u32; 3] {
 
 /// Indent per level of the node hierarchy, in the Timeline's name column.
 const INDENT: f32 = 12.0;
+/// Where the tree (caret and name) starts in a row, after the eye and
+/// lock columns.
+const TREE: f32 = 42.0;
 
 /// One Timeline row: a layer, a node track (index into the shown node
 /// tracks) or a sound clip.
@@ -545,6 +565,163 @@ fn hierarchy_rows(s: &Session, tracks: &[NodeId], sounds: usize) -> Vec<(Slot, u
     out
 }
 
+/// The Timeline rows left after folding, and what each shown row
+/// carries from the rows it hides.
+struct Folded {
+    /// Shown rows in order, with their depth.
+    rows: Vec<(Slot, usize)>,
+    /// Every row: its depth, the shown row it is (or that hides it), and
+    /// whether it is shown.
+    place: Vec<(Slot, usize, usize, bool)>,
+    /// Per shown row: Some(folded) when it has rows under it.
+    caret: Vec<Option<bool>>,
+    /// Per shown row: keys of the rows its fold hides.
+    hidden_keys: Vec<std::collections::BTreeSet<u32>>,
+    /// Per shown row: its fold hides the selected node.
+    holds_selected: Vec<bool>,
+    /// Every row that has rows under it, folded or not.
+    parents: Vec<NodeId>,
+}
+
+/// The node a Timeline row stands for (a layer by its drawing node).
+fn row_node(s: &Session, tracks: &[(NodeId, String, KeySet)], slot: Slot) -> Option<NodeId> {
+    match slot {
+        Slot::Layer(i) => s.doc.layers.get(i).map(|l| l.node),
+        Slot::Node(j) => tracks.get(j).map(|t| t.0),
+        Slot::Sound(_) => None,
+    }
+}
+
+type KeySet = std::collections::BTreeSet<u32>;
+
+/// Fold the Timeline as a tree: a row is a parent when the row after it
+/// is deeper, and a folded parent hides every deeper row after it.
+fn fold_layout(
+    s: &Session,
+    layout: &[(Slot, usize)],
+    tracks: &[(NodeId, String, KeySet)],
+    selected: Option<NodeId>,
+) -> Folded {
+    let mut out = Folded {
+        rows: Vec::new(),
+        place: Vec::new(),
+        caret: Vec::new(),
+        hidden_keys: Vec::new(),
+        holds_selected: Vec::new(),
+        parents: Vec::new(),
+    };
+    let deeper = |k: usize, depth: usize| {
+        layout
+            .get(k + 1)
+            .is_some_and(|&(next, d)| d > depth && !matches!(next, Slot::Sound(_)))
+    };
+    let mut fold_at: Option<(usize, usize)> = None;
+    for (k, &(slot, depth)) in layout.iter().enumerate() {
+        let id = row_node(s, tracks, slot);
+        if id.is_some() && deeper(k, depth) {
+            out.parents.extend(id);
+        }
+        match fold_at {
+            Some((d, shown)) if depth > d && !matches!(slot, Slot::Sound(_)) => {
+                out.place.push((slot, depth, shown, false));
+                let keys: KeySet = match slot {
+                    Slot::Node(j) => tracks[j].2.clone(),
+                    _ => id
+                        .and_then(|id| s.doc.graph.keys(id))
+                        .map(|keys| keys.keys().copied().collect())
+                        .unwrap_or_default(),
+                };
+                out.hidden_keys[shown].extend(keys);
+                out.holds_selected[shown] |= id.is_some() && id == selected;
+                continue;
+            }
+            _ => fold_at = None,
+        }
+        let shown = out.rows.len();
+        out.rows.push((slot, depth));
+        out.place.push((slot, depth, shown, true));
+        let caret =
+            (id.is_some() && deeper(k, depth)).then(|| id.is_some_and(|id| s.row_folded(id)));
+        out.caret.push(caret);
+        out.hidden_keys.push(KeySet::new());
+        out.holds_selected.push(false);
+        if caret == Some(true) {
+            fold_at = Some((depth, shown));
+        }
+    }
+    out
+}
+
+/// The fold arrow of a parent row: pointing right when folded, down
+/// when open.
+fn paint_caret(painter: &egui::Painter, c: Pos2, folded: bool, ink: egui::Color32) {
+    let points = if folded {
+        [
+            c + Vec2::new(-1.5, -3.5),
+            c + Vec2::new(2.0, 0.0),
+            c + Vec2::new(-1.5, 3.5),
+        ]
+    } else {
+        [
+            c + Vec2::new(-3.5, -1.5),
+            c + Vec2::new(0.0, 2.0),
+            c + Vec2::new(3.5, -1.5),
+        ]
+    };
+    painter.line(points.to_vec(), Stroke::new(1.5, ink));
+}
+
+/// The caret of a shown row that has rows under it, and its tooltip.
+fn caret_ui(head: &egui::Painter, resp: &egui::Response, at: Pos2, caret: Option<bool>) {
+    let Some(folded) = caret else {
+        return;
+    };
+    paint_caret(head, at, folded, theme::TEXT_SECONDARY);
+    let area = Rect::from_center_size(at, Vec2::new(16.0, theme::ROW));
+    if resp.hover_pos().is_some_and(|p| area.contains(p)) {
+        resp.clone()
+            .on_hover_text_at_pointer(if folded { "Expand" } else { "Collapse" });
+    }
+}
+
+/// Collapse and Expand for a row's menu, and for every row.
+fn fold_menu(ui: &mut egui::Ui, s: &mut Session, row: Option<(NodeId, bool)>, parents: &[NodeId]) {
+    if let Some((id, folded)) = row {
+        let label = if folded { "Expand" } else { "Collapse" };
+        if ui.button(label).clicked() {
+            s.set_row_folded(id, !folded);
+            ui.close();
+        }
+    }
+    for (label, folded) in [("Collapse all", true), ("Expand all", false)] {
+        if ui
+            .add_enabled(!parents.is_empty(), egui::Button::new(label))
+            .clicked()
+        {
+            for &id in parents {
+                s.set_row_folded(id, folded);
+            }
+            ui.close();
+        }
+    }
+}
+
+/// A key on a row that a fold hides: a small hollow diamond on the
+/// folded row.
+fn hidden_key(painter: &egui::Painter, c: Pos2) {
+    let r = 3.0;
+    let points = vec![
+        c + Vec2::new(0.0, -r),
+        c + Vec2::new(r, 0.0),
+        c + Vec2::new(0.0, r),
+        c + Vec2::new(-r, 0.0),
+    ];
+    painter.add(egui::Shape::closed_line(
+        points,
+        Stroke::new(1.0, theme::TEXT_SECONDARY),
+    ));
+}
+
 /// "Add node" from a Timeline row: the new node goes in the nearest place
 /// in the hierarchy that fits (a peg above, an effect after), so the
 /// Timeline can work like a layer stack or like nodes.
@@ -587,6 +764,7 @@ fn layer_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, row: usiz
         s.toggle_locked(row);
         ui.close();
     }
+    ui.separator();
     ui.separator();
     if ui
         .add_enabled(s.layer_count() > 1, egui::Button::new("Delete layer"))
@@ -866,10 +1044,14 @@ pub fn timeline(
     profile: Profile,
 ) {
     header(ui, s, profile);
-    const HEAD: f32 = 176.0;
+    let head_w = t.names_width();
     const RULER: f32 = 28.0;
-    // The lock switch, just left of the Parameters field.
-    const LOCK: std::ops::Range<f32> = HEAD - PARAM_W - 28.0..HEAD - PARAM_W - 6.0;
+    // The eye and lock switches keep fixed columns at the left, as in
+    // Harmony; the tree (caret, name) starts after them.
+    let eye_col = 6.0..24.0;
+    let lock_col = 24.0..TREE;
+    // Where the Parameters field starts.
+    let params = head_w - PARAM_W - 6.0;
     // Ctrl+wheel zooms the frames, from a whole scene at a glance to
     // wide cells.
     const FRAME_W: std::ops::RangeInclusive<f32> = 2.0..=48.0;
@@ -963,29 +1145,41 @@ pub fn timeline(
         .map(|(id, name, frames)| (id, name.to_owned(), frames))
         .collect();
     let sound_rows = s.doc.sounds.len();
-    let track_count = rows + node_tracks.len() + sound_rows;
-    // Where each row goes, following the node hierarchy.
+    // Where each row goes, following the node hierarchy; folded rows
+    // hide the deeper rows under them.
     let track_ids: Vec<NodeId> = node_tracks.iter().map(|(id, _, _)| *id).collect();
-    let layout = hierarchy_rows(s, &track_ids, sound_rows);
+    let fold = fold_layout(
+        s,
+        &hierarchy_rows(s, &track_ids, sound_rows),
+        &node_tracks,
+        visible_node,
+    );
+    let layout = fold.rows.clone();
+    let track_count = layout.len();
+    // A hidden row takes the slot of the row that hides it.
     let mut layer_slot = vec![0usize; rows];
     let mut layer_depth = vec![0usize; rows];
+    let mut layer_shown = vec![false; rows];
     let mut node_slot = vec![0usize; node_tracks.len()];
     let mut node_depth = vec![0usize; node_tracks.len()];
+    let mut node_shown = vec![false; node_tracks.len()];
     let mut sound_slot = vec![0usize; sound_rows];
-    for (slot, &(row, depth)) in layout.iter().enumerate() {
+    for &(row, depth, slot, shown) in &fold.place {
         match row {
             Slot::Layer(i) => {
                 layer_slot[i] = slot;
                 layer_depth[i] = depth;
+                layer_shown[i] = shown;
             }
             Slot::Node(j) => {
                 node_slot[j] = slot;
                 node_depth[j] = depth;
+                node_shown[j] = shown;
             }
             Slot::Sound(k) => sound_slot[k] = slot,
         }
     }
-    let width = HEAD + len as f32 * cw + 16.0;
+    let width = head_w + len as f32 * cw + 16.0;
 
     let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
@@ -998,7 +1192,7 @@ pub fn timeline(
             // The middle button scrolls the view and never edits it.
             let resp = middle_scrolls(ui, resp);
             let o = resp.rect.min;
-            let frame_x = |f: u32| o.x + HEAD + (f - 1) as f32 * cw;
+            let frame_x = |f: u32| o.x + head_w + (f - 1) as f32 * cw;
             let rows_bottom = o.y + RULER + track_count as f32 * rh;
             let zoom = ui.input(|i| i.zoom_delta());
             if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| {
@@ -1006,7 +1200,7 @@ pub fn timeline(
             }) {
                 let wide = (cw * zoom).clamp(*FRAME_W.start(), *FRAME_W.end());
                 // The frame under the pointer stays under it.
-                let along = (p.x - o.x - HEAD).max(0.0);
+                let along = (p.x - o.x - head_w).max(0.0);
                 ui.scroll_with_delta_animation(
                     Vec2::new(-along * (wide / cw - 1.0), 0.0),
                     egui::style::ScrollAnimation::none(),
@@ -1022,7 +1216,7 @@ pub fn timeline(
             // The names stay at the left of the view while the frames
             // scroll under them, as the ruler does at the top.
             let hx = o.x + scroll_viewport.left().max(0.0);
-            let frames_left = (hx + HEAD).min(viewport.right());
+            let frames_left = (hx + head_w).min(viewport.right());
             let ruler = viewport_painter.with_clip_rect(Rect::from_min_max(
                 Pos2::new(frames_left, ruler_top),
                 Pos2::new(viewport.right(), ruler_bottom),
@@ -1043,6 +1237,28 @@ pub fn timeline(
                 track_clip.min,
                 Pos2::new(frames_left, track_clip.bottom()),
             ));
+            // A drag on the names panel's right edge sets its width, for
+            // long names and deep rigs.
+            let edge = Rect::from_min_max(
+                Pos2::new(hx + head_w - 3.0, track_clip.top()),
+                Pos2::new(hx + head_w + 3.0, track_clip.bottom()),
+            );
+            let edge_resp = ui
+                .interact(edge, ui.scope_id().with("names-edge"), Sense::drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if edge_resp.dragged() {
+                let w = head_w + edge_resp.drag_delta().x;
+                t.names_w = Some(w.clamp(*NAMES_RANGE.start(), *NAMES_RANGE.end()));
+            }
+            if edge_resp.hovered() || edge_resp.dragged() {
+                full.line_segment(
+                    [
+                        Pos2::new(hx + head_w, track_clip.top()),
+                        Pos2::new(hx + head_w, track_clip.bottom()),
+                    ],
+                    Stroke::new(2.0, theme::ACCENT_SELECT),
+                );
+            }
 
             // Beats follow the frame rate: the second, its half and a
             // small step (24 fps: 24, 12, 6; 30 fps: 30, 15, 5). Lines and
@@ -1080,7 +1296,11 @@ pub fn timeline(
                 let y = o.y + RULER + layer_slot[i] as f32 * rh;
                 let indent = layer_depth[i] as f32 * INDENT;
                 let node = s.doc.layers[i].node;
-                let sel = visible_node == Some(node);
+                if !layer_shown[i] {
+                    continue;
+                }
+                // A folded row also shows the selection of a hidden row.
+                let sel = visible_node == Some(node) || fold.holds_selected[layer_slot[i]];
                 let visible = s.layer_visible(i);
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
@@ -1104,9 +1324,16 @@ pub fn timeline(
                         theme::ACCENT_SELECT,
                     );
                 }
+                caret_ui(
+                    &head,
+                    &resp,
+                    Pos2::new(hx + TREE + 8.0 + indent, y + rh / 2.0),
+                    fold.caret[layer_slot[i]],
+                );
+                // The eye keeps its column whatever the indent.
                 let eye = if visible { Icon::Eye } else { Icon::EyeOff };
                 let eye_rect = Rect::from_center_size(
-                    Pos2::new(hx + 22.0 + indent, y + rh / 2.0),
+                    Pos2::new(hx + (eye_col.start + eye_col.end) / 2.0, y + rh / 2.0),
                     Vec2::splat(16.0),
                 );
                 icons::paint(
@@ -1122,7 +1349,7 @@ pub fn timeline(
                 // Locked: a closed padlock and the name in red, as in Harmony.
                 let locked = s.layer_locked(i);
                 let lock_rect = Rect::from_center_size(
-                    Pos2::new(hx + (LOCK.start + LOCK.end) / 2.0, y + rh / 2.0),
+                    Pos2::new(hx + (lock_col.start + lock_col.end) / 2.0, y + rh / 2.0),
                     Vec2::splat(16.0),
                 );
                 icons::paint(
@@ -1137,7 +1364,7 @@ pub fn timeline(
                 );
                 if resp
                     .hover_pos()
-                    .is_some_and(|p| LOCK.contains(&(p.x - hx)) && (y..y + rh).contains(&p.y))
+                    .is_some_and(|p| lock_col.contains(&(p.x - hx)) && (y..y + rh).contains(&p.y))
                 {
                     resp.clone()
                         .on_hover_text_at_pointer(keymap::tooltip(profile, Action::ToggleLock));
@@ -1153,12 +1380,12 @@ pub fn timeline(
                     widgets::fitted_text(
                         ui,
                         &head,
-                        Pos2::new(hx + 40.0 + indent, y + rh / 2.0),
+                        Pos2::new(hx + TREE + 18.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         s.layer_name(i),
                         theme::body(),
                         name_col,
-                        HEAD - 68.0 - PARAM_W - indent,
+                        params - TREE - 22.0 - indent,
                     );
                 }
                 parameters_field(
@@ -1168,7 +1395,7 @@ pub fn timeline(
                     t,
                     i,
                     Rect::from_min_size(
-                        Pos2::new(hx + HEAD - PARAM_W - 6.0, y + 4.0),
+                        Pos2::new(hx + head_w - PARAM_W - 6.0, y + 4.0),
                         Vec2::new(PARAM_W, rh - 8.0),
                     ),
                 );
@@ -1204,7 +1431,11 @@ pub fn timeline(
                         // playhead and any keyframe diamond it would sit under.
                         let text_w = 7.0 * name.len() as f32;
                         let mut obstacles: Vec<f32> = (start..f)
-                            .filter(|fr| s.doc.graph.has_key(node, *fr) || *fr == s.frame)
+                            .filter(|fr| {
+                                s.doc.graph.has_key(node, *fr)
+                                    || fold.hidden_keys[layer_slot[i]].contains(fr)
+                                    || *fr == s.frame
+                            })
                             .map(|fr| frame_x(fr) + cw / 2.0)
                             .collect();
                         obstacles.sort_by(f32::total_cmp);
@@ -1239,29 +1470,45 @@ pub fn timeline(
                         4.5,
                     );
                 }
+                for &f in fold.hidden_keys[layer_slot[i]]
+                    .iter()
+                    .filter(|&&f| (1..=len).contains(&f) && !s.doc.graph.has_key(node, f))
+                {
+                    hidden_key(&painter, Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0));
+                }
             }
 
             for (index, (node, name, frames)) in node_tracks.iter().enumerate() {
-                let y = o.y + RULER + node_slot[index] as f32 * rh;
+                if !node_shown[index] {
+                    continue;
+                }
+                let slot = node_slot[index];
+                let y = o.y + RULER + slot as f32 * rh;
                 let indent = node_depth[index] as f32 * INDENT;
                 let row = Rect::from_min_size(
                     Pos2::new(o.x + 4.0, y + 1.0),
                     Vec2::new(width - 8.0, rh - 2.0),
                 );
                 reveal_track(ui, row, reveal == Some(*node));
-                if visible_node == Some(*node) {
+                if visible_node == Some(*node) || fold.holds_selected[slot] {
                     full.rect_filled(row, theme::RADIUS_CONTROL, theme::BG_RAISED);
                 }
+                caret_ui(
+                    &head,
+                    &resp,
+                    Pos2::new(hx + TREE + 8.0 + indent, y + rh / 2.0),
+                    fold.caret[slot],
+                );
                 if !matches!(t.renaming_node, Some((id, _)) if id == *node) {
                     widgets::fitted_text(
                         ui,
                         &head,
-                        Pos2::new(hx + 18.0 + indent, y + rh / 2.0),
+                        Pos2::new(hx + TREE + 18.0 + indent, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         name,
                         theme::body(),
                         theme::TEXT_SECONDARY,
-                        HEAD - 30.0 - indent,
+                        head_w - TREE - 24.0 - indent,
                     );
                 }
                 for f in frames.iter().copied().filter(|f| (1..=len).contains(f)) {
@@ -1271,6 +1518,12 @@ pub fn timeline(
                         4.5,
                     );
                 }
+                for &f in fold.hidden_keys[slot]
+                    .iter()
+                    .filter(|&&f| (1..=len).contains(&f) && !frames.contains(&f))
+                {
+                    hidden_key(&painter, Pos2::new(frame_x(f) + cw / 2.0, y + rh / 2.0));
+                }
             }
 
             let fps = s.doc.settings.fps.max(1.0);
@@ -1279,8 +1532,10 @@ pub fn timeline(
             for (j, track) in s.doc.sounds.iter().enumerate() {
                 let y = o.y + RULER + sound_slot[j] as f32 * rh;
                 let on = !track.muted;
-                let eye_rect =
-                    Rect::from_center_size(Pos2::new(hx + 22.0, y + rh / 2.0), Vec2::splat(16.0));
+                let eye_rect = Rect::from_center_size(
+                    Pos2::new(hx + (eye_col.start + eye_col.end) / 2.0, y + rh / 2.0),
+                    Vec2::splat(16.0),
+                );
                 // Mute uses the layer's show/hide icon until the icon set
                 // has a speaker.
                 icons::paint(
@@ -1297,7 +1552,7 @@ pub fn timeline(
                     widgets::fitted_text(
                         ui,
                         &head,
-                        Pos2::new(hx + 40.0, y + rh / 2.0),
+                        Pos2::new(hx + TREE + 18.0, y + rh / 2.0),
                         Align2::LEFT_CENTER,
                         &track.name,
                         theme::body(),
@@ -1306,7 +1561,7 @@ pub fn timeline(
                         } else {
                             theme::TEXT_SECONDARY
                         },
-                        HEAD - 56.0,
+                        head_w - TREE - 24.0,
                     );
                 }
                 let Some(file) = s.doc.media.get(&track.media) else {
@@ -1516,14 +1771,14 @@ pub fn timeline(
                 t.scrubbing = !on_block
                     && ui
                         .input(|i| i.pointer.press_origin())
-                        .is_some_and(|p| p.x >= hx + HEAD && p.y >= o.y);
+                        .is_some_and(|p| p.x >= hx + head_w && p.y >= o.y);
             }
             let scrub = t.scrubbing && (resp.dragged() || resp.drag_stopped());
             if let Some(p) = resp.interact_pointer_pos().filter(|p| {
-                scrub || (resp.clicked_by(egui::PointerButton::Primary) && p.x >= hx + HEAD)
+                scrub || (resp.clicked_by(egui::PointerButton::Primary) && p.x >= hx + head_w)
             }) {
-                let frame =
-                    (((p.x - o.x - HEAD) / cw).floor() as i64 + 1).clamp(1, i64::from(len)) as u32;
+                let frame = (((p.x - o.x - head_w) / cw).floor() as i64 + 1)
+                    .clamp(1, i64::from(len)) as u32;
                 s.frame = frame;
             }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
@@ -1588,9 +1843,11 @@ pub fn timeline(
                 let origin = ui.input(|i| i.pointer.press_origin());
                 if let (Some(p), Some(row)) = (origin, origin.and_then(row_at)) {
                     let x = p.x - hx;
-                    // Layer rows only: sound rows sit below the layers.
-                    let eye_end = 32.0 + layer_depth.get(row).copied().unwrap_or(0) as f32 * INDENT;
-                    if row < layers && (eye_end..LOCK.start).contains(&x) {
+                    // Layer rows only, by the name: past the caret, before
+                    // the Parameters field.
+                    let caret_end =
+                        TREE + 16.0 + layer_depth.get(row).copied().unwrap_or(0) as f32 * INDENT;
+                    if row < layers && (caret_end..params).contains(&x) {
                         t.layer_drag = Some(row);
                     }
                 }
@@ -1630,34 +1887,48 @@ pub fn timeline(
                 let rel = Vec2::new(p.x - hx, p.y - o.y);
                 if let Some(Slot::Sound(j)) = slot_at(p) {
                     let id = s.doc.sounds[j].id;
-                    if rel.x < 32.0 && resp.clicked() {
+                    if eye_col.contains(&rel.x) && resp.clicked() {
                         s.toggle_sound(id);
                     }
                     // As in Harmony, a double-click opens the Sound editor,
                     // from the name or from the sound itself.
-                    if resp.double_clicked() && rel.x >= 32.0 {
+                    if resp.double_clicked() && !eye_col.contains(&rel.x) {
                         t.sound_editor = Some(SoundEditor::new(&s.doc.sounds[j]));
                     }
                 } else if let Some(row) = row_at(p) {
-                    // The eye moves right with the row's indent.
-                    let eye_end = 32.0 + layer_depth[row] as f32 * INDENT;
+                    // The caret follows the row's indent; the eye and the
+                    // lock keep their columns.
+                    let caret_end = TREE + 16.0 + layer_depth[row] as f32 * INDENT;
+                    let on_caret = (lock_col.end..caret_end).contains(&rel.x)
+                        && fold.caret[layer_slot[row]].is_some();
                     if resp.clicked() || resp.drag_started() {
-                        if rel.x < eye_end && resp.clicked() {
+                        if on_caret && resp.clicked() {
+                            let node = s.doc.layers[row].node;
+                            s.set_row_folded(node, !s.row_folded(node));
+                        } else if eye_col.contains(&rel.x) && resp.clicked() {
                             s.toggle_visible(row);
-                        } else if LOCK.contains(&rel.x) && resp.clicked() {
+                        } else if lock_col.contains(&rel.x) && resp.clicked() {
                             s.toggle_locked(row);
                         }
                         s.select_graph_node(s.doc.layers[row].node, false);
                     }
-                    if resp.double_clicked() && rel.x < LOCK.start {
+                    if resp.double_clicked() && !on_caret && (lock_col.end..params).contains(&rel.x)
+                    {
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
                 } else if let Some(Slot::Node(j)) = slot_at(p) {
                     let (node, name, _) = &node_tracks[j];
+                    let caret_end = TREE + 16.0 + node_depth[j] as f32 * INDENT;
+                    let on_caret = (lock_col.end..caret_end).contains(&rel.x)
+                        && fold.caret[node_slot[j]].is_some();
+                    if on_caret && resp.clicked() {
+                        s.set_row_folded(*node, !s.row_folded(*node));
+                    }
                     if resp.clicked() || resp.drag_started() {
                         s.select_graph_node(*node, false);
                     }
-                    if resp.double_clicked() && rel.x < HEAD {
+                    if resp.double_clicked() && !on_caret && (lock_col.end..head_w).contains(&rel.x)
+                    {
                         t.renaming_node = Some((*node, name.clone()));
                     }
                 }
@@ -1671,8 +1942,9 @@ pub fn timeline(
                 match resp.interact_pointer_pos().and_then(slot_at) {
                     Some(Slot::Layer(r)) => {
                         t.menu_row = Some(r);
-                        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.x >= hx + HEAD) {
-                            s.frame = (((p.x - o.x - HEAD) / cw) as u32 + 1).clamp(1, len);
+                        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.x >= hx + head_w)
+                        {
+                            s.frame = (((p.x - o.x - head_w) / cw) as u32 + 1).clamp(1, len);
                         }
                         t.menu_node = Some(s.doc.layers[r].node);
                     }
@@ -1687,6 +1959,13 @@ pub fn timeline(
             if let Some(id) = t.sound_menu {
                 resp.context_menu(|ui| sound_menu(ui, s, t, id));
             } else if t.menu_node.is_some() {
+                // Collapse or Expand for the row, when it has rows under it.
+                let menu_caret = t.menu_node.and_then(|node| {
+                    let at = layout
+                        .iter()
+                        .position(|&(slot, _)| row_node(s, &node_tracks, slot) == Some(node))?;
+                    Some((node, fold.caret[at]?))
+                });
                 resp.context_menu(|ui| {
                     if let Some(node) = t.menu_node {
                         add_node_menu(ui, s, node);
@@ -1696,6 +1975,8 @@ pub fn timeline(
                         drawing_clipboard_menu(ui, s, profile);
                         ui.separator();
                         layer_menu(ui, s, t, row);
+                        ui.separator();
+                        fold_menu(ui, s, menu_caret, &fold.parents);
                     } else if let Some(node) = t.menu_node {
                         // A peg, Mesh Warp or effect row.
                         ui.separator();
@@ -1714,6 +1995,8 @@ pub fn timeline(
                             super::node::delete_nodes(s, &[node]);
                             ui.close();
                         }
+                        ui.separator();
+                        fold_menu(ui, s, menu_caret, &fold.parents);
                     }
                 });
             }
@@ -1729,8 +2012,8 @@ pub fn timeline(
                     s,
                     t,
                     Rect::from_min_size(
-                        Pos2::new(hx + 36.0, y + 3.0),
-                        Vec2::new(HEAD - 52.0, rh - 6.0),
+                        Pos2::new(hx + TREE + 14.0, y + 3.0),
+                        Vec2::new(head_w - TREE - 20.0, rh - 6.0),
                     ),
                 );
             }
@@ -1747,8 +2030,8 @@ pub fn timeline(
                         s,
                         t,
                         Rect::from_min_size(
-                            Pos2::new(hx + 14.0 + indent, y + 3.0),
-                            Vec2::new(HEAD - 26.0 - indent, rh - 6.0),
+                            Pos2::new(hx + TREE + 14.0 + indent, y + 3.0),
+                            Vec2::new(head_w - TREE - 20.0 - indent, rh - 6.0),
                         ),
                     );
                 }
@@ -1757,13 +2040,14 @@ pub fn timeline(
             }
             if let Some((row, _)) = t.renaming {
                 let y = o.y + RULER + layer_slot.get(row).copied().unwrap_or(row) as f32 * rh;
+                let indent = layer_depth.get(row).copied().unwrap_or(0) as f32 * INDENT;
                 rename_field(
                     ui,
                     s,
                     t,
                     Rect::from_min_size(
-                        Pos2::new(hx + 36.0, y + 3.0),
-                        Vec2::new(HEAD - 52.0 - PARAM_W, rh - 6.0),
+                        Pos2::new(hx + TREE + 14.0 + indent, y + 3.0),
+                        Vec2::new(params - TREE - 18.0 - indent, rh - 6.0),
                     ),
                 );
             }
@@ -2016,11 +2300,12 @@ mod hierarchy_tests {
         assert!(!harness.state().1.scrubbing);
     }
 
-    /// A layer under a peg is indented, and so is its eye: a click on the
+    /// A layer under a peg is indented, but its eye keeps its column at
+    /// the left, as in Harmony: a click on the
     /// eye where it is drawn hides the layer, and a click just past it
     /// does not.
     #[test]
-    fn the_eye_of_an_indented_layer_follows_the_indent() {
+    fn the_eye_of_an_indented_layer_keeps_its_column() {
         let mut session = Session::new_scene();
         let peg = session.doc.layers[0].peg;
         crate::views::node::insert_near(
@@ -2058,9 +2343,10 @@ mod hierarchy_tests {
                 harness.run_steps(1);
             }
         };
-        // Down the indented eye's column until a click hides a layer.
-        let eye_x = 22.0 + INDENT;
-        let y = (20..300)
+        // Down the eye column (8 is the panel's left edge here) until a
+        // click hides a layer; start below the "Show pegs" bar.
+        let eye_x = 8.0 + 15.0;
+        let y = (70..300)
             .map(|y| y as f32)
             .find(|&y| {
                 click(&mut harness, Pos2::new(eye_x, y));
@@ -2076,8 +2362,8 @@ mod hierarchy_tests {
             harness.state().0.layer_visible(0),
             "a second click shows it"
         );
-        // Just past the end of the eye: no change.
-        click(&mut harness, Pos2::new(eye_x + 16.0, y));
+        // On the name: no change.
+        click(&mut harness, Pos2::new(8.0 + TREE + 30.0, y));
         assert!(harness.state().0.layer_visible(0));
     }
 
@@ -2254,8 +2540,10 @@ mod hierarchy_tests {
         let name_after = text_at(harness.output(), &name);
         assert!((name_after.x - name_before.x).abs() < 0.1);
         assert!(text_at(harness.output(), "6").x < ruler_before.x - 50.0);
-        // The eye sits 18 points left of the name.
-        let eye = Pos2::new(name_after.x - 18.0, name_after.y + 6.0);
+        // The name starts TREE + 18 past the panel's edge, plus one
+        // indent for the layer's peg; the eye's centre is 15 past it.
+        let edge = name_after.x - TREE - 18.0 - INDENT;
+        let eye = Pos2::new(edge + 15.0, name_after.y + 6.0);
         assert!(harness.state().0.layer_visible(0));
         for pressed in [true, false] {
             harness.input_mut().events.extend([
@@ -2594,5 +2882,179 @@ mod hierarchy_tests {
         harness.run_steps(1);
         type_and_enter(&mut harness, "Hip");
         assert_eq!(harness.state().0.doc.graph.node(peg).unwrap().name, "Hip");
+    }
+
+    /// Every chain node of every layer as a Timeline track, each with a
+    /// key on frame 5.
+    fn chain_tracks(s: &Session) -> Vec<(NodeId, String, KeySet)> {
+        let mut tracks = Vec::new();
+        for i in 0..s.layer_count() {
+            let (pegs, effects) = layer_chain(s, i);
+            for id in pegs.into_iter().chain(effects) {
+                if !tracks.iter().any(|(t, _, _)| *t == id) {
+                    tracks.push((id, String::new(), [5].into()));
+                }
+            }
+        }
+        tracks
+    }
+
+    /// A scene whose first layer sits under two pegs: (session, outer
+    /// peg, inner peg).
+    fn two_peg_scene() -> (Session, NodeId, NodeId) {
+        let mut s = Session::new_scene();
+        let inner = s.doc.layers[0].peg;
+        // The new peg goes above the layer's own peg.
+        crate::views::node::insert_near(
+            &mut s,
+            inner,
+            symphony_core::graph::NodeKind::Peg(Default::default()),
+        );
+        let outer = s.doc.graph.input(inner, 0).unwrap();
+        assert_eq!(s.doc.graph.input(s.doc.layers[0].node, 0), Some(inner));
+        (s, outer, inner)
+    }
+
+    fn folded(s: &Session, selected: Option<NodeId>) -> (Folded, Vec<(NodeId, String, KeySet)>) {
+        let tracks = chain_tracks(s);
+        let ids: Vec<NodeId> = tracks.iter().map(|t| t.0).collect();
+        let fold = fold_layout(s, &hierarchy_rows(s, &ids, 0), &tracks, selected);
+        (fold, tracks)
+    }
+
+    #[test]
+    fn a_folded_parent_hides_every_row_under_it() {
+        let (mut s, outer, inner) = two_peg_scene();
+        let layer = s.doc.layers[0].node;
+        let (open, tracks) = folded(&s, None);
+        let layers: Vec<NodeId> = s.doc.layers.iter().map(|l| l.node).collect();
+        let at = |f: &Folded, id: NodeId| {
+            f.rows.iter().position(|&(slot, _)| match slot {
+                Slot::Layer(i) => layers[i] == id,
+                Slot::Node(j) => tracks[j].0 == id,
+                Slot::Sound(_) => false,
+            })
+        };
+        assert_eq!(open.caret[at(&open, outer).unwrap()], Some(false));
+        assert_eq!(open.caret[at(&open, inner).unwrap()], Some(false));
+        assert_eq!(
+            open.caret[at(&open, layer).unwrap()],
+            None,
+            "no rows under it"
+        );
+
+        s.set_row_folded(outer, true);
+        assert!(s.dirty(), "the fold is saved with the scene");
+        let (fold, _) = folded(&s, Some(layer));
+        let top = at(&fold, outer).unwrap();
+        assert_eq!(at(&fold, inner), None, "the inner peg hides");
+        assert_eq!(at(&fold, layer), None, "the layer hides");
+        assert_eq!(fold.caret[top], Some(true));
+        assert!(fold.hidden_keys[top].contains(&5), "hidden keys show");
+        assert!(fold.holds_selected[top], "and the hidden selection");
+        assert_eq!(fold.rows.len() + 2, open.rows.len(), "other rows stay");
+
+        // Fold only the inner peg: the outer one stays open above it.
+        s.set_row_folded(outer, false);
+        s.set_row_folded(inner, true);
+        let (fold, _) = folded(&s, None);
+        assert_eq!(fold.caret[at(&fold, outer).unwrap()], Some(false));
+        assert_eq!(fold.caret[at(&fold, inner).unwrap()], Some(true));
+        assert_eq!(at(&fold, layer), None);
+        assert_eq!(
+            fold.parents.len(),
+            open.parents.len(),
+            "Collapse all finds them all"
+        );
+    }
+
+    fn timeline_harness(s: Session) -> egui_kittest::Harness<'static, (Session, TimingState)> {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (s, TimingState::default()),
+            );
+        harness.run_steps(3);
+        harness
+    }
+
+    fn press(
+        harness: &mut egui_kittest::Harness<'_, (Session, TimingState)>,
+        from: Pos2,
+        to: Pos2,
+    ) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        harness
+            .input_mut()
+            .events
+            .extend([egui::Event::PointerMoved(from), button(from, true)]);
+        harness.run_steps(1);
+        if to != from {
+            for k in 1..=4 {
+                let p = from + (to - from) * (k as f32 / 4.0);
+                harness
+                    .input_mut()
+                    .events
+                    .push(egui::Event::PointerMoved(p));
+                harness.run_steps(1);
+            }
+        }
+        harness.input_mut().events.push(button(to, false));
+        harness.run_steps(1);
+    }
+
+    /// A click on the outer peg's caret hides the rows under it; a second
+    /// click shows them. No eye changes.
+    #[test]
+    fn a_click_on_a_parent_caret_folds_the_rows_under_it() {
+        let (s, outer, _) = two_peg_scene();
+        let mut harness = timeline_harness(s);
+        // The outer peg is not indented: its caret is just past the
+        // switches (8 is the panel's left edge here).
+        let caret = |y: f32| Pos2::new(8.0 + TREE + 8.0, y);
+        let y = (70..300)
+            .map(|y| y as f32)
+            .find(|&y| {
+                press(&mut harness, caret(y), caret(y));
+                harness.state().0.row_folded(outer)
+            })
+            .expect("a caret");
+        let s = &harness.state().0;
+        assert!((0..s.layer_count()).all(|i| s.layer_visible(i)), "no eye");
+        press(&mut harness, caret(y), caret(y));
+        assert!(
+            !harness.state().0.row_folded(outer),
+            "a second click opens it"
+        );
+    }
+
+    #[test]
+    fn a_drag_on_the_names_edge_sets_its_width() {
+        let mut harness = timeline_harness(Session::new_scene());
+        let edge = 8.0 + NAMES_W;
+        press(
+            &mut harness,
+            Pos2::new(edge, 150.0),
+            Pos2::new(edge + 100.0, 150.0),
+        );
+        let w = harness.state().1.names_width();
+        assert!((w - (NAMES_W + 100.0)).abs() < 2.0, "width {w}");
+        let s = &harness.state().0;
+        assert!((0..s.layer_count()).all(|i| s.layer_visible(i)));
     }
 }

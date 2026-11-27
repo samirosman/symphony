@@ -2,7 +2,7 @@
 //! node graph, drawings and the palette. Everything a scene file holds.
 //! UI state (current frame, selection, tool) is not here (E3.5).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +168,11 @@ pub struct Scene {
     pub node_positions: BTreeMap<NodeId, [f32; 2]>,
     #[serde(default)]
     pub custom_wiring: bool,
+    /// Timeline rows folded to hide the rows under them, by node (a
+    /// layer by its drawing node). View state, saved with the scene; not
+    /// an undo step.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub folded_rows: BTreeSet<NodeId>,
     /// Front to back: index 0 is the top of the Timeline and composite port 0.
     pub layers: Vec<Layer>,
     pub drawings: BTreeMap<Id, Drawing>,
@@ -352,6 +357,7 @@ impl Scene {
             graph,
             node_positions: BTreeMap::new(),
             custom_wiring: false,
+            folded_rows: BTreeSet::new(),
             layers: Vec::new(),
             drawings: BTreeMap::new(),
             palette,
