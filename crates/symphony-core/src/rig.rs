@@ -166,7 +166,13 @@ impl Bone {
 
     /// The bone's turn from its rest angle on `frame`, inside its limits.
     pub fn rotation_at(&self, frame: u32) -> f32 {
-        self.clamp_rotation(self.rotation.at(frame))
+        self.rotation_plus(frame, 0.0)
+    }
+
+    /// The turn on `frame` with `offset` (from rig controls) added
+    /// before the limits apply.
+    pub fn rotation_plus(&self, frame: u32, offset: f32) -> f32 {
+        self.clamp_rotation(self.rotation.at(frame) + offset)
     }
 
     pub fn length(&self) -> f32 {
@@ -206,8 +212,14 @@ impl Bone {
     /// How much the bone is stretched on `frame` (1 when it can't be),
     /// within its limits.
     pub fn stretch_at(&self, frame: u32) -> f32 {
+        self.stretch_plus(frame, 0.0)
+    }
+
+    /// The stretch on `frame` with `offset` (from rig controls) added
+    /// before the limits apply.
+    pub fn stretch_plus(&self, frame: u32, offset: f32) -> f32 {
         let (lo, hi) = self.stretch_range();
-        self.stretch.at(frame).clamp(lo, hi)
+        (self.stretch.at(frame) + offset).clamp(lo, hi)
     }
 
     /// The artwork's scale along and across the bone for `stretch`.

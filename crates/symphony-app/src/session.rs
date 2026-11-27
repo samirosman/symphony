@@ -429,6 +429,8 @@ pub struct Session {
     pub show_strokes: bool,
     /// Bone handles in the Camera view (Shift+C hides them).
     pub show_rig_controls: bool,
+    /// A rig Control in Setup mode: rig edits go into its poses.
+    pub control_setup: Option<crate::views::control_edit::Setup>,
     /// Harmony's Respect Protected Colours (Shift+S), on by default.
     pub respect_protected: bool,
     /// The art layer tools draw and edit on (Harmony's Art Layer toolbar).
@@ -555,6 +557,7 @@ impl Session {
             link_bucket_fills: true,
             show_strokes: false,
             show_rig_controls: true,
+            control_setup: None,
             respect_protected: true,
             art: ArtLayer::LineArt,
             art_preview: true,
@@ -3029,6 +3032,25 @@ impl Session {
                 before,
                 after: name.into(),
             }],
+        );
+    }
+
+    /// Rename graph node `id` (a peg, bone or Control row in the
+    /// Timeline), as one undo step. A blank name changes nothing.
+    pub fn rename_node(&mut self, id: NodeId, name: &str) {
+        let name = name.trim();
+        let Some(before) = self.doc.graph.node(id).cloned() else {
+            return;
+        };
+        if name.is_empty() || name == before.name {
+            return;
+        }
+        let mut after = before.clone();
+        after.name = name.into();
+        self.history.apply(
+            &mut self.doc,
+            "Rename node",
+            vec![Edit::SetNodeProperties { id, before, after }],
         );
     }
 

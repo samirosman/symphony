@@ -333,6 +333,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Curve(c) if c.closed => "Envelope",
         NodeKind::Curve(_) => "Curve",
         NodeKind::KinematicOutput => "Kinematic Output",
+        NodeKind::Control(_) => "Control",
         NodeKind::Composite => "Composite",
         NodeKind::Display => "Camera",
         NodeKind::Write => "Write",
@@ -373,6 +374,7 @@ pub fn addable_nodes() -> impl Iterator<Item = NodeKind> {
         NodeKind::Curve(Box::new(CurveDeformer::new(false))),
         NodeKind::Curve(Box::new(CurveDeformer::new(true))),
         NodeKind::KinematicOutput,
+        NodeKind::Control(Default::default()),
         NodeKind::Composite,
     ]
     .into_iter()
@@ -408,7 +410,10 @@ pub fn add_from_search(s: &mut Session, state: &mut NodeViewState, kind: NodeKin
     // a Kinematic Output goes between the selected layer and its bone.
     if matches!(
         kind,
-        NodeKind::MeshWarp(_) | NodeKind::Curve(_) | NodeKind::KinematicOutput
+        NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
+            | NodeKind::KinematicOutput
+            | NodeKind::Control(_)
     ) {
         if let Some(node) = s.doc.layers.get(s.selected).map(|l| l.node) {
             insert_near(s, node, kind);
@@ -548,6 +553,60 @@ fn peg_like(kind: &NodeKind) -> bool {
     )
 }
 
+/// Where a new Control goes: above the whole chain that carries
+/// `target` (its pegs, or its bones and their skeleton), so the poses
+/// can change every one of them (Harmony puts its controllers above the
+/// rig).
+fn control_splice(
+    graph: &symphony_core::graph::Graph,
+    target: NodeId,
+) -> Option<(Option<Link>, Option<NodeId>, Input)> {
+    let carries = |id: NodeId| {
+        graph.node(id).is_some_and(|node| {
+            matches!(
+                node.kind,
+                NodeKind::Peg(_)
+                    | NodeKind::Skeleton(_)
+                    | NodeKind::Bone(_)
+                    | NodeKind::MeshWarp(_)
+                    | NodeKind::Curve(_)
+                    | NodeKind::KinematicOutput
+                    | NodeKind::Control(_)
+            )
+        })
+    };
+    let mut top = target;
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = graph
+        .input(top, 0)
+        .filter(|&p| carries(p) && seen.insert(p))
+    {
+        top = parent;
+    }
+    if graph.bone(top).is_some() {
+        return None;
+    }
+    let parent = graph.input(top, 0);
+    let old = parent.map(|from| Link {
+        from,
+        to: top,
+        port: 0,
+    });
+    Some((old, parent, (top, 0)))
+}
+
+/// Does a new node of this kind go above the node it is added to?
+fn goes_above(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Peg(_)
+            | NodeKind::MeshWarp(_)
+            | NodeKind::Curve(_)
+            | NodeKind::KinematicOutput
+            | NodeKind::Control(_)
+    )
+}
+
 pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
     let graph = &s.doc.graph;
     let kind_of = |id: NodeId| graph.node(id).map(|n| n.kind.clone());
@@ -572,6 +631,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
             Some((old, parent, (target, 0)))
         }
         NodeKind::KinematicOutput => kinematic_splice(graph, target),
+        NodeKind::Control(_) => control_splice(graph, target),
         NodeKind::Effect(_) | NodeKind::Composite => {
             // From a peg, go down to the drawing it carries.
             let mut src = target;
@@ -597,10 +657,7 @@ pub fn insert_near(s: &mut Session, target: NodeId, kind: NodeKind) {
         return;
     };
     let id = s.doc.graph.next_id();
-    let position = if matches!(
-        kind,
-        NodeKind::Peg(_) | NodeKind::MeshWarp(_) | NodeKind::Curve(_) | NodeKind::KinematicOutput
-    ) {
+    let position = if goes_above(&kind) {
         [at[0], at[1] - (H + 30.0)]
     } else {
         [at[0], at[1] + H + 30.0]
@@ -1907,6 +1964,117 @@ fn bone_display_rows(ui: &mut egui::Ui, bone: &mut symphony_core::rig::Bone) {
 /// A new angle limit: a quarter turn each way from the rest angle.
 const DEFAULT_ANGLE_LIMITS: [f32; 2] = [-90.0, 90.0];
 
+/// A Control node's properties: its position, range, poses and how its
+/// widget shows in the Camera view.
+fn control_properties(
+    ui: &mut egui::Ui,
+    s: &Session,
+    id: NodeId,
+    c: &mut symphony_core::control::Control,
+) {
+    property_heading(ui, "Control");
+    peg_value(ui, "Control position", &mut c.value, s.frame, s.animate);
+    let [lo, hi] = &mut c.range;
+    bone_number(ui, "Min", lo, -100.0..=0.0, "", false)
+        .on_hover_text("The least the position can be. The rest pose is at 0.");
+    bone_number(ui, "Max", hi, 0.0..=100.0, "", false)
+        .on_hover_text("The most the position can be. The rest pose is at 0.");
+    ui.add_space(8.0);
+    control_pose_rows(ui, c);
+    ui.add_space(8.0);
+    property_heading(ui, "Display");
+    control_widget_rows(ui, s, id, &mut c.widget);
+}
+
+fn control_pose_rows(ui: &mut egui::Ui, c: &mut symphony_core::control::Control) {
+    property_heading(ui, "Poses");
+    ui.label(egui::RichText::new("Rest pose at 0").color(theme::TEXT_SECONDARY));
+    let mut remove = None;
+    for (index, pose) in c.poses.iter().enumerate() {
+        ui.horizontal(|ui| {
+            let n = pose.offsets.len();
+            ui.label(format!(
+                "At {:.2}: {n} value{}",
+                pose.at,
+                if n == 1 { "" } else { "s" }
+            ));
+            if ui
+                .small_button("Delete")
+                .on_hover_text("Remove this pose.")
+                .clicked()
+            {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        c.poses.remove(index);
+    }
+    if c.poses.is_empty() {
+        ui.label(
+            egui::RichText::new("No poses yet. Setup mode adds them.").color(theme::TEXT_SECONDARY),
+        );
+    }
+}
+
+fn control_widget_rows(
+    ui: &mut egui::Ui,
+    s: &Session,
+    id: NodeId,
+    widget: &mut symphony_core::control::Widget,
+) {
+    use symphony_core::rig::BoneColour;
+    property_row(ui, "Colour", |ui| {
+        egui::ComboBox::from_id_salt("control-colour")
+            .selected_text(widget.colour.title())
+            .show_ui(ui, |ui| {
+                for colour in BoneColour::ALL {
+                    ui.selectable_value(&mut widget.colour, colour, colour.title());
+                }
+            })
+            .response
+    });
+    property_row(ui, "Orientation", |ui| {
+        widgets::segmented(
+            ui,
+            "control-orientation",
+            &mut widget.vertical,
+            &[(false, "Horizontal"), (true, "Vertical")],
+            false,
+        )
+    });
+    bone_number(ui, "Size", &mut widget.size, 20.0..=2000.0, "", false)
+        .on_hover_text("Length of the slider in the Camera view.");
+    widgets::checkbox(ui, &mut widget.show_label, "Show label")
+        .on_hover_text("Show the node's name next to the slider.");
+    let graph = &s.doc.graph;
+    let name = |n: Option<NodeId>| {
+        n.and_then(|n| graph.node(n))
+            .map_or("Parent".to_owned(), |node| node_name(node).to_owned())
+    };
+    property_row(ui, "Follow", |ui| {
+        egui::ComboBox::from_id_salt("control-follow")
+            .selected_text(name(widget.follow))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut widget.follow, None, "Parent");
+                for (other, node) in graph.nodes() {
+                    let movable = matches!(
+                        node.kind,
+                        NodeKind::Peg(_) | NodeKind::Skeleton(_) | NodeKind::Bone(_)
+                    );
+                    if movable && other != id {
+                        ui.selectable_value(&mut widget.follow, Some(other), node_name(node));
+                    }
+                }
+            })
+            .response
+    })
+    .on_hover_text("The slider moves with this peg or bone.");
+    let [x, y] = &mut widget.position;
+    bone_number(ui, "Position X", x, -100_000.0..=100_000.0, "", false);
+    bone_number(ui, "Position Y", y, -100_000.0..=100_000.0, "", false);
+}
+
 /// A Curve or Envelope node's properties.
 fn curve_properties(ui: &mut egui::Ui, frame: u32, c: &mut CurveDeformer) {
     egui::ComboBox::from_label("Deformation Quality")
@@ -1976,13 +2144,17 @@ fn reset_to_rest(c: &mut CurveDeformer, frame: u32) {
 
 fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) {
     let mut build_mesh_now = false;
-    ui.add_sized(
-        [ui.available_width(), 28.0],
-        egui::TextEdit::singleline(&mut draft.node.name)
-            .font(egui::FontId::proportional(theme::SIZE_HEADING))
-            .hint_text("Node name"),
-    )
-    .on_hover_text("Node name");
+    let name = ui
+        .add_sized(
+            [ui.available_width(), 28.0],
+            egui::TextEdit::singleline(&mut draft.node.name)
+                .font(egui::FontId::proportional(theme::SIZE_HEADING))
+                .hint_text("Node name"),
+        )
+        .on_hover_text("Node name. Enter renames the node.");
+    if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        rename_from_draft(s, draft);
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(
             egui::RichText::new(kind_label(&draft.node.kind))
@@ -2358,6 +2530,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             }
         }
         NodeKind::Curve(c) => curve_properties(ui, s.frame, c),
+        NodeKind::Control(c) => control_properties(ui, s, draft.id, c),
         NodeKind::Drawing { column } => {
             if let Some(source) = s.doc.xsheet.column(*column) {
                 property_heading(ui, "Exposure");
@@ -2548,6 +2721,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             | NodeKind::Bone(_)
             | NodeKind::MeshWarp(_)
             | NodeKind::Curve(_)
+            | NodeKind::Control(_)
     ) && draft.node.kind != draft.initial.kind
         && draft.node.enabled == draft.initial.enabled
     {
@@ -2617,6 +2791,7 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             | NodeKind::Bone(_)
             | NodeKind::MeshWarp(_)
             | NodeKind::Curve(_)
+            | NodeKind::Control(_)
     );
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
@@ -2650,6 +2825,21 @@ fn property_form(ui: &mut egui::Ui, s: &mut Session, draft: &mut PropertyDraft) 
             apply_properties(s, draft, false, true);
         }
     });
+}
+
+/// Enter in the name field: rename the node at once. Other changes in
+/// the panel stay staged for Apply changes.
+fn rename_from_draft(s: &mut Session, draft: &mut PropertyDraft) {
+    let name = draft.node.name.trim().to_owned();
+    if name.is_empty() {
+        return;
+    }
+    s.rename_node(draft.id, &name);
+    draft.node.name.clone_from(&name);
+    draft.initial.name = name;
+    // The rename is in the draft already: no reload, which would drop
+    // the staged changes.
+    draft.version = s.doc.version;
 }
 
 fn apply_name(s: &mut Session, draft: &mut PropertyDraft) {
@@ -2774,6 +2964,19 @@ fn apply_properties(s: &mut Session, draft: &mut PropertyDraft, key: bool, delet
                 }
             }
             after.kind = NodeKind::Curve(curve);
+        }
+        if let NodeKind::Control(control) = if delete {
+            &before.kind
+        } else {
+            &draft.node.kind
+        } {
+            let mut control = control.clone();
+            if delete {
+                control.value.remove_key(s.frame);
+            } else {
+                control.value.set_key(s.frame, control.value.at(s.frame));
+            }
+            after.kind = NodeKind::Control(control);
         }
     }
     if let Some(fov) = draft.fov {
@@ -3177,7 +3380,8 @@ fn arrange_band(kind: &NodeKind) -> usize {
         | NodeKind::Bone(_)
         | NodeKind::MeshWarp(_)
         | NodeKind::Curve(_)
-        | NodeKind::KinematicOutput => 0,
+        | NodeKind::KinematicOutput
+        | NodeKind::Control(_) => 0,
         NodeKind::Drawing { .. } | NodeKind::Gradient(_) => 1,
         NodeKind::Effect(_) => 2,
         NodeKind::Composite => 3,
@@ -4623,6 +4827,10 @@ fn library_details(kind: &NodeKind) -> (&'static str, &'static str) {
             "Rigging",
             "Poses attached drawings and bends vector artwork around a joint.",
         ),
+        NodeKind::Control(_) => (
+            "Rigging",
+            "Blends saved poses of the rig under it, picked with one slider.",
+        ),
         NodeKind::MeshWarp(_) => (
             "Rigging",
             "Deforms artwork with a grid or points placed on the drawing.",
@@ -5208,6 +5416,56 @@ mod tests {
         assert_eq!(s.doc.graph.input(output, 0), Some(bone));
     }
 
+    /// Add node > Control on a drawing under a bone goes above the
+    /// skeleton, so its poses can change every bone of the rig.
+    #[test]
+    fn a_control_goes_above_the_rig_of_the_selected_layer() {
+        let mut s = Session::new_scene();
+        let drawing = s.doc.layers[0].node;
+        let skeleton = s
+            .doc
+            .graph
+            .add("Skeleton", NodeKind::Skeleton(Default::default()));
+        let bone = s
+            .doc
+            .graph
+            .add("Bone", NodeKind::Bone(symphony_core::rig::Bone::default()));
+        s.doc.graph.connect(skeleton, bone, 0);
+        s.doc.graph.connect(bone, drawing, 0);
+        insert_near(&mut s, drawing, NodeKind::Control(Default::default()));
+        let control = s
+            .doc
+            .graph
+            .input(skeleton, 0)
+            .expect("a node above the skeleton");
+        assert!(matches!(
+            s.doc.graph.node(control).unwrap().kind,
+            NodeKind::Control(_)
+        ));
+        assert_eq!(
+            s.doc.graph.input(bone, 0),
+            Some(skeleton),
+            "the rig stays whole"
+        );
+        s.undo();
+        assert_eq!(s.doc.graph.input(skeleton, 0), None);
+    }
+
+    /// On a layer with pegs, a Control goes above the topmost peg.
+    #[test]
+    fn a_control_goes_above_a_layers_pegs() {
+        let mut s = Session::new_scene();
+        let layer = s.doc.layers[0];
+        let top = s.doc.graph.add("Top", NodeKind::Peg(Default::default()));
+        s.doc.graph.connect(top, layer.peg, 0);
+        insert_near(&mut s, layer.node, NodeKind::Control(Default::default()));
+        let control = s.doc.graph.input(top, 0).expect("a node above the top peg");
+        assert!(matches!(
+            s.doc.graph.node(control).unwrap().kind,
+            NodeKind::Control(_)
+        ));
+    }
+
     #[test]
     fn node_colours_are_per_type_and_stable() {
         let all: Vec<NodeKind> = addable_nodes()
@@ -5303,6 +5561,94 @@ mod tests {
         assert!(pix.data().chunks(4).filter(|p| p[3] > 0).count() > 50);
     }
     use egui_kittest::Harness;
+
+    /// The Control's properties list its poses; Delete removes one as
+    /// an undoable edit.
+    #[test]
+    fn a_controls_pose_can_be_deleted_from_its_properties() {
+        use egui_kittest::kittest::Queryable;
+        use symphony_core::control::{Control, Pose};
+        let mut s = Session::new_scene();
+        let control = s.doc.graph.add(
+            "Blink",
+            NodeKind::Control(Control {
+                poses: vec![Pose {
+                    at: 1.0,
+                    offsets: Vec::new(),
+                }],
+                ..Control::default()
+            }),
+        );
+        s.selected_node = Some(control);
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(360.0, 900.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (s, state)| inspector(ui, s, state),
+                (s, NodeViewState::default()),
+            );
+        harness.run_steps(2);
+        harness.get_by_label("At 1.00: 0 values");
+        harness.get_by_label("Delete").click();
+        harness.run_steps(2);
+        let poses = |s: &Session| match &s.doc.graph.node(control).unwrap().kind {
+            NodeKind::Control(c) => c.poses.len(),
+            _ => unreachable!(),
+        };
+        assert_eq!(poses(&harness.state().0), 0);
+        harness.state_mut().0.undo();
+        assert_eq!(poses(&harness.state().0), 1);
+    }
+
+    /// Enter in the name field renames the node at once, as one undo
+    /// step; a change staged in the panel stays staged.
+    #[test]
+    fn enter_in_the_name_field_renames_the_node() {
+        use egui_kittest::kittest::Queryable;
+        let mut s = Session::new_scene();
+        let control = s.doc.graph.add(
+            "Blink",
+            NodeKind::Control(symphony_core::control::Control::default()),
+        );
+        s.selected_node = Some(control);
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(360.0, 900.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (s, state)| inspector(ui, s, state),
+                (s, NodeViewState::default()),
+            );
+        harness.run_steps(2);
+        harness
+            .get_by(|n| {
+                n.role() == egui::accesskit::Role::TextInput
+                    && n.value().as_deref() == Some("Blink")
+            })
+            .click();
+        harness.run_steps(2);
+        harness
+            .state_mut()
+            .1
+            .properties
+            .as_mut()
+            .unwrap()
+            .node
+            .enabled = false;
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text(" and lift".into()));
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+        let name = |s: &Session| s.doc.graph.node(control).unwrap().name.clone();
+        assert_eq!(name(&harness.state().0), "Blink and lift");
+        assert!(harness.state().0.doc.graph.node(control).unwrap().enabled);
+        let draft = harness.state().1.properties.as_ref().unwrap();
+        assert!(!draft.node.enabled, "the staged change stays");
+        harness.state_mut().0.undo();
+        assert_eq!(name(&harness.state().0), "Blink");
+    }
 
     #[test]
     fn wheel_zoom_anchors_the_pointer_and_resize_keeps_the_graph_origin() {
@@ -5702,6 +6048,24 @@ mod tests {
         s.undo();
         assert_eq!(s.doc.node_positions[&layer.peg], [200.0, 120.0]);
         assert!(!s.doc.node_positions.contains_key(&layer.node));
+    }
+
+    /// Set key and Delete key work on a Control's position.
+    #[test]
+    fn a_controls_position_can_be_keyed_from_its_properties() {
+        let mut s = Session::new_scene();
+        let control = s
+            .doc
+            .graph
+            .add("Blink", NodeKind::Control(Default::default()));
+        s.frame = 5;
+        let mut draft = PropertyDraft::new(&s, control).unwrap();
+        apply_properties(&mut s, &mut draft, true, false);
+        let keyed = |s: &Session| s.doc.graph.has_key(control, 5);
+        assert!(keyed(&s));
+        let mut draft = PropertyDraft::new(&s, control).unwrap();
+        apply_properties(&mut s, &mut draft, false, true);
+        assert!(!keyed(&s));
     }
 
     #[test]

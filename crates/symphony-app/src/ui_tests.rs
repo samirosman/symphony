@@ -13,6 +13,7 @@ use crate::keymap::Profile;
 use crate::session::{Session, Tool};
 use crate::views::camera::{self, CanvasState};
 
+mod controls;
 mod deformers;
 mod rig;
 

@@ -34,6 +34,8 @@ pub struct TimingState {
     swap_drag: Option<(usize, usize, f32)>,
     /// Sound track being renamed, and the name typed so far.
     renaming_sound: Option<(Id, String)>,
+    /// Peg, bone or Control row being renamed, and the name typed so far.
+    renaming_node: Option<(NodeId, String)>,
     /// Sound track whose context menu is open.
     sound_menu: Option<Id>,
     /// A sound track being moved or trimmed.
@@ -465,6 +467,7 @@ fn layer_chain(s: &Session, layer: usize) -> (Vec<NodeId>, Vec<NodeId>) {
                     | NodeKind::KinematicOutput
                     | NodeKind::Skeleton(_)
                     | NodeKind::Bone(_)
+                    | NodeKind::Control(_)
             )
         ) && !pegs.contains(&up)
         {
@@ -621,12 +624,16 @@ fn sound_menu(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, id: Id) {
     }
 }
 
-/// [`rename_field`] for a sound track's name.
-fn sound_rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
-    let Some((id, text)) = t.renaming_sound.as_mut() else {
-        return;
-    };
-    let id = *id;
+/// What an inline rename field did this frame.
+enum Typed {
+    Editing,
+    Cancel,
+    Done(String),
+}
+
+/// An inline rename field over a name. Enter or clicking away keeps the
+/// name, Escape cancels (D8.6).
+fn rename_edit(ui: &mut egui::Ui, text: &mut String, rect: Rect) -> Typed {
     let resp = ui.put(rect, egui::TextEdit::singleline(text).font(theme::body()));
     resp.request_focus();
     let (enter, esc) = ui.input(|i| {
@@ -636,11 +643,43 @@ fn sound_rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, r
         )
     });
     if esc {
-        t.renaming_sound = None;
+        Typed::Cancel
     } else if enter || resp.lost_focus() {
-        let name = text.clone();
-        t.renaming_sound = None;
-        s.rename_sound(id, &name);
+        Typed::Done(text.clone())
+    } else {
+        Typed::Editing
+    }
+}
+
+/// [`rename_field`] for a sound track's name.
+fn sound_rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
+    let Some((id, text)) = t.renaming_sound.as_mut() else {
+        return;
+    };
+    let id = *id;
+    match rename_edit(ui, text, rect) {
+        Typed::Editing => {}
+        Typed::Cancel => t.renaming_sound = None,
+        Typed::Done(name) => {
+            t.renaming_sound = None;
+            s.rename_sound(id, &name);
+        }
+    }
+}
+
+/// [`rename_field`] for a peg, bone or Control row's node name.
+fn node_rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: Rect) {
+    let Some((id, text)) = t.renaming_node.as_mut() else {
+        return;
+    };
+    let id = *id;
+    match rename_edit(ui, text, rect) {
+        Typed::Editing => {}
+        Typed::Cancel => t.renaming_node = None,
+        Typed::Done(name) => {
+            t.renaming_node = None;
+            s.rename_node(id, &name);
+        }
     }
 }
 
@@ -798,20 +837,13 @@ fn rename_field(ui: &mut egui::Ui, s: &mut Session, t: &mut TimingState, rect: R
         return;
     };
     let row = *row;
-    let resp = ui.put(rect, egui::TextEdit::singleline(text).font(theme::body()));
-    resp.request_focus();
-    let (enter, esc) = ui.input(|i| {
-        (
-            i.key_pressed(egui::Key::Enter),
-            i.key_pressed(egui::Key::Escape),
-        )
-    });
-    if esc {
-        t.renaming = None;
-    } else if enter || resp.lost_focus() {
-        let name = text.clone();
-        t.renaming = None;
-        s.rename_layer(row, &name);
+    match rename_edit(ui, text, rect) {
+        Typed::Editing => {}
+        Typed::Cancel => t.renaming = None,
+        Typed::Done(name) => {
+            t.renaming = None;
+            s.rename_layer(row, &name);
+        }
     }
 }
 
@@ -888,6 +920,9 @@ pub fn timeline(
                 for value in curve.values() {
                     frames.extend(value.keys().iter().map(|key| key.frame));
                 }
+            }
+            NodeKind::Control(control) => {
+                frames.extend(control.value.keys().iter().map(|key| key.frame));
             }
             NodeKind::Display => {
                 let motion = &s.doc.camera_motion;
@@ -1217,16 +1252,18 @@ pub fn timeline(
                 if visible_node == Some(*node) {
                     full.rect_filled(row, theme::RADIUS_CONTROL, theme::BG_RAISED);
                 }
-                widgets::fitted_text(
-                    ui,
-                    &head,
-                    Pos2::new(hx + 18.0 + indent, y + rh / 2.0),
-                    Align2::LEFT_CENTER,
-                    name,
-                    theme::body(),
-                    theme::TEXT_SECONDARY,
-                    HEAD - 30.0 - indent,
-                );
+                if !matches!(t.renaming_node, Some((id, _)) if id == *node) {
+                    widgets::fitted_text(
+                        ui,
+                        &head,
+                        Pos2::new(hx + 18.0 + indent, y + rh / 2.0),
+                        Align2::LEFT_CENTER,
+                        name,
+                        theme::body(),
+                        theme::TEXT_SECONDARY,
+                        HEAD - 30.0 - indent,
+                    );
+                }
                 for f in frames.iter().copied().filter(|f| (1..=len).contains(f)) {
                     key_diamond(
                         &painter,
@@ -1615,9 +1652,13 @@ pub fn timeline(
                     if resp.double_clicked() && rel.x < LOCK.start {
                         t.renaming = Some((row, s.layer_name(row).to_owned()));
                     }
-                } else if resp.clicked() || resp.drag_started() {
-                    if let Some(Slot::Node(j)) = slot_at(p) {
-                        s.select_graph_node(node_tracks[j].0, false);
+                } else if let Some(Slot::Node(j)) = slot_at(p) {
+                    let (node, name, _) = &node_tracks[j];
+                    if resp.clicked() || resp.drag_started() {
+                        s.select_graph_node(*node, false);
+                    }
+                    if resp.double_clicked() && rel.x < HEAD {
+                        t.renaming_node = Some((*node, name.clone()));
                     }
                 }
             }
@@ -1658,6 +1699,11 @@ pub fn timeline(
                     } else if let Some(node) = t.menu_node {
                         // A peg, Mesh Warp or effect row.
                         ui.separator();
+                        if ui.button("Rename node").clicked() {
+                            let name = s.doc.graph.node(node).map(|n| n.name.clone());
+                            t.renaming_node = name.map(|name| (node, name));
+                            ui.close();
+                        }
                         let why = super::node::undeletable(s, node);
                         let b = ui.add_enabled(why.is_none(), egui::Button::new("Delete node"));
                         let b = match why {
@@ -1687,6 +1733,27 @@ pub fn timeline(
                         Vec2::new(HEAD - 52.0, rh - 6.0),
                     ),
                 );
+            }
+            let renaming = t
+                .renaming_node
+                .as_ref()
+                .and_then(|(id, _)| node_tracks.iter().position(|(n, ..)| n == id));
+            match renaming {
+                Some(j) => {
+                    let y = o.y + RULER + node_slot[j] as f32 * rh;
+                    let indent = node_depth[j] as f32 * INDENT;
+                    node_rename_field(
+                        ui,
+                        s,
+                        t,
+                        Rect::from_min_size(
+                            Pos2::new(hx + 14.0 + indent, y + 3.0),
+                            Vec2::new(HEAD - 26.0 - indent, rh - 6.0),
+                        ),
+                    );
+                }
+                // The row went away (deleted, or filtered out).
+                None => t.renaming_node = None,
             }
             if let Some((row, _)) = t.renaming {
                 let y = o.y + RULER + layer_slot.get(row).copied().unwrap_or(row) as f32 * rh;
@@ -2391,5 +2458,141 @@ mod hierarchy_tests {
         s.undo();
         s.undo();
         assert_eq!(s.doc.graph.input(layer.node, 0), Some(old_peg));
+    }
+
+    /// A layer under a peg, in the Timeline.
+    fn peg_row_harness() -> (
+        egui_kittest::Harness<'static, (Session, TimingState)>,
+        NodeId,
+    ) {
+        let mut session = Session::new_scene();
+        let peg = session.doc.layers[0].peg;
+        crate::views::node::insert_near(
+            &mut session,
+            peg,
+            symphony_core::graph::NodeKind::Peg(Default::default()),
+        );
+        let peg = session
+            .doc
+            .graph
+            .input(session.doc.layers[0].node, 0)
+            .unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(800.0, 380.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, (session, timing)| {
+                    timeline(
+                        ui,
+                        session,
+                        timing,
+                        &SoundState::default(),
+                        Profile::Symphony,
+                    )
+                },
+                (session, TimingState::default()),
+            );
+        harness.run_steps(3);
+        (harness, peg)
+    }
+
+    /// Type `text` and Enter into the focused field.
+    fn type_and_enter(
+        harness: &mut egui_kittest::Harness<'static, (Session, TimingState)>,
+        text: &str,
+    ) {
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text(text.into()));
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+    }
+
+    /// A double-click on a peg row's name opens a field over it; Enter
+    /// renames the node as one undo step.
+    #[test]
+    fn a_double_click_renames_a_node_row() {
+        let (mut harness, _) = peg_row_harness();
+        // Both clicks in consecutive frames: kittest's clock moves too
+        // far between two separate clicks for a double-click.
+        let opened = (20..300).step_by(4).any(|y| {
+            let pos = Pos2::new(90.0, y as f32);
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(pos));
+            for _ in 0..2 {
+                for pressed in [true, false] {
+                    harness.input_mut().events.push(egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                harness.step();
+            }
+            harness.run_steps(2);
+            harness.state().1.renaming_node.is_some()
+        });
+        assert!(opened, "a rename field");
+        // The upper of the two pegs is the first row found.
+        let peg = harness.state().1.renaming_node.as_ref().unwrap().0;
+        harness
+            .state_mut()
+            .1
+            .renaming_node
+            .as_mut()
+            .unwrap()
+            .1
+            .clear();
+        harness.run_steps(1);
+        type_and_enter(&mut harness, "Hip peg with a long name");
+        let name = |s: &Session| s.doc.graph.node(peg).unwrap().name.clone();
+        assert_eq!(name(&harness.state().0), "Hip peg with a long name");
+        assert!(harness.state().1.renaming_node.is_none());
+        harness.state_mut().0.undo();
+        assert_ne!(name(&harness.state().0), "Hip peg with a long name");
+    }
+
+    /// The right-click menu of a node row has Rename node.
+    #[test]
+    fn the_node_row_menu_renames_the_node() {
+        use egui_kittest::kittest::Queryable;
+        let (mut harness, peg) = peg_row_harness();
+        let found = (20..300).step_by(4).any(|y| {
+            let pos = Pos2::new(90.0, y as f32);
+            for pressed in [true, false] {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Secondary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(1);
+            }
+            harness.run_steps(1);
+            harness.state().1.menu_node == Some(peg) && harness.state().1.menu_row.is_none()
+        });
+        assert!(found, "the peg row's menu");
+        harness.get_by_label("Rename node").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.renaming_node.as_ref().unwrap().0, peg);
+        harness
+            .state_mut()
+            .1
+            .renaming_node
+            .as_mut()
+            .unwrap()
+            .1
+            .clear();
+        harness.run_steps(1);
+        type_and_enter(&mut harness, "Hip");
+        assert_eq!(harness.state().0.doc.graph.node(peg).unwrap().name, "Hip");
     }
 }
