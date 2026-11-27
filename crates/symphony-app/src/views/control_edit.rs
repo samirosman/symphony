@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use eframe::egui::{self, Pos2, Stroke};
-use symphony_core::control::{channel_values, restore_channels, Control, Pose};
+use symphony_core::control::{channel_values, restore_channels, Control};
 use symphony_core::graph::{NodeId, NodeKind};
 use symphony_core::history::Edit;
 use symphony_core::math::Affine;
@@ -52,6 +52,8 @@ pub struct Setup {
     seen: BTreeMap<NodeId, NodeKind>,
     /// `History::made` when last seen.
     made: u64,
+    /// A rig change off a pose was refused: the panel says why.
+    refused: bool,
 }
 
 /// One widget as shown this frame.
@@ -390,6 +392,7 @@ pub fn start_setup(s: &mut Session, id: NodeId) {
         control: id,
         seen: rig_under(s, id),
         made: s.history.made(),
+        refused: false,
     });
 }
 
@@ -419,12 +422,9 @@ pub fn add_pose(s: &mut Session) {
         return;
     };
     let mut after = before.clone();
+    // The new pose holds what the rig shows at the knob now.
     if let NodeKind::Control(control) = &mut after.kind {
-        control.poses.push(Pose {
-            at,
-            offsets: Vec::new(),
-        });
-        control.poses.sort_by(|a, b| a.at.total_cmp(&b.at));
+        control.add_pose(at);
     }
     s.history.apply(
         &mut s.doc,
@@ -437,7 +437,9 @@ pub fn add_pose(s: &mut Session) {
 /// In Setup mode, move each change to the rig under the Control into
 /// the pose at the knob, as part of the edit's own undo step. It waits
 /// until the edit ends (`pointer_down` false), so a drag records once.
-/// Undo and redo change nothing here: they only refresh what was seen.
+/// Off a pose, a rig change is refused at once, even mid-drag: its undo
+/// step is discarded, so the rig stays still. Undo and redo change
+/// nothing here: they only refresh what was seen.
 pub fn record_setup(s: &mut Session, pointer_down: bool) {
     let Some(mut setup) = s.control_setup.take() else {
         return;
@@ -446,6 +448,11 @@ pub fn record_setup(s: &mut Session, pointer_down: bool) {
         end_setup(s);
         return;
     };
+    if !on_pose && setup.made != s.history.made() && rig_changed(s, &setup.seen) {
+        s.history.discard(&mut s.doc);
+        setup.refused = true;
+    }
+    setup.refused &= !on_pose;
     if pointer_down {
         s.control_setup = Some(setup);
         return;
@@ -491,6 +498,19 @@ pub fn record_setup(s: &mut Session, pointer_down: bool) {
     s.control_setup = Some(setup);
 }
 
+/// Whether a value a pose can offset differs from `seen` on any bone or
+/// peg under the Control.
+fn rig_changed(s: &Session, seen: &BTreeMap<NodeId, NodeKind>) -> bool {
+    seen.iter().any(|(node, old)| {
+        s.doc.graph.node(*node).is_some_and(|now| {
+            channel_values(&now.kind, s.frame)
+                .into_iter()
+                .zip(channel_values(old, s.frame))
+                .any(|((_, value), (_, was))| (value - was).abs() > 1e-5)
+        })
+    })
+}
+
 /// The Setup mode panel and frame in the Camera view, and the recording.
 pub fn setup_ui(
     ui: &egui::Ui,
@@ -507,6 +527,7 @@ pub fn setup_ui(
         )
     });
     let setup = setup_state(s).filter(|_| s.control_setup.is_some());
+    let refused = s.control_setup.as_ref().is_some_and(|setup| setup.refused);
     if setup.is_none() && (selected.is_none() || !s.show_rig_controls) {
         return;
     }
@@ -536,15 +557,21 @@ pub fn setup_ui(
                             "Pose the rig. The changes go into the pose at {at:.2}, not into keys."
                         )
                     } else if at == 0.0 {
-                        "Move the knob away from the rest pose, then add a pose.".to_owned()
+                        "Move the knob away from the rest pose, then add a pose. \
+                         The rig stays still until then."
+                            .to_owned()
                     } else {
-                        "Add a pose here, or move the knob onto a pose dot.".to_owned()
+                        "Add a pose first, or move the knob onto a pose dot. \
+                         The rig stays still until then."
+                            .to_owned()
                     };
-                    ui.label(
-                        egui::RichText::new(hint)
-                            .font(theme::dense())
-                            .color(theme::TEXT_SECONDARY),
-                    );
+                    // After a refused change the hint takes the mode's colour.
+                    let ink = if refused {
+                        theme::ACCENT_TIME
+                    } else {
+                        theme::TEXT_SECONDARY
+                    };
+                    ui.label(egui::RichText::new(hint).font(theme::dense()).color(ink));
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(!on_pose && at != 0.0, egui::Button::new("Add pose"))
